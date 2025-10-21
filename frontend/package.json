@@ -24,6 +24,7 @@
     "react-redux": "^9.2.0",
     "react-router-dom": "^7.6.3",
     "react-scripts": "^5.0.1",
+    "react-syntax-highlighter": "^15.6.6",
     "react-transition-group": "^4.4.2",
     "redux": "^5.0.1",
     "redux-logger": "^3.0.6",
@@ -37,7 +38,8 @@
     "survey-pdf": "^2.2.2",
     "survey-react-ui": "^2.2.2",
     "uuid": "^11.1.0",
-    "web-vitals": "^5.0.3"
+    "web-vitals": "^5.0.3",
+    "yet-another-react-lightbox": "^3.25.0"
   },
   "scripts": {
     "start": "react-scripts start",
