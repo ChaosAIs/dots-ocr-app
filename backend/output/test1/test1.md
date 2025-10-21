@@ -10,12 +10,12 @@ $$
 \mathcal{G}_K \sim \sum_{d \in K} \pi_{\text{ext}}(f_d | d), \quad (1)
 $$
 
-where $\pi_{\text{ext}}$ denotes an LLM-based extractor that parses each $d$ into a set of relation-entity pairs $f_d = \{(r_i, r_{\tau_i}\}, \}$, with $r_i$ as the relation and $\tau_i = \{v_1, \dots, v_n\}$ the participating entities.
+where $\pi_{\text{ext}}$ denotes an LLM-based extractor that parses each $d$ into a set of relation-entity pairs $f_d = \{(r_i, v_r, r_i)\}$, with $r_i$ as the relation and $v_r = \{v_1, \dots, v_n\}$ the participating entities.
 
 (b) **Graph Retrieval.** Graph retrieval is formulated as a two-step process over $\mathcal{G}_K$: (1) retrieving candidate reasoning paths and (2) pruning irrelevant ones. Conditioned on a query $q$, the model first retrieves a candidate set $\mathcal{X}_q = \{x_1, \dots, x_m\}$ and then selects a relevant subset $\mathcal{Z}_q \subseteq \mathcal{X}_q$. The overall objective is to maximize the expected joint likelihood of the two steps:
 
 $$
-\max_q \mathbb{E}_{\mathcal{Z}_q \sim P(\mathcal{Z}_q | \mathcal{G}_K)} \left[ \prod_{t=1}^{T_x} P_\theta(x_t | x_{<t}, q, \mathcal{G}_K) \cdot \prod_{t=1}^{T_z} P_\theta(z_t | z_{<t}, \mathcal{X}_q, q) \right], \quad (2)
+\max_q \mathbb{E}_{\mathcal{Z}_q \sim P(\mathcal{Z}_q | \mathcal{G}_K)} \left[ \prod_{t=1}^{T_x} P_0(x_t | x_{<t}, q, \mathcal{G}_K) \cdot \prod_{t=1}^{T_z} P_0(z_t | z_{<t}, \mathcal{X}_q, q) \right], \quad (2)
 $$
 
 where $T_x$ and $T_z$ denote the number of retrieved and selected paths, respectively.

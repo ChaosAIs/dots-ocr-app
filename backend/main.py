@@ -11,8 +11,14 @@ import asyncio
 import threading
 from typing import Dict, Set
 import uuid
+import logging
 
 from ocr_service.parser import DotsOCRParser
+from worker_pool import WorkerPool
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -43,6 +49,9 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 # Create directories if they don't exist
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Get number of worker threads from environment (default: 4)
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 
 
 # Conversion status tracking
@@ -127,6 +136,46 @@ class ConnectionManager:
 
 conversion_manager = ConversionManager()
 connection_manager = ConnectionManager()
+
+
+def _worker_progress_callback(conversion_id: str, status: str, result=None, error=None):
+    """Callback for worker pool progress updates"""
+    try:
+        if status == "completed":
+            conversion_manager.update_conversion(
+                conversion_id,
+                status="completed",
+                progress=100,
+                message="Conversion completed successfully",
+                completed_at=datetime.now().isoformat(),
+            )
+            asyncio.run(connection_manager.broadcast(conversion_id, {
+                "status": "completed",
+                "progress": 100,
+                "message": "Conversion completed successfully",
+                "results": result,
+            }))
+        elif status == "error":
+            conversion_manager.update_conversion(
+                conversion_id,
+                status="error",
+                progress=0,
+                message=f"Conversion failed: {error}",
+                error=error,
+                completed_at=datetime.now().isoformat(),
+            )
+            asyncio.run(connection_manager.broadcast(conversion_id, {
+                "status": "error",
+                "progress": 0,
+                "message": f"Conversion failed: {error}",
+                "error": error,
+            }))
+    except Exception as e:
+        logger.error(f"Error in progress callback: {str(e)}")
+
+
+# Initialize worker pool
+worker_pool = WorkerPool(num_workers=NUM_WORKERS, progress_callback=_worker_progress_callback)
 
 
 @app.get("/")
@@ -280,67 +329,21 @@ async def list_documents():
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 
-def _convert_document_background(conversion_id: str, filename: str, prompt_mode: str):
-    """Background task to convert document"""
-    try:
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="processing",
-            started_at=datetime.now().isoformat(),
-            message="Starting conversion..."
-        )
+def _convert_document_background(filename: str, prompt_mode: str):
+    """Background task to convert document - executed by worker pool"""
+    file_path = os.path.join(INPUT_DIR, filename)
 
-        # Broadcast status update
-        asyncio.run(connection_manager.broadcast(conversion_id, {
-            "status": "processing",
-            "progress": 10,
-            "message": "Starting conversion...",
-        }))
+    logger.info(f"Starting conversion for {filename}")
 
-        file_path = os.path.join(INPUT_DIR, filename)
+    # Parse the file using the OCR parser
+    results = parser.parse_file(
+        file_path,
+        output_dir=OUTPUT_DIR,
+        prompt_mode=prompt_mode,
+    )
 
-        # Parse the file using the OCR parser
-        results = parser.parse_file(
-            file_path,
-            output_dir=OUTPUT_DIR,
-            prompt_mode=prompt_mode,
-        )
-
-        # Update conversion status to completed
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="completed",
-            progress=100,
-            message="Conversion completed successfully",
-            completed_at=datetime.now().isoformat(),
-        )
-
-        # Broadcast completion
-        asyncio.run(connection_manager.broadcast(conversion_id, {
-            "status": "completed",
-            "progress": 100,
-            "message": "Conversion completed successfully",
-            "results": results,
-        }))
-
-    except Exception as e:
-        error_msg = str(e)
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="error",
-            progress=0,
-            message=f"Conversion failed: {error_msg}",
-            error=error_msg,
-            completed_at=datetime.now().isoformat(),
-        )
-
-        # Broadcast error
-        asyncio.run(connection_manager.broadcast(conversion_id, {
-            "status": "error",
-            "progress": 0,
-            "message": f"Conversion failed: {error_msg}",
-            "error": error_msg,
-        }))
+    logger.info(f"Conversion completed successfully for {filename}")
+    return results
 
 
 @app.post("/convert")
@@ -349,6 +352,7 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
     Trigger document conversion (non-blocking).
 
     Returns immediately with a conversion ID. Use WebSocket to track progress.
+    Multiple conversions can run concurrently using the worker pool.
 
     Parameters:
     - filename: The name of the file to convert (must be in input folder)
@@ -374,13 +378,30 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
         # Create conversion task
         conversion_id = conversion_manager.create_conversion(filename)
 
-        # Start background conversion task
-        thread = threading.Thread(
-            target=_convert_document_background,
-            args=(conversion_id, filename, prompt_mode),
-            daemon=True
+        # Update status to processing
+        conversion_manager.update_conversion(
+            conversion_id,
+            status="processing",
+            started_at=datetime.now().isoformat(),
+            message="Conversion queued, waiting for worker..."
         )
-        thread.start()
+
+        # Broadcast initial status
+        await connection_manager.broadcast(conversion_id, {
+            "status": "processing",
+            "progress": 5,
+            "message": "Conversion queued, waiting for worker...",
+        })
+
+        # Submit task to worker pool
+        success = worker_pool.submit_task(
+            conversion_id=conversion_id,
+            func=_convert_document_background,
+            args=(filename, prompt_mode),
+        )
+
+        if not success:
+            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
 
         # Return immediately with conversion ID
         return JSONResponse(content={
@@ -388,11 +409,14 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
             "conversion_id": conversion_id,
             "filename": filename,
             "message": "Conversion task started. Use WebSocket to track progress.",
+            "queue_size": worker_pool.get_queue_size(),
+            "active_tasks": worker_pool.get_active_tasks_count(),
         })
 
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error starting conversion: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
 
 
@@ -420,6 +444,25 @@ async def get_conversion_status(conversion_id: str):
         raise HTTPException(status_code=500, detail=f"Error getting conversion status: {str(e)}")
 
 
+@app.get("/worker-pool-status")
+async def get_worker_pool_status():
+    """
+    Get the status of the worker pool.
+
+    Returns:
+    - JSON with queue size and active tasks count
+    """
+    try:
+        return JSONResponse(content={
+            "status": "ok",
+            "queue_size": worker_pool.get_queue_size(),
+            "active_tasks": worker_pool.get_active_tasks_count(),
+            "num_workers": NUM_WORKERS,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting worker pool status: {str(e)}")
+
+
 @app.websocket("/ws/conversion/{conversion_id}")
 async def websocket_conversion_progress(websocket: WebSocket, conversion_id: str):
     """
@@ -443,7 +486,7 @@ async def websocket_conversion_progress(websocket: WebSocket, conversion_id: str
         # Keep connection alive and listen for disconnection
         while True:
             # This will raise WebSocketDisconnect when client disconnects
-            data = await websocket.receive_text()
+            await websocket.receive_text()
             # Optional: handle incoming messages if needed
 
     except WebSocketDisconnect:

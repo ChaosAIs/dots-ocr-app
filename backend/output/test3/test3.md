@@ -25,7 +25,7 @@ where $\phi(\mathbf{a}_t^{\text{query}})$ is the query embedding, $\phi(e_H)$ is
 (iii) **Fusion via Reciprocal Rank Aggregation.** To produce the final knowledge set, we merge results from both retrieval paths using reciprocal rank aggregation over hyperedges:
 
 $$
-\mathbf{a}_t^{\text{rel}} = \mathcal{F}_t^{\text{query}} = \text{Top-k} \left( \mathcal{F}_V^k \cup \mathcal{F}_H^*, \text{RankScore}(f) \right), \quad (9)
+\mathbf{a}_t^{\text{rel}} = \mathcal{F}_t^{\text{query}} = \text{Top-k} \left( \mathcal{F}_V^k \cup \mathcal{F}_H^*, \text{RankScore}(f) \right), \quad \text{RankScore}(f) = \frac{1}{r_V} + \frac{1}{r_H} \mathbf{a}_t^{\text{query}}, \quad (9)
 $$
 
 where $r_V$ and $r_H$ are the ranks of n-ary relational fact $f$ in $\mathcal{F}_V^k$ and $\mathcal{F}_H^*$ respectively (set to $\infty$ if absent), and $k$ is the number of retrieved facts $\mathbf{a}_t^{\text{rel}}$ returned to the agent.
@@ -36,7 +36,7 @@ $$
 \max_{\theta} \mathbb{E}_{\tau \sim \pi_{\theta}} (\tau_q | q; \hat{\mathcal{G}}_H) [\log P(y_q | \tau)], \quad (10)
 $$
 
-where $P(y_q | \tau)$ denotes the likelihood of the correct answer $y_q \sim \mathbf{a}_t^{\text{ans}}$ under trajectory $\tau$, guiding $\pi_{\theta}$ toward answer-consistent reasoning.
+where $P(y_q | \tau)$ denotes the likelihood of the correct answer $y_q \sim \mathbf{a}_t^{\text{ans}}$ under trajectory $\tau$, guiding $\pi_\theta$ toward answer-consistent reasoning.
 
 **Proposition 2.** *Multi-turn interaction with the graph environment improves retrieval efficiency.*
 
