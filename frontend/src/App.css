@@ -1,0 +1,710 @@
+/* Global Heading Styles - Minimal Margins */
+h1, h2, h3, h4, h5, h6 {
+  margin-top: 0.25rem !important;
+  margin-bottom: 0.25rem !important;
+  line-height: 1.2 !important;
+}
+
+/* Ultra-compact option - uncomment if you want even less spacing */
+/*
+h1, h2, h3, h4, h5, h6 {
+  margin: 0 !important;
+  padding: 0.125rem 0 !important;
+  line-height: 1.1 !important;
+}
+*/
+
+.p-card .p-card-content {
+  padding: 0;
+ }
+
+/* Menu item text should not wrap */
+.p-menubar .p-menuitem-text,
+.p-menubar .p-submenu-list .p-menuitem-text {
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+
+/* Ensure submenu has enough width */
+.p-menubar .p-submenu-list {
+  min-width: 200px !important;
+  width: auto !important;
+}
+
+/* Ensure primeicons display correctly in all contexts */
+.pi {
+  font-family: 'primeicons' !important;
+  speak: none;
+  font-style: normal;
+  font-weight: normal;
+  font-variant: normal;
+  text-transform: none;
+  line-height: 1;
+  display: inline-block;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Fix for menu icons */
+.p-menubar .p-menuitem-icon,
+.p-tabview .p-tabview-nav li .p-tabview-nav-link .p-tabview-nav-link-icon,
+.p-button .p-button-icon,
+.p-tabview .p-tabview-nav li .p-tabview-nav-link .p-tabview-left-icon {
+  font-family: 'primeicons' !important;
+}
+
+/* Debug: Ensure all pi classes use primeicons font */
+[class*="pi-"]:before,
+.pi:before {
+  font-family: 'primeicons' !important;
+}
+
+/* Specific fixes for common icon containers */
+.p-menubar .p-menuitem-link .p-menuitem-icon,
+.p-tabview-nav-link .p-tabview-left-icon,
+.p-button-icon-left,
+.p-button-icon-right,
+.p-button-icon-only .p-button-icon {
+  font-family: 'primeicons' !important;
+}
+
+/* Override PrimeReact card title margins */
+.p-card-title h1,
+.p-card-title h2,
+.p-card-title h3,
+.p-card-title h4,
+.p-card-title h5,
+.p-card-title h6 {
+  margin: 0 !important;
+}
+
+/* Survey.js Compact Layout Styles */
+
+/* Reduce overall container padding and margins */
+
+.survey-wrapper {
+  margin-top: 1rem !important;
+}
+
+/* Compact survey main container */
+.sv_main {
+  background-color: var(--bg-white) !important;
+}
+
+.sv_main .sv_container {
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Reduce header spacing */
+.sv_main .sv_header {
+  padding: 1rem 0 0.5rem 0 !important;
+  margin-bottom: 1rem !important;
+}
+
+/* Compact page layout */
+.sv_main .sv_body {
+  padding: 0 !important;
+  background-color: transparent !important;
+}
+
+.sv_main .sv_page {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* Reduce question spacing - make it much more compact */
+.sv_main .sv_qstn {
+  margin-bottom: 0.5rem !important;
+  padding: 0.5rem !important;
+  border: 1px solid #e0e0e0;
+  border-radius: 4px;
+  background-color: #fafafa;
+}
+
+/* Compact question titles */
+.sv_main .sv_q_title {
+  margin-bottom: 0.25rem !important;
+  font-size: 0.9rem !important;
+  line-height: 1.2 !important;
+}
+
+/* Reduce input field spacing */
+.sv_main .sv_q_text_root,
+.sv_main .sv_q_dropdown_control,
+.sv_main .sv_q_radiogroup,
+.sv_main .sv_q_checkbox {
+  margin-top: 0.1rem !important;
+}
+
+/* Compact text inputs */
+.sv_main input[type="text"],
+.sv_main input[type="email"],
+.sv_main input[type="number"],
+.sv_main textarea,
+.sv_main select {
+  padding: 0.5rem !important;
+  font-size: 0.9rem !important;
+  line-height: 1.2 !important;
+}
+
+/* Compact textarea */
+.sv_main textarea {
+  min-height: 60px !important;
+  resize: vertical;
+}
+
+/* Reduce radio button and checkbox spacing */
+.sv_main .sv_q_radiogroup_item,
+.sv_main .sv_q_checkbox_item {
+  margin-bottom: 0.25rem !important;
+  padding: 0.25rem 0 !important;
+}
+
+/* Compact navigation buttons */
+.sv_main .sv_nav {
+  margin-top: 1.5rem !important;
+  padding: 1rem 0 !important;
+}
+
+.sv_main .sv_nav input[type="button"] {
+  padding: 0.5rem 1.5rem !important;
+  margin: 0 0.5rem !important;
+  font-size: 0.9rem !important;
+}
+
+/* Reduce row spacing - make it much tighter */
+.sv_main .sv_row {
+  margin-bottom: 0.25rem !important;
+}
+
+/* Make the overall container more compact */
+.sv_main .sv_container .sv_body .sv_p_root {
+  padding: 0.5rem !important;
+}
+
+/* Reduce spacing between form sections */
+.sv_main .sv_p_container {
+  margin-bottom: 0.5rem !important;
+  padding: 0.5rem !important;
+}
+
+/* Make section titles more compact */
+.sv_main .sv_p_title {
+  margin-bottom: 0.25rem !important;
+  padding-bottom: 0.25rem !important;
+  font-size: 1rem !important;
+  font-weight: 600 !important;
+}
+
+/* Reduce spacing around error messages */
+.sv_main .sv_q_erbox {
+  margin-top: 0.25rem !important;
+  padding: 0.25rem !important;
+  font-size: 0.85rem !important;
+}
+
+/* Compact dropdown menus with proper styling */
+.sv_main .sv_q_dropdown_control {
+  min-height: auto !important;
+  position: relative !important;
+}
+
+.sv_main .sv_q_dropdown_control select {
+  padding: 0.4rem !important;
+  background-color: var(--bg-white) !important;
+  border: 1px solid #ccc !important;
+  border-radius: 4px !important;
+  font-size: 0.9rem !important;
+  width: 100% !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  -moz-appearance: none !important;
+  background-image: url("data:image/svg+xml;charset=US-ASCII,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 4 5'><path fill='%23666' d='M2 0L0 2h4zm0 5L0 3h4z'/></svg>") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 0.7rem center !important;
+  background-size: 0.65rem auto !important;
+  padding-right: 2rem !important;
+}
+
+.sv_main .sv_q_dropdown_control select:focus {
+  outline: 2px solid #007bff !important;
+  outline-offset: -2px !important;
+  border-color: #007bff !important;
+}
+
+/* Fix dropdown option styling */
+.sv_main .sv_q_dropdown_control select option {
+  background-color: var(--bg-white) !important;
+  color: var(--primary-text) !important;
+  padding: 0.5rem !important;
+}
+
+/* Hide any background text/placeholder issues */
+.sv_main .sv_q_dropdown_control::before,
+.sv_main .sv_q_dropdown_control::after {
+  display: none !important;
+}
+
+/* Ensure dropdown container doesn't have conflicting styles */
+.sv_main .sv_q_dropdown {
+  background: transparent !important;
+  position: relative !important;
+}
+
+/* Fix specific dropdown background text issues */
+.sv_main .sv_q_dropdown_control .sv_q_dropdown_placeholder {
+  display: none !important;
+}
+
+.sv_main .sv_q_dropdown_control::placeholder {
+  color: transparent !important;
+}
+
+/* Ensure dropdown text is properly visible */
+.sv_main .sv_q_dropdown_control select {
+  color: var(--primary-text) !important;
+  background-color: var(--bg-white) !important;
+  z-index: 10 !important;
+  position: relative !important;
+}
+
+/* Hide any survey.js generated background elements that might interfere */
+.sv_main .sv_q_dropdown_control > div:not(select) {
+  display: none !important;
+}
+
+.sv_main .sv_q_dropdown_control > span {
+  display: none !important;
+}
+
+/* Ensure clean dropdown appearance */
+.sv_main .sv_q_dropdown_control {
+  background: var(--bg-white) !important;
+  overflow: hidden !important;
+}
+
+/* Reduce panel spacing */
+.sv_main .sv_p_container {
+  margin-bottom: 1rem !important;
+  padding: 0.75rem !important;
+}
+
+/* Compact matrix questions */
+.sv_main .sv_q_matrix {
+  margin-top: 0.5rem !important;
+}
+
+.sv_main .sv_q_matrix td {
+  padding: 0.25rem !important;
+}
+
+/* Reduce spacing for rating questions */
+.sv_main .sv_q_rating {
+  margin-top: 0.5rem !important;
+}
+
+.sv_main .sv_q_rating_item {
+  margin: 0 0.25rem !important;
+}
+
+/* Compact boolean/switch questions */
+.sv_main .sv_q_boolean {
+  margin-top: 0.5rem !important;
+}
+
+/* Reduce spacing for image picker */
+.sv_main .sv_q_imagepicker {
+  margin-top: 0.5rem !important;
+}
+
+.sv_main .sv_q_imagepicker_item {
+  margin: 0.25rem !important;
+}
+
+/* Mobile responsiveness - even more compact on small screens */
+@media (max-width: 768px) {
+  .survey-container {
+    padding: 0.5rem;
+  }
+
+  .sv_main .sv_qstn {
+    padding: 0.5rem !important;
+    margin-bottom: 0.75rem !important;
+  }
+
+  .sv_main .sv_q_title {
+    font-size: 0.9rem !important;
+  }
+
+  .sv_main input[type="text"],
+  .sv_main input[type="email"],
+  .sv_main input[type="number"],
+  .sv_main textarea,
+  .sv_main select {
+    font-size: 0.85rem !important;
+  }
+}
+
+/* Override any excessive spacing from survey themes */
+.sv_main * {
+  box-sizing: border-box;
+}
+
+/* Ensure consistent compact spacing */
+.sv_main .sv_q_other {
+  margin-top: 0.25rem !important;
+}
+
+.sv_main .sv_q_file {
+  margin-top: 0.5rem !important;
+}
+
+/* Compact progress bar */
+.sv_main .sv_progress {
+  margin-bottom: 1rem !important;
+  height: 4px !important;
+}
+
+/* Additional compact styling for specific form elements */
+
+/* Reduce spacing between sections */
+.sv_main .sv_page_title {
+  margin-bottom: 0.75rem !important;
+  padding: 0.5rem 0 !important;
+  font-size: 1.1rem !important;
+}
+
+/* Compact section headers */
+.sv_main h4, .sv_main h5 {
+  margin: 0.5rem 0 !important;
+  font-size: 1rem !important;
+}
+
+/* Reduce whitespace in form sections */
+.sv_main .sv_p_title {
+  margin-bottom: 0.5rem !important;
+  font-size: 1rem !important;
+  font-weight: 600;
+}
+
+/* Compact comment/text area sections */
+.sv_main .sv_q_comment {
+  margin-top: 0.25rem !important;
+}
+
+/* Reduce spacing for dropdown selections */
+.sv_main .sv_q_dropdown {
+  margin-top: 0.25rem !important;
+}
+
+/* Make the overall form more compact by reducing line heights */
+.sv_main {
+  line-height: 1.4 !important;
+}
+
+/* Compact the "Planning Sections" area */
+.sv_main .sv_q_panel {
+  margin-bottom: 0.75rem !important;
+  padding: 0.5rem !important;
+}
+
+/* Reduce spacing for commitment and goal sections */
+.sv_main .sv_q_text,
+.sv_main .sv_q_comment,
+.sv_main .sv_q_dropdown {
+  margin-bottom: 0.5rem !important;
+}
+
+/* Make text inputs more compact */
+.sv_main input[type="text"]:focus,
+.sv_main textarea:focus,
+.sv_main select:focus {
+  outline: 2px solid #007bff;
+  outline-offset: -2px;
+}
+
+/* Reduce the overall vertical spacing */
+.sv_main .sv_qstn:last-child {
+  margin-bottom: 0.25rem !important;
+}
+
+/* Ultra-compact styling for maximum space efficiency */
+.sv_main .sv_page_title {
+  margin: 0 0 0.5rem 0 !important;
+  padding: 0.25rem 0 !important;
+  font-size: 1.1rem !important;
+  line-height: 1.3 !important;
+}
+
+/* Remove excessive padding from main survey body */
+.sv_main .sv_body {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+/* Make form fields more compact */
+.sv_main input[type="text"],
+.sv_main input[type="email"],
+.sv_main input[type="number"],
+.sv_main textarea {
+  padding: 0.4rem !important;
+  margin: 0 !important;
+  font-size: 0.9rem !important;
+  line-height: 1.2 !important;
+  border: 1px solid #ccc !important;
+  border-radius: 3px !important;
+}
+
+/* Compact the response required message */
+.sv_main .sv_q_erbox {
+  margin: 0.1rem 0 !important;
+  padding: 0.2rem 0.4rem !important;
+  font-size: 0.8rem !important;
+}
+
+/* Remove extra spacing from question descriptions */
+.sv_main .sv_q_description {
+  margin: 0.1rem 0 !important;
+  font-size: 0.85rem !important;
+  line-height: 1.2 !important;
+}
+
+/* Make the entire survey container more compact */
+.survey-container {
+  margin: 0 auto !important;
+}
+
+.survey-wrapper {
+  margin-top: 0.5rem !important;
+}
+
+/* Compact mobile view even further */
+@media (max-width: 768px) {
+  .survey-container {
+    padding: 0.25rem !important;
+  }
+
+  .sv_main .sv_qstn {
+    padding: 0.3rem !important;
+    margin-bottom: 0.3rem !important;
+  }
+
+  .sv_main .sv_q_title {
+    font-size: 0.85rem !important;
+    margin-bottom: 0.15rem !important;
+  }
+}
+
+:root {
+  --ctr-font-family: "primeicons";
+  --lbr-font-family: "primeicons";
+  --sjs-font-family: "primeicons";
+  --font-family: "primeicons";
+  --sjs-font-pagetitle-family: "primeicons";
+  --sjs-default-font-family: "primeicons";
+
+  --ctr-page-banner-background-colo: var(--prime-color);
+  --sjs-secondary-background-500: var(--prime-color);
+  --sjs-primary-backcolor: var(--prime-color);
+  --primary: var(--prime-color);
+  --ctr-toolbox-item-icon-color: var(--prime-color);
+  --sjs-primary-background-500: var(--prime-color);
+}
+
+.sd-root-modern {
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: rgba(1, 0, 0, 0);
+  --sd-mobile-width: 600px;
+  --sd-timer-size: calc(18 * var(--sjs-base-unit, var(--base-unit, 8px)));
+  width: 100%;
+  font-family: var(--sjs-font-family, var(--font-family, var(--sjs-default-font-family)));
+  background-color: var(--sjs-general-backcolor-dim, var(--background-dim, #f3f3f3));
+  position: relative
+}
+
+.sd-element--collapsed .sd-element__header {
+  background-color: var(--medium-gray) !important;
+}
+
+.sd-root-modern,.sd-container-modern {
+    --sd-base-padding: calc(1.5 * var(--sjs-base-unit, var(--base-unit, 8px)));
+    --sd-base-vertical-padding: calc(1.5 * var(--sjs-base-unit, var(--base-unit, 8px)));
+    --sd-page-vertical-padding: calc(1.5 * var(--sjs-base-unit, var(--base-unit, 8px)))
+}
+
+.sd-root-modern.sd-root-modern--mobile,.sd-root-modern--mobile .sd-container-modern {
+    --sd-base-padding: calc(1.5 * var(--sjs-base-unit, var(--base-unit, 8px)));
+    --sd-base-vertical-padding: calc(1.5 * var(--sjs-base-unit, var(--base-unit, 8px)));
+    --sd-page-vertical-padding: calc(1.5 * var(--sjs-base-unit, var(--base-unit, 8px)))
+}
+
+.sd-row__panel .sd-element--nested {
+  border: none;
+}
+
+.sd-element .sd-element__header .sd-element__title{
+   font-family: "Proxima Nova", -apple-system, BlinkMacSystemFont, "Segoe UI", 
+    Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  font-weight: 400;
+  font-style: Regular;
+  font-size: 14px;
+  line-height: 100%;
+  letter-spacing: 0%;
+  color: var(--primary-text);
+  padding: 0px;
+}
+
+
+/* More specific - target clearfix rows within nested panels */
+.sd-element--nested .sd-panel__content .sd-row.sd-clearfix {
+  margin-top: 0px !important;
+  margin-bottom: 16px !important;
+}
+
+/* Target dropdowns within panels */
+.sd-dropdown {
+  padding: 0px !important;
+  padding-left: 8px !important;
+
+}
+
+/* Target dropdowns within panels */
+.sd-dropdown input,
+.sd-dropdown input[type="text"],
+.sd-dropdown input[type="search"] {
+  border: none !important;
+}
+
+.sd-dropdown,
+.sd-text,
+.sd-comment,
+.sd-text--multiline,
+.sd-question textarea,
+.sd-question select,
+.sd-element textarea,
+.sd-element select {
+  border: solid 1px var(--divider) !important;
+  box-shadow: none !important;
+  background-color: var(--bg-white) !important;
+}
+
+
+/* Target all disabled inputs - UPDATED TO BE MORE SPECIFIC */
+.sd-input:disabled,
+.sd-root input:disabled,
+.sd-root textarea:disabled,
+.sd-root select:disabled,
+.sd-question input:disabled,
+.sd-question textarea:disabled,
+.sd-question select:disabled,
+.sd-element input:disabled,
+.sd-element textarea:disabled,
+.sd-element select:disabled,
+.sd-dropdown input:disabled,
+.sd-dropdown select:disabled {
+  background-color: var(--medium-gray) !important;
+  border: none !important;
+  box-shadow: none !important;
+  color: #666 !important;
+}
+
+/* Target disabled dropdown containers */
+.sd-dropdown:disabled,
+.sd-dropdown.sd-dropdown--disabled,
+.sd-dropdown[disabled] {
+  background-color: var(--medium-gray) !important;
+  border: none !important;
+}
+
+/* Target disabled input containers */
+.sd-input:disabled,
+.sd-input.sd-input--disabled,
+.sd-input.sd-input--readonly,
+.sd-input[disabled] {
+  background-color: var(--medium-gray) !important;
+  border: none !important;
+}
+
+/* Target disabled state for SurveyJS modern theme */
+.sd-root-modern input:disabled,
+.sd-root-modern textarea:disabled,
+.sd-root-modern select:disabled,
+.sd-container-modern input:disabled,
+.sd-container-modern textarea:disabled,
+.sd-container-modern select:disabled {
+  background-color: var(--medium-gray) !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* Target readonly inputs (which behave like disabled) */
+.sd-input[readonly],
+.sd-root input[readonly],
+.sd-root textarea[readonly],
+.sd-question textarea[readonly],
+.sd-element textarea[readonly] {
+  background-color: var(--medium-gray) !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+/* ENSURE ENABLED DROPDOWNS KEEP THEIR STYLING */
+/* .sd-dropdown:not(:disabled):not(.sd-dropdown--disabled):not([disabled]) {
+  border: solid 1px var(--divider) !important;
+  background-color: red!important;
+  box-shadow: none !important;
+} */
+
+/* Target SurveyJS Creator tabbed menu item text - Default (not selected) state */
+.svc-tabbed-menu-item__text {
+  font-family: "Proxima Nova", -apple-system, BlinkMacSystemFont, "Segoe UI", 
+    Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif !important;
+  font-weight: 500 !important;
+  font-style: normal !important;
+  font-size: 16px !important;
+  color: var(--secondary-text) !important;
+}
+
+/* Target selected/active menu item text */
+.svc-tabbed-menu-item--selected .svc-tabbed-menu-item__text,
+.svc-tabbed-menu-item.svc-tabbed-menu-item--selected .svc-tabbed-menu-item__text,
+.svc-tabbed-menu-item--active .svc-tabbed-menu-item__text,
+.svc-tabbed-menu-item.svc-tabbed-menu-item--active .svc-tabbed-menu-item__text {
+  font-weight: 600 !important;
+  font-style: normal !important;
+  font-size: 16px !important;
+  color: var(--prime-color) !important;
+}
+
+/* More specific targeting if needed */
+.svc-tabbed-menu .svc-tabbed-menu-item--selected .svc-tabbed-menu-item__text,
+.svc-tabbed-menu .svc-tabbed-menu-item--active .svc-tabbed-menu-item__text {
+  font-weight: 600 !important;
+  font-style: normal !important;
+  font-size: 16px !important;
+  color: var(--prime-color) !important;
+}
+
+/* Alternative selector patterns for different SurveyJS versions */
+.svc-tabbed-menu-item[aria-selected="true"] .svc-tabbed-menu-item__text,
+.svc-tabbed-menu-item.selected .svc-tabbed-menu-item__text,
+.svc-tabbed-menu-item.active .svc-tabbed-menu-item__text {
+  font-weight: 600 !important;
+  font-style: normal !important;
+  font-size: 16px !important;
+  color: var(--prime-color) !important;
+}
+
+.sd-panel__content,
+.sd-element__content {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+
+.sd-panel.sd-element--nested > .sd-panel__content {
+  padding: 0 !important;
+  margin: 0 !important;
+}
+

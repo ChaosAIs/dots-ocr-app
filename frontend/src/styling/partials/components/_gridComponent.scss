@@ -1,0 +1,64 @@
+.p-accordion {
+  .p-accordion-header {
+    .p-accordion-header-link {
+      border: none;
+      background: none;
+      display: flex;
+      flex-direction: row-reverse;
+      margin-right: auto;
+      color: #1f1f1f !important;
+      background-color: transparent !important;
+
+      &:hover {
+        background-color: transparent !important;
+      }
+      .p-accordion-toggle-icon {
+        margin-right: auto;
+        margin-left: 10px;
+      }
+    }
+  }
+}
+
+.p-accordion-toggle-icon {
+  .pi {
+    .pi-chevron-down {
+      margin-right: auto !important;
+      margin-left: 10px;
+    }
+  }
+}
+
+.p-accordion-content {
+  background: transparent !important;
+}
+
+.p-datatable {
+  * {
+    font-size: 14px;
+  }
+  .p-datatable-thead {
+    th {
+      background: transparent !important;
+    }
+  }
+
+  .p-datatable-tbody {
+    tr:nth-child(even) {
+      background: #e5e5ea !important;
+    }
+
+    tr:nth-child(odd) {
+      background: transparent;
+    }
+  }
+
+  .p-paginator {
+    background-color: transparent !important;
+  }
+
+  .prime-color-grid-action {
+    font-size: small;
+    cursor: pointer !important;
+  }
+}

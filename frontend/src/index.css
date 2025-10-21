@@ -1,0 +1,90 @@
+body {
+  margin: 0;
+  font-family: "primeicons";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  zoom: 90%;
+}
+
+code {
+  font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New", monospace;
+}
+
+/* Debug Section Element Type Checkboxes */
+.debug-element-type-checkbox {
+  width: 14px;
+  height: 14px;
+  accent-color: #007bff;
+  cursor: pointer;
+}
+
+.debug-element-type-checkbox:hover {
+  transform: scale(1.1);
+}
+
+.debug-element-type-label {
+  font-size: 14px;
+  color: #495057;
+  cursor: pointer;
+  margin: 0;
+  user-select: none;
+  transition: color 0.2s ease;
+}
+
+.debug-element-type-label:hover {
+  color: #007bff;
+}
+
+.debug-element-type-container {
+  display: flex;
+  gap: 15px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 5px;
+  padding: 8px;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  border: 1px solid #dee2e6;
+  transition: background-color 0.2s ease;
+  min-height: 30px;
+}
+
+.debug-element-type-container:hover {
+  background-color: #e9ecef;
+}
+
+/* Ensure proper spacing for the combined filter row */
+.debug-element-type-container select {
+  min-width: 80px;
+}
+
+.debug-element-type-container label {
+  white-space: nowrap;
+}
+
+/* Debug panel scrollable content area */
+.debug-scrollable-content {
+  flex: 1;
+  overflow: auto;
+  padding: 0 15px 15px 15px;
+  max-height: calc(600px - 200px);
+}
+
+/* Custom scrollbar for debug panel */
+.debug-scrollable-content::-webkit-scrollbar {
+  width: 8px;
+}
+
+.debug-scrollable-content::-webkit-scrollbar-track {
+  background: #f1f1f1;
+  border-radius: 4px;
+}
+
+.debug-scrollable-content::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+.debug-scrollable-content::-webkit-scrollbar-thumb:hover {
+  background: #a8a8a8;
+}

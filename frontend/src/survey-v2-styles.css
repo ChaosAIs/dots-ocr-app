@@ -1,0 +1,214 @@
+/* Survey.js v2 Custom Styles */
+
+/* Override Survey.js v2 default styles for better integration */
+.sv-root {
+  font-family: inherit !important;
+}
+
+/* Compact layout for dropdowns */
+.sv-dropdown {
+  margin-bottom: 1rem !important;
+}
+
+.sv-dropdown__filter-string-input {
+  padding: 0.5rem !important;
+  font-size: 0.9rem !important;
+  border: 1px solid #ccc !important;
+  border-radius: 4px !important;
+}
+
+.sv-dropdown__list {
+  max-height: 200px !important;
+  border: 1px solid #ccc !important;
+  border-radius: 4px !important;
+  background: white !important;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1) !important;
+}
+
+.sv-dropdown__list-item {
+  padding: 0.5rem !important;
+  font-size: 0.9rem !important;
+  border-bottom: 1px solid #f0f0f0 !important;
+  cursor: pointer !important;
+}
+
+.sv-dropdown__list-item:hover {
+  background-color: #f8f9fa !important;
+}
+
+.sv-dropdown__list-item--selected {
+  background-color: #007bff !important;
+  color: white !important;
+}
+
+/* Fix dropdown clear button */
+.sv-dropdown__clean-button {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 20px !important;
+  height: 20px !important;
+  background: #dc3545 !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 50% !important;
+  cursor: pointer !important;
+  font-size: 12px !important;
+  line-height: 1 !important;
+}
+
+.sv-dropdown__clean-button:hover {
+  background: #c82333 !important;
+}
+
+/* Ensure dropdown input is properly styled */
+.sv-dropdown__filter-string-input:focus {
+  outline: 2px solid #007bff !important;
+  outline-offset: -2px !important;
+  border-color: #007bff !important;
+}
+
+/* Question title styling */
+.sv-question__title {
+  font-weight: 600 !important;
+  margin-bottom: 0.5rem !important;
+  font-size: 1rem !important;
+}
+
+/* Question content spacing */
+.sv-question__content {
+  margin-bottom: 1rem !important;
+}
+
+/* Panel styling */
+.sv-panel {
+  margin-bottom: 1.5rem !important;
+  padding: 1rem !important;
+  border: 1px solid #e9ecef !important;
+  border-radius: 6px !important;
+  background: #f8f9fa !important;
+}
+
+.sv-panel__title {
+  font-size: 1.2rem !important;
+  font-weight: 600 !important;
+  margin-bottom: 1rem !important;
+  color: #495057 !important;
+}
+
+/* Text input styling */
+.sv-text {
+  width: 100% !important;
+  padding: 0.5rem !important;
+  font-size: 0.9rem !important;
+  border: 1px solid #ccc !important;
+  border-radius: 4px !important;
+}
+
+.sv-text:focus {
+  outline: 2px solid #007bff !important;
+  outline-offset: -2px !important;
+  border-color: #007bff !important;
+}
+
+/* Button styling */
+.sv-btn {
+  padding: 0.5rem 1rem !important;
+  font-size: 0.9rem !important;
+  border-radius: 4px !important;
+  border: 1px solid #007bff !important;
+  background: #007bff !important;
+  color: white !important;
+  cursor: pointer !important;
+}
+
+.sv-btn:hover {
+  background: #0056b3 !important;
+  border-color: #0056b3 !important;
+}
+
+/* Progress bar */
+.sv-progress {
+  margin-bottom: 1rem !important;
+}
+
+.sv-progress__bar {
+  background: #007bff !important;
+  height: 6px !important;
+  border-radius: 3px !important;
+}
+
+/* Error styling */
+.sv-question--error .sv-question__title {
+  color: #dc3545 !important;
+}
+
+.sv-question__erros {
+  color: #dc3545 !important;
+  font-size: 0.85rem !important;
+  margin-top: 0.25rem !important;
+}
+
+/* Mobile responsiveness */
+@media (max-width: 768px) {
+  .sv-panel {
+    padding: 0.75rem !important;
+    margin-bottom: 1rem !important;
+  }
+
+  .sv-question__title {
+    font-size: 0.95rem !important;
+  }
+
+  .sv-dropdown__filter-string-input,
+  .sv-text {
+    font-size: 0.85rem !important;
+  }
+}
+
+/* Ensure proper z-index for dropdowns */
+.sv-dropdown__list {
+  z-index: 1000 !important;
+  position: absolute !important;
+}
+
+/* Fix any layout issues */
+.sv-question {
+  margin-bottom: 1rem !important;
+}
+
+/* Compact spacing for better form density */
+.sv-root {
+  line-height: 1.4 !important;
+}
+
+/* Override any conflicting styles from the main app */
+/* .survey-wrapper .sv-root * {
+  box-sizing: border-box !important;
+} */
+
+/* Selected Partner Reference Data Display Styles */
+.sv-question--text input[readonly] {
+  background-color: #f8f9fa !important;
+  border: 1px solid #e9ecef !important;
+  color: #495057 !important;
+  cursor: not-allowed !important;
+}
+
+.sv-question--text input[readonly]:focus {
+  box-shadow: none !important;
+  border-color: #e9ecef !important;
+}
+
+/* Loading state */
+.sv-question--text input.loading {
+  background-color: #e3f2fd !important;
+  color: #1976d2 !important;
+}
+
+/* Error state */
+.sv-question--text input.error {
+  background-color: #ffebee !important;
+  color: #d32f2f !important;
+  border-color: #f44336 !important;
+}

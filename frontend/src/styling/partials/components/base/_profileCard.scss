@@ -1,0 +1,34 @@
+.profile-card {
+  display: flex;
+
+  .image-holder {
+    .current-user {
+      width: 96px;
+      height: 96px;
+      background-size: cover;
+      border-radius: 50%;
+    }
+  }
+
+  .user-info {
+    margin-left: 20px;
+
+    h2 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    p {
+      margin: 5px 0px;
+      font-size: 12px;
+    }
+
+    .user-location {
+      color: #6f6f6f;
+    }
+  }
+
+  .help {
+    margin-left: auto;
+  }
+}

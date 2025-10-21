@@ -1,0 +1,293 @@
+@import "./components/_colors.scss";
+
+// Button height variable
+$btn-height: 44px;
+$btn-padding: 24px;
+
+html,
+body,
+#root {
+  height: 100%;
+  min-height: 100%;
+  background-color: get-color(backgrounds, bg_gray);
+}
+
+.app {
+  min-height: 100%;
+  /* Remove fixed height to allow content expansion */
+}
+
+.body-area {
+  padding-top: 1%;
+  width: 90%;
+  margin: auto;
+  overflow-y: auto;
+  /* Allow vertical scrolling when content exceeds viewport */
+}
+
+/* Default styles for buttons and dropdowns */
+.p-button,
+.p-dropdown {
+  background-color: #e5e5ea;
+  color: #1f1f1f;
+  outline: none;
+  border: none;
+
+  &:hover,
+  &:active,
+  &:focus {
+    background-color: #c9c9dd !important;
+    color: #1f1f1f !important;
+    border: none !important;
+    box-shadow: none !important;
+  }
+}
+
+/* Adding styles for red action buttons */
+.p-button.action {
+  background-color: #ed1a3b !important;
+  color: white !important;
+  border-radius: 0;
+  &:focus,
+  &:hover {
+    background-color: #af273c !important;
+    color: white !important;
+  }
+}
+
+/* Red action button disabled */
+
+.p-button.action.p-disabled {
+  background-color: #c9c9dd !important;
+  color: black;
+}
+
+/*  Pagination styles */
+button.p-paginator-page.p-highlight {
+  background-color: #ed1a3b !important;
+  color: white !important;
+}
+
+.p-button-default {
+  background-color: get-color(primary, default_gray) !important;
+  color: #333 !important;
+  border: 1px solid get-color(primary, default_gray) !important;
+  height: $btn-height;
+  padding-left: $btn-padding;
+  padding-right: $btn-padding;
+
+  &:hover,
+  &:active,
+  &:focus {
+    background-color: darken(get-color(primary, default_gray), 10%) !important;
+    border-color: darken(get-color(primary, default_gray), 10%) !important;
+    border: 1px solid get-color(primary, default_gray) !important;
+  }
+
+  &:focus {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+
+.p-button-default .p-button-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.p-button-primary {
+  background-color: get-color(primary, prime-color_red) !important;
+  color: white !important;
+  border: 1px solid get-color(primary, prime-color_red) !important;
+  height: $btn-height;
+  padding-left: $btn-padding;
+  padding-right: $btn-padding;
+
+  &:hover,
+  &:active,
+  &:focus {
+    background-color: darken(get-color(primary, prime-color_red), 10%) !important;
+    border-color: darken(get-color(primary, prime-color_red), 10%) !important;
+    border: 1px solid get-color(primary, prime-color_red) !important;
+    color: white !important;
+  }
+
+  &:focus {
+    outline: none !important;
+    box-shadow: none !important;
+  }
+}
+
+.p-button-primary .p-button-label {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.p-button-primary-rounded {
+  @extend .p-button-primary;
+  border-radius: 25px !important;
+}
+
+.p-button-rounded {
+  border-radius: 25px !important;
+}
+
+.p-radiobutton .p-radiobutton-box.p-highlight {
+  border-color: #ed1a3b;
+  background: #ed1a3b;
+}
+
+.p-inputtext:enabled:focus,
+.p-inputtext:enabled:hover,
+.p-inputtext {
+  background-color: transparent;
+  outline: none;
+  border: 1px solid #959597;
+  &:hover,
+  &:active,
+  &:focus {
+    outline: #959597;
+    box-shadow: none;
+  }
+}
+
+/** override padding in the Grid */
+.p-datatable .p-datatable-tbody > tr > td {
+  padding: 0.55rem 0.55rem !important;
+}
+
+/* Tabs - Enhanced prime-color Styling */
+.p-tabview {
+  .p-tabview-nav {
+    background-color: transparent !important;
+    border-bottom: 1px solid #e0e0e0;
+
+    li {
+      .p-tabview-nav-link {
+        background-color: transparent !important;
+        border: none !important;
+        border-bottom: 3px solid transparent !important;
+        color: #6c757d !important;
+        font-weight: 500;
+        padding: 1rem 1.5rem !important;
+        transition: all 0.2s ease-in-out;
+
+        &:hover {
+          background-color: #f8f9fa !important;
+          color: #495057 !important;
+        }
+
+        .p-tabview-left-icon {
+          margin-right: 0.5rem !important;
+          color: inherit;
+        }
+
+        .p-tabview-title {
+          margin-left: 0.25rem;
+          font-size: 0.95rem;
+        }
+      }
+
+      /* Active/Selected Tab Styling */
+      &.p-highlight .p-tabview-nav-link {
+        background-color: transparent !important;
+        border-bottom: 3px solid #ed1a3b !important;
+        color: #ed1a3b !important;
+        font-weight: 600 !important;
+
+        &:hover {
+          background-color: #fef7f8 !important;
+          color: #ed1a3b !important;
+        }
+
+        .p-tabview-left-icon {
+          color: #ed1a3b !important;
+        }
+
+        .p-tabview-title {
+          color: #ed1a3b !important;
+          font-weight: 600;
+        }
+      }
+    }
+  }
+
+  .p-tabview-panels {
+    background-color: transparent !important;
+    padding: 1.5rem 0 !important;
+  }
+}
+
+/** Button */
+.p-button-gray {
+  background-color: #e8e8e8 !important; // Light background
+  border: 1px solid #e8e8e8 !important; // Subtle border
+  color: black !important; // Dark icon color
+
+  &:hover {
+    background-color: white !important; // prime-color red on hover
+    border-color: white !important;
+    color: Black !important; // White icon on hover
+  }
+
+  &:focus {
+    box-shadow: 0 0 0 2px rgba(223, 220, 220, 0.2) !important; // prime-color red focus ring
+  }
+
+  .p-button-icon {
+    font-size: 1rem !important; // Appropriate icon size
+  }
+}
+
+.p-button-red {
+  background-color: #ed1a3b !important; // prime-color red background
+  border: 1px solid #ed1a3b !important; // prime-color red border
+  color: white !important; // White text
+
+  &:hover {
+    background-color: #af273c !important; // Darker red on hover
+    border-color: #af273c !important;
+    color: white !important; // Keep white text on hover
+  }
+
+  &:focus {
+    box-shadow: 0 0 0 2px rgba(237, 26, 59, 0.2) !important; // prime-color red focus ring
+  }
+
+  .p-button-icon {
+    font-size: 1rem !important; // Appropriate icon size
+  }
+
+  // Disabled state
+  &.p-disabled {
+    background-color: #c9c9dd !important;
+    border-color: #c9c9dd !important;
+    color: black !important;
+  }
+}
+
+.hometab-status {
+  color: #ed1a3b;
+  text-transform: uppercase;
+}
+
+/** Page title font style */
+.page-title {
+  margin-top: 0 !important;
+  margin-bottom: 0.5rem !important;
+  font-size: 1.3rem !important;
+  font-weight: 600 !important;
+  color: black !important;
+}
+
+.section-header {
+  margin-top: 0 !important;
+  margin-bottom: 0.5rem !important;
+  font-size: 1rem !important;
+  font-weight: 600 !important;
+  color: black !important;
+}
+
+.p-dropdown {
+  min-width: 80px;
+}

@@ -1,0 +1,27 @@
+:root {
+  /* Primary Colors */
+  --prime-color: #E81A3B;
+  --highlighted: #FEE1E5;
+  --highlighted-hover: #FFF1F0;
+  --prime-color-charcoal: #333333;
+  --default-gray: #F7F6F7;
+  --medium-gray: #E8E8E8;
+  --disabled-gray: #DADBE0;
+
+  /* Status Colors */
+  --success-green: #54A575;
+  --warning-orange: #FD7E14;
+  --danger-red: #98002E;
+
+  /* Background Colors */
+  --bg-white: #ffffff;
+  --bg-gray: #F7F6F7;
+
+  /* Text Colors */
+  --primary-text: #333333;
+  --secondary-text: #6F6F6F;
+  --disabled-text: #9F9F9F;
+  --hint-text: #9F9F9F;
+  --divider: #D4D4D5;
+  --sorting: #BFBFBF;
+}

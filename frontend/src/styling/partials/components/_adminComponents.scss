@@ -1,0 +1,171 @@
+/* Admin Components Styling */
+
+/* Tab Component Styling */
+.p-tabview {
+  .p-tabview-nav {
+    li {
+      .p-tabview-nav-link {
+        .p-tabview-left-icon {
+          margin-right: 0.5rem !important;
+        }
+
+        .p-tabview-title {
+          margin-left: 0.25rem;
+        }
+      }
+    }
+  }
+}
+
+/* Dialog Styling */
+.p-dialog {
+  .p-dialog-header {
+    background-color: white !important;
+    color: white !important;
+    padding-bottom: 8px !important;
+    
+    .p-dialog-title {
+      color: rgba(0, 0, 0, 0.88) !important;
+      line-height: 22px;
+      font-weight: 600;
+      font-size: 22px;
+      word-wrap: break-word;
+      margin: 0;
+    }
+    
+    .p-dialog-header-icon {      
+      &:hover {
+        background-color: rgba(255, 255, 255, 0.1) !important;
+      }
+    }
+  }
+  
+  .p-dialog-content {
+    padding: 1.5rem;
+  }
+  
+  .p-dialog-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid #e0e0e0;
+  }
+}
+
+/* Form Styling */
+.p-field {
+  margin-bottom: 1rem;
+  
+  label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    color: #1f1f1f;
+  }
+  
+  .p-inputtext,
+  .p-dropdown,
+  .p-multiselect {
+    width: 100%;
+  }
+}
+
+/* Badge Styling */
+.p-badge {
+  &.p-badge-success {
+    background-color: #28a745;
+  }
+  
+  &.p-badge-danger {
+    background-color: #ed1a3b;
+  }
+  
+  &.p-badge-warning {
+    background-color: #ffc107;
+    color: #1f1f1f;
+  }
+  
+  &.p-badge-info {
+    background-color: #17a2b8;
+  }
+  
+  &.p-badge-secondary {
+    background-color: #6c757d;
+  }
+}
+
+/* Toast Styling */
+.p-toast {
+  .p-toast-message {
+    &.p-toast-message-success {
+      background-color: #d4edda;
+      border-color: #c3e6cb;
+      color: #155724;
+    }
+    
+    &.p-toast-message-error {
+      background-color: #f8d7da;
+      border-color: #f5c6cb;
+      color: #721c24;
+    }
+    
+    &.p-toast-message-warn {
+      background-color: #fff3cd;
+      border-color: #ffeaa7;
+      color: #856404;
+    }
+    
+    &.p-toast-message-info {
+      background-color: #d1ecf1;
+      border-color: #bee5eb;
+      color: #0c5460;
+    }
+  }
+}
+
+.button-container {
+  display: flex !important;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+
+  .p-button {
+    width: auto !important; // Override p-fluid
+    flex: none !important;  // Override flex behavior
+  }
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+  /* Add responsive styles for remaining admin components here */
+}
+
+/* Pagination Styling */
+.p-paginator {
+  background-color: transparent !important;
+  border: none !important;
+  
+  .p-paginator-pages {
+    .p-paginator-page {
+      &.p-highlight {
+        background-color: #ed1a3b !important;
+        border-color: #ed1a3b !important;
+        color: white !important;
+      }
+      
+      &:not(.p-highlight):hover {
+        background-color: #e5e5ea !important;
+        border-color: #c9c9dd !important;
+      }
+    }
+  }
+  
+  .p-paginator-first,
+  .p-paginator-prev,
+  .p-paginator-next,
+  .p-paginator-last {
+    &:hover {
+      background-color: #e5e5ea !important;
+      border-color: #c9c9dd !important;
+    }
+  }
+}

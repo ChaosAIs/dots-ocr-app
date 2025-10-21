@@ -1,0 +1,1 @@
+They are React components working as children components inside page components.

@@ -1,0 +1,36 @@
+$colors: (
+    primary: (
+        prime-color_red: #E81A3B,
+        highlighted: #FEE1E5,
+        highlighted_hover: #FFF1F0,
+        prime-color_charcoal: #333333,
+        default_gray: #F7F6F7,
+        medium_gray: #E8E8E8,
+        disabled_gray: #DADBE0
+    ),
+    status: (
+        success_green: #4CAF50,
+        warning_orange: #FD7E14,
+        danger_red: #98002E
+    ),
+    backgrounds: (
+        bg_white: #ffffff,
+        bg_gray: #F7F6F7
+    ),
+    texts: (
+        primary_text: #333333,
+        secondary_text: #6F6F6F,
+        disabled_text: #9F9F9F,
+        hint_text: #9F9F9F,
+        divider: #D4D4D5,
+        sorting: #BFBFBF
+    )
+);
+
+@function get-color($palette, $shade: null) {
+  @if $shade {
+    @return map-get(map-get($colors, $palette), $shade);
+  } @else {
+    @return map-get($colors, $palette);
+  }
+}

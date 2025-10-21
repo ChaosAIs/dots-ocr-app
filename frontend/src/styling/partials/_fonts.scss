@@ -1,0 +1,31 @@
+.app * {
+  font-family: -apple-system, BlinkMacSystemFont, "Proxima Nova", "Segoe UI", 
+    Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, 
+    "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", 
+    "Noto Color Emoji" !important;
+}
+
+/* Ensure primeicons font is not overridden */
+.app .pi {
+  font-family: 'primeicons' !important;
+}
+
+.error {
+  &__title-container {
+    display: flex;
+    align-items: center;
+  }
+
+  &__title {
+    color: #bf0000;
+    margin-left: 10px;
+  }
+
+  &__subtitle {
+    color: #808080;
+  }
+
+  &__message {
+    color: #bf0000;
+  }
+}
