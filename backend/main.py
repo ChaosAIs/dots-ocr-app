@@ -59,8 +59,25 @@ async def health_check():
 
 @app.get("/config")
 async def get_config():
-    """Get current configuration"""
+    """Get current configuration for both backend and frontend"""
+    # Get frontend configuration from environment variables
+    app_domain = os.getenv("APP_DOMAIN", "http://localhost:3000")
+    base_path = os.getenv("BASE_PATH", "")
+    iam_domain = os.getenv("IAM_DOMAIN", "http://localhost:5000")
+    client_id = os.getenv("CLIENT_ID", "dots-ocr-app")
+    iam_scope = os.getenv("IAM_SCOPE", "openid profile email")
+    api_domain = os.getenv("API_DOMAIN", "http://localhost:8080")
+
     return {
+        # Frontend configuration
+        "basePath": base_path,
+        "appDomain": app_domain,
+        "apiDomain": api_domain,
+        "iamDomain": iam_domain,
+        "clientId": client_id,
+        "iamScope": iam_scope,
+
+        # Backend OCR configuration
         "vllm_ip": parser.ip,
         "vllm_port": parser.port,
         "model_name": parser.model_name,

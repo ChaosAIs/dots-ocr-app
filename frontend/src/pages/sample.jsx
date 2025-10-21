@@ -109,7 +109,7 @@ export const Sample = () => {
   return (
     <>
       <h2>Sample Page</h2>
-      {authService.isAuthenticated() && (
+      {authService && typeof authService.isAuthenticated === 'function' && authService.isAuthenticated() && (
         <div>
           <h3>Today's News (Demo Remote Web API call)</h3>
           <ul>
@@ -225,23 +225,18 @@ export const Sample = () => {
           </Button>
         </div>
         <div className="mb-2 mr-2">
-          <Button className="btn btn-secondary" onClick={() => debugHasRole("15")}>
-            🎭 Check Admin Role (15)
+          <Button className="btn btn-secondary" onClick={() => debugHasRole("2")}>
+            🎭 Check Administrator Role (2)
           </Button>
         </div>
         <div className="mb-2 mr-2">
-          <Button className="btn btn-secondary" onClick={() => debugHasRole("3")}>
-            🎭 Check Active Partner Role (3)
+          <Button className="btn btn-secondary" onClick={() => debugHasRole("1")}>
+            🎭 Check User Role (1)
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-secondary" onClick={() => debugHasPermission("1")}>
             🔑 Check Login Permission (1)
-          </Button>
-        </div>
-        <div className="mb-2 mr-2">
-          <Button className="btn btn-secondary" onClick={() => debugHasPermission("3")}>
-            🔑 Check Track All Plans Permission (3)
           </Button>
         </div>
       </div>

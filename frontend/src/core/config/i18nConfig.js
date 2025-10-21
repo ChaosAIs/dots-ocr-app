@@ -10,6 +10,16 @@ import APP_CONFIG from "./appConfig";
  *
  * Reference: https://www.cluemediator.com/implement-multi-languages-in-react
  */
+// Log the basePath being used for i18n
+console.log("🔧 i18n initialization - APP_CONFIG.basePath:", APP_CONFIG.basePath);
+
+// Use PUBLIC_URL from environment or construct from basePath
+// For development, use relative path; for production, use basePath
+const publicUrl = process.env.PUBLIC_URL || APP_CONFIG.basePath || "";
+const i18nLoadPath = `${publicUrl}/assets/i18n/{{ns}}/{{lng}}.json`;
+console.log("🔧 i18n PUBLIC_URL:", publicUrl);
+console.log("🔧 i18n loadPath:", i18nLoadPath);
+
 i18n
   // load translation using http -> see /public/locales (i.e. https://github.com/i18next/react-i18next/tree/master/example/react/public/locales)
   // learn more: https://github.com/i18next/i18next-http-backend
@@ -25,7 +35,7 @@ i18n
     lng: "en",
     backend: {
       /* translation file path. Note: basePath default value = "/"  */
-      loadPath: `${APP_CONFIG.basePath}/assets/i18n/{{ns}}/{{lng}}.json`,
+      loadPath: i18nLoadPath,
     },
     fallbackLng: "en",
     debug: false,
@@ -42,7 +52,7 @@ i18n
       formatSeparator: ",",
     },
     react: {
-      wait: true,
+      useSuspense: false,
     },
   });
 

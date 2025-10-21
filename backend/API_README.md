@@ -16,6 +16,14 @@ pip install -r requirements.txt
 Edit `backend/.env` to customize settings:
 
 ```env
+# Frontend Configuration
+APP_DOMAIN=http://localhost:3000
+BASE_PATH=
+API_DOMAIN=http://localhost:8080
+IAM_DOMAIN=http://localhost:5000
+CLIENT_ID=dots-ocr-app
+IAM_SCOPE=openid profile email
+
 # VLLM Server Configuration
 VLLM_IP=localhost
 VLLM_PORT=8001
@@ -33,7 +41,7 @@ OUTPUT_DIR=./backend/output
 
 # FastAPI Server Configuration
 API_HOST=0.0.0.0
-API_PORT=8000
+API_PORT=8080
 ```
 
 ## Running the API
@@ -60,29 +68,37 @@ The API will be available at `http://localhost:8000`
 ## API Endpoints
 
 ### 1. Root Endpoint
+
 ```
 GET /
 ```
+
 Returns API information and available endpoints.
 
 ### 2. Health Check
+
 ```
 GET /health
 ```
+
 Returns service health status.
 
 ### 3. Get Configuration
+
 ```
 GET /config
 ```
+
 Returns current parser configuration.
 
 ### 4. Parse Single File
+
 ```
 POST /parse
 ```
 
 **Parameters:**
+
 - `file` (required): PDF or image file to parse
 - `prompt_mode` (optional): Prompt mode for parsing
   - `prompt_layout_all_en` (default)
@@ -92,6 +108,7 @@ POST /parse
 - `bbox` (optional): Bounding box for grounding OCR as JSON string `[x1, y1, x2, y2]`
 
 **Example with curl:**
+
 ```bash
 curl -X POST "http://localhost:8000/parse" \
   -F "file=@/path/to/document.pdf" \
@@ -99,6 +116,7 @@ curl -X POST "http://localhost:8000/parse" \
 ```
 
 **Example with Python:**
+
 ```python
 import requests
 
@@ -110,15 +128,18 @@ with open("document.pdf", "rb") as f:
 ```
 
 ### 5. Parse Multiple Files (Batch)
+
 ```
 POST /parse-batch
 ```
 
 **Parameters:**
+
 - `files` (required): List of PDF or image files to parse
 - `prompt_mode` (optional): Prompt mode for parsing
 
 **Example with curl:**
+
 ```bash
 curl -X POST "http://localhost:8000/parse-batch" \
   -F "files=@/path/to/document1.pdf" \
@@ -127,6 +148,7 @@ curl -X POST "http://localhost:8000/parse-batch" \
 ```
 
 **Example with Python:**
+
 ```python
 import requests
 
@@ -142,6 +164,7 @@ print(response.json())
 ## Response Format
 
 ### Successful Parse Response
+
 ```json
 {
   "status": "success",
@@ -162,6 +185,7 @@ print(response.json())
 ```
 
 ### Batch Response
+
 ```json
 {
   "status": "completed",
@@ -198,37 +222,55 @@ output/
 
 ## Configuration Options
 
+### Frontend Configuration
+
+These settings are served to the frontend via the `/config` endpoint:
+
+- `APP_DOMAIN`: Frontend application domain (default: http://localhost:3000)
+- `BASE_PATH`: Base path for the frontend application (default: empty string)
+- `API_DOMAIN`: Backend API domain (default: http://localhost:8080)
+- `IAM_DOMAIN`: Identity/Authentication server domain (default: http://localhost:5000)
+- `CLIENT_ID`: Client ID for authentication (default: dots-ocr-app)
+- `IAM_SCOPE`: OAuth scopes for authentication (default: openid profile email)
+
 ### VLLM Server
+
 - `VLLM_IP`: IP address of vLLM server (default: localhost)
 - `VLLM_PORT`: Port of vLLM server (default: 8001)
 - `VLLM_MODEL_NAME`: Model name to use (default: dots_ocr)
 
 ### Inference
+
 - `TEMPERATURE`: Model temperature (default: 0.1)
 - `TOP_P`: Top-p sampling parameter (default: 1.0)
 - `MAX_COMPLETION_TOKENS`: Maximum tokens in response (default: 16384)
 
 ### Processing
+
 - `NUM_THREAD`: Number of threads for parallel processing (default: 64)
 - `DPI`: DPI for PDF rendering (default: 200)
 - `OUTPUT_DIR`: Directory for output files (default: ./backend/output)
 
 ### Image Processing
+
 - `MIN_PIXELS`: Minimum image pixels (default: None)
 - `MAX_PIXELS`: Maximum image pixels (default: None)
 
 ### API Server
+
 - `API_HOST`: API server host (default: 0.0.0.0)
 - `API_PORT`: API server port (default: 8000)
 
 ## Error Handling
 
 The API returns appropriate HTTP status codes:
+
 - `200`: Successful request
 - `400`: Bad request (invalid parameters)
 - `500`: Server error
 
 Error responses include a detail message:
+
 ```json
 {
   "detail": "Error message describing what went wrong"
@@ -245,16 +287,18 @@ Error responses include a detail message:
 ## Troubleshooting
 
 ### Connection Error to vLLM Server
+
 - Check that vLLM server is running at the configured IP and port
 - Verify `VLLM_IP` and `VLLM_PORT` in `.env`
 
 ### Out of Memory
+
 - Reduce `NUM_THREAD` in `.env`
 - Reduce `DPI` for PDF rendering
 - Process files individually instead of batch
 
 ### Slow Processing
+
 - Increase `NUM_THREAD` if system has available resources
 - Increase `DPI` for faster processing (lower quality)
 - Ensure vLLM server has sufficient GPU memory
-

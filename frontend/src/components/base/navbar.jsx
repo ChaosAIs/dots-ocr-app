@@ -15,7 +15,7 @@ export const NavBar = () => {
   //
   // Try to get selected language code from the global redux store.
   //
-  const state = useSelector((state) => state);
+  const language = useSelector((state) => state.language);
   const dispatch = useDispatch();
   //
   // Binding Redux custom action creators.
@@ -24,15 +24,15 @@ export const NavBar = () => {
   const { setLanguage } = bindActionCreators(actionCreators, dispatch);
 
   const authService = useContext(AuthContext);
-  const user = authService.getUser();
-  const isAuthorized = authService.isAuthenticated();
+  const user = authService && typeof authService.getUser === 'function' ? authService.getUser() : null;
+  const isAuthorized = authService && typeof authService.isAuthenticated === 'function' ? authService.isAuthenticated() : false;
   const { t, i18n } = useTranslation();
 
   useEffect(() => {
-    if (state.language && state.language.length > 0) {
-      i18n.changeLanguage(state.language);
+    if (language && language.length > 0) {
+      i18n.changeLanguage(language);
     }
-  }, [i18n, state]);
+  }, [i18n, language]);
 
   // Check if user has Administrator role
   const isSystemAdmin = isAuthorized && user?.roles?.includes(Role.Administrator);
@@ -50,7 +50,7 @@ export const NavBar = () => {
       visible: isSystemAdmin,
       items: [
         {
-          label: "Partner Reference Data",
+          label: "Document Management",
           icon: "pi pi-fw pi-users",
           url: `${APP_CONFIG.basePath}/admin/data-management`,
         }
@@ -58,26 +58,23 @@ export const NavBar = () => {
     },
   ];
 
+  // Language options with hardcoded labels to avoid translation timing issues
   const languages = [
-    { label: t("Nav.English"), value: "en" },
-    { label: t("Nav.French"), value: "fr" },
+    { label: "English", value: "en" },
+    { label: "Français", value: "fr" },
   ];
-
-  const login = () => {
-    // Show progress spinner.
-    loadingService.httpRequestSent();
-    authService.signin();
-  };
 
   const logout = () => {
     // Show progress spinner.
     loadingService.httpRequestSent();
-    authService.signout();
+    if (authService && typeof authService.signout === 'function') {
+      authService.signout();
+    }
   };
 
   const languageDropdown = (
     <Dropdown
-      value={state.language}
+      value={language}
       options={languages}
       onChange={(e) => {
         i18n.changeLanguage(e.value);
@@ -89,10 +86,6 @@ export const NavBar = () => {
 
   const start = (
     <div className="navbar-brand-container">
-      <img
-        alt="logo"
-        src={`${APP_CONFIG.basePath}/logo.png`}
-      />
       <span className="navbar-brand-text">       
         {t("Nav.DocumentConversion")}
       </span>
@@ -100,22 +93,13 @@ export const NavBar = () => {
   );
   const end = (
     <>
-      {isAuthorized && <span className="p-2">{user.displayName}</span>}
-      {languageDropdown} 
-      {isAuthorized && (
-        // it is logout button.
-        <Button label="Logout" rounded className="p-button-gray p-button-rounded"
-          title={t("Nav.Logout")}
-          onClick={logout}
-        ></Button>
-      )}
-      {!isAuthorized && (
-        // It is login button.
-        <Button label="Login" rounded className="p-button-gray"
-          title={t("Nav.Login")}
-          onClick={login}
-        ></Button>
-      )}
+      {isAuthorized && <span className="p-2">{user?.displayName || "User"}</span>}
+      {languageDropdown}
+      {/* Always show logout button since we're using temporary auth */}
+      {/* <Button label={t("Nav.Logout")} rounded className="p-button-gray p-button-rounded"
+        title={t("Nav.Logout")}
+        onClick={logout}
+      ></Button> */}
     </>
   );
 

@@ -1,11 +1,12 @@
 /** Define current running application's environment.
- * value = "dev_cors" or "prod_nocors". 
+ * value = "dev_cors" or "prod_nocors".
  * Other settings get from server side api
  * */
 const APP_ENV = process.env.REACT_APP_ENV;
 const APP_CONFIG_API = process.env.REACT_APP_CONFIG_API;
 
-console.log("APP_CONFIG_API", APP_CONFIG_API);
+console.log("APP_ENV:", APP_ENV);
+console.log("APP_CONFIG_API:", APP_CONFIG_API);
 
 let app_config = null;
 
@@ -15,7 +16,17 @@ const getConfig = function () {
   // Validate required environment variables
   if (!APP_ENV || !APP_CONFIG_API) {
     console.error("Missing required environment variables: REACT_APP_ENV or REACT_APP_CONFIG_API");
-    return null;
+    console.error("APP_ENV:", APP_ENV);
+    console.error("APP_CONFIG_API:", APP_CONFIG_API);
+    // Return a default config to prevent crashes
+    return {
+      basePath: "",
+      appDomain: window.location.protocol + "//" + window.location.host,
+      apiDomain: "http://localhost:8080",
+      iamDomain: "http://localhost:5000",
+      clientId: "dots-ocr-app",
+      iamScope: "openid profile email",
+    };
   }
 
   // create a new XMLHttpRequest
@@ -25,7 +36,20 @@ const getConfig = function () {
     //console.log("config", xhr.responseText);
     app_config = JSON.parse(xhr.responseText);
     // update the state of the component with the result here
-    console.log(xhr.responseText);
+    console.log("✅ Config loaded from server:", xhr.responseText);
+  });
+
+  xhr.addEventListener("error", () => {
+    console.error("❌ Failed to load config from server");
+    // Use default config on error
+    app_config = {
+      basePath: "",
+      appDomain: window.location.protocol + "//" + window.location.host,
+      apiDomain: "http://localhost:8080",
+      iamDomain: "http://localhost:5000",
+      clientId: "dots-ocr-app",
+      iamScope: "openid profile email",
+    };
   });
 
   var domain = window.location.protocol + "//" + window.location.host;
@@ -50,15 +74,31 @@ const getConfig = function () {
   if (APP_ENV.indexOf("_cors") > 0) {
     // For any "**_cors" environments, need to get web api endpoint full path from environment file.
     // Currently, this setting only work for local development environment and corporate with environment file called ".env.development.local".
+    console.log("📡 Fetching config from:", APP_CONFIG_API);
     xhr.open("GET", APP_CONFIG_API, false);
   } else {
     // For any "**_nocors" environments, call web api endpoint with current domain.
     // corporate with environment file called ".env.production.local".
-    xhr.open("GET", domain + APP_CONFIG_API, false);
+    const configUrl = domain + APP_CONFIG_API;
+    console.log("📡 Fetching config from:", configUrl);
+    xhr.open("GET", configUrl, false);
   }
 
   // send the request
-  xhr.send();
+  try {
+    xhr.send();
+  } catch (error) {
+    console.error("❌ Error sending config request:", error);
+    // Use default config on error
+    app_config = {
+      basePath: "",
+      appDomain: window.location.protocol + "//" + window.location.host,
+      apiDomain: "http://localhost:8080",
+      iamDomain: "http://localhost:5000",
+      clientId: "dots-ocr-app",
+      iamScope: "openid profile email",
+    };
+  }
 
   let stillWating = true;
   //we only wait for 30s to avoid chrome freeze

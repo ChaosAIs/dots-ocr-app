@@ -2,7 +2,8 @@ import axios from "axios";
 import { loadingService } from "../loading/loadingService";
 import APP_CONFIG from "../config/appConfig";
 import { messageService } from "../message/messageService";
-import AuthService from "../auth/authService";
+// import AuthService from "../auth/authService"; // Temporarily disabled IAM SSO
+import TempAuthService from "../auth/tempAuthService"; // Using temporary auth service
 /**
  * It is instance of axios Http client, which works for http call.
  * Corporate with loading.jsx for a global progress bar process.
@@ -21,21 +22,17 @@ const http = axios.create({
 
 /**
  * Corporate with http const to inject access_token to http request header.
- * Work for Identity Server 4 single sign on.
+ * Work for temporary authentication.
  * @returns Bearer token header string.
  */
 const getAccessTokenHeader = () => {
-  const oidc = JSON.parse(
-    /**
-     * Note: It is OIDC-Client library default storage.
-     * The key format is defined by oidc-client library.
-     * Note: Developer no needs to modify the session key.
-     * */
-    sessionStorage.getItem(`oidc.user:${APP_CONFIG.iamDomain}:${APP_CONFIG.clientId}`)
-  );
-  if (!!oidc && !!oidc.access_token && !oidc.expired) {
-    return `Bearer ${oidc.access_token}`;
-  } else return "";
+  // Using temporary auth service
+  const tempAuthService = new TempAuthService();
+  const user = tempAuthService.getUser();
+  if (user && user.accessToken) {
+    return `Bearer ${user.accessToken}`;
+  }
+  return "";
 };
 
 /** Get current language codes. */
@@ -120,25 +117,21 @@ http.interceptors.response.use(
  */
 const handleUnauthorizedAccess = () => {
   try {
-    // Create a new instance of AuthService to handle the redirect
-    const authService = new AuthService();
+    // Using temporary auth service
+    const authService = new TempAuthService();
 
     // Clear any stale authentication state
-    authService.userManager.clearStaleState();
+    authService.clearAuthState();
 
     // Store the current location for redirect after login
     const currentPath = window.location.pathname + window.location.search;
     localStorage.setItem("redirectUri", currentPath);
 
-    console.log("Unauthorized access detected. Redirecting to login...");
+    console.log("Unauthorized access detected. For temporary auth, allowing access...");
     console.log("Current path stored for redirect:", currentPath);
 
-    // Redirect to login
-    authService.signinRedirect().catch((error) => {
-      console.error("Error during signin redirect:", error);
-      // Fallback: navigate to home page if signin redirect fails
-      window.location.replace(APP_CONFIG.basePath);
-    });
+    // For temporary auth, just log and continue (no redirect needed)
+    // In production with IAM, this would redirect to login
   } catch (error) {
     console.error("Error handling unauthorized access:", error);
     // Fallback: navigate to home page

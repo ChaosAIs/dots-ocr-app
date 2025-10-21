@@ -500,15 +500,15 @@ export default class AuthService {
 
   /**
    * Get human-readable description for role ID
+   * Reference to Enumerations.Role in server side.
+   * Reference to records in table dbo.[Role].
    * @param {string} roleId - The role ID
    * @returns {string} Role description
    */
   getRoleDescription = (roleId) => {
     const roleDescriptions = {
-      15: "Partner Plans Administrator",
-      3: "Active Partner",
-      16: "New Partner",
-      17: "Executive Leadership/Reviewer",
+      1: "User",
+      2: "Administrator",
     };
     return roleDescriptions[roleId] || "Unknown Role";
   };
@@ -521,20 +521,7 @@ export default class AuthService {
   getPermissionDescription = (permissionId) => {
     const permissionDescriptions = {
       1: "Login",
-      2: "Track Own Partner Plan",
-      3: "Track All Partner Plans",
-      4: "Draft Submit Partner Plan",
-      5: "Edit Partner Plans Under Review",
-      6: "Partner Plans Final Submission",
-      7: "Mid End Year Self Assessment",
-      8: "Mid End Year Reviewer Assessment",
-      9: "View Submitted Partner Plans",
-      10: "Edit Submitted Partner Plans",
-      11: "Export Plan Data To Excel",
-      12: "Manage Partner Reviewer Relationships",
-      13: "Upload KPI Data",
-      14: "Edit Publish Input Form",
-    };
+      };
     return permissionDescriptions[permissionId] || "Unknown Permission";
   };
 }

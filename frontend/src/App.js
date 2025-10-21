@@ -25,27 +25,7 @@ import "./core/auth/debugAuth";
 
 // Component to conditionally render navbar based on current route
 const ConditionalNavBar = () => {
-  const location = useLocation();
-
-  // Hide navbar on partner questionnaire pages
-  const hideNavbarRoutes = ["/my-partner-plan", "/my-partner-plan-v2", "/partner-plan", "/partner-plan-v2"];
-  const shouldHideNavbar = hideNavbarRoutes.includes(location.pathname);
-
-  // Add/remove body class for fullscreen layout
-  React.useEffect(() => {
-    if (shouldHideNavbar) {
-      document.body.classList.add("partner-questionnaire-fullscreen");
-    } else {
-      document.body.classList.remove("partner-questionnaire-fullscreen");
-    }
-
-    // Cleanup on unmount
-    return () => {
-      document.body.classList.remove("partner-questionnaire-fullscreen");
-    };
-  }, [shouldHideNavbar]);
-
-  return shouldHideNavbar ? null : <NavBar />;
+  return <NavBar />;
 };
 
 function App() {

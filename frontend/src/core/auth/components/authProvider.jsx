@@ -1,5 +1,6 @@
 import React from "react";
-import AuthService from "../authService";
+// import AuthService from "../authService"; // Temporarily disabled IAM SSO
+import TempAuthService from "../tempAuthService"; // Using temporary auth service
 
 /**
  * Declare a Authentication context.
@@ -29,7 +30,8 @@ export const AuthConsumer = AuthContext.Consumer;
  * Reference: https://stackoverflow.com/questions/58197800/set-the-data-in-react-context-from-asynchronous-api-call
  */
 export const AuthProvider = ({ children }) => {
-  const authService = new AuthService();
+  // Using temporary auth service instead of IAM SSO
+  const authService = new TempAuthService();
 
   // The Provider component accepts a value prop to be passed to consuming components
   // that are descendants of this Provider.
