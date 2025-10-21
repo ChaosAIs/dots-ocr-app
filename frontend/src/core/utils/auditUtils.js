@@ -526,7 +526,7 @@ export const extractFieldTitleMapping = (questionnaireDefinition, questionnaireY
 
 /**
  * Resolve field title by traversing up the form hierarchy to find meaningful parent titles
- * @param {string} fieldName - Field name to resolve (e.g., "otherPartnerContributionsList")
+ * @param {string} fieldName - Field name to resolve.
  * @param {Object} questionnaireDefinition - The questionnaire definition JSON
  * @returns {string|null} Hierarchical title or null if not found
  */
