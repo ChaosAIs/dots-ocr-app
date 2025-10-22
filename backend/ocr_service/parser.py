@@ -4,6 +4,8 @@ from tqdm import tqdm
 from multiprocessing.pool import ThreadPool, Pool
 import argparse
 from dotenv import load_dotenv
+import time
+import threading
 
 
 from dots_ocr.model.inference import inference_with_vllm
@@ -60,17 +62,57 @@ class DotsOCRParser:
 
 
     def _inference_with_vllm(self, image, prompt):
-        response = inference_with_vllm(
-            image,
-            prompt, 
-            model_name=self.model_name,
-            ip=self.ip,
-            port=self.port,
-            temperature=self.temperature,
-            top_p=self.top_p,
-            max_completion_tokens=self.max_completion_tokens,
-        )
-        return response
+        """Inference with progress updates during the blocking call"""
+        response = [None]  # Use list to allow modification in thread
+        exception = [None]
+
+        def run_inference():
+            try:
+                response[0] = inference_with_vllm(
+                    image,
+                    prompt,
+                    model_name=self.model_name,
+                    ip=self.ip,
+                    port=self.port,
+                    temperature=self.temperature,
+                    top_p=self.top_p,
+                    max_completion_tokens=self.max_completion_tokens,
+                )
+            except Exception as e:
+                exception[0] = e
+
+        # Start inference in a thread
+        inference_thread = threading.Thread(target=run_inference, daemon=True)
+        inference_thread.start()
+
+        # Send progress updates while waiting for inference to complete
+        progress_values = [56, 58, 60, 62, 64, 66, 68, 70, 72]
+        messages = [
+            "Running model inference (step 1/9)...",
+            "Running model inference (step 2/9)...",
+            "Running model inference (step 3/9)...",
+            "Running model inference (step 4/9)...",
+            "Running model inference (step 5/9)...",
+            "Running model inference (step 6/9)...",
+            "Running model inference (step 7/9)...",
+            "Running model inference (step 8/9)...",
+            "Running model inference (step 9/9)...",
+        ]
+
+        for progress, message in zip(progress_values, messages):
+            inference_thread.join(timeout=2)  # Wait 2 seconds
+            if not inference_thread.is_alive():
+                break
+            if self.progress_callback:
+                self.progress_callback(progress=progress, message=message)
+
+        # Wait for inference to complete
+        inference_thread.join()
+
+        if exception[0]:
+            raise exception[0]
+
+        return response[0]
 
     def get_prompt(self, prompt_mode, bbox=None, origin_image=None, image=None, min_pixels=None, max_pixels=None):
         prompt = dict_promptmode_to_prompt[prompt_mode]
@@ -83,13 +125,13 @@ class DotsOCRParser:
 
     # def post_process_results(self, response, prompt_mode, save_dir, save_name, origin_image, image, min_pixels, max_pixels)
     def _parse_single_image(
-        self, 
-        origin_image, 
-        prompt_mode, 
-        save_dir, 
-        save_name, 
-        source="image", 
-        page_idx=0, 
+        self,
+        origin_image,
+        prompt_mode,
+        save_dir,
+        save_name,
+        source="image",
+        page_idx=0,
         bbox=None,
         fitz_preprocess=False,
         ):
@@ -107,7 +149,16 @@ class DotsOCRParser:
             image = fetch_image(origin_image, min_pixels=min_pixels, max_pixels=max_pixels)
         input_height, input_width = smart_resize(image.height, image.width)
         prompt = self.get_prompt(prompt_mode, bbox, origin_image, image, min_pixels=min_pixels, max_pixels=max_pixels)
+
+        # Report progress: preparing for inference
+        if self.progress_callback:
+            self.progress_callback(progress=55, message="Preparing for model inference...")
+
         response = self._inference_with_vllm(image, prompt)
+
+        # Report progress: inference completed
+        if self.progress_callback:
+            self.progress_callback(progress=75, message="Model inference completed, post-processing...")
         result = {'page_no': page_idx,
             "input_height": input_height,
             "input_width": input_width
@@ -115,14 +166,22 @@ class DotsOCRParser:
         if source == 'pdf':
             save_name = f"{save_name}_page_{page_idx}"
         if prompt_mode in ['prompt_layout_all_en', 'prompt_layout_only_en', 'prompt_grounding_ocr']:
+            # Report progress: post-processing output
+            if self.progress_callback:
+                self.progress_callback(progress=78, message="Processing model output...")
+
             cells, filtered = post_process_output(
-                response, 
-                prompt_mode, 
-                origin_image, 
+                response,
+                prompt_mode,
+                origin_image,
                 image,
-                min_pixels=min_pixels, 
+                min_pixels=min_pixels,
                 max_pixels=max_pixels,
                 )
+
+            # Report progress: output processed
+            if self.progress_callback:
+                self.progress_callback(progress=82, message="Generating markdown...")
             if filtered and prompt_mode != 'prompt_layout_only_en':  # model output json failed, use filtered process
                 json_file_path = os.path.join(save_dir, f"{save_name}.json")
                 with open(json_file_path, 'w') as w:
@@ -198,12 +257,20 @@ class DotsOCRParser:
 
         origin_image = fetch_image(input_path)
 
+        # Report progress: image loaded, preparing
+        if self.progress_callback:
+            self.progress_callback(progress=20, message="Image loaded, preparing for processing...")
+
         # Report progress: processing image
         if self.progress_callback:
-            self.progress_callback(progress=50, message="Processing image...")
+            self.progress_callback(progress=30, message="Preprocessing image...")
 
         result = self._parse_single_image(origin_image, prompt_mode, save_dir, filename, source="image", bbox=bbox, fitz_preprocess=fitz_preprocess)
         result['file_path'] = input_path
+
+        # Report progress: post-processing
+        if self.progress_callback:
+            self.progress_callback(progress=85, message="Post-processing results...")
 
         # Report progress: finalizing
         if self.progress_callback:
