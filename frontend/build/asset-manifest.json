@@ -1,6 +1,6 @@
 {
   "files": {
-    "main.css": "/docs/static/css/main.a1e54134.css",
+    "main.css": "/docs/static/css/main.f7478a57.css",
     "main.js": "/docs/static/js/main.5c562cd9.js",
     "static/js/38.71e1e41a.chunk.js": "/docs/static/js/38.71e1e41a.chunk.js",
     "static/media/primeicons.svg": "/docs/static/media/primeicons.8314df98e531d33edc78.svg",
@@ -69,12 +69,12 @@
     "static/media/KaTeX_Size3-Regular.woff": "/docs/static/media/KaTeX_Size3-Regular.7947224e8a9914fa332b.woff",
     "static/media/KaTeX_Size3-Regular.woff2": "/docs/static/media/KaTeX_Size3-Regular.e1951519f6f0596f7356.woff2",
     "index.html": "/docs/index.html",
-    "main.a1e54134.css.map": "/docs/static/css/main.a1e54134.css.map",
+    "main.f7478a57.css.map": "/docs/static/css/main.f7478a57.css.map",
     "main.5c562cd9.js.map": "/docs/static/js/main.5c562cd9.js.map",
     "38.71e1e41a.chunk.js.map": "/docs/static/js/38.71e1e41a.chunk.js.map"
   },
   "entrypoints": [
-    "static/css/main.a1e54134.css",
+    "static/css/main.f7478a57.css",
     "static/js/main.5c562cd9.js"
   ]
 }

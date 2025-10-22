@@ -291,3 +291,23 @@ button.p-paginator-page.p-highlight {
 .p-dropdown {
   min-width: 80px;
 }
+
+/* Markdown Viewer Header Buttons */
+.markdown-viewer-header .header-actions .p-button {
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0 !important;
+  border-radius: 50%;
+
+  &:hover {
+    background-color: rgba(255, 255, 255, 0.2);
+  }
+
+  &.p-button-icon-only .p-button-label {
+    display: none;
+  }
+}
