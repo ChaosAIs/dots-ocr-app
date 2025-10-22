@@ -45,19 +45,19 @@
       justify-content: center;
       width: 36px;
       height: 36px;
-      padding: 0;
+      padding: 0 !important;
       border-radius: 50%;
 
       &:hover {
         background-color: rgba(255, 255, 255, 0.2);
       }
+    }
 
-      .p-button-icon {
-        font-size: 16px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        line-height: 1;
+    :deep(.p-button.p-button-icon-only) {
+      padding: 0 !important;
+
+      .p-button-label {
+        display: none;
       }
     }
   }
@@ -77,11 +77,13 @@
 }
 
 .markdown-toc-sidebar {
-  :deep(.p-sidebar-content) {
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-  }
+  width: 250px;
+  background-color: #f8f9fa;
+  border-right: 1px solid #ddd;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  
 
   .toc-header {
     padding: 16px;
@@ -457,24 +459,23 @@
   }
 }
 
+// Scrollbar styling for TOC sidebar
 .markdown-toc-sidebar {
-  :deep(.p-sidebar-content) {
-    .toc-content {
-      &::-webkit-scrollbar {
-        width: 6px;
-      }
+  .toc-content {
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
 
-      &::-webkit-scrollbar-track {
-        background: transparent;
-      }
+    &::-webkit-scrollbar-track {
+      background: transparent;
+    }
 
-      &::-webkit-scrollbar-thumb {
-        background: #ccc;
-        border-radius: 3px;
+    &::-webkit-scrollbar-thumb {
+      background: #ccc;
+      border-radius: 3px;
 
-        &:hover {
-          background: #999;
-        }
+      &:hover {
+        background: #999;
       }
     }
   }

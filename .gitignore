@@ -1,9 +1,9 @@
 backend/ocr_service/utils/__pycache__
 backend/ocr_service/__pycache__
 backend/ocr_service/model/__pycache__
-frontend/node_modules
-backend/output
-backend/input
-frontend/build
-backend/__pycache__
+frontend/node_modules/
+backend/output/
+backend/input/
+frontend/build/
+backend/__pycache__/
 .code_assistant/

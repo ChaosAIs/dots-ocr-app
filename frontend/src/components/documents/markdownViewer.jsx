@@ -3,7 +3,6 @@ import { Dialog } from "primereact/dialog";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { InputText } from "primereact/inputtext";
-import { Sidebar } from "primereact/sidebar";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
 import remarkMath from "remark-math";
@@ -21,7 +20,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
-  const [showTOC, setShowTOC] = useState(true);
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [images, setImages] = useState([]);
@@ -117,13 +115,13 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   }, [content, searchTerm]);
 
   const handleDownload = () => {
-    const element = document.createElement("a");
+    const element = window.document.createElement("a");
     const file = new Blob([content], { type: "text/markdown" });
     element.href = URL.createObjectURL(file);
     element.download = `${document.filename.split(".")[0]}.md`;
-    document.body.appendChild(element);
+    window.document.body.appendChild(element);
     element.click();
-    document.body.removeChild(element);
+    window.document.body.removeChild(element);
   };
 
   const handleCopyCode = (code) => {
@@ -229,13 +227,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
       <span>{document?.filename}</span>
       <div className="header-actions">
         <Button
-          icon={showTOC ? "pi pi-times" : "pi pi-bars"}
-          className="p-button-rounded p-button-text"
-          onClick={() => setShowTOC(!showTOC)}
-          tooltip={showTOC ? "Hide TOC" : "Show TOC"}
-          tooltipPosition="left"
-        />
-        <Button
           icon="pi pi-download"
           className="p-button-rounded p-button-text"
           onClick={handleDownload}
@@ -258,29 +249,25 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         className="markdown-viewer-dialog"
       >
         <div className="markdown-viewer-wrapper">
-          {/* Table of Contents Sidebar */}
-          <Sidebar
-            visible={showTOC && tableOfContents.length > 0}
-            onHide={() => setShowTOC(false)}
-            position="left"
-            className="markdown-toc-sidebar"
-            style={{ width: "250px" }}
-          >
-            <div className="toc-header">
-              <h3>Table of Contents</h3>
+          {/* Table of Contents Sidebar - Always visible on the left */}
+          {tableOfContents.length > 0 && (
+            <div className="markdown-toc-sidebar">
+              <div className="toc-header">
+                <h3>Table of Contents</h3>
+              </div>
+              <div className="toc-content">
+                {tableOfContents.map((heading, index) => (
+                  <div
+                    key={index}
+                    className={`toc-item toc-level-${heading.level}`}
+                    onClick={() => scrollToHeading(heading.id)}
+                  >
+                    {heading.title}
+                  </div>
+                ))}
+              </div>
             </div>
-            <div className="toc-content">
-              {tableOfContents.map((heading, index) => (
-                <div
-                  key={index}
-                  className={`toc-item toc-level-${heading.level}`}
-                  onClick={() => scrollToHeading(heading.id)}
-                >
-                  {heading.title}
-                </div>
-              ))}
-            </div>
-          </Sidebar>
+          )}
 
           {/* Main Content */}
           <div className="markdown-viewer-content">
