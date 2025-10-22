@@ -32,6 +32,7 @@ class DotsOCRParser:
             output_dir=None,
             min_pixels=None,
             max_pixels=None,
+            progress_callback=None,
         ):
         # Load environment variables from .env file
         load_dotenv()
@@ -46,6 +47,7 @@ class DotsOCRParser:
         self.num_thread = num_thread or int(os.getenv('NUM_THREAD', 64))
         self.dpi = dpi or int(os.getenv('DPI', 200))
         self.output_dir = output_dir or os.getenv('OUTPUT_DIR', './output')
+        self.progress_callback = progress_callback
 
         # Handle None values for min_pixels and max_pixels
         min_pixels_env = os.getenv('MIN_PIXELS', 'None')
@@ -190,15 +192,34 @@ class DotsOCRParser:
         return result
     
     def parse_image(self, input_path, filename, prompt_mode, save_dir, bbox=None, fitz_preprocess=False):
+        # Report progress: loading image
+        if self.progress_callback:
+            self.progress_callback(progress=10, message="Loading image...")
+
         origin_image = fetch_image(input_path)
+
+        # Report progress: processing image
+        if self.progress_callback:
+            self.progress_callback(progress=50, message="Processing image...")
+
         result = self._parse_single_image(origin_image, prompt_mode, save_dir, filename, source="image", bbox=bbox, fitz_preprocess=fitz_preprocess)
         result['file_path'] = input_path
+
+        # Report progress: finalizing
+        if self.progress_callback:
+            self.progress_callback(progress=95, message="Finalizing conversion...")
+
         return [result]
         
     def parse_pdf(self, input_path, filename, prompt_mode, save_dir):
         print(f"loading pdf: {input_path}")
         images_origin = load_images_from_pdf(input_path)
         total_pages = len(images_origin)
+
+        # Report progress: PDF loaded
+        if self.progress_callback:
+            self.progress_callback(progress=10, message=f"PDF loaded with {total_pages} pages")
+
         tasks = [
             {
                 "origin_image": image,
@@ -223,17 +244,32 @@ class DotsOCRParser:
                     results.append(result)
                     pbar.update(1)
 
+                    # Report progress: pages processed
+                    pages_processed = len(results)
+                    progress = 10 + int((pages_processed / total_pages) * 80)  # 10-90% for processing
+                    if self.progress_callback:
+                        self.progress_callback(
+                            progress=progress,
+                            message=f"Processing pages: {pages_processed}/{total_pages}"
+                        )
+
         results.sort(key=lambda x: x["page_no"])
         for i in range(len(results)):
             results[i]['file_path'] = input_path
+
+        # Report progress: finalizing
+        if self.progress_callback:
+            self.progress_callback(progress=95, message="Finalizing conversion...")
+
         return results
 
-    def parse_file(self, 
-        input_path, 
-        output_dir="", 
+    def parse_file(self,
+        input_path,
+        output_dir="",
         prompt_mode="prompt_layout_all_en",
         bbox=None,
-        fitz_preprocess=False
+        fitz_preprocess=False,
+        progress_callback=None
         ):
         output_dir = output_dir or self.output_dir
         output_dir = os.path.abspath(output_dir)
@@ -241,13 +277,17 @@ class DotsOCRParser:
         save_dir = os.path.join(output_dir, filename)
         os.makedirs(save_dir, exist_ok=True)
 
+        # Set progress callback if provided
+        if progress_callback is not None:
+            self.progress_callback = progress_callback
+
         if file_ext == '.pdf':
             results = self.parse_pdf(input_path, filename, prompt_mode, save_dir)
         elif file_ext in image_extensions:
             results = self.parse_image(input_path, filename, prompt_mode, save_dir, bbox=bbox, fitz_preprocess=fitz_preprocess)
         else:
             raise ValueError(f"file extension {file_ext} not supported, supported extensions are {image_extensions} and pdf")
-        
+
         print(f"Parsing finished, results saving to {save_dir}")
         with open(os.path.join(output_dir, os.path.basename(filename)+'.jsonl'), 'w') as w:
             for result in results:

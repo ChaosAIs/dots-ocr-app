@@ -138,6 +138,28 @@ conversion_manager = ConversionManager()
 connection_manager = ConnectionManager()
 
 
+def _create_parser_progress_callback(conversion_id: str):
+    """Create a progress callback for the parser"""
+    def progress_callback(progress: int, message: str = ""):
+        """Callback for parser progress updates"""
+        try:
+            conversion_manager.update_conversion(
+                conversion_id,
+                progress=progress,
+                message=message,
+            )
+            asyncio.run(connection_manager.broadcast(conversion_id, {
+                "status": "processing",
+                "progress": progress,
+                "message": message,
+            }))
+            logger.info(f"Conversion {conversion_id}: {progress}% - {message}")
+        except Exception as e:
+            logger.error(f"Error in parser progress callback: {str(e)}")
+
+    return progress_callback
+
+
 def _worker_progress_callback(conversion_id: str, status: str, result=None, error=None):
     """Callback for worker pool progress updates"""
     try:
@@ -329,17 +351,18 @@ async def list_documents():
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 
-def _convert_document_background(filename: str, prompt_mode: str):
+def _convert_document_background(filename: str, prompt_mode: str, conversion_id: str = None, progress_callback=None):
     """Background task to convert document - executed by worker pool"""
     file_path = os.path.join(INPUT_DIR, filename)
 
     logger.info(f"Starting conversion for {filename}")
 
-    # Parse the file using the OCR parser
+    # Parse the file using the OCR parser with progress callback
     results = parser.parse_file(
         file_path,
         output_dir=OUTPUT_DIR,
         prompt_mode=prompt_mode,
+        progress_callback=progress_callback,
     )
 
     logger.info(f"Conversion completed successfully for {filename}")
@@ -393,11 +416,18 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
             "message": "Conversion queued, waiting for worker...",
         })
 
+        # Create progress callback for this conversion
+        progress_callback = _create_parser_progress_callback(conversion_id)
+
         # Submit task to worker pool
         success = worker_pool.submit_task(
             conversion_id=conversion_id,
             func=_convert_document_background,
             args=(filename, prompt_mode),
+            kwargs={
+                "conversion_id": conversion_id,
+                "progress_callback": progress_callback,
+            }
         )
 
         if not success:

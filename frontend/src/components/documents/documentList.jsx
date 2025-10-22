@@ -15,7 +15,6 @@ export const DocumentList = ({ refreshTrigger }) => {
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [showMarkdownViewer, setShowMarkdownViewer] = useState(false);
   const [converting, setConverting] = useState(null);
-  const [conversionProgress, setConversionProgress] = useState({}); // conversion_id -> progress
   const [webSockets, setWebSockets] = useState({}); // conversion_id -> websocket
 
   // Load documents on component mount and when refreshTrigger changes
@@ -64,6 +63,15 @@ export const DocumentList = ({ refreshTrigger }) => {
       setConverting(document.filename);
       messageService.infoToast("Starting conversion...");
 
+      // Update document with conversion status
+      setDocuments((prev) =>
+        prev.map((doc) =>
+          doc.filename === document.filename
+            ? { ...doc, conversionProgress: 0, conversionStatus: "converting" }
+            : doc
+        )
+      );
+
       // Start conversion (returns immediately with conversion_id)
       const response = await documentService.convertDocument(
         document.filename,
@@ -73,25 +81,29 @@ export const DocumentList = ({ refreshTrigger }) => {
       if (response.status === "accepted" && response.conversion_id) {
         const conversionId = response.conversion_id;
 
-        // Initialize progress
-        setConversionProgress((prev) => ({
-          ...prev,
-          [conversionId]: 0,
-        }));
-
         // Connect to WebSocket for progress updates
         const ws = documentService.connectToConversionProgress(
           conversionId,
           (progressData) => {
-            // Update progress
-            setConversionProgress((prev) => ({
-              ...prev,
-              [conversionId]: progressData.progress || 0,
-            }));
+            // Update document with progress
+            setDocuments((prev) =>
+              prev.map((doc) =>
+                doc.filename === document.filename
+                  ? { ...doc, conversionProgress: progressData.progress || 0 }
+                  : doc
+              )
+            );
 
             // Handle completion
             if (progressData.status === "completed") {
               messageService.successToast("Document converted successfully");
+              setDocuments((prev) =>
+                prev.map((doc) =>
+                  doc.filename === document.filename
+                    ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
+                    : doc
+                )
+              );
               setConverting(null);
               // Reload documents to update status
               setTimeout(() => loadDocuments(), 1000);
@@ -102,12 +114,26 @@ export const DocumentList = ({ refreshTrigger }) => {
               messageService.errorToast(
                 progressData.message || "Conversion failed"
               );
+              setDocuments((prev) =>
+                prev.map((doc) =>
+                  doc.filename === document.filename
+                    ? { ...doc, conversionStatus: "error" }
+                    : doc
+                )
+              );
               setConverting(null);
             }
           },
           (error) => {
             console.error("WebSocket error:", error);
             messageService.errorToast("Connection error during conversion");
+            setDocuments((prev) =>
+              prev.map((doc) =>
+                doc.filename === document.filename
+                  ? { ...doc, conversionStatus: "error" }
+                  : doc
+              )
+            );
             setConverting(null);
           }
         );
@@ -121,6 +147,13 @@ export const DocumentList = ({ refreshTrigger }) => {
     } catch (error) {
       messageService.errorToast("Failed to start conversion");
       console.error("Error starting conversion:", error);
+      setDocuments((prev) =>
+        prev.map((doc) =>
+          doc.filename === document.filename
+            ? { ...doc, conversionStatus: "error" }
+            : doc
+        )
+      );
       setConverting(null);
     }
   };
@@ -168,19 +201,24 @@ export const DocumentList = ({ refreshTrigger }) => {
   };
 
   const progressBodyTemplate = (rowData) => {
-    // Check if this document is currently converting
-    const isConverting = converting === rowData.filename;
+    // Get the conversion status from rowData (same as Status column uses rowData.markdown_exists)
+    const status = rowData.conversionStatus;
 
-    if (!isConverting) {
+    // If not converting, return null
+    if (status !== "converting") {
       return null;
     }
 
-    // Find the progress for this document
-    const progress = Object.values(conversionProgress)[0] || 0;
+    // Get the progress from rowData
+    const progress = rowData.conversionProgress || 0;
 
     return (
       <div className="progress-container">
-        <ProgressBar value={progress} showValue={true} />
+        <ProgressBar
+          value={progress}
+          showValue={true}
+          displayValueTemplate={() => `${Math.round(progress)}%`}
+        />
       </div>
     );
   };
