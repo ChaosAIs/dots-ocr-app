@@ -135,15 +135,35 @@ class DocumentService {
   }
 
   /**
-   * Get markdown content of a converted document
+   * Get list of markdown files for a document
    * @param {string} filename - The filename (without extension)
-   * @returns {Promise} - Markdown content
+   * @returns {Promise} - List of markdown files
    */
-  async getMarkdownContent(filename) {
+  async getMarkdownFiles(filename) {
     try {
       const response = await http.get(
-        `${this.apiDomain}/markdown/${filename}`
+        `${this.apiDomain}/markdown-files/${filename}`
       );
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching markdown files:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get markdown content of a converted document
+   * @param {string} filename - The filename (without extension)
+   * @param {number} pageNo - Optional page number for multi-page documents
+   * @returns {Promise} - Markdown content
+   */
+  async getMarkdownContent(filename, pageNo = null) {
+    try {
+      let url = `${this.apiDomain}/markdown/${filename}`;
+      if (pageNo !== null) {
+        url += `?page_no=${pageNo}`;
+      }
+      const response = await http.get(url);
       return response.data;
     } catch (error) {
       console.error("Error fetching markdown content:", error);

@@ -33,13 +33,31 @@
 
   .header-actions {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 4px;
+    flex-shrink: 0;
 
     :deep(.p-button) {
       color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border-radius: 50%;
 
       &:hover {
         background-color: rgba(255, 255, 255, 0.2);
+      }
+
+      .p-button-icon {
+        font-size: 16px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        line-height: 1;
       }
     }
   }
@@ -370,6 +388,36 @@
       margin: 24px 0;
       background-color: #e1e4e8;
       border: 0;
+    }
+
+    .page-footer {
+      margin-top: 40px;
+      padding-top: 16px;
+      border-top: 1px solid #e1e4e8;
+      text-align: right;
+      font-size: 12px;
+      color: #999;
+      font-weight: 500;
+    }
+
+    // KaTeX math formula styling
+    .katex-display {
+      margin: 16px 0;
+      overflow-x: auto;
+      overflow-y: hidden;
+
+      .katex {
+        font-size: 1.1em;
+      }
+    }
+
+    .katex {
+      font-size: 1em;
+    }
+
+    // Inline math
+    .katex-inline {
+      margin: 0 2px;
     }
   }
 }

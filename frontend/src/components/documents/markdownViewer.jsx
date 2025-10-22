@@ -1,10 +1,14 @@
-import React, { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Dialog } from "primereact/dialog";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { InputText } from "primereact/inputtext";
 import { Sidebar } from "primereact/sidebar";
 import ReactMarkdown from "react-markdown";
+import rehypeRaw from "rehype-raw";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import "katex/dist/katex.min.css";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
 import Lightbox from "yet-another-react-lightbox";
@@ -21,6 +25,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [images, setImages] = useState([]);
+  const contentRef = useRef(null);
 
   useEffect(() => {
     if (visible && document) {
@@ -33,12 +38,13 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const tableOfContents = useMemo(() => {
     const headings = [];
     const lines = content.split("\n");
-    lines.forEach((line, index) => {
+    lines.forEach((line) => {
       const match = line.match(/^(#{1,6})\s+(.+)$/);
       if (match) {
         const level = match[1].length;
         const title = match[2];
-        const id = `heading-${index}`;
+        // Generate ID from title to match the markdown components
+        const id = `heading-${title}`;
         headings.push({ level, title, id });
       }
     });
@@ -60,10 +66,40 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
     try {
       setLoading(true);
       const filename = document.filename.split(".")[0]; // Remove extension
-      const response = await documentService.getMarkdownContent(filename);
-      if (response.status === "success") {
-        setContent(response.content);
-        extractImages(response.content);
+
+      // Load the list of markdown files
+      const filesResponse = await documentService.getMarkdownFiles(filename);
+      if (filesResponse.status === "success") {
+        // Load all markdown files and combine them
+        let combinedContent = "";
+        for (const file of filesResponse.markdown_files) {
+          try {
+            const contentResponse = await documentService.getMarkdownContent(
+              filename,
+              file.page_no
+            );
+            if (contentResponse.status === "success") {
+              // Add page separator for multi-page documents
+              if (filesResponse.markdown_files.length > 1) {
+                combinedContent += `\n\n---\n\n`;
+              }
+              combinedContent += contentResponse.content;
+
+              // Add page footer for multi-page documents
+              if (filesResponse.markdown_files.length > 1) {
+                const pageLabel = file.page_no !== null ? `Page ${file.page_no}` : "Combined";
+                combinedContent += `\n\n<div class="page-footer">${pageLabel}</div>`;
+              }
+            }
+          } catch (error) {
+            console.error(`Error loading page ${file.page_no}:`, error);
+          }
+        }
+
+        if (combinedContent) {
+          setContent(combinedContent);
+          extractImages(combinedContent);
+        }
       }
     } catch (error) {
       messageService.errorToast("Failed to load markdown content");
@@ -101,11 +137,16 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   };
 
   const scrollToHeading = (id) => {
-    const element = document.getElementById(id);
-    if (element) {
-      element.scrollIntoView({ behavior: "smooth" });
+    // Search for the element within the content container
+    if (contentRef.current) {
+      const element = contentRef.current.querySelector(`[id="${id}"]`);
+      if (element) {
+        element.scrollIntoView({ behavior: "smooth" });
+      }
     }
   };
+
+
 
   // Custom markdown components
   const markdownComponents = {
@@ -266,8 +307,12 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
                 <ProgressSpinner />
               </div>
             ) : (
-              <div className="markdown-body">
-                <ReactMarkdown components={markdownComponents}>
+              <div className="markdown-body" ref={contentRef}>
+                <ReactMarkdown
+                  components={markdownComponents}
+                  remarkPlugins={[remarkMath]}
+                  rehypePlugins={[rehypeRaw, rehypeKatex]}
+                >
                   {highlightedContent}
                 </ReactMarkdown>
               </div>

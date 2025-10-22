@@ -302,6 +302,36 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
 
 
+def _check_markdown_exists(file_name_without_ext: str) -> tuple:
+    """
+    Check if markdown file exists for a document.
+    Handles both single markdown files and multi-page markdown files.
+
+    Returns:
+    - (markdown_exists: bool, markdown_path: str or None, is_multipage: bool)
+    """
+    # Check for single markdown file (for single-page documents or images)
+    markdown_path = os.path.join(OUTPUT_DIR, file_name_without_ext, f"{file_name_without_ext}_nohf.md")
+    if os.path.exists(markdown_path):
+        return True, markdown_path, False
+
+    # Check for multi-page markdown files (for PDFs with multiple pages)
+    output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
+    if os.path.exists(output_dir):
+        # Look for page-specific markdown files
+        page_files = []
+        for file in os.listdir(output_dir):
+            if file.endswith("_nohf.md") and "_page_" in file:
+                page_files.append(file)
+
+        if page_files:
+            # Sort by page number
+            page_files.sort(key=lambda x: int(x.split("_page_")[1].split("_")[0]))
+            return True, os.path.join(output_dir, page_files[0]), True
+
+    return False, None, False
+
+
 @app.get("/documents")
 async def list_documents():
     """
@@ -327,10 +357,9 @@ async def list_documents():
                 file_stat = os.stat(file_path)
                 upload_time = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
 
-                # Check if markdown file exists
+                # Check if markdown file exists (handles both single and multi-page)
                 file_name_without_ext = os.path.splitext(filename)[0]
-                markdown_path = os.path.join(OUTPUT_DIR, file_name_without_ext, f"{file_name_without_ext}_nohf.md")
-                markdown_exists = os.path.exists(markdown_path)
+                markdown_exists, markdown_path, is_multipage = _check_markdown_exists(file_name_without_ext)
 
                 documents.append({
                     "filename": filename,
@@ -339,6 +368,7 @@ async def list_documents():
                     "upload_time": upload_time,
                     "markdown_exists": markdown_exists,
                     "markdown_path": markdown_path if markdown_exists else None,
+                    "is_multipage": is_multipage,
                 })
 
         return JSONResponse(content={
@@ -526,13 +556,84 @@ async def websocket_conversion_progress(websocket: WebSocket, conversion_id: str
         await connection_manager.disconnect(conversion_id, websocket)
 
 
-@app.get("/markdown/{filename}")
-async def get_markdown_content(filename: str):
+@app.get("/markdown-files/{filename}")
+async def list_markdown_files(filename: str):
     """
-    Get the markdown content of a converted document.
+    List all markdown files associated with a document.
+    Handles both single markdown files and multi-page markdown files.
 
     Parameters:
     - filename: The name of the file (without extension)
+
+    Returns:
+    - List of markdown files with their page numbers
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        output_dir = os.path.join(OUTPUT_DIR, filename)
+
+        if not os.path.exists(output_dir):
+            raise HTTPException(status_code=404, detail=f"No output directory for: {filename}")
+
+        markdown_files = []
+
+        # Check for single markdown file
+        single_md_path = os.path.join(output_dir, f"{filename}_nohf.md")
+        if os.path.exists(single_md_path):
+            markdown_files.append({
+                "filename": f"{filename}_nohf.md",
+                "path": single_md_path,
+                "page_no": None,
+                "is_multipage": False,
+            })
+
+        # Check for multi-page markdown files
+        page_files = []
+        for file in os.listdir(output_dir):
+            if file.endswith("_nohf.md") and "_page_" in file:
+                page_no = int(file.split("_page_")[1].split("_")[0])
+                page_files.append({
+                    "filename": file,
+                    "path": os.path.join(output_dir, file),
+                    "page_no": page_no,
+                    "is_multipage": True,
+                })
+
+        # Sort by page number
+        page_files.sort(key=lambda x: x["page_no"])
+        markdown_files.extend(page_files)
+
+        if not markdown_files:
+            raise HTTPException(status_code=404, detail=f"No markdown files found for: {filename}")
+
+        return JSONResponse(content={
+            "status": "success",
+            "filename": filename,
+            "markdown_files": markdown_files,
+            "total": len(markdown_files),
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing markdown files: {str(e)}")
+
+
+@app.get("/markdown/{filename}")
+async def get_markdown_content(filename: str, page_no: int = None):
+    """
+    Get the markdown content of a converted document.
+    Supports both single markdown files and page-specific markdown files.
+
+    Parameters:
+    - filename: The name of the file (without extension)
+    - page_no: Optional page number for multi-page documents
 
     Returns:
     - The markdown file content
@@ -545,8 +646,13 @@ async def get_markdown_content(filename: str):
         if ".." in filename or "/" in filename or "\\" in filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Try to find the markdown file
-        markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
+        # Determine which markdown file to read
+        if page_no is not None:
+            # Read page-specific markdown file
+            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}_nohf.md")
+        else:
+            # Try to find the single markdown file
+            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
 
         if not os.path.exists(markdown_path):
             raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
@@ -558,6 +664,7 @@ async def get_markdown_content(filename: str):
         return JSONResponse(content={
             "status": "success",
             "filename": filename,
+            "page_no": page_no,
             "content": content,
         })
 
