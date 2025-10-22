@@ -61,10 +61,18 @@ class DotsOCRParser:
         assert self.max_pixels is None or self.max_pixels <= MAX_PIXELS
 
 
-    def _inference_with_vllm(self, image, prompt):
-        """Inference with progress updates during the blocking call"""
+    def _inference_with_vllm(self, image, prompt, smooth_progress=True):
+        """Inference with optional smooth progress updates during the blocking call
+
+        Args:
+            image: Image to process
+            prompt: Prompt for inference
+            smooth_progress: If True, send smooth progress updates (for single images).
+                           If False, don't send updates (for PDF pages processed in parallel).
+        """
         response = [None]  # Use list to allow modification in thread
         exception = [None]
+        start_time = [time.time()]
 
         def run_inference():
             try:
@@ -85,26 +93,31 @@ class DotsOCRParser:
         inference_thread = threading.Thread(target=run_inference, daemon=True)
         inference_thread.start()
 
-        # Send progress updates while waiting for inference to complete
-        progress_values = [56, 58, 60, 62, 64, 66, 68, 70, 72]
-        messages = [
-            "Running model inference (step 1/9)...",
-            "Running model inference (step 2/9)...",
-            "Running model inference (step 3/9)...",
-            "Running model inference (step 4/9)...",
-            "Running model inference (step 5/9)...",
-            "Running model inference (step 6/9)...",
-            "Running model inference (step 7/9)...",
-            "Running model inference (step 8/9)...",
-            "Running model inference (step 9/9)...",
-        ]
+        if smooth_progress:
+            # Send smooth progress updates while waiting for inference to complete
+            # Progress from 55% to 75% during inference
+            start_progress = 55
+            end_progress = 75
+            update_interval = 0.2  # Update every 200ms for smooth animation
 
-        for progress, message in zip(progress_values, messages):
-            inference_thread.join(timeout=2)  # Wait 2 seconds
-            if not inference_thread.is_alive():
-                break
-            if self.progress_callback:
-                self.progress_callback(progress=progress, message=message)
+            while inference_thread.is_alive():
+                elapsed = time.time() - start_time[0]
+                # Calculate progress based on elapsed time (smooth curve)
+                progress_ratio = min(elapsed / 30.0, 1.0)  # Assume inference takes ~30 seconds max
+                current_progress = int(start_progress + (end_progress - start_progress) * progress_ratio)
+
+                if self.progress_callback:
+                    self.progress_callback(
+                        progress=current_progress,
+                        message=f"Running model inference... ({current_progress}%)"
+                    )
+
+                # Wait a bit before next update
+                inference_thread.join(timeout=update_interval)
+        else:
+            # For PDF pages, just wait without sending progress updates
+            # Page-level progress will be handled by parse_pdf()
+            inference_thread.join()
 
         # Wait for inference to complete
         inference_thread.join()
@@ -150,15 +163,9 @@ class DotsOCRParser:
         input_height, input_width = smart_resize(image.height, image.width)
         prompt = self.get_prompt(prompt_mode, bbox, origin_image, image, min_pixels=min_pixels, max_pixels=max_pixels)
 
-        # Report progress: preparing for inference
-        if self.progress_callback:
-            self.progress_callback(progress=55, message="Preparing for model inference...")
-
-        response = self._inference_with_vllm(image, prompt)
-
-        # Report progress: inference completed
-        if self.progress_callback:
-            self.progress_callback(progress=75, message="Model inference completed, post-processing...")
+        # Run inference (progress updates are handled inside _inference_with_vllm)
+        # For PDF pages, use smooth_progress=False to avoid blocking page-level progress updates
+        response = self._inference_with_vllm(image, prompt, smooth_progress=(source == "image"))
         result = {'page_no': page_idx,
             "input_height": input_height,
             "input_width": input_width
@@ -166,10 +173,6 @@ class DotsOCRParser:
         if source == 'pdf':
             save_name = f"{save_name}_page_{page_idx}"
         if prompt_mode in ['prompt_layout_all_en', 'prompt_layout_only_en', 'prompt_grounding_ocr']:
-            # Report progress: post-processing output
-            if self.progress_callback:
-                self.progress_callback(progress=78, message="Processing model output...")
-
             cells, filtered = post_process_output(
                 response,
                 prompt_mode,
@@ -178,10 +181,6 @@ class DotsOCRParser:
                 min_pixels=min_pixels,
                 max_pixels=max_pixels,
                 )
-
-            # Report progress: output processed
-            if self.progress_callback:
-                self.progress_callback(progress=82, message="Generating markdown...")
             if filtered and prompt_mode != 'prompt_layout_only_en':  # model output json failed, use filtered process
                 json_file_path = os.path.join(save_dir, f"{save_name}.json")
                 with open(json_file_path, 'w') as w:
@@ -253,24 +252,24 @@ class DotsOCRParser:
     def parse_image(self, input_path, filename, prompt_mode, save_dir, bbox=None, fitz_preprocess=False):
         # Report progress: loading image
         if self.progress_callback:
-            self.progress_callback(progress=10, message="Loading image...")
+            self.progress_callback(progress=5, message="Loading image...")
 
         origin_image = fetch_image(input_path)
 
         # Report progress: image loaded, preparing
         if self.progress_callback:
-            self.progress_callback(progress=20, message="Image loaded, preparing for processing...")
+            self.progress_callback(progress=15, message="Image loaded, preparing for processing...")
 
         # Report progress: processing image
         if self.progress_callback:
-            self.progress_callback(progress=30, message="Preprocessing image...")
+            self.progress_callback(progress=25, message="Preprocessing image...")
 
         result = self._parse_single_image(origin_image, prompt_mode, save_dir, filename, source="image", bbox=bbox, fitz_preprocess=fitz_preprocess)
         result['file_path'] = input_path
 
         # Report progress: post-processing
         if self.progress_callback:
-            self.progress_callback(progress=85, message="Post-processing results...")
+            self.progress_callback(progress=80, message="Post-processing results...")
 
         # Report progress: finalizing
         if self.progress_callback:
