@@ -4,7 +4,6 @@ import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { InputText } from "primereact/inputtext";
 import ReactMarkdown from "react-markdown";
-import rehypeRaw from "rehype-raw";
 import remarkMath from "remark-math";
 import rehypeKatex from "rehype-katex";
 import "katex/dist/katex.min.css";
@@ -41,7 +40,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
       if (match) {
         const level = match[1].length;
         const title = match[2];
-        // Generate ID from title to match the markdown components
         const id = `heading-${title}`;
         headings.push({ level, title, id });
       }
@@ -51,11 +49,17 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
 
   // Extract images from markdown
   const extractImages = (markdown) => {
-    const imageRegex = /!\[.*?\]\((.*?)\)/g;
+    const imageRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
     const imgs = [];
     let match;
+
     while ((match = imageRegex.exec(markdown)) !== null) {
-      imgs.push({ src: match[1], alt: match[0] });
+      const alt = match[1];
+      const src = match[2];
+      // Only add non-base64 images to lightbox (base64 images are too large)
+      if (!src.startsWith('data:')) {
+        imgs.push({ src, alt });
+      }
     }
     setImages(imgs);
   };
@@ -63,12 +67,10 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const loadMarkdownContent = async () => {
     try {
       setLoading(true);
-      const filename = document.filename.split(".")[0]; // Remove extension
+      const filename = document.filename.split(".")[0];
 
-      // Load the list of markdown files
       const filesResponse = await documentService.getMarkdownFiles(filename);
       if (filesResponse.status === "success") {
-        // Load all markdown files and combine them
         let combinedContent = "";
         for (const file of filesResponse.markdown_files) {
           try {
@@ -77,16 +79,18 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               file.page_no
             );
             if (contentResponse.status === "success") {
-              // Add page separator for multi-page documents
+              // Debug logging to see what content we're actually receiving
+              console.log(`Page ${file.page_no} content preview:`, contentResponse.content.substring(0, 200));
+              console.log(`Page ${file.page_no} has base64 images:`, contentResponse.content.includes('data:image/'));
+
               if (filesResponse.markdown_files.length > 1) {
                 combinedContent += `\n\n---\n\n`;
               }
               combinedContent += contentResponse.content;
 
-              // Add page footer for multi-page documents
               if (filesResponse.markdown_files.length > 1) {
                 const pageLabel = file.page_no !== null ? `Page ${file.page_no}` : "Combined";
-                combinedContent += `\n\n<div class="page-footer">${pageLabel}</div>`;
+                combinedContent += `\n\n---\n\n*${pageLabel}*`;
               }
             }
           } catch (error) {
@@ -95,6 +99,11 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         }
 
         if (combinedContent) {
+          // Debug logging for final combined content
+          console.log('Final combined content preview:', combinedContent.substring(0, 500));
+          console.log('Final content has base64 images:', combinedContent.includes('data:image/'));
+          console.log('Final content has relative image paths:', /!\[.*?\]\([^)]*(?<!data:image\/[^)]*)\)/g.test(combinedContent));
+
           setContent(combinedContent);
           extractImages(combinedContent);
         }
@@ -107,12 +116,9 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
     }
   };
 
-  // Highlight search term in content
   const highlightedContent = useMemo(() => {
-    if (!searchTerm) return content;
-    const regex = new RegExp(`(${searchTerm})`, "gi");
-    return content.replace(regex, `<mark>$1</mark>`);
-  }, [content, searchTerm]);
+    return content;
+  }, [content]);
 
   const handleDownload = () => {
     const element = window.document.createElement("a");
@@ -135,7 +141,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   };
 
   const scrollToHeading = (id) => {
-    // Search for the element within the content container
     if (contentRef.current) {
       const element = contentRef.current.querySelector(`[id="${id}"]`);
       if (element) {
@@ -144,15 +149,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
     }
   };
 
-
-
-  // Custom markdown components
   const markdownComponents = {
-    code({ node, inline, className, children, ...props }) {
-      const match = /language-(\w+)/.exec(className || "");
-      const language = match ? match[1] : "text";
-      const code = String(children).replace(/\n$/, "");
-
+    code({ inline, children, ...props }) {
       if (inline) {
         return (
           <code className="inline-code" {...props}>
@@ -160,6 +158,15 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           </code>
         );
       }
+      return null;
+    },
+    pre({ children, ...props }) {
+      const codeElement = children?.[0];
+      const codeContent = codeElement?.props?.children || "";
+      const className = codeElement?.props?.className || "";
+      const match = /language-(\w+)/.exec(className);
+      const language = match ? match[1] : "text";
+      const code = String(codeContent).replace(/\n$/, "");
 
       return (
         <div className="code-block-wrapper">
@@ -170,7 +177,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               className="p-button-rounded p-button-text p-button-sm"
               onClick={() => handleCopyCode(code)}
               tooltip="Copy code"
-              tooltipPosition="left"
             />
           </div>
           <SyntaxHighlighter
@@ -185,13 +191,38 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
       );
     },
     img({ src, alt, ...props }) {
+      if (!src) {
+        console.warn('Image component received empty src');
+        return null;
+      }
+
       const imageIndex = images.findIndex((img) => img.src === src);
+      const isBase64 = src.startsWith('data:');
+
+      // Debug logging for image rendering
+      console.log('Rendering image:', {
+        isBase64,
+        srcPreview: src.substring(0, 100),
+        alt,
+        imageIndex
+      });
+
       return (
         <img
           src={src}
           alt={alt}
           className="markdown-image"
-          onClick={() => handleImageClick(imageIndex)}
+          onClick={() => !isBase64 && imageIndex >= 0 && handleImageClick(imageIndex)}
+          style={{ cursor: isBase64 ? 'default' : 'pointer', maxWidth: '100%' }}
+          onError={(e) => {
+            console.error('Image failed to load:', {
+              src: src.substring(0, 100),
+              error: e
+            });
+          }}
+          onLoad={() => {
+            console.log('Image loaded successfully:', src.substring(0, 50));
+          }}
           {...props}
         />
       );
@@ -249,7 +280,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         className="markdown-viewer-dialog"
       >
         <div className="markdown-viewer-wrapper">
-          {/* Table of Contents Sidebar - Always visible on the left */}
           {tableOfContents.length > 0 && (
             <div className="markdown-toc-sidebar">
               <div className="toc-header">
@@ -269,9 +299,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
             </div>
           )}
 
-          {/* Main Content */}
           <div className="markdown-viewer-content">
-            {/* Search Bar */}
             <div className="search-bar">
               <InputText
                 placeholder="Search in document..."
@@ -288,7 +316,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               )}
             </div>
 
-            {/* Content */}
             {loading ? (
               <div className="markdown-loading">
                 <ProgressSpinner />
@@ -298,7 +325,12 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
                 <ReactMarkdown
                   components={markdownComponents}
                   remarkPlugins={[remarkMath]}
-                  rehypePlugins={[rehypeRaw, rehypeKatex]}
+                  rehypePlugins={[rehypeKatex]}
+                  urlTransform={(url) => {
+                    // Preserve all URLs including base64 data URLs
+                    console.log('URL transform:', url?.substring(0, 100));
+                    return url;
+                  }}
                 >
                   {highlightedContent}
                 </ReactMarkdown>
@@ -308,7 +340,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         </div>
       </Dialog>
 
-      {/* Image Lightbox */}
       <Lightbox
         open={lightboxOpen}
         close={() => setLightboxOpen(false)}
@@ -320,4 +351,3 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
 };
 
 export default MarkdownViewer;
-
