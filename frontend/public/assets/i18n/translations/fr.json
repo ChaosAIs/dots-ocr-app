@@ -62,7 +62,8 @@
     "FailedToLoad": "Échec du chargement du contenu markdown",
     "Page": "Page",
     "Combined": "Combiné",
-    "DocumentImages": "Images du document"
+    "DocumentImages": "Images du document",
+    "ImagePreview": "Aperçu de l'image"
   },
   "Pages": {
     "NotFound": "La page spécifiée n'existe pas.",

@@ -62,7 +62,8 @@
         "FailedToLoad": "Failed to load markdown content",
         "Page": "Page",
         "Combined": "Combined",
-        "DocumentImages": "Document Images"
+        "DocumentImages": "Document Images",
+        "ImagePreview": "Image Preview"
     },
     "Pages": {
         "NotFound": "The specified page is not existing.",

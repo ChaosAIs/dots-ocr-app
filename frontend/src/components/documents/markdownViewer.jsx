@@ -27,6 +27,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [images, setImages] = useState([]);
   const [pageImages, setPageImages] = useState([]); // Array of {pageNo, imageUrl}
+  const [pageImageModalOpen, setPageImageModalOpen] = useState(false);
+  const [selectedPageImage, setSelectedPageImage] = useState(null);
   const contentRef = useRef(null);
   const imagePanelRef = useRef(null);
 
@@ -164,6 +166,16 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const handleImageClick = (index) => {
     setLightboxIndex(index);
     setLightboxOpen(true);
+  };
+
+  const handlePageImageClick = (pageImage) => {
+    setSelectedPageImage(pageImage);
+    setPageImageModalOpen(true);
+  };
+
+  const handlePageImageModalClose = () => {
+    setPageImageModalOpen(false);
+    setSelectedPageImage(null);
   };
 
   const scrollToHeading = (id, pageNo) => {
@@ -361,7 +373,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
                     <img
                       src={pageImage.imageUrl}
                       alt={`Page ${pageImage.pageNo}`}
-                      className="page-image"
+                      className="page-image clickable"
+                      onClick={() => handlePageImageClick(pageImage)}
                       onError={(e) => {
                         console.error(`Failed to load image for page ${pageImage.pageNo}`);
                         e.target.style.display = 'none';
@@ -421,6 +434,34 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         slides={images.map((img) => ({ src: img.src }))}
         index={lightboxIndex}
       />
+
+      {/* Page Image Preview Modal */}
+      <Dialog
+        header={
+          selectedPageImage
+            ? `${t("MarkdownViewer.Page")} ${selectedPageImage.pageNo}`
+            : t("MarkdownViewer.ImagePreview")
+        }
+        visible={pageImageModalOpen}
+        onHide={handlePageImageModalClose}
+        modal
+        maximizable
+        style={{ width: "90vw" }}
+        className="page-image-preview-dialog"
+      >
+        {selectedPageImage && (
+          <div className="page-image-preview-container">
+            <img
+              src={selectedPageImage.imageUrl}
+              alt={`Page ${selectedPageImage.pageNo}`}
+              className="page-image-preview"
+              onError={(e) => {
+                console.error(`Failed to load preview image for page ${selectedPageImage.pageNo}`);
+              }}
+            />
+          </div>
+        )}
+      </Dialog>
     </>
   );
 };

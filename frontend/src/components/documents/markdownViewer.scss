@@ -225,6 +225,10 @@
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         transition: all 0.3s ease;
 
+        &.clickable {
+          cursor: pointer;
+        }
+
         &:hover {
           box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
           transform: scale(1.01);
@@ -657,3 +661,27 @@
   }
 }
 
+// Page Image Preview Modal
+.page-image-preview-dialog {
+  .p-dialog-content {
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .page-image-preview-container {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background-color: #f5f5f5;
+    min-height: 400px;
+    max-height: 80vh;
+    overflow: auto;
+
+    .page-image-preview {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    }
+  }
+}
