@@ -1,11 +1,13 @@
 import React, { useRef, useState } from "react";
 import { FileUpload } from "primereact/fileupload";
 import { ProgressBar } from "primereact/progressbar";
+import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
 import "./fileUpload.scss";
 
 export const DocumentFileUpload = ({ onUploadSuccess }) => {
+  const { t } = useTranslation();
   const fileUploadRef = useRef(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -15,7 +17,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
     const files = e.files;
 
     if (!files || files.length === 0) {
-      messageService.infoToast("Please select files to upload");
+      messageService.infoToast(t("FileUpload.PleaseSelectFiles"));
       return;
     }
 
@@ -43,7 +45,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         
         if (!validExtensions.includes(fileExtension)) {
           messageService.errorToast(
-            `Invalid file type: ${file.name}. Supported types: PDF, Images, DOC, EXCEL`
+            t("FileUpload.InvalidFileType", { filename: file.name })
           );
           continue;
         }
@@ -51,11 +53,11 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         try {
           const response = await documentService.uploadDocument(file);
           if (response.status === "success") {
-            messageService.successToast(`${file.name} uploaded successfully`);
+            messageService.successToast(t("FileUpload.UploadSuccess", { filename: file.name }));
             setUploadProgress(((i + 1) / files.length) * 100);
           }
         } catch (error) {
-          messageService.errorToast(`Failed to upload ${file.name}`);
+          messageService.errorToast(t("FileUpload.UploadFailed", { filename: file.name }));
           console.error("Upload error:", error);
         }
       }
@@ -70,7 +72,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         onUploadSuccess();
       }
     } catch (error) {
-      messageService.errorToast("Error uploading files");
+      messageService.errorToast(t("FileUpload.ErrorUploading"));
       console.error("Error uploading files:", error);
     } finally {
       setUploading(false);
@@ -96,8 +98,8 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
   return (
     <div className="file-upload-container">
       <div className="file-upload-header">
-        <h2>Upload Documents</h2>
-        <p>Upload PDF, images, or office documents to convert to markdown</p>
+        <h2>{t("FileUpload.Title")}</h2>
+        <p>{t("FileUpload.Description")}</p>
       </div>
 
       <div
@@ -115,9 +117,9 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
           uploadHandler={handleUpload}
           onClear={handleClear}
           auto={false}
-          chooseLabel="Choose Files"
-          uploadLabel="Upload"
-          cancelLabel="Cancel"
+          chooseLabel={t("FileUpload.ChooseFiles")}
+          uploadLabel={t("FileUpload.Upload")}
+          cancelLabel={t("FileUpload.Cancel")}
           disabled={uploading}
           className="file-upload-component"
         />
@@ -126,16 +128,16 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
       {uploading && (
         <div className="upload-progress">
           <ProgressBar value={uploadProgress} />
-          <p>Uploading... {Math.round(uploadProgress)}%</p>
+          <p>{t("FileUpload.Uploading")} {Math.round(uploadProgress)}%</p>
         </div>
       )}
 
       <div className="file-upload-info">
         <p>
-          <strong>Supported formats:</strong> PDF, PNG, JPG, GIF, BMP, DOC, DOCX, XLS, XLSX
+          <strong>{t("FileUpload.SupportedFormats")}</strong> {t("FileUpload.SupportedFormatsList")}
         </p>
         <p>
-          <strong>Max file size:</strong> 50MB
+          <strong>{t("FileUpload.MaxFileSize")}</strong> {t("FileUpload.MaxFileSizeValue")}
         </p>
       </div>
     </div>

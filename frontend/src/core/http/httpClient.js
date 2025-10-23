@@ -2,6 +2,7 @@ import axios from "axios";
 import { loadingService } from "../loading/loadingService";
 import APP_CONFIG from "../config/appConfig";
 import { messageService } from "../message/messageService";
+import i18n from "../config/i18nConfig";
 // import AuthService from "../auth/authService"; // Temporarily disabled IAM SSO
 import TempAuthService from "../auth/tempAuthService"; // Using temporary auth service
 /**
@@ -81,10 +82,10 @@ http.interceptors.response.use(
     if (error.response) {
       switch (error.response.status) {
         case 400:
-          messageService.errorToast("It is Bad Request");
+          messageService.errorToast(i18n.t("HttpClient.BadRequest"));
           break;
         case 401:
-          messageService.errorToast("Unauthorized Access. Redirecting to login...");
+          messageService.errorToast(i18n.t("HttpClient.Unauthorized"));
           // Auto-redirect to login on unauthorized access
           handleUnauthorizedAccess();
           break;
@@ -92,18 +93,18 @@ http.interceptors.response.use(
         //  messageService.errorToast("Required access endpoint is No Found");
         //  break;
         case 406:
-          messageService.errorToast("Request Not Acceptable");
+          messageService.errorToast(i18n.t("HttpClient.NotAcceptable"));
           break;
         case 403:
-          messageService.errorToast("Access Forbidden. Redirecting to login...");
+          messageService.errorToast(i18n.t("HttpClient.Forbidden"));
           // Auto-redirect to login on forbidden access
           handleUnauthorizedAccess();
           break;
         case 408:
-          messageService.errorToast("Request is Timeout");
+          messageService.errorToast(i18n.t("HttpClient.Timeout"));
           break;
         default:
-          messageService.errorToast("Request process failed.");
+          messageService.errorToast(i18n.t("HttpClient.RequestFailed"));
           break;
       }
     }

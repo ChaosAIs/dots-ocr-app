@@ -1,5 +1,5 @@
 {
-    "Nav" :{
+    "Nav": {
         "Home": "Home",
         "SiteManagement": "Site Management",
         "UserManagement": "User Management",
@@ -8,7 +8,119 @@
         "Logout": "Logout",
         "English": "English",
         "French": "French",
-        "DocumentConversion": "Document Conversion"
-
+        "DocumentConversion": "Document Conversion",
+        "Admin": "Admin",
+        "DocumentManagement": "Document Management",
+        "SelectLanguage": "Select a language"
+    },
+    "FileUpload": {
+        "Title": "Upload Documents",
+        "Description": "Upload PDF, images, or office documents to convert to markdown",
+        "ChooseFiles": "Choose Files",
+        "Upload": "Upload",
+        "Cancel": "Cancel",
+        "Uploading": "Uploading...",
+        "SupportedFormats": "Supported formats:",
+        "SupportedFormatsList": "PDF, PNG, JPG, GIF, BMP, DOC, DOCX, XLS, XLSX",
+        "MaxFileSize": "Max file size:",
+        "MaxFileSizeValue": "50MB",
+        "PleaseSelectFiles": "Please select files to upload",
+        "InvalidFileType": "Invalid file type: {filename}. Supported types: PDF, Images, DOC, EXCEL",
+        "UploadSuccess": "{filename} uploaded successfully",
+        "UploadFailed": "Failed to upload {filename}",
+        "ErrorUploading": "Error uploading files"
+    },
+    "DocumentList": {
+        "Title": "Uploaded Documents",
+        "Refresh": "Refresh",
+        "NoDocuments": "No documents uploaded yet. Upload a document to get started.",
+        "Filename": "Filename",
+        "Size": "Size",
+        "UploadTime": "Upload Time",
+        "Status": "Status",
+        "Progress": "Progress",
+        "Actions": "Actions",
+        "Converted": "Converted",
+        "Pending": "Pending",
+        "ViewMarkdown": "View Markdown",
+        "ConvertToMarkdown": "Convert to Markdown",
+        "StartingConversion": "Starting conversion...",
+        "ConversionSuccess": "Document converted successfully",
+        "ConversionFailed": "Conversion failed",
+        "ConnectionError": "Connection error during conversion",
+        "FailedToLoad": "Failed to load documents",
+        "FailedToView": "Failed to view markdown",
+        "FailedToConvert": "Failed to start conversion",
+        "PaginatorTemplate": "{first} to {last} of {totalRecords}"
+    },
+    "MarkdownViewer": {
+        "DownloadMarkdown": "Download Markdown",
+        "TableOfContents": "Table of Contents",
+        "SearchPlaceholder": "Search in document...",
+        "CopyCode": "Copy code",
+        "CodeCopied": "Code copied to clipboard",
+        "FailedToLoad": "Failed to load markdown content",
+        "Page": "Page",
+        "Combined": "Combined"
+    },
+    "Pages": {
+        "NotFound": "The specified page is not existing.",
+        "Sample": {
+            "Title": "Sample Page",
+            "TodaysNews": "Today's News (Demo Remote Web API call)",
+            "EncryptedInvoice": "Encrypted Invoice Records Display Demo:",
+            "DemoMessageBox": "Demo Message Box for multiple messages at one time",
+            "DemoSuccessMessage": "Demo Message Box for one success message",
+            "DemoErrorMessage": "Demo Message Box for one error message",
+            "DemoErrorToast": "Demo error Toast",
+            "DemoSuccessToast": "Demo Success Toast",
+            "DemoConfirmDialog": "Demo Confirmation Dialog",
+            "DemoDeleteDialog": "Demo Confirm Deletion Dialog",
+            "DemoSuccessDialog": "Demo Success Message Dialog",
+            "DemoErrorDialog": "Demo Error Message Dialog",
+            "DemoWarnDialog": "Demo Warn Message Dialog",
+            "DemoInfoDialog": "Demo Info Message Dialog",
+            "DemoKeyVault": "Demo Show Azure Key Vault Message",
+            "DemoTranslate": "Demo Show Server Side Message based on selected language",
+            "DebugAuth": "🔧 Debug Authentication & Authorization",
+            "DebugRoles": "🔍 Debug Current User Roles",
+            "CheckAdminRole": "🎭 Check Administrator Role (2)",
+            "CheckUserRole": "🎭 Check User Role (1)",
+            "CheckLoginPermission": "🔑 Check Login Permission (1)",
+            "ConsoleTip": "💡 Tip: You can also use these functions in the browser console:",
+            "CurrentEnvironment": "Current Environment.",
+            "CurrentConfig": "Current config settings:",
+            "ConfirmMessage": "Are you sure you want to continue the process? please click 'Yes' to continue, or click 'No' to stop the process.",
+            "DeleteConfirmMessage": "Are you sure you want to delete the item? please click 'Yes' to delete, or click 'No' to cancel the deletion.",
+            "SuccessDialogMessage": "Success Dialog Message",
+            "ErrorDialogMessage": "Error Dialog Message",
+            "WarnDialogMessage": "Warn Dialog Message",
+            "InfoDialogMessage": "Info Dialog Message",
+            "TestSuccessMessage": "test success message.",
+            "TestErrorMessage": "test error message.",
+            "TestSuccessToast": "test success toast message.",
+            "TestErrorToast": "test error toast message.",
+            "InformationTest": "Information Test",
+            "WarnTest": "Warn Test",
+            "ErrorTest": "Error Test",
+            "SuccessTest": "Success Test",
+            "Choiced": "Choiced: {response}"
+        },
+        "UserProfile": {
+            "Title": "It is user profile page",
+            "CurrentUser": "Current logon user name:",
+            "NotAuthenticated": "Not authenticated"
+        },
+        "UserManagement": {
+            "Title": "It is user management"
+        }
+    },
+    "HttpClient": {
+        "BadRequest": "It is Bad Request",
+        "Unauthorized": "Unauthorized Access. Redirecting to login...",
+        "NotAcceptable": "Request Not Acceptable",
+        "Forbidden": "Access Forbidden. Redirecting to login...",
+        "Timeout": "Request is Timeout",
+        "RequestFailed": "Request process failed."
     }
 }

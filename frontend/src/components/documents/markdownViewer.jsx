@@ -3,6 +3,7 @@ import { Dialog } from "primereact/dialog";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { InputText } from "primereact/inputtext";
+import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
@@ -18,6 +19,7 @@ import { messageService } from "../../core/message/messageService";
 import "./markdownViewer.scss";
 
 const MarkdownViewer = ({ document, visible, onHide }) => {
+  const { t } = useTranslation();
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState("");
@@ -91,7 +93,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               combinedContent += contentResponse.content;
 
               if (filesResponse.markdown_files.length > 1) {
-                const pageLabel = file.page_no !== null ? `Page ${file.page_no}` : "Combined";
+                const pageLabel = file.page_no !== null ? `${t("MarkdownViewer.Page")} ${file.page_no}` : t("MarkdownViewer.Combined");
                 combinedContent += `\n\n---\n\n*${pageLabel}*`;
               }
             }
@@ -111,7 +113,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         }
       }
     } catch (error) {
-      messageService.errorToast("Failed to load markdown content");
+      messageService.errorToast(t("MarkdownViewer.FailedToLoad"));
       console.error("Error loading markdown:", error);
     } finally {
       setLoading(false);
@@ -134,7 +136,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
 
   const handleCopyCode = (code) => {
     navigator.clipboard.writeText(code);
-    messageService.successToast("Code copied to clipboard");
+    messageService.successToast(t("MarkdownViewer.CodeCopied"));
   };
 
   const handleImageClick = (index) => {
@@ -178,7 +180,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               icon="pi pi-copy"
               className="p-button-rounded p-button-text p-button-sm"
               onClick={() => handleCopyCode(code)}
-              tooltip="Copy code"
+              tooltip={t("MarkdownViewer.CopyCode")}
             />
           </div>
           <SyntaxHighlighter
@@ -263,7 +265,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           icon="pi pi-download"
           className="p-button-rounded p-button-text"
           onClick={handleDownload}
-          tooltip="Download Markdown"
+          tooltip={t("MarkdownViewer.DownloadMarkdown")}
           tooltipPosition="left"
         />
       </div>
@@ -285,7 +287,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           {tableOfContents.length > 0 && (
             <div className="markdown-toc-sidebar">
               <div className="toc-header">
-                <h3>Table of Contents</h3>
+                <h3>{t("MarkdownViewer.TableOfContents")}</h3>
               </div>
               <div className="toc-content">
                 {tableOfContents.map((heading, index) => (
@@ -304,7 +306,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           <div className="markdown-viewer-content">
             <div className="search-bar">
               <InputText
-                placeholder="Search in document..."
+                placeholder={t("MarkdownViewer.SearchPlaceholder")}
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="search-input"

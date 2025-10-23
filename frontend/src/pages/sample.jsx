@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useContext } from "react";
+import { useTranslation } from "react-i18next";
 import { messageService } from "../core/message/messageService";
 import { Button } from "primereact/button";
 import APP_CONFIG from "../core/config/appConfig";
@@ -8,6 +9,7 @@ import { AuthContext } from "../core/auth/components/authProvider";
 import { debugCurrentUserRoles, debugHasRole, debugHasPermission } from "../core/auth/debugAuth";
 
 export const Sample = () => {
+  const { t } = useTranslation();
   const [keyVaultMessage, setMessage] = useState("");
   const [translateMessage, setTranslateMessage] = useState("");
   const [notifications, setNotifications] = useState([]);
@@ -35,26 +37,26 @@ export const Sample = () => {
    *  Same as code in: constructor(props) { super(props); this.showMessages = this.showMessages.bind(this);}
    */
   const showMessages = () => {
-    messageService.info("Information Test", false);
-    messageService.warn("Warn Test", false);
-    messageService.error("Error Test", false);
-    messageService.success("Success Test", false);
+    messageService.info(t("Pages.Sample.InformationTest"), false);
+    messageService.warn(t("Pages.Sample.WarnTest"), false);
+    messageService.error(t("Pages.Sample.ErrorTest"), false);
+    messageService.success(t("Pages.Sample.SuccessTest"), false);
     messageService.emit();
   };
 
   const showMessage = (messageType) => {
     if (messageType === "success") {
-      messageService.success("test success message.");
+      messageService.success(t("Pages.Sample.TestSuccessMessage"));
     } else if (messageType === "error") {
-      messageService.error("test error message.");
+      messageService.error(t("Pages.Sample.TestErrorMessage"));
     }
   };
 
   const showToast = (messageType) => {
     if (messageType === "success") {
-      messageService.successToast("test success toast message.");
+      messageService.successToast(t("Pages.Sample.TestSuccessToast"));
     } else if (messageType === "error") {
-      messageService.errorToast("test error toast message.");
+      messageService.errorToast(t("Pages.Sample.TestErrorToast"));
     }
   };
 
@@ -76,13 +78,13 @@ export const Sample = () => {
 
   const showConfirmDialog = (message) => {
     messageService.confirmDialog(message, (response) => {
-      messageService.infoToast("Choiced: " + response);
+      messageService.infoToast(t("Pages.Sample.Choiced", { response }));
     });
   };
 
   const showDeleteConfirmDialog = (message) => {
     messageService.confirmDeletionDialog(message, (response) => {
-      messageService.infoToast("Choiced: " + response);
+      messageService.infoToast(t("Pages.Sample.Choiced", { response }));
     });
   };
 
@@ -108,16 +110,16 @@ export const Sample = () => {
 
   return (
     <>
-      <h2>Sample Page</h2>
+      <h2>{t("Pages.Sample.Title")}</h2>
       {authService && typeof authService.isAuthenticated === 'function' && authService.isAuthenticated() && (
         <div>
-          <h3>Today's News (Demo Remote Web API call)</h3>
+          <h3>{t("Pages.Sample.TodaysNews")}</h3>
           <ul>
             {notifications.map((item) => {
               return <li key={item.id}>{item.message}</li>;
             })}
           </ul>
-          <h3>Encrypted Invoice Records Display Demo:</h3>
+          <h3>{t("Pages.Sample.EncryptedInvoice")}</h3>
           <ul>
             {invoices.map((item) => {
               return (
@@ -132,29 +134,29 @@ export const Sample = () => {
       <div className="flex flex-wrap">
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={showMessages}>
-            Demo Message Box for multiple messages at one time
+            {t("Pages.Sample.DemoMessageBox")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => showMessage("success")}>
-            Demo Message Box for one success message
+            {t("Pages.Sample.DemoSuccessMessage")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => showMessage("error")}>
-            Demo Message Box for one error message
+            {t("Pages.Sample.DemoErrorMessage")}
           </Button>
         </div>
       </div>
       <div className="flex flex-wrap">
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => showToast("error")}>
-            Demo error Toast
+            {t("Pages.Sample.DemoErrorToast")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => showToast("success")}>
-            Demo Success Toast
+            {t("Pages.Sample.DemoSuccessToast")}
           </Button>
         </div>
       </div>
@@ -163,47 +165,47 @@ export const Sample = () => {
           <Button
             className="btn btn-primary"
             onClick={() =>
-              showConfirmDialog("Are you sure you want to continue the process? please click 'Yes' to continue, or click 'No' to stop the process.")
+              showConfirmDialog(t("Pages.Sample.ConfirmMessage"))
             }
           >
-            Demo Confirmation Dialog
+            {t("Pages.Sample.DemoConfirmDialog")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button
             className="btn btn-primary"
             onClick={() =>
-              showDeleteConfirmDialog("Are you sure you want to delete the item? please click 'Yes' to delete, or click 'No' to cancel the deletion.")
+              showDeleteConfirmDialog(t("Pages.Sample.DeleteConfirmMessage"))
             }
           >
-            Demo Confirm Deletion Dialog
+            {t("Pages.Sample.DemoDeleteDialog")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
-          <Button className="btn btn-primary" onClick={() => showDialog("Success Dialog Message", "success")}>
-            Demo Success Message Dialog
+          <Button className="btn btn-primary" onClick={() => showDialog(t("Pages.Sample.SuccessDialogMessage"), "success")}>
+            {t("Pages.Sample.DemoSuccessDialog")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
-          <Button className="btn btn-primary" onClick={() => showDialog("Error Dialog Message", "error")}>
-            Demo Error Message Dialog
+          <Button className="btn btn-primary" onClick={() => showDialog(t("Pages.Sample.ErrorDialogMessage"), "error")}>
+            {t("Pages.Sample.DemoErrorDialog")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
-          <Button className="btn btn-primary" onClick={() => showDialog("Warn Dialog Message", "warn")}>
-            Demo Warn Message Dialog
+          <Button className="btn btn-primary" onClick={() => showDialog(t("Pages.Sample.WarnDialogMessage"), "warn")}>
+            {t("Pages.Sample.DemoWarnDialog")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
-          <Button className="btn btn-primary" onClick={() => showDialog("Info Dialog Message", "info")}>
-            Demo Info Message Dialog
+          <Button className="btn btn-primary" onClick={() => showDialog(t("Pages.Sample.InfoDialogMessage"), "info")}>
+            {t("Pages.Sample.DemoInfoDialog")}
           </Button>
         </div>
       </div>
       <div className="flex flex-wrap">
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => showKeyVaultMessage()}>
-            Demo Show Azure Key Vault Message
+            {t("Pages.Sample.DemoKeyVault")}
           </Button>
         </div>
         <div className="mb-2 mr-2">{keyVaultMessage}</div>
@@ -211,47 +213,47 @@ export const Sample = () => {
       <div className="flex flex-wrap">
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => showTranslateMessage()}>
-            Demo Show Server Side Message based on selected language
+            {t("Pages.Sample.DemoTranslate")}
           </Button>
         </div>
         <div className="mb-2 mr-2">{translateMessage}</div>
       </div>
 
-      <h4>🔧 Debug Authentication & Authorization</h4>
+      <h4>{t("Pages.Sample.DebugAuth")}</h4>
       <div className="flex flex-wrap">
         <div className="mb-2 mr-2">
           <Button className="btn btn-primary" onClick={() => debugCurrentUserRoles()}>
-            🔍 Debug Current User Roles
+            {t("Pages.Sample.DebugRoles")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-secondary" onClick={() => debugHasRole("2")}>
-            🎭 Check Administrator Role (2)
+            {t("Pages.Sample.CheckAdminRole")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-secondary" onClick={() => debugHasRole("1")}>
-            🎭 Check User Role (1)
+            {t("Pages.Sample.CheckUserRole")}
           </Button>
         </div>
         <div className="mb-2 mr-2">
           <Button className="btn btn-secondary" onClick={() => debugHasPermission("1")}>
-            🔑 Check Login Permission (1)
+            {t("Pages.Sample.CheckLoginPermission")}
           </Button>
         </div>
       </div>
       <div className="mb-3">
         <small className="text-muted">
-          💡 Tip: You can also use these functions in the browser console:
+          {t("Pages.Sample.ConsoleTip")}
           <br />• <code>window.debugAuth.logRoles()</code>
           <br />• <code>window.debugAuth.hasRole(roleId)</code>
           <br />• <code>window.debugAuth.hasPermission(permissionId)</code>
         </small>
       </div>
 
-      <h4>Current Environment.</h4>
+      <h4>{t("Pages.Sample.CurrentEnvironment")}</h4>
       <span>{process.env.REACT_APP_ENV}</span>
-      <h4>Current config settings:</h4>
+      <h4>{t("Pages.Sample.CurrentConfig")}</h4>
       <span>{JSON.stringify(APP_CONFIG)}</span>
     </>
   );

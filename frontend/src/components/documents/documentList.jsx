@@ -4,12 +4,14 @@ import { Column } from "primereact/column";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { ProgressBar } from "primereact/progressbar";
+import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
 import MarkdownViewer from "./markdownViewer";
 import "./documentList.scss";
 
 export const DocumentList = ({ refreshTrigger }) => {
+  const { t } = useTranslation();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState(null);
@@ -47,7 +49,7 @@ export const DocumentList = ({ refreshTrigger }) => {
         setDocuments(sortedDocuments);
       }
     } catch (error) {
-      messageService.errorToast("Failed to load documents");
+      messageService.errorToast(t("DocumentList.FailedToLoad"));
       console.error("Error loading documents:", error);
     } finally {
       setLoading(false);
@@ -59,7 +61,7 @@ export const DocumentList = ({ refreshTrigger }) => {
       setSelectedDocument(document);
       setShowMarkdownViewer(true);
     } catch (error) {
-      messageService.errorToast("Failed to view markdown");
+      messageService.errorToast(t("DocumentList.FailedToView"));
       console.error("Error viewing markdown:", error);
     }
   };
@@ -67,7 +69,7 @@ export const DocumentList = ({ refreshTrigger }) => {
   const handleConvert = async (document) => {
     try {
       setConverting(document.filename);
-      messageService.infoToast("Starting conversion...");
+      messageService.infoToast(t("DocumentList.StartingConversion"));
 
       // Update document with conversion status
       setDocuments((prev) =>
@@ -102,7 +104,7 @@ export const DocumentList = ({ refreshTrigger }) => {
 
             // Handle completion
             if (progressData.status === "completed") {
-              messageService.successToast("Document converted successfully");
+              messageService.successToast(t("DocumentList.ConversionSuccess"));
               setDocuments((prev) =>
                 prev.map((doc) =>
                   doc.filename === document.filename
@@ -118,7 +120,7 @@ export const DocumentList = ({ refreshTrigger }) => {
             // Handle errors
             if (progressData.status === "error") {
               messageService.errorToast(
-                progressData.message || "Conversion failed"
+                progressData.message || t("DocumentList.ConversionFailed")
               );
               setDocuments((prev) =>
                 prev.map((doc) =>
@@ -132,7 +134,7 @@ export const DocumentList = ({ refreshTrigger }) => {
           },
           (error) => {
             console.error("WebSocket error:", error);
-            messageService.errorToast("Connection error during conversion");
+            messageService.errorToast(t("DocumentList.ConnectionError"));
             setDocuments((prev) =>
               prev.map((doc) =>
                 doc.filename === document.filename
@@ -151,7 +153,7 @@ export const DocumentList = ({ refreshTrigger }) => {
         }));
       }
     } catch (error) {
-      messageService.errorToast("Failed to start conversion");
+      messageService.errorToast(t("DocumentList.FailedToConvert"));
       console.error("Error starting conversion:", error);
       setDocuments((prev) =>
         prev.map((doc) =>
@@ -172,7 +174,7 @@ export const DocumentList = ({ refreshTrigger }) => {
             icon="pi pi-eye"
             className="p-button-rounded p-button-success"
             onClick={() => handleViewMarkdown(rowData)}
-            tooltip="View Markdown"
+            tooltip={t("DocumentList.ViewMarkdown")}
             tooltipPosition="top"
           />
         ) : (
@@ -182,7 +184,7 @@ export const DocumentList = ({ refreshTrigger }) => {
             onClick={() => handleConvert(rowData)}
             loading={converting === rowData.filename}
             disabled={converting !== null}
-            tooltip="Convert to Markdown"
+            tooltip={t("DocumentList.ConvertToMarkdown")}
             tooltipPosition="top"
           />
         )}
@@ -201,7 +203,7 @@ export const DocumentList = ({ refreshTrigger }) => {
   const statusBodyTemplate = (rowData) => {
     return (
       <span className={`status-badge ${rowData.markdown_exists ? "converted" : "pending"}`}>
-        {rowData.markdown_exists ? "Converted" : "Pending"}
+        {rowData.markdown_exists ? t("DocumentList.Converted") : t("DocumentList.Pending")}
       </span>
     );
   };
@@ -240,20 +242,20 @@ export const DocumentList = ({ refreshTrigger }) => {
   return (
     <div className="document-list-container">
       <div className="document-list-header">
-        <h2>Uploaded Documents</h2>
+        <h2>{t("DocumentList.Title")}</h2>
         <Button
           icon="pi pi-refresh"
           className="p-button-rounded p-button-text"
           onClick={loadDocuments}
           loading={loading}
-          tooltip="Refresh"
+          tooltip={t("DocumentList.Refresh")}
           tooltipPosition="top"
         />
       </div>
 
       {documents.length === 0 ? (
         <div className="no-documents">
-          <p>No documents uploaded yet. Upload a document to get started.</p>
+          <p>{t("DocumentList.NoDocuments")}</p>
         </div>
       ) : (
         <DataTable
@@ -264,35 +266,35 @@ export const DocumentList = ({ refreshTrigger }) => {
           rows={10}
           rowsPerPageOptions={[5, 10, 20]}
           paginatorTemplate="RowsPerPageDropdown FirstPageLink PrevPageLink CurrentPageReport NextPageLink LastPageLink"
-          currentPageReportTemplate="{first} to {last} of {totalRecords}"
+          currentPageReportTemplate={t("DocumentList.PaginatorTemplate")}
         >
-          <Column field="filename" header="Filename" style={{ width: "30%" }} />
+          <Column field="filename" header={t("DocumentList.Filename")} style={{ width: "30%" }} />
           <Column
             field="file_size"
-            header="Size"
+            header={t("DocumentList.Size")}
             body={fileSizeBodyTemplate}
             style={{ width: "15%" }}
           />
           <Column
             field="upload_time"
-            header="Upload Time"
+            header={t("DocumentList.UploadTime")}
             body={uploadTimeBodyTemplate}
             style={{ width: "25%" }}
           />
           <Column
             field="markdown_exists"
-            header="Status"
+            header={t("DocumentList.Status")}
             body={statusBodyTemplate}
             style={{ width: "15%" }}
           />
           <Column
-            header="Progress"
+            header={t("DocumentList.Progress")}
             body={progressBodyTemplate}
             style={{ width: "20%" }}
           />
           <Column
             body={actionBodyTemplate}
-            header="Actions"
+            header={t("DocumentList.Actions")}
             style={{ width: "15%" }}
             bodyStyle={{ textAlign: "center" }}
           />

@@ -45,12 +45,12 @@ export const NavBar = () => {
       visible: true, // It is custom property. Work for show/hide menu items based on user authentication.
     },
     {
-      label: "Admin",
+      label: t("Nav.Admin"),
       icon: "pi pi-fw pi-cog",
       visible: isSystemAdmin,
       items: [
         {
-          label: "Document Management",
+          label: t("Nav.DocumentManagement"),
           icon: "pi pi-fw pi-users",
           url: `${APP_CONFIG.basePath}/admin/data-management`,
         }
@@ -80,7 +80,7 @@ export const NavBar = () => {
         i18n.changeLanguage(e.value);
         setLanguage(e.value);
       }}
-      placeholder="Select a language"
+      placeholder={t("Nav.SelectLanguage")}
     />
   );
 
