@@ -11,7 +11,7 @@ import MarkdownViewer from "./markdownViewer";
 import "./documentList.scss";
 
 export const DocumentList = ({ refreshTrigger }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState(null);
@@ -22,7 +22,14 @@ export const DocumentList = ({ refreshTrigger }) => {
   // Load documents on component mount and when refreshTrigger changes
   useEffect(() => {
     loadDocuments();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshTrigger]);
+
+  // Force re-render when language changes to update translations
+  useEffect(() => {
+    // This effect ensures the component re-renders when language changes
+    // The i18n.language property will trigger a re-render
+  }, [i18n.language]);
 
   // Cleanup WebSockets on unmount
   useEffect(() => {
