@@ -61,7 +61,8 @@
     "CodeCopied": "Code copié dans le presse-papiers",
     "FailedToLoad": "Échec du chargement du contenu markdown",
     "Page": "Page",
-    "Combined": "Combiné"
+    "Combined": "Combiné",
+    "DocumentImages": "Images du document"
   },
   "Pages": {
     "NotFound": "La page spécifiée n'existe pas.",

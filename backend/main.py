@@ -1,7 +1,7 @@
 import os
 import json
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 import shutil
@@ -672,6 +672,54 @@ async def get_markdown_content(filename: str, page_no: int = None):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading markdown file: {str(e)}")
+
+
+@app.get("/image/{filename}")
+async def get_image(filename: str, page_no: int = None):
+    """
+    Get the JPG image of a converted document.
+    Supports both single image files and page-specific image files.
+
+    Parameters:
+    - filename: The name of the file (without extension)
+    - page_no: Optional page number for multi-page documents
+
+    Returns:
+    - The JPG image file
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        # Determine which image file to serve
+        if page_no is not None:
+            # Serve page-specific image file
+            image_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}.jpg")
+        else:
+            # Try to find the single image file
+            image_path = os.path.join(OUTPUT_DIR, filename, f"{filename}.jpg")
+
+        if not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"Image file not found for: {filename}")
+
+        # Return the image file
+        return FileResponse(
+            image_path,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "public, max-age=3600",
+                "Content-Disposition": f'inline; filename="{os.path.basename(image_path)}"'
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error serving image file: {str(e)}")
 
 
 @app.post("/parse")

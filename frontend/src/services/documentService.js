@@ -172,6 +172,20 @@ class DocumentService {
   }
 
   /**
+   * Get the URL for the JPG image of a converted document
+   * @param {string} filename - The filename (without extension)
+   * @param {number} pageNo - Optional page number for multi-page documents
+   * @returns {string} - Image URL
+   */
+  getImageUrl(filename, pageNo = null) {
+    let url = `${this.apiDomain}/image/${filename}`;
+    if (pageNo !== null) {
+      url += `?page_no=${pageNo}`;
+    }
+    return url;
+  }
+
+  /**
    * Format file size for display
    * @param {number} bytes - File size in bytes
    * @returns {string} - Formatted file size

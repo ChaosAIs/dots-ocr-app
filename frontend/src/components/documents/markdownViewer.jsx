@@ -26,7 +26,9 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [images, setImages] = useState([]);
+  const [pageImages, setPageImages] = useState([]); // Array of {pageNo, imageUrl}
   const contentRef = useRef(null);
+  const imagePanelRef = useRef(null);
 
   useEffect(() => {
     if (visible && document) {
@@ -35,21 +37,31 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, document]);
 
-  // Extract table of contents from markdown
+  // Extract table of contents from markdown with page numbers
   const tableOfContents = useMemo(() => {
     const headings = [];
     const lines = content.split("\n");
+    let currentPage = pageImages.length > 0 ? pageImages[0].pageNo : 1;
+
     lines.forEach((line) => {
+      // Check if this line indicates a page separator (matches "*Page 18*" or "*Page18*")
+      const pageMatch = line.match(/^\*.*?(\d+)\*$/);
+      if (pageMatch && line.toLowerCase().includes('page')) {
+        currentPage = parseInt(pageMatch[1], 10);
+        return;
+      }
+
+      // Check for heading
       const match = line.match(/^(#{1,6})\s+(.+)$/);
       if (match) {
         const level = match[1].length;
         const title = match[2];
         const id = `heading-${title}`;
-        headings.push({ level, title, id });
+        headings.push({ level, title, id, pageNo: currentPage });
       }
     });
     return headings;
-  }, [content]);
+  }, [content, pageImages]);
 
   // Extract images from markdown
   const extractImages = (markdown) => {
@@ -76,6 +88,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
       const filesResponse = await documentService.getMarkdownFiles(filename);
       if (filesResponse.status === "success") {
         let combinedContent = "";
+        const imageUrls = [];
+
         for (const file of filesResponse.markdown_files) {
           try {
             const contentResponse = await documentService.getMarkdownContent(
@@ -96,6 +110,13 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
                 const pageLabel = file.page_no !== null ? `${t("MarkdownViewer.Page")} ${file.page_no}` : t("MarkdownViewer.Combined");
                 combinedContent += `\n\n---\n\n*${pageLabel}*`;
               }
+
+              // Get the image URL for this page
+              const imageUrl = documentService.getImageUrl(filename, file.page_no);
+              imageUrls.push({
+                pageNo: file.page_no,
+                imageUrl: imageUrl
+              });
             }
           } catch (error) {
             console.error(`Error loading page ${file.page_no}:`, error);
@@ -109,6 +130,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           console.log('Final content has relative image paths:', /!\[.*?\]\([^)]*(?<!data:image\/[^)]*)\)/g.test(combinedContent));
 
           setContent(combinedContent);
+          setPageImages(imageUrls);
           extractImages(combinedContent);
         }
       }
@@ -144,11 +166,22 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
     setLightboxOpen(true);
   };
 
-  const scrollToHeading = (id) => {
+  const scrollToHeading = (id, pageNo) => {
+    // Scroll markdown content to the heading
     if (contentRef.current) {
       const element = contentRef.current.querySelector(`[id="${id}"]`);
       if (element) {
         element.scrollIntoView({ behavior: "smooth" });
+      }
+    }
+
+    // Scroll image panel to the corresponding page
+    if (imagePanelRef.current && pageNo) {
+      const pageImageContainer = imagePanelRef.current.querySelector(
+        `[data-page-no="${pageNo}"]`
+      );
+      if (pageImageContainer) {
+        pageImageContainer.scrollIntoView({ behavior: "smooth", block: "start" });
       }
     }
   };
@@ -284,25 +317,63 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         className="markdown-viewer-dialog"
       >
         <div className="markdown-viewer-wrapper">
-          {tableOfContents.length > 0 && (
-            <div className="markdown-toc-sidebar">
-              <div className="toc-header">
+          {/* Table of Contents - Only for multi-page documents */}
+          {pageImages.length > 1 && tableOfContents.length > 0 && (
+            <div className="markdown-toc-panel">
+              <div className="toc-panel-header">
                 <h3>{t("MarkdownViewer.TableOfContents")}</h3>
               </div>
-              <div className="toc-content">
+              <div className="toc-panel-content">
                 {tableOfContents.map((heading, index) => (
                   <div
                     key={index}
                     className={`toc-item toc-level-${heading.level}`}
-                    onClick={() => scrollToHeading(heading.id)}
+                    onClick={() => scrollToHeading(heading.id, heading.pageNo)}
                   >
-                    {heading.title}
+                    <span className="toc-title">{heading.title}</span>
+                    {heading.pageNo && (
+                      <span className="toc-page-badge">{heading.pageNo}</span>
+                    )}
                   </div>
                 ))}
               </div>
             </div>
           )}
 
+          {/* Image Panel in the Middle */}
+          {pageImages.length > 0 && (
+            <div className="markdown-image-panel">
+              <div className="image-panel-header">
+                <h3>{t("MarkdownViewer.DocumentImages")}</h3>
+              </div>
+              <div className="image-panel-content" ref={imagePanelRef}>
+                {pageImages.map((pageImage, index) => (
+                  <div
+                    key={index}
+                    className="page-image-container"
+                    data-page-no={pageImage.pageNo}
+                  >
+                    {pageImages.length > 1 && (
+                      <div className="page-label">
+                        {t("MarkdownViewer.Page")} {pageImage.pageNo}
+                      </div>
+                    )}
+                    <img
+                      src={pageImage.imageUrl}
+                      alt={`Page ${pageImage.pageNo}`}
+                      className="page-image"
+                      onError={(e) => {
+                        console.error(`Failed to load image for page ${pageImage.pageNo}`);
+                        e.target.style.display = 'none';
+                      }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Markdown Content on the Right */}
           <div className="markdown-viewer-content">
             <div className="search-bar">
               <InputText

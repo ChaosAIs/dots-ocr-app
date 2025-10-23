@@ -61,7 +61,8 @@
         "CodeCopied": "Code copied to clipboard",
         "FailedToLoad": "Failed to load markdown content",
         "Page": "Page",
-        "Combined": "Combined"
+        "Combined": "Combined",
+        "DocumentImages": "Document Images"
     },
     "Pages": {
         "NotFound": "The specified page is not existing.",
