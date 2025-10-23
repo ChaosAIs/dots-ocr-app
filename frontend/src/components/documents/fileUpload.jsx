@@ -10,11 +10,23 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
-  const handleSelect = async (e) => {
+  const handleUpload = async (e) => {
+    // The uploadHandler receives an event object with files property
     const files = e.files;
-    if (files && files.length > 0) {
-      await uploadFiles(files);
+
+    if (!files || files.length === 0) {
+      messageService.infoToast("Please select files to upload");
+      return;
     }
+
+    await uploadFiles(files);
+  };
+
+  const handleClear = () => {
+    // This is called when the FileUpload component is cleared
+    // Don't call clear() here as it would cause infinite recursion
+    // Just reset any local state if needed
+    setUploadProgress(0);
   };
 
   const uploadFiles = async (files) => {
@@ -69,9 +81,10 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
   const handleDrop = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    const files = e.dataTransfer.files;
-    if (files && files.length > 0) {
-      uploadFiles(files);
+    const files = Array.from(e.dataTransfer.files);
+    if (files && files.length > 0 && fileUploadRef.current) {
+      // Add dropped files to the FileUpload component
+      fileUploadRef.current.setFiles(files);
     }
   };
 
@@ -98,12 +111,13 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
           multiple
           accept=".pdf,.png,.jpg,.jpeg,.gif,.bmp,.doc,.docx,.xls,.xlsx"
           maxFileSize={52428800} // 50MB
-          onSelect={handleSelect}
+          customUpload
+          uploadHandler={handleUpload}
+          onClear={handleClear}
           auto={false}
           chooseLabel="Choose Files"
           uploadLabel="Upload"
           cancelLabel="Cancel"
-          customUpload
           disabled={uploading}
           className="file-upload-component"
         />

@@ -38,7 +38,13 @@ export const DocumentList = ({ refreshTrigger }) => {
       setLoading(true);
       const response = await documentService.getDocuments();
       if (response.status === "success") {
-        setDocuments(response.documents || []);
+        // Sort documents by upload_time in descending order (newest first)
+        const sortedDocuments = (response.documents || []).sort((a, b) => {
+          const dateA = new Date(a.upload_time);
+          const dateB = new Date(b.upload_time);
+          return dateB - dateA; // Descending order
+        });
+        setDocuments(sortedDocuments);
       }
     } catch (error) {
       messageService.errorToast("Failed to load documents");
