@@ -5,7 +5,9 @@ import { ProgressSpinner } from "primereact/progressspinner";
 import { InputText } from "primereact/inputtext";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
+import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 import "katex/dist/katex.min.css";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
@@ -324,8 +326,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               <div className="markdown-body" ref={contentRef}>
                 <ReactMarkdown
                   components={markdownComponents}
-                  remarkPlugins={[remarkMath]}
-                  rehypePlugins={[rehypeKatex]}
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeRaw, rehypeKatex]}
                   urlTransform={(url) => {
                     // Preserve all URLs including base64 data URLs
                     console.log('URL transform:', url?.substring(0, 100));
