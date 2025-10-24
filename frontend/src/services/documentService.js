@@ -172,6 +172,27 @@ class DocumentService {
   }
 
   /**
+   * Update markdown content of a converted document
+   * @param {string} filename - The filename (without extension)
+   * @param {string} content - The new markdown content
+   * @param {number} pageNo - Optional page number for multi-page documents
+   * @returns {Promise} - Update response
+   */
+  async saveMarkdownContent(filename, content, pageNo = null) {
+    try {
+      let url = `${this.apiDomain}/markdown/${filename}`;
+      if (pageNo !== null) {
+        url += `?page_no=${pageNo}`;
+      }
+      const response = await http.put(url, { content });
+      return response.data;
+    } catch (error) {
+      console.error("Error saving markdown content:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Get the URL for the JPG image of a converted document
    * @param {string} filename - The filename (without extension)
    * @param {number} pageNo - Optional page number for multi-page documents

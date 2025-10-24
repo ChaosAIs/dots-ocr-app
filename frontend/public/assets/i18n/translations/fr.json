@@ -63,7 +63,14 @@
     "Page": "Page",
     "Combined": "Combiné",
     "DocumentImages": "Images du document",
-    "ImagePreview": "Aperçu de l'image"
+    "ImagePreview": "Aperçu de l'image",
+    "PreviewTab": "Aperçu",
+    "EditTab": "Modifier",
+    "SaveChanges": "Enregistrer les modifications",
+    "SavingChanges": "Enregistrement...",
+    "SaveSuccess": "Markdown enregistré avec succès",
+    "SaveFailed": "Échec de l'enregistrement du contenu markdown",
+    "UnsavedChanges": "Vous avez des modifications non enregistrées. Êtes-vous sûr de vouloir fermer ?"
   },
   "Pages": {
     "NotFound": "La page spécifiée n'existe pas.",

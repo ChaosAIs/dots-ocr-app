@@ -1,6 +1,6 @@
 import os
 import json
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
@@ -672,6 +672,63 @@ async def get_markdown_content(filename: str, page_no: int = None):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading markdown file: {str(e)}")
+
+
+@app.put("/markdown/{filename}")
+async def update_markdown_content(filename: str, request: Request, page_no: int = None):
+    """
+    Update the markdown content of a converted document.
+    Supports both single markdown files and page-specific markdown files.
+
+    Parameters:
+    - filename: The name of the file (without extension)
+    - page_no: Optional page number for multi-page documents
+    - request body: JSON with 'content' field containing the new markdown content
+
+    Returns:
+    - Success status
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        # Get the content from request body
+        body = await request.json()
+        content = body.get("content")
+
+        if content is None:
+            raise HTTPException(status_code=400, detail="No content provided")
+
+        # Determine which markdown file to write
+        if page_no is not None:
+            # Write to page-specific markdown file
+            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}_nohf.md")
+        else:
+            # Write to single markdown file
+            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
+
+        if not os.path.exists(markdown_path):
+            raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
+
+        # Write the updated content
+        with open(markdown_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        return JSONResponse(content={
+            "status": "success",
+            "filename": filename,
+            "page_no": page_no,
+            "message": "Markdown content updated successfully",
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating markdown file: {str(e)}")
 
 
 @app.get("/image/{filename}")

@@ -63,7 +63,14 @@
         "Page": "Page",
         "Combined": "Combined",
         "DocumentImages": "Document Images",
-        "ImagePreview": "Image Preview"
+        "ImagePreview": "Image Preview",
+        "PreviewTab": "Preview",
+        "EditTab": "Edit",
+        "SaveChanges": "Save Changes",
+        "SavingChanges": "Saving...",
+        "SaveSuccess": "Markdown saved successfully",
+        "SaveFailed": "Failed to save markdown content",
+        "UnsavedChanges": "You have unsaved changes. Are you sure you want to close?"
     },
     "Pages": {
         "NotFound": "The specified page is not existing.",

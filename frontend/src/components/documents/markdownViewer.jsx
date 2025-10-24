@@ -3,6 +3,8 @@ import { Dialog } from "primereact/dialog";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { InputText } from "primereact/inputtext";
+import { TabView, TabPanel } from "primereact/tabview";
+import { InputTextarea } from "primereact/inputtextarea";
 import { useTranslation } from "react-i18next";
 import ReactMarkdown from "react-markdown";
 import remarkMath from "remark-math";
@@ -21,7 +23,11 @@ import "./markdownViewer.scss";
 const MarkdownViewer = ({ document, visible, onHide }) => {
   const { t } = useTranslation();
   const [content, setContent] = useState("");
+  const [editedContent, setEditedContent] = useState("");
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [activeTabIndex, setActiveTabIndex] = useState(0);
   const [searchTerm, setSearchTerm] = useState("");
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
@@ -132,8 +138,10 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           console.log('Final content has relative image paths:', /!\[.*?\]\([^)]*(?<!data:image\/[^)]*)\)/g.test(combinedContent));
 
           setContent(combinedContent);
+          setEditedContent(combinedContent);
           setPageImages(imageUrls);
           extractImages(combinedContent);
+          setHasUnsavedChanges(false);
         }
       }
     } catch (error) {
@@ -141,6 +149,84 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
       console.error("Error loading markdown:", error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSaveMarkdown = async () => {
+    try {
+      setSaving(true);
+      const filename = document.filename.split(".")[0];
+
+      // For multi-page documents, we need to save each page separately
+      const filesResponse = await documentService.getMarkdownFiles(filename);
+      if (filesResponse.status === "success" && filesResponse.markdown_files.length > 1) {
+        // Split the edited content by the pattern we use when combining pages
+        // The pattern is: \n\n---\n\n[content]\n\n---\n\n*Page X*\n\n---\n\n[content]\n\n---\n\n*Page Y*
+        // We need to extract just the content parts, not the page labels
+
+        // First, split by the separator
+        const sections = editedContent.split(/\n\n---\n\n/);
+
+        // Extract page contents by filtering out empty sections and page labels
+        const pageContents = [];
+        for (const section of sections) {
+          const trimmed = section.trim();
+          // Skip empty sections and page label sections (like "*Page 1*" or "*page 1*")
+          if (trimmed && !trimmed.match(/^\*(?:Page|page)\s*\d+\*$/i)) {
+            pageContents.push(trimmed);
+          }
+        }
+
+        console.log('Saving multi-page document:', {
+          totalSections: sections.length,
+          pageContents: pageContents.length,
+          expectedPages: filesResponse.markdown_files.length,
+          firstPagePreview: pageContents[0]?.substring(0, 100)
+        });
+
+        // Save each page
+        if (pageContents.length !== filesResponse.markdown_files.length) {
+          console.warn(`Mismatch: Found ${pageContents.length} page contents but expected ${filesResponse.markdown_files.length} pages`);
+        }
+
+        for (let i = 0; i < filesResponse.markdown_files.length && i < pageContents.length; i++) {
+          const file = filesResponse.markdown_files[i];
+          const pageContent = pageContents[i];
+          console.log(`Saving page ${file.page_no}, content length: ${pageContent.length}`);
+          await documentService.saveMarkdownContent(filename, pageContent, file.page_no);
+        }
+      } else {
+        // Single page document
+        await documentService.saveMarkdownContent(filename, editedContent);
+      }
+
+      setContent(editedContent);
+      setHasUnsavedChanges(false);
+      messageService.successToast(t("MarkdownViewer.SaveSuccess"));
+
+      // Reload the content to ensure we're in sync
+      await loadMarkdownContent();
+    } catch (error) {
+      messageService.errorToast(t("MarkdownViewer.SaveFailed"));
+      console.error("Error saving markdown:", error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleEditorChange = (e) => {
+    setEditedContent(e.target.value);
+    setHasUnsavedChanges(true);
+  };
+
+  const handleDialogHide = () => {
+    if (hasUnsavedChanges) {
+      if (window.confirm(t("MarkdownViewer.UnsavedChanges"))) {
+        setHasUnsavedChanges(false);
+        onHide();
+      }
+    } else {
+      onHide();
     }
   };
 
@@ -322,7 +408,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
       <Dialog
         header={headerTemplate}
         visible={visible}
-        onHide={onHide}
+        onHide={handleDialogHide}
         modal
         maximizable
         style={{ width: "95vw", height: "95vh" }}
@@ -388,41 +474,72 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
 
           {/* Markdown Content on the Right */}
           <div className="markdown-viewer-content">
-            <div className="search-bar">
-              <InputText
-                placeholder={t("MarkdownViewer.SearchPlaceholder")}
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="search-input"
-              />
-              {searchTerm && (
-                <Button
-                  icon="pi pi-times"
-                  className="p-button-rounded p-button-text p-button-sm"
-                  onClick={() => setSearchTerm("")}
-                />
-              )}
-            </div>
-
             {loading ? (
               <div className="markdown-loading">
                 <ProgressSpinner />
               </div>
             ) : (
-              <div className="markdown-body" ref={contentRef}>
-                <ReactMarkdown
-                  components={markdownComponents}
-                  remarkPlugins={[remarkGfm, remarkMath]}
-                  rehypePlugins={[rehypeRaw, rehypeKatex]}
-                  urlTransform={(url) => {
-                    // Preserve all URLs including base64 data URLs
-                    console.log('URL transform:', url?.substring(0, 100));
-                    return url;
-                  }}
-                >
-                  {highlightedContent}
-                </ReactMarkdown>
-              </div>
+              <TabView activeIndex={activeTabIndex} onTabChange={(e) => setActiveTabIndex(e.index)}>
+                {/* Preview Tab */}
+                <TabPanel header={t("MarkdownViewer.PreviewTab")} leftIcon="pi pi-eye">
+                  <div className="search-bar">
+                    <InputText
+                      placeholder={t("MarkdownViewer.SearchPlaceholder")}
+                      value={searchTerm}
+                      onChange={(e) => setSearchTerm(e.target.value)}
+                      className="search-input"
+                    />
+                    {searchTerm && (
+                      <Button
+                        icon="pi pi-times"
+                        className="p-button-rounded p-button-text p-button-sm"
+                        onClick={() => setSearchTerm("")}
+                      />
+                    )}
+                  </div>
+                  <div className="markdown-body" ref={contentRef}>
+                    <ReactMarkdown
+                      components={markdownComponents}
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeRaw, rehypeKatex]}
+                      urlTransform={(url) => {
+                        // Preserve all URLs including base64 data URLs
+                        console.log('URL transform:', url?.substring(0, 100));
+                        return url;
+                      }}
+                    >
+                      {highlightedContent}
+                    </ReactMarkdown>
+                  </div>
+                </TabPanel>
+
+                {/* Edit Tab */}
+                <TabPanel header={t("MarkdownViewer.EditTab")} leftIcon="pi pi-pencil">
+                  <div className="editor-toolbar">
+                    <Button
+                      label={saving ? t("MarkdownViewer.SavingChanges") : t("MarkdownViewer.SaveChanges")}
+                      icon={saving ? "pi pi-spin pi-spinner" : "pi pi-save"}
+                      onClick={handleSaveMarkdown}
+                      disabled={!hasUnsavedChanges || saving}
+                      className="p-button-success"
+                    />
+                    {hasUnsavedChanges && (
+                      <span className="unsaved-indicator">
+                        <i className="pi pi-exclamation-circle"></i> Unsaved changes
+                      </span>
+                    )}
+                  </div>
+                  <div className="editor-container">
+                    <InputTextarea
+                      value={editedContent}
+                      onChange={handleEditorChange}
+                      className="markdown-editor"
+                      rows={30}
+                      autoResize={false}
+                    />
+                  </div>
+                </TabPanel>
+              </TabView>
             )}
           </div>
         </div>
