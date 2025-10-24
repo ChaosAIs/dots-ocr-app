@@ -37,14 +37,17 @@ def inference_with_vllm(
     )
     try:
         response = client.chat.completions.create(
-            messages=messages, 
-            model=model_name, 
+            messages=messages,
+            model=model_name,
             max_completion_tokens=max_completion_tokens,
             temperature=temperature,
             top_p=top_p)
         response = response.choices[0].message.content
         return response
     except requests.exceptions.RequestException as e:
-        print(f"request error: {e}")
-        return None
+        print(f"Request error: {e}")
+        raise Exception(f"Inference API request failed: {e}")
+    except Exception as e:
+        print(f"Inference error: {e}")
+        raise Exception(f"Inference failed: {e}")
 
