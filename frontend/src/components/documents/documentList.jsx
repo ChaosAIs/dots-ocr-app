@@ -11,7 +11,7 @@ import MarkdownViewer from "./markdownViewer";
 import "./documentList.scss";
 
 export const DocumentList = ({ refreshTrigger }) => {
-  const { t, i18n } = useTranslation();
+  const { t, i18n, ready } = useTranslation();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState(null);
@@ -208,9 +208,14 @@ export const DocumentList = ({ refreshTrigger }) => {
   };
 
   const statusBodyTemplate = (rowData) => {
+    // Force re-render when language changes by using i18n.language
+    const statusText = rowData.markdown_exists
+      ? t("DocumentList.Converted")
+      : t("DocumentList.Pending");
+
     return (
       <span className={`status-badge ${rowData.markdown_exists ? "converted" : "pending"}`}>
-        {rowData.markdown_exists ? t("DocumentList.Converted") : t("DocumentList.Pending")}
+        {statusText}
       </span>
     );
   };
@@ -238,7 +243,8 @@ export const DocumentList = ({ refreshTrigger }) => {
     );
   };
 
-  if (loading && documents.length === 0) {
+  // Show loading spinner while translations are loading or documents are loading
+  if (!ready || (loading && documents.length === 0)) {
     return (
       <div className="document-list-loading">
         <ProgressSpinner />
@@ -266,6 +272,7 @@ export const DocumentList = ({ refreshTrigger }) => {
         </div>
       ) : (
         <DataTable
+          key={i18n.language}
           value={documents}
           className="p-datatable-striped"
           responsiveLayout="scroll"
