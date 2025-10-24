@@ -386,6 +386,28 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         </h3>
       );
     },
+    table({ children, ...props }) {
+      return (
+        <table className="markdown-table" {...props}>
+          {children}
+        </table>
+      );
+    },
+    thead({ children, ...props }) {
+      return <thead {...props}>{children}</thead>;
+    },
+    tbody({ children, ...props }) {
+      return <tbody {...props}>{children}</tbody>;
+    },
+    tr({ children, ...props }) {
+      return <tr {...props}>{children}</tr>;
+    },
+    th({ children, ...props }) {
+      return <th {...props}>{children}</th>;
+    },
+    td({ children, ...props }) {
+      return <td {...props}>{children}</td>;
+    },
   };
 
   const headerTemplate = (
@@ -572,7 +594,7 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               src={selectedPageImage.imageUrl}
               alt={`Page ${selectedPageImage.pageNo}`}
               className="page-image-preview"
-              onError={(e) => {
+              onError={() => {
                 console.error(`Failed to load preview image for page ${selectedPageImage.pageNo}`);
               }}
             />

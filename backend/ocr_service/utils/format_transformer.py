@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+from html.parser import HTMLParser
 
 from PIL import Image
 from dots_ocr.utils.image_utils import PILimage_to_base64
@@ -122,37 +123,197 @@ def get_formula_in_markdown(text: str) -> str:
 def clean_text(text: str) -> str:
     """
     Cleans text by removing extra whitespace.
-    
+
     Args:
         text: The original text.
-        
+
     Returns:
         str: The cleaned text.
     """
     if not text:
         return ""
-    
+
     # Remove leading and trailing whitespace
     text = text.strip()
-    
+
     # Replace multiple consecutive whitespace characters with a single space
     text = re.sub(r'\s+', ' ', text)
-    
+
     return text
+
+
+class HTMLTableParser(HTMLParser):
+    """
+    Parses HTML tables and converts them to Markdown format.
+    """
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+        self.current_row = []
+        self.current_cell = []
+        self.in_table = False
+        self.in_thead = False
+        self.in_tbody = False
+        self.in_tr = False
+        self.in_th = False
+        self.in_td = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag == 'table':
+            self.in_table = True
+            self.rows = []
+        elif tag == 'thead':
+            self.in_thead = True
+        elif tag == 'tbody':
+            self.in_tbody = True
+        elif tag == 'tr':
+            self.in_tr = True
+            self.current_row = []
+        elif tag == 'th':
+            self.in_th = True
+            self.current_cell = []
+        elif tag == 'td':
+            self.in_td = True
+            self.current_cell = []
+
+    def handle_endtag(self, tag):
+        if tag == 'table':
+            self.in_table = False
+        elif tag == 'thead':
+            self.in_thead = False
+        elif tag == 'tbody':
+            self.in_tbody = False
+        elif tag == 'tr':
+            self.in_tr = False
+            if self.current_row:
+                self.rows.append({
+                    'cells': self.current_row.copy(),
+                    'is_header': self.in_thead
+                })
+        elif tag == 'th':
+            self.in_th = False
+            cell_text = ''.join(self.current_cell).strip()
+            self.current_row.append(cell_text)
+        elif tag == 'td':
+            self.in_td = False
+            cell_text = ''.join(self.current_cell).strip()
+            self.current_row.append(cell_text)
+
+    def handle_data(self, data):
+        if self.in_th or self.in_td:
+            self.current_cell.append(data)
+
+
+def html_table_to_markdown(html: str) -> str:
+    """
+    Converts an HTML table to Markdown table format.
+
+    Args:
+        html: HTML string containing a table.
+
+    Returns:
+        str: Markdown formatted table.
+    """
+    if not html or not isinstance(html, str):
+        return html
+
+    # Check if it's actually an HTML table
+    if '<table' not in html.lower():
+        return html
+
+    parser = HTMLTableParser()
+    try:
+        parser.feed(html)
+    except Exception as e:
+        print(f"Error parsing HTML table: {e}")
+        return html
+
+    if not parser.rows:
+        return html
+
+    # Build markdown table
+    markdown_lines = []
+
+    # Determine the maximum number of columns
+    max_cols = max(len(row['cells']) for row in parser.rows) if parser.rows else 0
+
+    if max_cols == 0:
+        return html
+
+    # Process rows
+    has_header = False
+    for i, row in enumerate(parser.rows):
+        cells = row['cells']
+        is_header = row['is_header']
+
+        # Pad cells to match max_cols
+        while len(cells) < max_cols:
+            cells.append('')
+
+        # Escape pipe characters in cell content
+        escaped_cells = [cell.replace('|', '\\|') for cell in cells]
+
+        # Create markdown row
+        markdown_row = '| ' + ' | '.join(escaped_cells) + ' |'
+        markdown_lines.append(markdown_row)
+
+        # Add separator after header row
+        if is_header or (i == 0 and not has_header):
+            separator = '| ' + ' | '.join(['---'] * max_cols) + ' |'
+            markdown_lines.append(separator)
+            has_header = True
+
+    # If no header was found, add separator after first row
+    if not has_header and len(markdown_lines) > 0:
+        separator = '| ' + ' | '.join(['---'] * max_cols) + ' |'
+        markdown_lines.insert(1, separator)
+
+    return '\n'.join(markdown_lines)
+
+
+def is_markdown_table(text: str) -> bool:
+    """
+    Check if text contains a markdown table.
+    A markdown table has rows with pipes and at least one separator row with dashes.
+    Handles both multi-line tables and single-line tables (with \n in the text).
+
+    Args:
+        text: Text to check
+
+    Returns:
+        bool: True if text appears to be a markdown table
+    """
+    if not text or '|' not in text:
+        return False
+
+    # Split by newlines (handles both actual newlines and \n in text)
+    lines = text.split('\n')
+
+    # Check if there's at least one line with pipes and one separator line
+    has_pipes = any('|' in line for line in lines)
+
+    # Check for separator line (contains ---, may have : for alignment, and only | and spaces)
+    has_separator = any(
+        '---' in line and '|' in line and
+        all(c in '|-: \t' for c in line.strip())
+        for line in lines
+    )
+
+    return has_pipes and has_separator
 
 
 def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_page_hf: bool = False) -> str:
     """
     Converts a layout JSON format to Markdown.
-    
+
     In the layout JSON, formulas are LaTeX, tables are HTML, and text is Markdown.
-    
+
     Args:
         image: A PIL Image object.
         cells: A list of dictionaries, each representing a layout cell.
         text_key: The key for the text field in the cell dictionary.
         no_page_header_footer: If True, skips page headers and footers.
-        
+
     Returns:
         str: The text in Markdown format.
     """
@@ -161,19 +322,30 @@ def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_pa
     for i, cell in enumerate(cells):
         x1, y1, x2, y2 = [int(coord) for coord in cell['bbox']]
         text = cell.get(text_key, "")
-        
+
         if no_page_hf and cell['category'] in ['Page-header', 'Page-footer']:
             continue
-        
+
         if cell['category'] == 'Picture':
             image_crop = image.crop((x1, y1, x2, y2))
             image_base64 = PILimage_to_base64(image_crop)
             text_items.append(f"![]({image_base64})")
         elif cell['category'] == 'Formula':
             text_items.append(get_formula_in_markdown(text))
-        else:            
-            text = clean_text(text)
-            text_items.append(f"{text}")
+        elif cell['category'] == 'Table':
+            # Convert HTML table to Markdown table
+            markdown_table = html_table_to_markdown(text)
+            text_items.append(markdown_table)
+        else:
+            # Check if the text contains a markdown table (even if category is not 'Table')
+            # This handles cases where OCR returns markdown tables as plain text
+            if is_markdown_table(text):
+                # Text already contains a properly formatted markdown table
+                # Just append it as-is (it already has newlines)
+                text_items.append(text)
+            else:
+                text = clean_text(text)
+                text_items.append(f"{text}")
 
     markdown_text = '\n\n'.join(text_items)
     return markdown_text
