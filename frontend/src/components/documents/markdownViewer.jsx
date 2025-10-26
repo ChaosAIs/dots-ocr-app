@@ -38,6 +38,14 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const contentRef = useRef(null);
   const imagePanelRef = useRef(null);
 
+  // Helper function to determine if the file is an image/PDF type (should show image preview)
+  const isImageOrPdfFile = (filename) => {
+    if (!filename) return false;
+    const imageExtensions = ['.pdf', '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp'];
+    const extension = '.' + filename.split('.').pop().toLowerCase();
+    return imageExtensions.includes(extension);
+  };
+
   useEffect(() => {
     if (visible && document) {
       loadMarkdownContent();
@@ -460,8 +468,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
             </div>
           )}
 
-          {/* Image Panel in the Middle */}
-          {pageImages.length > 0 && (
+          {/* Image Panel in the Middle - Only show for image/PDF files */}
+          {pageImages.length > 0 && isImageOrPdfFile(document?.filename) && (
             <div className="markdown-image-panel">
               <div className="image-panel-header">
                 <h3>{t("MarkdownViewer.DocumentImages")}</h3>
