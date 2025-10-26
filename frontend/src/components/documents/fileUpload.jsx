@@ -40,7 +40,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         const file = files[i];
         
         // Validate file type
-        const validExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".doc", ".docx", ".xls", ".xlsx"];
+        const validExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".csv", ".tsv"];
         const fileExtension = "." + file.name.split(".").pop().toLowerCase();
         
         if (!validExtensions.includes(fileExtension)) {
@@ -111,7 +111,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
           ref={fileUploadRef}
           name="files"
           multiple
-          accept=".pdf,.png,.jpg,.jpeg,.gif,.bmp,.doc,.docx,.xls,.xlsx"
+          accept=".pdf,.png,.jpg,.jpeg,.gif,.bmp,.doc,.docx,.xls,.xlsx,.txt,.csv,.tsv"
           maxFileSize={52428800} // 50MB
           customUpload
           uploadHandler={handleUpload}

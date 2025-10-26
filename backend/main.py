@@ -15,6 +15,8 @@ import logging
 
 from ocr_service.parser import DotsOCRParser
 from worker_pool import WorkerPool
+from doc_service.document_converter_manager import DocumentConverterManager
+from pathlib import Path
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -49,6 +51,13 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 # Create directories if they don't exist
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# Initialize document converter manager for Word/Excel/TXT files
+doc_converter_manager = DocumentConverterManager(
+    input_folder=INPUT_DIR,
+    output_folder=OUTPUT_DIR,
+    add_section_numbers=True
+)
 
 # Get number of worker threads from environment (default: 4)
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
@@ -306,17 +315,19 @@ def _check_markdown_exists(file_name_without_ext: str) -> tuple:
     """
     Check if markdown file exists for a document.
     Handles both single markdown files and multi-page markdown files.
+    Both OCR and doc_service converters use _nohf.md format.
 
     Returns:
     - (markdown_exists: bool, markdown_path: str or None, is_multipage: bool)
     """
-    # Check for single markdown file (for single-page documents or images)
-    markdown_path = os.path.join(OUTPUT_DIR, file_name_without_ext, f"{file_name_without_ext}_nohf.md")
-    if os.path.exists(markdown_path):
-        return True, markdown_path, False
+    output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+    # Check for single markdown file (for single-page documents, images, Word, Excel, TXT)
+    markdown_path_nohf = os.path.join(output_dir, f"{file_name_without_ext}_nohf.md")
+    if os.path.exists(markdown_path_nohf):
+        return True, markdown_path_nohf, False
 
     # Check for multi-page markdown files (for PDFs with multiple pages)
-    output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
     if os.path.exists(output_dir):
         # Look for page-specific markdown files
         page_files = []
@@ -381,11 +392,62 @@ async def list_documents():
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 
+def _convert_with_doc_service(filename: str, conversion_id: str = None, progress_callback=None):
+    """Background task to convert document using doc_service - executed by worker pool"""
+    file_path = os.path.join(INPUT_DIR, filename)
+    file_path_obj = Path(file_path)
+
+    logger.info(f"Starting doc_service conversion for {filename}")
+
+    # Send progress updates
+    if progress_callback:
+        progress_callback(10, "Starting document conversion...")
+
+    # Find the appropriate converter
+    converter = doc_converter_manager.find_converter_for_file(file_path_obj)
+    if not converter:
+        raise Exception(f"No converter found for file: {filename}")
+
+    if progress_callback:
+        progress_callback(30, "Converting document to markdown...")
+
+    # Create output directory structure matching OCR parser format
+    # output/{filename_without_ext}/{filename_without_ext}_nohf.md
+    filename_without_ext = file_path_obj.stem
+    output_subdir = Path(OUTPUT_DIR) / filename_without_ext
+    output_subdir.mkdir(parents=True, exist_ok=True)
+
+    # Use _nohf.md suffix to match OCR format for frontend grid compatibility
+    output_filename = filename_without_ext + "_nohf.md"
+    output_path = output_subdir / output_filename
+
+    # Convert the file
+    success = converter.convert_file(file_path_obj, output_path)
+
+    if not success:
+        raise Exception(f"Failed to convert {filename}")
+
+    if progress_callback:
+        progress_callback(90, "Conversion complete, finalizing...")
+
+    # Return results in a format similar to OCR parser
+    results = [{
+        "page_no": 0,
+        "md_content_path": str(output_path),
+        "file_path": file_path,
+        "converter_type": "doc_service",
+        "converter_name": converter.get_converter_info()["name"]
+    }]
+
+    logger.info(f"Doc_service conversion completed successfully for {filename}")
+    return results
+
+
 def _convert_document_background(filename: str, prompt_mode: str, conversion_id: str = None, progress_callback=None):
-    """Background task to convert document - executed by worker pool"""
+    """Background task to convert document using OCR parser - executed by worker pool"""
     file_path = os.path.join(INPUT_DIR, filename)
 
-    logger.info(f"Starting conversion for {filename}")
+    logger.info(f"Starting OCR conversion for {filename}")
 
     # Parse the file using the OCR parser with progress callback
     results = parser.parse_file(
@@ -395,14 +457,111 @@ def _convert_document_background(filename: str, prompt_mode: str, conversion_id:
         progress_callback=progress_callback,
     )
 
-    logger.info(f"Conversion completed successfully for {filename}")
+    logger.info(f"OCR conversion completed successfully for {filename}")
     return results
+
+
+@app.post("/convert-doc")
+async def convert_document_with_doc_service(filename: str = Form(...)):
+    """
+    Convert Word/Excel/TXT documents using doc_service converters (non-blocking).
+
+    This endpoint is specifically for structured documents (Word, Excel, TXT files)
+    that don't require OCR processing.
+
+    Returns immediately with a conversion ID. Use WebSocket to track progress.
+    Multiple conversions can run concurrently using the worker pool.
+
+    Parameters:
+    - filename: The name of the file to convert (must be in input folder)
+
+    Returns:
+    - JSON with conversion_id for tracking progress
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        file_path = os.path.join(INPUT_DIR, filename)
+        file_path_obj = Path(file_path)
+
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+        # Validate that this is a doc_service supported file
+        doc_service_extensions = ['.docx', '.doc', '.xlsx', '.xlsm', '.xlsb', '.xls', '.txt', '.csv', '.tsv', '.log', '.text']
+        file_extension = file_path_obj.suffix.lower()
+
+        if file_extension not in doc_service_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type {file_extension} not supported by doc_service. Use /convert endpoint for PDF/images."
+            )
+
+        # Create conversion task
+        conversion_id = conversion_manager.create_conversion(filename)
+
+        # Update status to processing
+        conversion_manager.update_conversion(
+            conversion_id,
+            status="processing",
+            started_at=datetime.now().isoformat(),
+            message="Document conversion queued..."
+        )
+
+        # Broadcast initial status
+        await connection_manager.broadcast(conversion_id, {
+            "status": "processing",
+            "progress": 5,
+            "message": "Document conversion queued...",
+        })
+
+        # Create progress callback for this conversion
+        progress_callback = _create_parser_progress_callback(conversion_id)
+
+        # Submit task to worker pool (using doc_service converter)
+        success = worker_pool.submit_task(
+            conversion_id=conversion_id,
+            func=_convert_with_doc_service,
+            args=(filename,),
+            kwargs={
+                "conversion_id": conversion_id,
+                "progress_callback": progress_callback,
+            }
+        )
+
+        if not success:
+            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
+
+        # Return immediately with conversion ID
+        return JSONResponse(content={
+            "status": "accepted",
+            "conversion_id": conversion_id,
+            "filename": filename,
+            "message": "Document conversion task started. Use WebSocket to track progress.",
+            "converter_type": "doc_service",
+            "queue_size": worker_pool.get_queue_size(),
+            "active_tasks": worker_pool.get_active_tasks_count(),
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting doc_service conversion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
 
 
 @app.post("/convert")
 async def convert_document(filename: str = Form(...), prompt_mode: str = Form("prompt_layout_all_en")):
     """
-    Trigger document conversion (non-blocking).
+    Trigger document conversion using OCR parser (non-blocking).
+
+    This endpoint is for PDF and image files that require OCR processing.
 
     Returns immediately with a conversion ID. Use WebSocket to track progress.
     Multiple conversions can run concurrently using the worker pool.
@@ -630,6 +789,7 @@ async def get_markdown_content(filename: str, page_no: int = None):
     """
     Get the markdown content of a converted document.
     Supports both single markdown files and page-specific markdown files.
+    Both OCR and doc_service converters use _nohf.md format.
 
     Parameters:
     - filename: The name of the file (without extension)
@@ -648,10 +808,10 @@ async def get_markdown_content(filename: str, page_no: int = None):
 
         # Determine which markdown file to read
         if page_no is not None:
-            # Read page-specific markdown file
+            # Read page-specific markdown file (multi-page PDFs)
             markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}_nohf.md")
         else:
-            # Try to find the single markdown file
+            # Read single markdown file (single-page documents, images, Word, Excel, TXT)
             markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
 
         if not os.path.exists(markdown_path):
@@ -679,6 +839,7 @@ async def update_markdown_content(filename: str, request: Request, page_no: int 
     """
     Update the markdown content of a converted document.
     Supports both single markdown files and page-specific markdown files.
+    Both OCR and doc_service converters use _nohf.md format.
 
     Parameters:
     - filename: The name of the file (without extension)
@@ -705,10 +866,10 @@ async def update_markdown_content(filename: str, request: Request, page_no: int 
 
         # Determine which markdown file to write
         if page_no is not None:
-            # Write to page-specific markdown file
+            # Write to page-specific markdown file (multi-page PDFs)
             markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}_nohf.md")
         else:
-            # Write to single markdown file
+            # Write to single markdown file (single-page documents, images, Word, Excel, TXT)
             markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
 
         if not os.path.exists(markdown_path):

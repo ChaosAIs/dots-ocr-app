@@ -47,12 +47,53 @@ class DocumentService {
   }
 
   /**
-   * Start document conversion (non-blocking)
+   * Detect if a file should use doc_service converter
+   * @param {string} filename - The filename to check
+   * @returns {boolean} - True if file should use doc_service
+   */
+  isDocServiceFile(filename) {
+    const docServiceExtensions = [
+      '.docx', '.doc',           // Word documents
+      '.xlsx', '.xlsm', '.xls',  // Excel spreadsheets
+      '.txt', '.csv', '.tsv',    // Plain text files
+      '.log', '.text'            // Other text formats
+    ];
+
+    const extension = '.' + filename.split('.').pop().toLowerCase();
+    return docServiceExtensions.includes(extension);
+  }
+
+  /**
+   * Start document conversion using doc_service (non-blocking)
+   * For Word, Excel, and text files
+   * @param {string} filename - The filename to convert
+   * @returns {Promise} - Response with conversion_id
+   */
+  async convertDocumentWithDocService(filename) {
+    try {
+      const formData = new FormData();
+      formData.append("filename", filename);
+
+      const response = await http.post(
+        `${this.apiDomain}/convert-doc`,
+        formData
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error("Error starting doc_service conversion:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Start document conversion using OCR parser (non-blocking)
+   * For PDF and image files
    * @param {string} filename - The filename to convert
    * @param {string} promptMode - The prompt mode to use
    * @returns {Promise} - Response with conversion_id
    */
-  async convertDocument(filename, promptMode = "prompt_layout_all_en") {
+  async convertDocumentWithOCR(filename, promptMode = "prompt_layout_all_en") {
     try {
       const formData = new FormData();
       formData.append("filename", filename);
@@ -64,6 +105,29 @@ class DocumentService {
       );
 
       return response.data;
+    } catch (error) {
+      console.error("Error starting OCR conversion:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Start document conversion (non-blocking)
+   * Automatically detects file type and routes to appropriate converter
+   * @param {string} filename - The filename to convert
+   * @param {string} promptMode - The prompt mode to use (only for OCR)
+   * @returns {Promise} - Response with conversion_id
+   */
+  async convertDocument(filename, promptMode = "prompt_layout_all_en") {
+    try {
+      // Detect file type and route to appropriate endpoint
+      if (this.isDocServiceFile(filename)) {
+        console.log(`Using doc_service converter for: ${filename}`);
+        return await this.convertDocumentWithDocService(filename);
+      } else {
+        console.log(`Using OCR parser for: ${filename}`);
+        return await this.convertDocumentWithOCR(filename, promptMode);
+      }
     } catch (error) {
       console.error("Error starting conversion:", error);
       throw error;
