@@ -284,6 +284,23 @@ class DocumentService {
   }
 
   /**
+   * Delete a document and all its associated files
+   * @param {string} filename - The filename to delete (with extension)
+   * @returns {Promise} - Delete response
+   */
+  async deleteDocument(filename) {
+    try {
+      const response = await http.delete(
+        `${this.apiDomain}/documents/${filename}`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error deleting document:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Format date for display
    * @param {string} isoString - ISO date string
    * @returns {string} - Formatted date

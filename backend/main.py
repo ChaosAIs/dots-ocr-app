@@ -892,6 +892,97 @@ async def update_markdown_content(filename: str, request: Request, page_no: int 
         raise HTTPException(status_code=500, detail=f"Error updating markdown file: {str(e)}")
 
 
+@app.delete("/documents/{filename}")
+async def delete_document(filename: str):
+    """
+    Delete a document and all its associated files.
+    Removes the uploaded file from input folder and all associated markdown/output files.
+
+    Parameters:
+    - filename: The name of the file to delete (with extension)
+
+    Returns:
+    - Success status with details of deleted files
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        deleted_files = []
+        errors = []
+
+        # Delete the uploaded file from input folder
+        input_file_path = os.path.join(INPUT_DIR, filename)
+        if os.path.exists(input_file_path):
+            try:
+                os.remove(input_file_path)
+                deleted_files.append(input_file_path)
+                logger.info(f"Deleted input file: {input_file_path}")
+            except Exception as e:
+                error_msg = f"Failed to delete input file {input_file_path}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+        else:
+            logger.warning(f"Input file not found: {input_file_path}")
+
+        # Delete the output folder and all its contents
+        file_name_without_ext = os.path.splitext(filename)[0]
+        output_folder_path = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+        if os.path.exists(output_folder_path) and os.path.isdir(output_folder_path):
+            try:
+                import shutil
+                shutil.rmtree(output_folder_path)
+                deleted_files.append(output_folder_path)
+                logger.info(f"Deleted output folder: {output_folder_path}")
+            except Exception as e:
+                error_msg = f"Failed to delete output folder {output_folder_path}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+        else:
+            logger.warning(f"Output folder not found: {output_folder_path}")
+
+        # Delete the JSONL results file if it exists
+        jsonl_file_path = os.path.join(OUTPUT_DIR, f"{file_name_without_ext}.jsonl")
+        if os.path.exists(jsonl_file_path):
+            try:
+                os.remove(jsonl_file_path)
+                deleted_files.append(jsonl_file_path)
+                logger.info(f"Deleted JSONL file: {jsonl_file_path}")
+            except Exception as e:
+                error_msg = f"Failed to delete JSONL file {jsonl_file_path}: {str(e)}"
+                errors.append(error_msg)
+                logger.error(error_msg)
+
+        # If no files were deleted and no errors occurred, the file didn't exist
+        if not deleted_files and not errors:
+            raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+
+        # Return success even if some deletions failed
+        response_data = {
+            "status": "success" if not errors else "partial_success",
+            "filename": filename,
+            "deleted_files": deleted_files,
+            "message": f"Deleted {len(deleted_files)} file(s)/folder(s)",
+        }
+
+        if errors:
+            response_data["errors"] = errors
+            response_data["message"] += f" with {len(errors)} error(s)"
+
+        return JSONResponse(content=response_data)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
+
 @app.get("/image/{filename}")
 async def get_image(filename: str, page_no: int = None):
     """

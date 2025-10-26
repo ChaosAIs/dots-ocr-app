@@ -73,6 +73,31 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
+  const handleDelete = async (document) => {
+    try {
+      // Show confirmation dialog
+      messageService.confirmDeletionDialog(
+        t("DocumentList.ConfirmDelete"),
+        async (confirmed) => {
+          if (confirmed) {
+            try {
+              await documentService.deleteDocument(document.filename);
+              messageService.successToast(t("DocumentList.DeleteSuccess"));
+              // Reload documents list
+              loadDocuments();
+            } catch (error) {
+              messageService.errorToast(t("DocumentList.DeleteFailed"));
+              console.error("Error deleting document:", error);
+            }
+          }
+        }
+      );
+    } catch (error) {
+      messageService.errorToast(t("DocumentList.DeleteFailed"));
+      console.error("Error deleting document:", error);
+    }
+  };
+
   const handleConvert = async (document) => {
     try {
       setConverting(document.filename);
@@ -195,6 +220,13 @@ export const DocumentList = ({ refreshTrigger }) => {
             tooltipPosition="top"
           />
         )}
+        <Button
+          icon="pi pi-trash"
+          className="p-button-rounded p-button-danger"
+          onClick={() => handleDelete(rowData)}
+          tooltip={t("DocumentList.DeleteDocument")}
+          tooltipPosition="top"
+        />
       </div>
     );
   };
