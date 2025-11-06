@@ -340,6 +340,8 @@ class DotsOCRParser:
         output_dir = output_dir or self.output_dir
         output_dir = os.path.abspath(output_dir)
         filename, file_ext = os.path.splitext(os.path.basename(input_path))
+        # Convert extension to lowercase for case-insensitive comparison
+        file_ext = file_ext.lower()
         save_dir = os.path.join(output_dir, filename)
         os.makedirs(save_dir, exist_ok=True)
 
@@ -358,6 +360,10 @@ class DotsOCRParser:
         with open(os.path.join(output_dir, os.path.basename(filename)+'.jsonl'), 'w') as w:
             for result in results:
                 w.write(json.dumps(result, ensure_ascii=False) + '\n')
+
+        # Report final completion
+        if self.progress_callback:
+            self.progress_callback(progress=100, message="Conversion completed successfully")
 
         return results
 

@@ -21,7 +21,7 @@
         "Cancel": "Cancel",
         "Uploading": "Uploading...",
         "SupportedFormats": "Supported formats:",
-        "SupportedFormatsList": "PDF, PNG, JPG, GIF, BMP, DOC, DOCX, XLS, XLSX",
+        "SupportedFormatsList": "PDF, PNG, JPG, GIF, BMP, DOC, DOCX, XLS, XLSX, TXT, CSV, TSV, LOG, TEXT",
         "MaxFileSize": "Max file size:",
         "MaxFileSizeValue": "50MB",
         "PleaseSelectFiles": "Please select files to upload",

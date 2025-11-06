@@ -21,7 +21,7 @@
     "Cancel": "Annuler",
     "Uploading": "Téléchargement en cours...",
     "SupportedFormats": "Formats pris en charge :",
-    "SupportedFormatsList": "PDF, PNG, JPG, GIF, BMP, DOC, DOCX, XLS, XLSX",
+    "SupportedFormatsList": "PDF, PNG, JPG, GIF, BMP, DOC, DOCX, XLS, XLSX, TXT, CSV, TSV, LOG, TEXT",
     "MaxFileSize": "Taille maximale du fichier :",
     "MaxFileSizeValue": "50 Mo",
     "PleaseSelectFiles": "Veuillez sélectionner des fichiers à télécharger",

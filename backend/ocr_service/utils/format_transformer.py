@@ -271,11 +271,109 @@ def html_table_to_markdown(html: str) -> str:
     return '\n'.join(markdown_lines)
 
 
+def normalize_markdown_table(text: str) -> str:
+    """
+    Normalize a markdown table by ensuring each row is on a separate line.
+    Handles tables that are on a single line or have improper formatting.
+
+    Args:
+        text: Markdown table text (may be single-line or multi-line)
+
+    Returns:
+        str: Properly formatted markdown table with each row on a separate line
+    """
+    if not text or '|' not in text:
+        return text
+
+    # If the table already has newlines, check if it's properly formatted
+    if '\n' in text:
+        lines = text.split('\n')
+        # If we have multiple lines with pipes, it's likely already formatted
+        pipe_lines = [line for line in lines if '|' in line]
+        if len(pipe_lines) > 1:
+            return text
+
+    # Find the separator row pattern
+    separator_match = re.search(r'\|[\s\-:]+\|', text)
+    if not separator_match:
+        return text
+
+    # Find the complete separator by extending from the match
+    sep_start = separator_match.start()
+    sep_end = separator_match.end()
+
+    # Extend forward to capture all separator cells
+    while sep_end < len(text) and text[sep_end] in '|-: \t':
+        sep_end += 1
+
+    separator = text[sep_start:sep_end].strip()
+
+    # Count columns by counting the number of dash groups
+    num_cols = len(re.findall(r'-+', separator))
+
+    # Extract header and data
+    header_text = text[:sep_start].strip()
+    data_text = text[sep_end:].strip()
+
+    # Parse header cells
+    header_cells = [c.strip() for c in header_text.split('|')]
+    # Remove empty strings from start/end (artifacts of split)
+    while header_cells and header_cells[0] == '':
+        header_cells.pop(0)
+    while header_cells and header_cells[-1] == '':
+        header_cells.pop()
+
+    # Parse data cells
+    data_cells = [c.strip() for c in data_text.split('|')]
+    # Remove empty strings from start/end
+    while data_cells and data_cells[0] == '':
+        data_cells.pop(0)
+    while data_cells and data_cells[-1] == '':
+        data_cells.pop()
+
+    # Build result
+    result = []
+
+    # Add header
+    if header_cells:
+        header_row = '| ' + ' | '.join(header_cells) + ' |'
+        result.append(header_row)
+
+    # Add separator - create a clean separator based on num_cols
+    clean_separator = '| ' + ' | '.join(['---'] * num_cols) + ' |'
+    result.append(clean_separator)
+
+    # Group data cells into rows
+    # The pattern is: num_cols cells, then 1 empty cell (row boundary marker)
+    # So we process in chunks of (num_cols + 1) and take only the first num_cols
+    if data_cells:
+        i = 0
+        while i < len(data_cells):
+            # Take num_cols cells for this row
+            row_cells = []
+            for j in range(num_cols):
+                if i < len(data_cells):
+                    row_cells.append(data_cells[i])
+                    i += 1
+                else:
+                    row_cells.append('')  # Pad if needed
+
+            # Skip the next cell if it's empty (row boundary marker)
+            if i < len(data_cells) and data_cells[i] == '':
+                i += 1
+
+            # Create the row
+            row_str = '| ' + ' | '.join(row_cells) + ' |'
+            result.append(row_str)
+
+    return '\n'.join(result) if len(result) > 1 else text
+
+
 def is_markdown_table(text: str) -> bool:
     """
     Check if text contains a markdown table.
     A markdown table has rows with pipes and at least one separator row with dashes.
-    Handles both multi-line tables and single-line tables (with \n in the text).
+    Handles both multi-line tables and single-line tables.
 
     Args:
         text: Text to check
@@ -286,7 +384,14 @@ def is_markdown_table(text: str) -> bool:
     if not text or '|' not in text:
         return False
 
-    # Split by newlines (handles both actual newlines and \n in text)
+    # Check for separator pattern (contains --- and |)
+    # This works for both single-line and multi-line tables
+    if '---' in text or '--' in text:
+        # Look for the pattern |--| or | --- | which indicates a separator row
+        if re.search(r'\|[\s\-:]+\|', text):
+            return True
+
+    # Fallback: Split by newlines and check line by line
     lines = text.split('\n')
 
     # Check if there's at least one line with pipes and one separator line
@@ -335,14 +440,16 @@ def layoutjson2md(image: Image.Image, cells: list, text_key: str = 'text', no_pa
         elif cell['category'] == 'Table':
             # Convert HTML table to Markdown table
             markdown_table = html_table_to_markdown(text)
-            text_items.append(markdown_table)
+            # Normalize the table to ensure proper formatting
+            normalized_table = normalize_markdown_table(markdown_table)
+            text_items.append(normalized_table)
         else:
             # Check if the text contains a markdown table (even if category is not 'Table')
             # This handles cases where OCR returns markdown tables as plain text
             if is_markdown_table(text):
-                # Text already contains a properly formatted markdown table
-                # Just append it as-is (it already has newlines)
-                text_items.append(text)
+                # Normalize the table to ensure proper formatting
+                normalized_table = normalize_markdown_table(text)
+                text_items.append(normalized_table)
             else:
                 text = clean_text(text)
                 text_items.append(f"{text}")

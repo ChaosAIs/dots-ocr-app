@@ -821,6 +821,26 @@ async def get_markdown_content(filename: str, page_no: int = None):
         with open(markdown_path, "r", encoding="utf-8") as f:
             content = f.read()
 
+        # Normalize any single-line tables in the content
+        from ocr_service.utils.format_transformer import normalize_markdown_table, is_markdown_table
+
+        # Process the content line by line to find and normalize tables
+        lines = content.split('\n')
+        normalized_lines = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            # Check if this line contains a markdown table
+            if is_markdown_table(line):
+                # Normalize the table
+                normalized_table = normalize_markdown_table(line)
+                normalized_lines.append(normalized_table)
+            else:
+                normalized_lines.append(line)
+            i += 1
+
+        content = '\n'.join(normalized_lines)
+
         return JSONResponse(content={
             "status": "success",
             "filename": filename,

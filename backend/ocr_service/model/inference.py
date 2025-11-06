@@ -11,7 +11,7 @@ import os
 
 def inference_with_vllm(
         image,
-        prompt, 
+        prompt,
         ip="localhost",
         port=8000,
         temperature=0.1,
@@ -19,9 +19,17 @@ def inference_with_vllm(
         max_completion_tokens=32768,
         model_name='model',
         ):
-    
+
     addr = f"http://{ip}:{port}/v1"
-    client = OpenAI(api_key="{}".format(os.environ.get("API_KEY", "0")), base_url=addr)
+    # Set timeout to 3 minutes (180 seconds) to prevent indefinite hanging
+    # Set max_retries to 0 to disable automatic retries (we handle retries at a higher level)
+    # This prevents the "never-ending" behavior where requests retry indefinitely
+    client = OpenAI(
+        api_key="{}".format(os.environ.get("API_KEY", "0")),
+        base_url=addr,
+        timeout=180.0,  # 3 minutes timeout per request
+        max_retries=0   # Disable automatic retries
+    )
     messages = []
     messages.append(
         {
