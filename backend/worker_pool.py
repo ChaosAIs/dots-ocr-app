@@ -50,7 +50,11 @@ class ConversionWorker(threading.Thread):
                         result=result
                     )
                 except Exception as e:
-                    logger.error(f"Error in worker {self.worker_id}: {str(e)}")
+                    logger.error(f"❌ Error in worker {self.worker_id}: {str(e)}")
+                    logger.error(f"   Error type: {type(e).__name__}")
+                    logger.error(f"   Conversion ID: {conversion_id}")
+                    logger.error(f"   Task: {task}")
+                    logger.exception(f"Full stack trace for conversion {conversion_id}:")
                     self.progress_callback(
                         conversion_id=conversion_id,
                         status="error",

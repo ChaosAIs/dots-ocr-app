@@ -70,12 +70,23 @@ class DotsOCRParser:
             smooth_progress: If True, send smooth progress updates (for single images).
                            If False, don't send updates (for PDF pages processed in parallel).
         """
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Log image details before inference
+        image_width, image_height = image.size
+        image_pixels = image_width * image_height
+        logger.info(f"🔍 Starting inference wrapper for image: {image_width}x{image_height} = {image_pixels:,} pixels")
+        logger.info(f"   Smooth progress: {smooth_progress}")
+        logger.info(f"   Prompt length: {len(prompt)} chars")
+
         response = [None]  # Use list to allow modification in thread
         exception = [None]
         start_time = [time.time()]
 
         def run_inference():
             try:
+                logger.info(f"🚀 Calling inference_with_vllm() in thread...")
                 response[0] = inference_with_vllm(
                     image,
                     prompt,
@@ -86,7 +97,11 @@ class DotsOCRParser:
                     top_p=self.top_p,
                     max_completion_tokens=self.max_completion_tokens,
                 )
+                logger.info(f"✅ inference_with_vllm() completed successfully")
             except Exception as e:
+                logger.error(f"❌ inference_with_vllm() failed: {e}")
+                logger.error(f"   Error type: {type(e).__name__}")
+                logger.exception("Full stack trace:")
                 exception[0] = e
 
         # Start inference in a thread

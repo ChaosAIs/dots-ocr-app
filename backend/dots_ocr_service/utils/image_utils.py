@@ -82,13 +82,23 @@ def to_rgb(pil_image: Image.Image) -> Image.Image:
 
 # copy from https://github.com/QwenLM/Qwen2.5-VL/blob/main/qwen-vl-utils/src/qwen_vl_utils/vision_process.py
 def fetch_image(
-        image, 
+        image,
         min_pixels=None,
         max_pixels=None,
         resized_height=None,
         resized_width=None,
     ) -> Image.Image:
+    import logging
+    logger = logging.getLogger(__name__)
+
     assert image is not None, f"image not found, maybe input format error: {image}"
+
+    # Log input parameters
+    image_source = "PIL.Image" if isinstance(image, Image.Image) else (image[:50] + "..." if len(str(image)) > 50 else str(image))
+    logger.info(f"📥 fetch_image() called with: {image_source}")
+    logger.info(f"   min_pixels: {min_pixels}, max_pixels: {max_pixels}")
+    logger.info(f"   resized_height: {resized_height}, resized_width: {resized_width}")
+
     image_obj = None
     if isinstance(image, Image.Image):
         image_obj = image
@@ -111,6 +121,11 @@ def fetch_image(
         image_obj = Image.open(image)
     if image_obj is None:
         raise ValueError(f"Unrecognized image input, support local path, http url, base64 and PIL.Image, got {image}")
+
+    # Log original image size
+    orig_width, orig_height = image_obj.size
+    logger.info(f"📐 Original image loaded: {orig_width}x{orig_height} = {orig_width * orig_height:,} pixels")
+
     image = to_rgb(image_obj)
     ## resize
     if resized_height and resized_width:
@@ -121,6 +136,7 @@ def fetch_image(
         )
         assert resized_height>0 and resized_width>0, f"resized_height: {resized_height}, resized_width: {resized_width}, min_pixels: {min_pixels}, max_pixels:{max_pixels}, width: {width}, height:{height}, "
         image = image.resize((resized_width, resized_height))
+        logger.info(f"📏 Image resized (explicit): {orig_width}x{orig_height} → {resized_width}x{resized_height}")
     elif min_pixels or max_pixels:
         width, height = image.size
         if not min_pixels:
@@ -136,6 +152,11 @@ def fetch_image(
         )
         assert resized_height>0 and resized_width>0, f"resized_height: {resized_height}, resized_width: {resized_width}, min_pixels: {min_pixels}, max_pixels:{max_pixels}, width: {width}, height:{height}, "
         image = image.resize((resized_width, resized_height))
+        logger.info(f"📏 Image resized (smart): {width}x{height} → {resized_width}x{resized_height}")
+        logger.info(f"   min_pixels: {min_pixels:,}, max_pixels: {max_pixels:,}")
+
+    final_width, final_height = image.size
+    logger.info(f"✅ fetch_image() returning: {final_width}x{final_height} = {final_width * final_height:,} pixels")
 
     return image
 

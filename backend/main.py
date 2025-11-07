@@ -290,10 +290,133 @@ async def get_config():
     }
 
 
+def _resize_image_if_needed(file_path: str, max_pixels: int = None) -> dict:
+    """
+    Resize image if it exceeds maximum pixel dimensions.
+
+    Args:
+        file_path: Path to the image file
+        max_pixels: Maximum number of pixels allowed. If None, reads from MAX_PIXELS env var.
+                   Default fallback is 8000000 (safer for vLLM servers with limited memory)
+
+    Returns:
+        dict with keys:
+            - resized: bool indicating if image was resized
+            - original_size: tuple of (width, height) before resize
+            - new_size: tuple of (width, height) after resize (None if not resized)
+            - message: str describing what happened
+    """
+    from PIL import Image
+    import math
+
+    # Get max_pixels from environment variable if not specified
+    if max_pixels is None:
+        max_pixels_env = os.getenv('MAX_PIXELS', '8000000')
+        if max_pixels_env.lower() == 'none':
+            max_pixels = 11289600  # Use absolute maximum if env is None
+        else:
+            max_pixels = int(max_pixels_env)
+
+    # Apply a safety margin (90% of max_pixels) to prevent edge cases
+    # This ensures the image is comfortably within limits after base64 encoding
+    safe_max_pixels = int(max_pixels * 0.9)
+
+    # Check if file is an image
+    file_ext = os.path.splitext(file_path)[1].lower()
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp'}
+
+    if file_ext not in image_extensions:
+        return {
+            "resized": False,
+            "original_size": None,
+            "new_size": None,
+            "message": "Not an image file"
+        }
+
+    try:
+        # Open image and get dimensions
+        with Image.open(file_path) as img:
+            original_width, original_height = img.size
+            original_pixels = original_width * original_height
+
+            # Check if resize is needed
+            if original_pixels <= safe_max_pixels:
+                return {
+                    "resized": False,
+                    "original_size": (original_width, original_height),
+                    "new_size": None,
+                    "message": f"Image size OK ({original_width}x{original_height} = {original_pixels:,} pixels, limit: {safe_max_pixels:,})"
+                }
+
+            # Calculate new dimensions maintaining aspect ratio
+            scale_factor = math.sqrt(safe_max_pixels / original_pixels)
+            new_width = int(original_width * scale_factor)
+            new_height = int(original_height * scale_factor)
+
+            # Ensure dimensions are divisible by 28 (IMAGE_FACTOR) for better compatibility
+            new_width = (new_width // 28) * 28
+            new_height = (new_height // 28) * 28
+
+            # Ensure minimum size
+            if new_width < 28:
+                new_width = 28
+            if new_height < 28:
+                new_height = 28
+
+            # Convert to RGB if necessary (for PNG with transparency, etc.)
+            if img.mode in ('RGBA', 'LA', 'P'):
+                # Create white background
+                rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                if img.mode == 'P':
+                    img = img.convert('RGBA')
+                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
+                img = rgb_img
+            elif img.mode != 'RGB':
+                img = img.convert('RGB')
+
+            # Resize image using high-quality LANCZOS resampling
+            resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            # Save resized image (overwrite original)
+            # Use high quality settings but optimize for size
+            if file_ext in {'.jpg', '.jpeg'}:
+                resized_img.save(file_path, 'JPEG', quality=90, optimize=True)
+            elif file_ext == '.png':
+                # For PNG, convert to JPEG to reduce file size significantly
+                # This helps with base64 encoding and network transfer
+                new_file_path = os.path.splitext(file_path)[0] + '.jpg'
+                resized_img.save(new_file_path, 'JPEG', quality=90, optimize=True)
+                # Remove original PNG and rename JPG to original name
+                if new_file_path != file_path:
+                    os.remove(file_path)
+                    os.rename(new_file_path, file_path)
+            else:
+                # For other formats, save as JPEG
+                resized_img.save(file_path, 'JPEG', quality=90, optimize=True)
+
+            new_pixels = new_width * new_height
+            return {
+                "resized": True,
+                "original_size": (original_width, original_height),
+                "new_size": (new_width, new_height),
+                "message": f"Image resized from {original_width}x{original_height} ({original_pixels:,} pixels) to {new_width}x{new_height} ({new_pixels:,} pixels, limit: {safe_max_pixels:,})"
+            }
+
+    except Exception as e:
+        logger.error(f"Error resizing image {file_path}: {e}")
+        return {
+            "resized": False,
+            "original_size": None,
+            "new_size": None,
+            "message": f"Error resizing image: {str(e)}"
+        }
+
+
 @app.post("/upload")
 async def upload_file(file: UploadFile = File(...)):
     """
     Upload a document file (PDF, image, DOC, EXCEL) to the input folder.
+    Automatically resizes images that are too large to prevent OCR errors.
 
     Parameters:
     - file: The file to upload
@@ -316,16 +439,36 @@ async def upload_file(file: UploadFile = File(...)):
             content = await file.read()
             buffer.write(content)
 
+        # Resize image if needed
+        resize_info = _resize_image_if_needed(file_path)
+
         file_size = os.path.getsize(file_path)
         upload_time = datetime.now().isoformat()
 
-        return JSONResponse(content={
+        response_data = {
             "status": "success",
             "filename": file.filename,
             "file_path": file_path,
             "file_size": file_size,
             "upload_time": upload_time,
-        })
+        }
+
+        # Add resize information if image was resized
+        if resize_info["resized"]:
+            response_data["resized"] = True
+            response_data["original_size"] = resize_info["original_size"]
+            response_data["new_size"] = resize_info["new_size"]
+            response_data["resize_message"] = resize_info["message"]
+            logger.info(f"📏 Image resized: {resize_info['message']}")
+            logger.info(f"   Original: {resize_info['original_size'][0]}x{resize_info['original_size'][1]} = {resize_info['original_size'][0] * resize_info['original_size'][1]:,} pixels")
+            logger.info(f"   New: {resize_info['new_size'][0]}x{resize_info['new_size'][1]} = {resize_info['new_size'][0] * resize_info['new_size'][1]:,} pixels")
+            logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
+        else:
+            orig_w, orig_h = resize_info['original_size']
+            logger.info(f"📏 Image size OK: {orig_w}x{orig_h} = {orig_w * orig_h:,} pixels")
+            logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
+
+        return JSONResponse(content=response_data)
 
     except HTTPException:
         raise

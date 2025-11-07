@@ -270,6 +270,10 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
         'img': ['src', 'alt', 'title', 'width', 'height', 'style'],
         'a': ['href', 'title', 'target'],
       },
+      protocols: {
+        ...defaultSchema.protocols,
+        src: [...(defaultSchema.protocols?.src || []), 'data'], // Allow data: URLs for base64 images
+      },
     };
   }, []);
 
