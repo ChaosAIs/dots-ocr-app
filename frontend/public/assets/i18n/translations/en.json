@@ -59,7 +59,7 @@
         "SelectConverter": "Select Converter",
         "ConverterAuto": "Auto",
         "ConverterDocService": "Doc Service",
-        "ConverterOCRService": "OCR Service",
+        "ConverterDotsOCR": "Dots OCR",
         "ConverterDeepSeekOCR": "DeepSeek OCR"
     },
     "MarkdownViewer": {

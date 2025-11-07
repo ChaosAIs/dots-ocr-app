@@ -219,10 +219,10 @@ export const DocumentList = ({ refreshTrigger }) => {
 
     if (isImage) {
       options.push({ label: t("DocumentList.ConverterDeepSeekOCR"), value: "deepseek_ocr" });
-      options.push({ label: t("DocumentList.ConverterOCRService"), value: "ocr_service" });
+      options.push({ label: t("DocumentList.ConverterDotsOCR"), value: "dots_ocr_service" });
     } else if (!isDocService) {
       // PDF files
-      options.push({ label: t("DocumentList.ConverterOCRService"), value: "ocr_service" });
+      options.push({ label: t("DocumentList.ConverterDotsOCR"), value: "dots_ocr_service" });
     }
 
     return options;

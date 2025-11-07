@@ -153,7 +153,7 @@ class DocumentService {
    * Automatically detects file type and routes to appropriate converter
    * @param {string} filename - The filename to convert
    * @param {string} promptMode - The prompt mode to use (only for OCR)
-   * @param {string} converterType - Optional: 'auto', 'doc_service', 'ocr_service', or 'deepseek_ocr'
+   * @param {string} converterType - Optional: 'auto', 'doc_service', 'dots_ocr_service', or 'deepseek_ocr'
    * @returns {Promise} - Response with conversion_id
    */
   async convertDocument(filename, promptMode = "prompt_layout_all_en", converterType = "auto") {
@@ -165,8 +165,8 @@ class DocumentService {
       } else if (converterType === "doc_service") {
         console.log(`Using doc_service converter for: ${filename}`);
         return await this.convertDocumentWithDocService(filename);
-      } else if (converterType === "ocr_service") {
-        console.log(`Using OCR parser for: ${filename}`);
+      } else if (converterType === "dots_ocr_service") {
+        console.log(`Using DOTS OCR parser for: ${filename}`);
         return await this.convertDocumentWithOCR(filename, promptMode);
       }
 

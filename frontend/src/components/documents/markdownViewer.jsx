@@ -11,6 +11,8 @@ import remarkMath from "remark-math";
 import remarkGfm from "remark-gfm";
 import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
+import rehypeSanitize from "rehype-sanitize";
+import { defaultSchema } from "rehype-sanitize";
 import "katex/dist/katex.min.css";
 import SyntaxHighlighter from "react-syntax-highlighter";
 import { atomOneDark } from "react-syntax-highlighter/dist/esm/styles/hljs";
@@ -241,6 +243,35 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const highlightedContent = useMemo(() => {
     return content;
   }, [content]);
+
+  // Custom sanitize schema that allows common HTML elements but prevents invalid tags
+  const customSanitizeSchema = useMemo(() => {
+    return {
+      ...defaultSchema,
+      tagNames: [
+        ...(defaultSchema.tagNames || []),
+        // Allow common HTML table elements
+        'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+        // Allow other common elements
+        'div', 'span', 'p', 'br', 'hr',
+        'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
+        'ul', 'ol', 'li',
+        'a', 'img',
+        'strong', 'em', 'b', 'i', 'u',
+        'code', 'pre',
+        'blockquote',
+      ],
+      attributes: {
+        ...defaultSchema.attributes,
+        '*': ['className', 'style', 'id', 'align', 'valign'],
+        'td': ['colspan', 'rowspan', 'align', 'valign', 'style'],
+        'th': ['colspan', 'rowspan', 'align', 'valign', 'style'],
+        'table': ['border', 'cellpadding', 'cellspacing', 'style'],
+        'img': ['src', 'alt', 'title', 'width', 'height', 'style'],
+        'a': ['href', 'title', 'target'],
+      },
+    };
+  }, []);
 
   const handleDownload = () => {
     const element = window.document.createElement("a");
@@ -531,7 +562,11 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
                     <ReactMarkdown
                       components={markdownComponents}
                       remarkPlugins={[remarkGfm, remarkMath]}
-                      rehypePlugins={[rehypeRaw, rehypeKatex]}
+                      rehypePlugins={[
+                        rehypeRaw,
+                        [rehypeSanitize, customSanitizeSchema],
+                        rehypeKatex
+                      ]}
                       urlTransform={(url) => {
                         // Preserve all URLs including base64 data URLs
                         console.log('URL transform:', url?.substring(0, 100));

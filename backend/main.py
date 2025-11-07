@@ -13,7 +13,7 @@ from typing import Dict, Set
 import uuid
 import logging
 
-from ocr_service.parser import DotsOCRParser
+from dots_ocr_service.parser import DotsOCRParser
 from worker_pool import WorkerPool
 from doc_service.document_converter_manager import DocumentConverterManager
 from deepseek_ocr_service.deepseek_ocr_converter import DeepSeekOCRConverter
@@ -992,7 +992,7 @@ async def get_markdown_content(filename: str, page_no: int = None):
             content = f.read()
 
         # Normalize any single-line tables in the content
-        from ocr_service.utils.format_transformer import normalize_markdown_table, is_markdown_table
+        from dots_ocr_service.utils.format_transformer import normalize_markdown_table, is_markdown_table
 
         # Process the content line by line to find and normalize tables
         lines = content.split('\n')

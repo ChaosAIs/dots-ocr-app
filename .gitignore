@@ -14,3 +14,6 @@ backend/__pycache__/
 DeekSeek-OCR--Dockerized-API/
 download_log.txt
 backend/deepseek_ocr_service/__pycache__/
+backend/dots_ocr_service/__pycache__/
+backend/dots_ocr_service/model/__pycache__/
+backend/dots_ocr_service/utils/__pycache__/
