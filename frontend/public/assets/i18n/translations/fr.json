@@ -55,7 +55,12 @@
     "FailedToLoad": "Échec du chargement des documents",
     "FailedToView": "Échec de l'affichage du markdown",
     "FailedToConvert": "Échec du démarrage de la conversion",
-    "PaginatorTemplate": "{first} à {last} sur {totalRecords}"
+    "PaginatorTemplate": "{first} à {last} sur {totalRecords}",
+    "SelectConverter": "Sélectionner le convertisseur",
+    "ConverterAuto": "Auto",
+    "ConverterDocService": "Service Doc",
+    "ConverterOCRService": "Service OCR",
+    "ConverterDeepSeekOCR": "DeepSeek OCR"
   },
   "MarkdownViewer": {
     "DownloadMarkdown": "Télécharger le Markdown",

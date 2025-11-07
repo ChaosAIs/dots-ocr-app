@@ -39,11 +39,25 @@
     display: flex;
     gap: 10px;
     justify-content: center;
+    align-items: center;
 
     .p-button {
       width: 40px;
       height: 40px;
       padding: 0;
+    }
+
+    .converter-dropdown {
+      min-width: 150px;
+
+      :deep(.p-dropdown) {
+        height: 40px;
+
+        .p-dropdown-label {
+          padding: 0.5rem;
+          font-size: 0.875rem;
+        }
+      }
     }
   }
 

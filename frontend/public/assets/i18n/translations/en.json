@@ -55,7 +55,12 @@
         "FailedToLoad": "Failed to load documents",
         "FailedToView": "Failed to view markdown",
         "FailedToConvert": "Failed to start conversion",
-        "PaginatorTemplate": "{first} to {last} of {totalRecords}"
+        "PaginatorTemplate": "{first} to {last} of {totalRecords}",
+        "SelectConverter": "Select Converter",
+        "ConverterAuto": "Auto",
+        "ConverterDocService": "Doc Service",
+        "ConverterOCRService": "OCR Service",
+        "ConverterDeepSeekOCR": "DeepSeek OCR"
     },
     "MarkdownViewer": {
         "DownloadMarkdown": "Download Markdown",

@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { DataTable } from "primereact/datatable";
 import { Column } from "primereact/column";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { ProgressBar } from "primereact/progressbar";
+import { Dropdown } from "primereact/dropdown";
 import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
@@ -18,6 +19,7 @@ export const DocumentList = ({ refreshTrigger }) => {
   const [showMarkdownViewer, setShowMarkdownViewer] = useState(false);
   const [converting, setConverting] = useState(null);
   const [webSockets, setWebSockets] = useState({}); // conversion_id -> websocket
+  const [converterTypes, setConverterTypes] = useState({}); // filename -> converter type
 
   // Load documents on component mount and when refreshTrigger changes
   useEffect(() => {
@@ -112,10 +114,14 @@ export const DocumentList = ({ refreshTrigger }) => {
         )
       );
 
+      // Get the selected converter type for this document (default to "auto")
+      const converterType = converterTypes[document.filename] || "auto";
+
       // Start conversion (returns immediately with conversion_id)
       const response = await documentService.convertDocument(
         document.filename,
-        "prompt_layout_all_en"
+        "prompt_layout_all_en",
+        converterType
       );
 
       if (response.status === "accepted" && response.conversion_id) {
@@ -198,7 +204,34 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
+  // Get converter options based on file type
+  const getConverterOptions = (filename) => {
+    const isImage = documentService.isImageFile(filename);
+    const isDocService = documentService.isDocServiceFile(filename);
+
+    const options = [
+      { label: t("DocumentList.ConverterAuto"), value: "auto" }
+    ];
+
+    if (isDocService) {
+      options.push({ label: t("DocumentList.ConverterDocService"), value: "doc_service" });
+    }
+
+    if (isImage) {
+      options.push({ label: t("DocumentList.ConverterDeepSeekOCR"), value: "deepseek_ocr" });
+      options.push({ label: t("DocumentList.ConverterOCRService"), value: "ocr_service" });
+    } else if (!isDocService) {
+      // PDF files
+      options.push({ label: t("DocumentList.ConverterOCRService"), value: "ocr_service" });
+    }
+
+    return options;
+  };
+
   const actionBodyTemplate = (rowData) => {
+    const converterOptions = getConverterOptions(rowData.filename);
+    const selectedConverter = converterTypes[rowData.filename] || "auto";
+
     return (
       <div className="action-buttons">
         {rowData.markdown_exists ? (
@@ -210,15 +243,30 @@ export const DocumentList = ({ refreshTrigger }) => {
             tooltipPosition="top"
           />
         ) : (
-          <Button
-            icon="pi pi-refresh"
-            className="p-button-rounded p-button-warning"
-            onClick={() => handleConvert(rowData)}
-            loading={converting === rowData.filename}
-            disabled={converting !== null}
-            tooltip={t("DocumentList.ConvertToMarkdown")}
-            tooltipPosition="top"
-          />
+          <>
+            {converterOptions.length > 1 && (
+              <Dropdown
+                value={selectedConverter}
+                options={converterOptions}
+                onChange={(e) => {
+                  const newValue = e.value;
+                  setConverterTypes(prev => ({ ...prev, [rowData.filename]: newValue }));
+                }}
+                placeholder={t("DocumentList.SelectConverter")}
+                className="converter-dropdown"
+                disabled={converting === rowData.filename}
+              />
+            )}
+            <Button
+              icon="pi pi-refresh"
+              className="p-button-rounded p-button-warning"
+              onClick={() => handleConvert(rowData)}
+              loading={converting === rowData.filename}
+              disabled={converting !== null}
+              tooltip={t("DocumentList.ConvertToMarkdown")}
+              tooltipPosition="top"
+            />
+          </>
         )}
         <Button
           icon="pi pi-trash"
@@ -304,8 +352,9 @@ export const DocumentList = ({ refreshTrigger }) => {
         </div>
       ) : (
         <DataTable
-          key={i18n.language}
+          key={`${i18n.language}-${JSON.stringify(converterTypes)}`}
           value={documents}
+          dataKey="filename"
           className="p-datatable-striped"
           responsiveLayout="scroll"
           paginator

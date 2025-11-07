@@ -64,6 +64,20 @@ class DocumentService {
   }
 
   /**
+   * Detect if a file is an image that can use DeepSeek OCR
+   * @param {string} filename - The filename to check
+   * @returns {boolean} - True if file is an image
+   */
+  isImageFile(filename) {
+    const imageExtensions = [
+      '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'
+    ];
+
+    const extension = '.' + filename.split('.').pop().toLowerCase();
+    return imageExtensions.includes(extension);
+  }
+
+  /**
    * Start document conversion using doc_service (non-blocking)
    * For Word, Excel, and text files
    * @param {string} filename - The filename to convert
@@ -112,20 +126,56 @@ class DocumentService {
   }
 
   /**
+   * Start image conversion using DeepSeek OCR service (non-blocking)
+   * For image files only
+   * @param {string} filename - The filename to convert
+   * @returns {Promise} - Response with conversion_id
+   */
+  async convertDocumentWithDeepSeekOCR(filename) {
+    try {
+      const formData = new FormData();
+      formData.append("filename", filename);
+
+      const response = await http.post(
+        `${this.apiDomain}/convert-deepseek`,
+        formData
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error("Error starting DeepSeek OCR conversion:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Start document conversion (non-blocking)
    * Automatically detects file type and routes to appropriate converter
    * @param {string} filename - The filename to convert
    * @param {string} promptMode - The prompt mode to use (only for OCR)
+   * @param {string} converterType - Optional: 'auto', 'doc_service', 'ocr_service', or 'deepseek_ocr'
    * @returns {Promise} - Response with conversion_id
    */
-  async convertDocument(filename, promptMode = "prompt_layout_all_en") {
+  async convertDocument(filename, promptMode = "prompt_layout_all_en", converterType = "auto") {
     try {
-      // Detect file type and route to appropriate endpoint
-      if (this.isDocServiceFile(filename)) {
+      // If converter type is explicitly specified, use it
+      if (converterType === "deepseek_ocr") {
+        console.log(`Using DeepSeek OCR converter for: ${filename}`);
+        return await this.convertDocumentWithDeepSeekOCR(filename);
+      } else if (converterType === "doc_service") {
         console.log(`Using doc_service converter for: ${filename}`);
         return await this.convertDocumentWithDocService(filename);
-      } else {
+      } else if (converterType === "ocr_service") {
         console.log(`Using OCR parser for: ${filename}`);
+        return await this.convertDocumentWithOCR(filename, promptMode);
+      }
+
+      // Auto-detect file type and route to appropriate endpoint
+      if (this.isDocServiceFile(filename)) {
+        console.log(`Auto-detected: Using doc_service converter for: ${filename}`);
+        return await this.convertDocumentWithDocService(filename);
+      } else {
+        console.log(`Auto-detected: Using OCR parser for: ${filename}`);
         return await this.convertDocumentWithOCR(filename, promptMode);
       }
     } catch (error) {

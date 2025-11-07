@@ -16,6 +16,7 @@ import logging
 from ocr_service.parser import DotsOCRParser
 from worker_pool import WorkerPool
 from doc_service.document_converter_manager import DocumentConverterManager
+from deepseek_ocr_service.deepseek_ocr_converter import DeepSeekOCRConverter
 from pathlib import Path
 
 # Setup logging
@@ -57,6 +58,27 @@ doc_converter_manager = DocumentConverterManager(
     input_folder=INPUT_DIR,
     output_folder=OUTPUT_DIR,
     add_section_numbers=True
+)
+
+# Initialize DeepSeek OCR converter for image files
+deepseek_ocr_ip = os.getenv("DEEPSEEK_OCR_IP", "localhost")
+deepseek_ocr_port = os.getenv("DEEPSEEK_OCR_PORT", "8005")
+deepseek_ocr_model = os.getenv("DEEPSEEK_OCR_MODEL_NAME", "deepseek-ai/DeepSeek-OCR")
+deepseek_ocr_temperature = float(os.getenv("DEEPSEEK_OCR_TEMPERATURE", "0.0"))
+deepseek_ocr_max_tokens = int(os.getenv("DEEPSEEK_OCR_MAX_TOKENS", "8192"))
+deepseek_ocr_ngram_size = int(os.getenv("DEEPSEEK_OCR_NGRAM_SIZE", "30"))
+deepseek_ocr_window_size = int(os.getenv("DEEPSEEK_OCR_WINDOW_SIZE", "90"))
+deepseek_ocr_whitelist_str = os.getenv("DEEPSEEK_OCR_WHITELIST_TOKEN_IDS", "128821,128822")
+deepseek_ocr_whitelist = [int(x.strip()) for x in deepseek_ocr_whitelist_str.split(",") if x.strip()]
+
+deepseek_ocr_converter = DeepSeekOCRConverter(
+    api_base=f"http://{deepseek_ocr_ip}:{deepseek_ocr_port}/v1",
+    model_name=deepseek_ocr_model,
+    temperature=deepseek_ocr_temperature,
+    max_tokens=deepseek_ocr_max_tokens,
+    ngram_size=deepseek_ocr_ngram_size,
+    window_size=deepseek_ocr_window_size,
+    whitelist_token_ids=deepseek_ocr_whitelist,
 )
 
 # Get number of worker threads from environment (default: 4)
@@ -461,6 +483,59 @@ def _convert_document_background(filename: str, prompt_mode: str, conversion_id:
     return results
 
 
+def _convert_with_deepseek_ocr(filename: str, conversion_id: str = None, progress_callback=None):
+    """Background task to convert image using DeepSeek OCR - executed by worker pool"""
+    file_path = os.path.join(INPUT_DIR, filename)
+    file_path_obj = Path(file_path)
+
+    logger.info(f"Starting DeepSeek OCR conversion for {filename}")
+
+    # Send progress updates
+    if progress_callback:
+        progress_callback(10, "Starting DeepSeek OCR conversion...")
+
+    # Validate that this is an image file
+    if not deepseek_ocr_converter.is_supported_file(file_path_obj):
+        raise Exception(f"File type not supported by DeepSeek OCR: {filename}")
+
+    if progress_callback:
+        progress_callback(30, "Converting image to markdown with DeepSeek OCR...")
+
+    # Create output directory structure matching OCR parser format
+    # output/{filename_without_ext}/{filename_without_ext}_nohf.md
+    filename_without_ext = file_path_obj.stem
+    output_subdir = Path(OUTPUT_DIR) / filename_without_ext
+    output_subdir.mkdir(parents=True, exist_ok=True)
+
+    # Use _nohf.md suffix to match OCR format for frontend grid compatibility
+    output_filename = filename_without_ext + "_nohf.md"
+    output_path = output_subdir / output_filename
+
+    if progress_callback:
+        progress_callback(50, "Calling DeepSeek OCR API...")
+
+    # Convert the file
+    success = deepseek_ocr_converter.convert_file(file_path_obj, output_path)
+
+    if not success:
+        raise Exception(f"Failed to convert {filename} with DeepSeek OCR")
+
+    if progress_callback:
+        progress_callback(90, "Conversion complete, finalizing...")
+
+    # Return results in a format similar to OCR parser
+    results = [{
+        "page_no": 0,
+        "md_content_path": str(output_path),
+        "file_path": str(file_path),
+        "converter_type": "deepseek_ocr",
+        "converter_name": "DeepSeek OCR"
+    }]
+
+    logger.info(f"DeepSeek OCR conversion completed successfully for {filename}")
+    return results
+
+
 @app.post("/convert-doc")
 async def convert_document_with_doc_service(filename: str = Form(...)):
     """
@@ -553,6 +628,101 @@ async def convert_document_with_doc_service(filename: str = Form(...)):
         raise
     except Exception as e:
         logger.error(f"Error starting doc_service conversion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
+
+
+@app.post("/convert-deepseek")
+async def convert_document_with_deepseek_ocr(filename: str = Form(...)):
+    """
+    Convert images using DeepSeek OCR service (non-blocking).
+
+    This endpoint is specifically for image files that will be converted using
+    the DeepSeek OCR model for high-quality OCR and markdown generation.
+
+    Returns immediately with a conversion ID. Use WebSocket to track progress.
+    Multiple conversions can run concurrently using the worker pool.
+
+    Parameters:
+    - filename: The name of the image file to convert (must be in input folder)
+
+    Returns:
+    - JSON with conversion_id for tracking progress
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        file_path = os.path.join(INPUT_DIR, filename)
+        file_path_obj = Path(file_path)
+
+        # Check if file exists
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+
+        # Validate that this is a DeepSeek OCR supported file (images only)
+        deepseek_ocr_extensions = deepseek_ocr_converter.get_supported_extensions()
+        file_extension = file_path_obj.suffix.lower()
+
+        if file_extension not in deepseek_ocr_extensions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type {file_extension} not supported by DeepSeek OCR. Supported types: {', '.join(deepseek_ocr_extensions)}"
+            )
+
+        # Create conversion task
+        conversion_id = conversion_manager.create_conversion(filename)
+
+        # Update status to processing
+        conversion_manager.update_conversion(
+            conversion_id,
+            status="processing",
+            started_at=datetime.now().isoformat(),
+            message="DeepSeek OCR conversion queued..."
+        )
+
+        # Broadcast initial status
+        await connection_manager.broadcast(conversion_id, {
+            "status": "processing",
+            "progress": 5,
+            "message": "DeepSeek OCR conversion queued...",
+        })
+
+        # Create progress callback for this conversion
+        progress_callback = _create_parser_progress_callback(conversion_id)
+
+        # Submit task to worker pool (using DeepSeek OCR converter)
+        success = worker_pool.submit_task(
+            conversion_id=conversion_id,
+            func=_convert_with_deepseek_ocr,
+            args=(filename,),
+            kwargs={
+                "conversion_id": conversion_id,
+                "progress_callback": progress_callback,
+            }
+        )
+
+        if not success:
+            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
+
+        # Return immediately with conversion ID
+        return JSONResponse(content={
+            "status": "accepted",
+            "conversion_id": conversion_id,
+            "filename": filename,
+            "message": "DeepSeek OCR conversion task started. Use WebSocket to track progress.",
+            "converter_type": "deepseek_ocr",
+            "queue_size": worker_pool.get_queue_size(),
+            "active_tasks": worker_pool.get_active_tasks_count(),
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting DeepSeek OCR conversion: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
 
 
