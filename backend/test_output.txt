@@ -1,0 +1,557 @@
+✅ Found image: input/One-Pager-Business-Monthly-Financial-Report.png
+✅ Encoded image to base64 (151900 chars)
+
+================================================================================
+Testing prompt: NEW: Simple Dashboard
+Prompt: Extract all text and data from this image. Convert to markdown....
+================================================================================
+📞 Calling DeepSeek OCR API...
+✅ Response received!
+   Length: 12754 characters
+
+================================================================================
+FULL OUTPUT:
+================================================================================
+# One Pager Business Monthly Financial Report
+
+This one pager covers business monthly financial report to assess performance. It involves details such as gross profit margin, operating and net profit margin, details of financial and income statement.
+
+## Financial Report: May 2023
+
+- **Gross profit**  
+  79%
+
+- **Operating profit margin**  
+  30%
+
+- **Net profit margin**  
+  12%
+
+---
+
+## Cash position
+
+### Cash Balance
+- **IN**  
+  $199.28 MM  
+- **OUT**  
+  $150.66 MM  
+
+### Cash at end of Month
+- Jan-22  
+- Feb-22  
+- Mar-22  
+- Apr-22  
+- May-22  
+
+---
+
+## OPEX
+
+### Month to Month YTD
+- **OPEX**  
+- **Marketing**  
+- **Add text here**  
+- **Add text here2**  
+
+$100k  
+$75k  
+$50k  
+$25k  
+$0k  
+
+Apr-22  
+May-22  
+Jun-22  
+Jul-22  
+Aug-22  
+
+---
+
+## Revenue Breakdown
+
+- **Add text here**  
+- **Add text here2**  
+- **Add text here3**  
+- **Add text here4**  
+- **Add text here5**  
+- **Add text here6**  
+- **Add text here7**  
+- **Add text here8**  
+- **Add text here9**  
+- **Add text here10**  
+- **Add text here11**  
+- **Add text here12**  
+- **Add text here13**  
+- **Add text here14**  
+- **Add text here15**  
+- **Add text here16**  
+- **Add text here17**  
+- **Add text here18**  
+- **Add text here19**  
+- **Add text here20**  
+- **Add text here21**  
+- **Add text here22**  
+- **Add text here23**  
+- **Add text here24**  
+- **Add text here25**  
+- **Add text here26**  
+- **Add text here27**  
+- **Add text here28**  
+- **Add text here29**  
+- **Add text here30**  
+- **Add text here31**  
+- **Add text here32**  
+- **Add text here33**  
+- **Add text here34**  
+- **Add text here35**  
+- **Add text here36**  
+- **Add text here37**  
+- **Add text here38**  
+- **Add text here39**  
+- **Add text here40**  
+- **Add text here41**  
+- **Add text here42**  
+- **Add text here43**  
+- **Add text here44**  
+- **Add text here45**  
+- **Add text here46**  
+- **Add text here47**  
+- **Add text here48**  
+- **Add text here49**  
+- **Add text here50**  
+- **Add text here51**  
+- **Add text here52**  
+- **Add text here53**  
+- **Add text here54**  
+- **Add text here55**  
+- **Add text here56**  
+- **Add text here57**  
+- **Add text here58**  
+- **Add text here59**  
+- **Add text here60**  
+- **Add text here61**  
+- **Add text here62**  
+- **Add text here63**  
+- **Add text here64**  
+- **Add text here65**  
+- **Add text here66**  
+- **Add text here67**  
+- **Add text here68**  
+- **Add text here69**  
+- **Add text here70**  
+- **Add text here71**  
+- **Add text here72**  
+- **Add text here73**  
+- **Add text here74**  
+- **Add text here75**  
+- **Add text here76**  
+- **Add text here77**  
+- **Add text here78**  
+- **Add text here79**  
+- **Add text here80**  
+- **Add text here81**  
+- **Add text here82**  
+- **Add text here83**  
+- **Add text here84**  
+- **Add text here85**  
+- **Add text here86**  
+- **Add text here87**  
+- **Add text here88**  
+- **Add text here89**  
+- **Add text here90**  
+- **Add text here91**  
+- **Add text here92**  
+- **Add text here93**  
+- **Add text here94**  
+- **Add text here95**  
+- **Add text here96**  
+- **Add text here97**  
+- **Add text here98**  
+- **Add text here99**  
+- **Add text here100**  
+- **Add text here101**  
+- **Add text here102**  
+- **Add text here103**  
+- **Add text here104**  
+- **Add text here105**  
+- **Add text here106**  
+- **Add text here107**  
+- **Add text here108**  
+- **Add text here109**  
+- **Add text here110**  
+- **Add text here111**  
+- **Add text here112**  
+- **Add text here113**  
+- **Add text here114**  
+- **Add text here115**  
+- **Add text here116**  
+- **Add text here117**  
+- **Add text here118**  
+- **Add text here119**  
+- **Add text here120**  
+- **Add text here121**  
+- **Add text here122**  
+- **Add text here123**  
+- **Add text here124**  
+- **Add text here125**  
+- **Add text here126**  
+- **Add text here127**  
+- **Add text here128**  
+- **Add text here129**  
+- **Add text here130**  
+- **Add text here131**  
+- **Add text here132**  
+- **Add text here133**  
+- **Add text here134**  
+- **Add text here135**  
+- **Add text here136**  
+- **Add text here137**  
+- **Add text here138**  
+- **Add text here139**  
+- **Add text here140**  
+- **Add text here141**  
+- **Add text here142**  
+- **Add text here143**  
+- **Add text here144**  
+- **Add text here145**  
+- **Add text here146**  
+- **Add text here147**  
+- **Add text here148**  
+- **Add text here149**  
+- **Add text here150**  
+- **Add text here151**  
+- **Add text here152**  
+- **Add text here153**  
+- **Add text here154**  
+- **Add text here155**  
+- **Add text here156**  
+- **Add text here157**  
+- **Add text here158**  
+- **Add text here159**  
+- **Add text here160**  
+- **Add text here161**  
+- **Add text here162**  
+- **Add text here163**  
+- **Add text here164**  
+- **Add text here165**  
+- **Add text here166**  
+- **Add text here167**  
+- **Add text here168**  
+- **Add text here169**  
+- **Add text here170**  
+- **Add text here171**  
+- **Add text here172**  
+- **Add text here173**  
+- **Add text here174**  
+- **Add text here175**  
+- **Add text here176**  
+- **Add text here177**  
+- **Add text here178**  
+- **Add text here179**  
+- **Add text here180**  
+- **Add text here181**  
+- **Add text here182**  
+- **Add text here183**  
+- **Add text here184**  
+- **Add text here185**  
+- **Add text here186**  
+- **Add text here187**  
+- **Add text here188**  
+- **Add text here189**  
+- **Add text here190**  
+- **Add text here191**  
+- **Add text here192**  
+- **Add text here193**  
+- **Add text here194**  
+- **Add text here195**  
+- **Add text here196**  
+- **Add text here197**  
+- **Add text here198**  
+- **Add text here199**  
+- **Add text here200**  
+- **Add text here201**  
+- **Add text here202**  
+- **Add text here203**  
+- **Add text here204**  
+- **Add text here205**  
+- **Add text here206**  
+- **Add text here207**  
+- **Add text here208**  
+- **Add text here209**  
+- **Add text here210**  
+- **Add text here211**  
+- **Add text here212**  
+- **Add text here213**  
+- **Add text here214**  
+- **Add text here215**  
+- **Add text here216**  
+- **Add text here217**  
+- **Add text here218**  
+- **Add text here219**  
+- **Add text here220**  
+- **Add text here221**  
+- **Add text here222**  
+- **Add text here223**  
+- **Add text here224**  
+- **Add text here225**  
+- **Add text here226**  
+- **Add text here227**  
+- **Add text here228**  
+- **Add text here229**  
+- **Add text here230**  
+- **Add text here231**  
+- **Add text here232**  
+- **Add text here233**  
+- **Add text here234**  
+- **Add text here235**  
+- **Add text here236**  
+- **Add text here237**  
+- **Add text here238**  
+- **Add text here239**  
+- **Add text here240**  
+- **Add text here241**  
+- **Add text here242**  
+- **Add text here243**  
+- **Add text here244**  
+- **Add text here245**  
+- **Add text here246**  
+- **Add text here247**  
+- **Add text here248**  
+- **Add text here249**  
+- **Add text here250**  
+- **Add text here251**  
+- **Add text here252**  
+- **Add text here253**  
+- **Add text here254**  
+- **Add text here255**  
+- **Add text here256**  
+- **Add text here257**  
+- **Add text here258**  
+- **Add text here259**  
+- **Add text here260**  
+- **Add text here261**  
+- **Add text here262**  
+- **Add text here263**  
+- **Add text here264**  
+- **Add text here265**  
+- **Add text here266**  
+- **Add text here267**  
+- **Add text here268**  
+- **Add text here269**  
+- **Add text here270**  
+- **Add text here271**  
+- **Add text here272**  
+- **Add text here273**  
+- **Add text here274**  
+- **Add text here275**  
+- **Add text here276**  
+- **Add text here277**  
+- **Add text here278**  
+- **Add text here279**  
+- **Add text here280**  
+- **Add text here281**  
+- **Add text here282**  
+- **Add text here283**  
+- **Add text here284**  
+- **Add text here285**  
+- **Add text here286**  
+- **Add text here287**  
+- **Add text here288**  
+- **Add text here289**  
+- **Add text here290**  
+- **Add text here291**  
+- **Add text here292**  
+- **Add text here293**  
+- **Add text here294**  
+- **Add text here295**  
+- **Add text here296**  
+- **Add text here297**  
+- **Add text here298**  
+- **Add text here299**  
+- **Add text here300**  
+- **Add text here301**  
+- **Add text here302**  
+- **Add text here303**  
+- **Add text here304**  
+- **Add text here305**  
+- **Add text here306**  
+- **Add text here307**  
+- **Add text here308**  
+- **Add text here309**  
+- **Add text here310**  
+- **Add text here311**  
+- **Add text here312**  
+- **Add text here313**  
+- **Add text here314**  
+- **Add text here315**  
+- **Add text here316**  
+- **Add text here317**  
+- **Add text here318**  
+- **Add text here319**  
+- **Add text here320**  
+- **Add text here321**  
+- **Add text here322**  
+- **Add text here323**  
+- **Add text here324**  
+- **Add text here325**  
+- **Add text here326**  
+- **Add text here327**  
+- **Add text here328**  
+- **Add text here329**  
+- **Add text here330**  
+- **Add text here331**  
+- **Add text here332**  
+- **Add text here333**  
+- **Add text here334**  
+- **Add text here335**  
+- **Add text here336**  
+- **Add text here337**  
+- **Add text here338**  
+- **Add text here339**  
+- **Add text here340**  
+- **Add text here341**  
+- **Add text here342**  
+- **Add text here343**  
+- **Add text here344**  
+- **Add text here345**  
+- **Add text here346**  
+- **Add text here347**  
+- **Add text here348**  
+- **Add text here349**  
+- **Add text here350**  
+- **Add text here351**  
+- **Add text here352**  
+- **Add text here353**  
+- **Add text here354**  
+- **Add text here355**  
+- **Add text here356**  
+- **Add text here357**  
+- **Add text here358**  
+- **Add text here359**  
+- **Add text here360**  
+- **Add text here361**  
+- **Add text here362**  
+- **Add text here363**  
+- **Add text here364**  
+- **Add text here365**  
+- **Add text here366**  
+- **Add text here367**  
+- **Add text here368**  
+- **Add text here369**  
+- **Add text here370**  
+- **Add text here371**  
+- **Add text here372**  
+- **Add text here373**  
+- **Add text here374**  
+- **Add text here375**  
+- **Add text here376**  
+- **Add text here377**  
+- **Add text here378**  
+- **Add text here379**  
+- **Add text here380**  
+- **Add text here381**  
+- **Add text here382**  
+- **Add text here383**  
+- **Add text here384**  
+- **Add text here385**  
+- **Add text here386**  
+- **Add text here387**  
+- **Add text here388**  
+- **Add text here389**  
+- **Add text here390**  
+- **Add text here391**  
+- **Add text here392**  
+- **Add text here393**  
+- **Add text here394**  
+- **Add text here395**  
+- **Add text here396**  
+- **Add text here397**  
+- **Add text here398**  
+- **Add text here399**  
+- **Add text here400**  
+- **Add text here401**  
+- **Add text here402**  
+- **Add text here403**  
+- **Add text here404**  
+- **Add text here405**  
+- **Add text here406**  
+- **Add text here407**  
+- **Add text here408**  
+- **Add text here409**  
+- **Add text here410**  
+- **Add text here411**  
+- **Add text here412**  
+- **Add text here413**  
+- **Add text here414**  
+- **Add text here415**  
+- **Add text here416**  
+- **Add text here417**  
+- **Add text here418**  
+- **Add text here419**  
+- **Add text here420**  
+- **Add text here421**  
+- **Add text here422**  
+- **Add text here423**  
+- **Add text here424**  
+- **Add text here425**  
+- **Add text here426**  
+- **Add text here427**  
+- **Add text here428**  
+- **Add text here429**  
+- **Add text here430**  
+- **Add text here431**  
+- **Add text here432**  
+- **Add text here433**  
+- **Add text here434**  
+- **Add text here435**  
+- **Add text here436**  
+- **Add text here437**  
+- **Add text here438**  
+- **Add text here439**  
+- **Add text here440**  
+- **Add text here441**  
+- **Add text here442**  
+- **Add text here443**  
+- **Add text here444**  
+- **Add text here445**  
+- **Add text here446**  
+- **Add text here447**  
+- **Add text here448**  
+- **Add text here449**  
+- **Add text here450**  
+- **Add text here451**  
+- **Add text here452**  
+- **Add text here453**  
+- **Add text here454**  
+- **Add text here455**  
+- **Add text here456**  
+- **Add text here457**  
+- **Add text here458**  
+- **Add text here459**  
+- **Add text here460**  
+- **Add text here461**  
+- **Add text here462**  
+- **Add text here463**  
+- **Add text here464**  
+- **Add text here465**  
+- **Add text here466**  
+- **Add text here467**  
+- **Add text here468**  
+- **Add text here469**  
+- **Add text here470**  
+- **Add text here471**  
+- **Add text here472**  
+- **Add text here473**  
+- **Add text here474**  
+- **Add text here475**  
+- **Add text here476**  
+- **Add text here477**  
+- **Add text here478**  
+- **Add text here479**  
+- **Add text here480**  
+- **Add text here481**  
+- **Add text here482**  
+- **Add text here483**  
+- **Add
+================================================================================

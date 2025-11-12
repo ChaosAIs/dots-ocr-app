@@ -10,7 +10,14 @@ The DeepSeek OCR service is a high-quality OCR solution that uses the DeepSeek-O
 
 - **Image-only conversion**: Supports PNG, JPG, JPEG, GIF, BMP, TIFF, and WEBP formats
 - **High-quality OCR**: Uses DeepSeek-OCR model for accurate text extraction
-- **Markdown generation**: Converts images directly to well-formatted markdown
+- **Intelligent image analysis**: Goes beyond text extraction to understand context and meaning
+- **Smart image type detection**: Automatically detects 9+ image types including receipts, forms, charts, diagrams, infographics, and more
+- **Context-aware prompts**: Uses specialized prompts that encourage explanation and insight, not just text extraction
+- **Multi-dimensional analysis**: Extracts text, explains purpose, identifies patterns, and provides insights
+- **Business document intelligence**: Special handling for receipts, invoices, and forms with transaction/field analysis
+- **Data visualization understanding**: Analyzes charts and graphs to explain trends and key insights
+- **Technical diagram comprehension**: Understands architecture diagrams, flowcharts, and system designs
+- **Automatic table fixing**: Post-processes markdown to fix incomplete table formatting
 - **Non-blocking API**: Integrates with the worker pool for concurrent processing
 - **Real-time progress**: WebSocket support for live conversion progress updates
 
@@ -49,60 +56,190 @@ This implementation is based on the DeepSeek-OCR reference code:
 
 ## Prompt Format
 
-### Important Note on API Differences
+### Important Note on API Differences and Prompt Requirements
 
 This implementation uses the **OpenAI-compatible API** (`/v1/chat/completions`) provided by vLLM, which differs from the direct vLLM API used in the reference implementation.
 
-**Key Difference**:
+**Critical Findings**:
 
-- **OpenAI-compatible API**: Do NOT include `<image>` token in prompts. The image is sent separately via `image_url` field.
-- **Direct vLLM API** (reference): Requires `<image>` token in prompts for image placement.
+1. **Do NOT use `<image>` token**: The image is sent separately via `image_url` field in the OpenAI-compatible API
+2. **Do NOT use `<|grounding|>` prefix**: This special token causes the model to return empty responses or only grounding coordinates
+3. **Keep prompts SHORT and simple**: Long, complex prompts (>100 chars) often cause empty responses or repetitive generic output
+4. **Use plain English prompts**: Simple, direct instructions work best
+5. **Avoid multi-step instructions**: Complex numbered lists cause the model to output repetitive text instead of extracting data
+6. **Focus on extraction, not analysis**: Ask to "extract" and "convert", not "analyze" or "provide insights"
 
-### Default Prompt (OpenAI-compatible API)
+**IMPORTANT LESSON LEARNED**: Initial attempts to use detailed multi-step prompts (e.g., "1. Analyze... 2. Extract... 3. Provide insights...") caused the model to output repetitive generic text like "Use bullet points to summarize key findings and insights" repeated 15 times. **Simple, direct prompts work dramatically better**. See `PROMPT_LESSONS_LEARNED.md` for details.
+
+### Intelligent Auto-Detection Feature (ENHANCED)
+
+The converter now automatically detects the type of image based on filename keywords and applies **intelligent, context-aware prompts** that encourage understanding and explanation, not just text extraction.
+
+#### Supported Image Types and Intelligence Features
+
+1. **Receipts & Invoices** (`receipt`, `invoice`, `bill`, `payment`)
+
+   - Summarizes the transaction (merchant, date, purpose)
+   - Extracts all key information (items, prices, totals, payment method)
+   - Identifies anomalies or notable observations
+   - Provides structured markdown output
+
+2. **Forms** (`form`, `application`, `survey`, `questionnaire`)
+
+   - Identifies the form's purpose
+   - Extracts all fields with labels and values
+   - Distinguishes required vs optional fields
+   - Notes instructions and important information
+
+3. **Flowcharts** (`flow`, `flowchart`, `workflow`, `process`)
+
+   - Explains what process the flowchart represents
+   - Extracts all text from shapes and connectors
+   - Describes flow logic, decision points, and branches
+   - Identifies start/end points and explains decision criteria
+   - Converts to ASCII flow diagram when possible
+
+4. **Technical Diagrams** (`diagram`, `architecture`, `schema`, `blueprint`, `uml`)
+
+   - Identifies what the diagram represents (architecture, system design, etc.)
+   - Explains main components and their relationships
+   - Extracts all labels and annotations
+   - Provides insights about the overall design
+
+5. **Charts & Graphs** (`chart`, `graph`, `plot`, `bar`, `pie`, `line`)
+
+   - Identifies chart type
+   - Explains the main message or insight from the data
+   - Extracts all labels, axes, legend, and data values
+   - Describes trends, patterns, and notable data points
+   - Draws conclusions from the visualization
+
+6. **Infographics** (`infographic`, `visual`, `poster`, `presentation`, `report`, `summary`, `dashboard`)
+
+   - Identifies the main topic and message
+   - Extracts key sections and their purposes
+   - Captures all statistics, facts, and data points
+   - Explains the narrative flow and information organization
+   - Highlights key insights and takeaways
+
+7. **Tables** (`table`, `grid`, `spreadsheet`)
+
+   - Explains the table's purpose
+   - Identifies column headers and their meanings
+   - Notes totals, subtotals, and calculated fields
+   - Highlights patterns or outliers
+   - Provides summary of key insights
+
+8. **Screenshots** (`screenshot`, `screen`, `capture`, `snap`)
+
+   - Identifies the application or interface
+   - Explains what the user is doing or what state is shown
+   - Extracts all visible text and UI elements
+   - Describes layout and main components
+   - Notes error messages or important status indicators
+
+9. **Documents** (default for all other files)
+   - Identifies document type (letter, article, manual, etc.)
+   - Preserves structure (headings, lists, emphasis, tables)
+   - Notes special elements (headers, footers, watermarks)
+   - Describes embedded images or diagrams
+   - Provides complete markdown conversion
+
+This feature is **enabled by default** and works automatically when you upload files with descriptive names.
+
+### Example: Enhanced Intelligence in Action
+
+**Old approach** (simple text extraction):
 
 ```
-<|grounding|>Convert the document to markdown.
+"Convert the document to markdown."
+→ Returns: Just the text from the image
 ```
 
-### Common Prompt Variations (OpenAI-compatible API)
+**New approach** (intelligent analysis):
 
-1. **Document Conversion** (Default):
+```
+For a receipt: "Analyze this receipt and provide:
+1. Summary of the transaction
+2. Extract all key information
+3. Notable observations
+4. Structured markdown format"
+→ Returns: Context + Data + Insights + Markdown
+```
+
+### Manual Prompt Variations
+
+You can also provide custom prompts to override auto-detection. **Important**: Keep prompts short and simple for best results.
+
+1. **General OCR**:
 
    ```
-   <|grounding|>Convert the document to markdown.
+   Extract all text from this image.
    ```
 
-2. **General OCR**:
-
-   ```
-   <|grounding|>OCR this image.
-   ```
-
-3. **Free OCR** (No Layout):
+2. **Free OCR** (No Layout):
 
    ```
    Free OCR.
    ```
 
-4. **Figure Parsing**:
+3. **Figure Parsing**:
 
    ```
    Parse the figure.
    ```
 
-5. **General Description**:
+4. **General Description**:
 
    ```
    Describe this image in detail.
    ```
 
-6. **Element Localization**:
-
+5. **Flowchart Analysis**:
    ```
-   Locate <|ref|>specific text<|/ref|> in the image.
+   Extract all text from this flowchart and describe the flow.
    ```
 
 **Note**: If you accidentally include `<image>` token in your prompt, it will be automatically removed by the converter.
+
+## Post-Processing Features
+
+### Automatic Markdown Table Fixing
+
+The DeepSeek OCR converter includes automatic post-processing to fix incomplete markdown tables. This feature addresses a common issue where the OCR model generates table headers without the required separator line.
+
+**Problem**: DeepSeek OCR sometimes generates tables like this:
+
+```markdown
+| Column 1 | Column 2 | Column 3 |
+| Data 1 | Data 2 | Data 3 |
+```
+
+This is invalid markdown because it's missing the separator line after the header.
+
+**Solution**: The converter automatically detects and fixes these tables:
+
+```markdown
+| Column 1 | Column 2 | Column 3 |
+| -------- | -------- | -------- |
+| Data 1   | Data 2   | Data 3   |
+```
+
+**How it works**:
+
+1. Scans the markdown output for table rows (lines starting with `|`)
+2. Detects table headers (first row after a heading or empty line)
+3. Checks if the separator line is missing
+4. Automatically inserts the separator line with the correct number of columns
+
+**Benefits**:
+
+- Tables render correctly in markdown viewers
+- No manual editing required
+- Preserves all original content
+- Works automatically for all conversions
+
+This feature is enabled by default and requires no configuration.
 
 ## Configuration
 
@@ -183,25 +320,34 @@ converter = DeepSeekOCRConverter(
     max_tokens=8192
 )
 
-# Convert an image with default prompt
-input_path = Path("input/image.png")
-output_path = Path("output/image.md")
+# Convert a flowchart with auto-detection (recommended)
+flowchart_path = Path("input/process_flowchart.png")
+output_path = Path("output/flowchart.md")
 
-success = converter.convert_file(input_path, output_path)
+success = converter.convert_file(flowchart_path, output_path)
 if success:
     print(f"Conversion successful: {output_path}")
+# Auto-detects 'flowchart' from filename and uses optimized prompt
+
+# Convert a document with auto-detection disabled
+document_path = Path("input/document.png")
+success = converter.convert_file(
+    document_path,
+    output_path,
+    auto_detect_type=False  # Use default document prompt
+)
 
 # Convert with custom prompt (no <image> token needed)
 success = converter.convert_file(
-    input_path,
+    document_path,
     output_path,
-    prompt="Free OCR."
+    prompt="Free OCR."  # Custom prompt overrides auto-detection
 )
 
 # Or get markdown content directly
 markdown = converter.convert_image_to_markdown(
-    input_path,
-    prompt="<|grounding|>OCR this image."
+    flowchart_path,
+    auto_detect_type=True  # Enable auto-detection (default)
 )
 print(markdown)
 ```
