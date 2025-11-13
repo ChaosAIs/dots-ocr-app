@@ -40,6 +40,31 @@
     }
 
     :deep(.p-fileupload) {
+      border: none;
+      background: transparent;
+
+      .p-fileupload-buttonbar {
+        background: transparent;
+        border: none;
+        padding: 10px 0;
+      }
+
+      .p-fileupload-content {
+        background: transparent;
+        border: none;
+        padding: 20px;
+        min-height: 100px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+
+        p {
+          color: #666;
+          font-size: 14px;
+          margin: 0;
+        }
+      }
+
       .p-fileupload-choose {
         margin-bottom: 10px;
       }

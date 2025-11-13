@@ -122,6 +122,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
           cancelLabel={t("FileUpload.Cancel")}
           disabled={uploading}
           className="file-upload-component"
+          emptyTemplate={<p className="m-0">{t("FileUpload.Description")}</p>}
         />
       </div>
 
