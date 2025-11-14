@@ -177,6 +177,18 @@ class DotsOCRParser:
 
         logger = logging.getLogger(__name__)
 
+        # Build a small snippet of the document content to give Gemma context
+        # about the main language and style of the surrounding text. The model
+        # will be instructed to align the image analysis language with this
+        # snippet instead of us hard-coding specific languages.
+        context_sample = md_content.strip()
+        if len(context_sample) > 2000:
+            # Keep both the beginning and end so that headings and footers can
+            # influence the detected language.
+            head = context_sample[:1000]
+            tail = context_sample[-1000:]
+            context_sample = f"{head}\n...\n{tail}"
+
         # Match markdown images with data URLs
         image_pattern = re.compile(r"!\[(.*?)\]\((data:image/[^)]+)\)")
 
@@ -190,7 +202,27 @@ class DotsOCRParser:
                 base64_str = data_url.split("base64,", 1)[1]
 
             try:
-                analysis_markdown = self.gemma3_converter.convert_image_base64_to_markdown(base64_str)
+                base_prompt = self.gemma3_converter._build_default_prompt()
+                language_instruction = (
+                    "\n\nLanguage and style requirements:\n"
+                    "- The image belongs to a larger document whose surrounding Markdown "
+                    "content is shown below between triple backticks.\n"
+                    "```markdown\n"
+                    f"{context_sample}\n"
+                    "```\n"
+                    "- Detect the primary human language used in that content and in "
+                    "any visible text in the image (for example, Chinese, English, etc.).\n"
+                    "- Write your entire analysis and any transcribed text in the same "
+                    "language as that content.\n"
+                    "- Do not translate the document into another language; preserve "
+                    "the original language.\n"
+                )
+
+                prompt = base_prompt + language_instruction
+                analysis_markdown = self.gemma3_converter.convert_image_base64_to_markdown(
+                    base64_str,
+                    prompt=prompt,
+                )
             except Exception as e:  # pragma: no cover - safety net
                 logger.error(f"Error during Gemma3 image analysis: {e}")
                 return match.group(0)
@@ -200,18 +232,119 @@ class DotsOCRParser:
 
             analysis_markdown = analysis_markdown.strip()
 
-            # Build the injected section: image first, then analysis under it
-            analysis_section_lines = [
-                match.group(0),
-                "",
-                "### Image Analysis",
-                "",
-                analysis_markdown,
-            ]
+            # Normalize headings within the analysis so that the first non-empty
+            # line starts with a level-4 heading (####), and any other headings
+            # are at least level 4 as well.
+            normalized_lines: list[str] = []
+            first_content_emitted = False
+            for line in analysis_markdown.splitlines():
+                stripped = line.strip()
+                if not first_content_emitted and stripped:
+                    first_content_emitted = True
+                    heading_match = re.match(r"^(\s{0,3})(#{1,6})(\s+)(.*)", line)
+                    if heading_match:
+                        indent, hashes, space, rest = heading_match.groups()
+                        if len(hashes) < 4:
+                            hashes = "#" * 4
+                        normalized_lines.append(f"{indent}{hashes}{space}{rest}")
+                    else:
+                        # Force the first content line to be a level-4 heading so that
+                        # the injected block always begins with "####".
+                        leading_ws = line[: len(line) - len(line.lstrip(" "))]
+                        normalized_lines.append(f"{leading_ws}#### {stripped}")
+                    continue
+
+                heading_match = re.match(r"^(\s{0,3})(#{1,6})(\s+)(.*)", line)
+                if heading_match:
+                    indent, hashes, space, rest = heading_match.groups()
+                    if len(hashes) < 4:
+                        hashes = "#" * 4
+                    normalized_lines.append(f"{indent}{hashes}{space}{rest}")
+                else:
+                    normalized_lines.append(line)
+
+            analysis_markdown = "\n".join(normalized_lines)
+
+            # Determine whether we actually need to insert horizontal rules before/after.
+            # If the original markdown already has a `---` just before or just after this
+            # image, we avoid inserting a duplicate separator.
+            include_top_rule = True
+            include_bottom_rule = True
+
+            # Look at the last non-empty line before the image in the original content.
+            before_text = md_content[: match.start()]
+            before_lines = before_text.rstrip("\n").splitlines()
+            if before_lines:
+                last_line = before_lines[-1].strip()
+                if last_line == "---":
+                    include_top_rule = False
+
+            # Look at the first non-empty line after the image in the original content.
+            after_text = md_content[match.end() :]
+            for line in after_text.splitlines():
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if stripped == "---":
+                    include_bottom_rule = False
+                break
+
+            # Build the injected section: ensure clear separation from main content.
+            # We add a horizontal rule before the image and after the whole section so the
+            # image+analysis block is visually isolated, but only if there isn't already
+            # a separator there.
+            analysis_section_lines = []
+
+            # Optional separator before the image
+            analysis_section_lines.append("")  # blank line before block
+            if include_top_rule:
+                analysis_section_lines.append("---")
+                analysis_section_lines.append("")
+
+            # Image itself
+            analysis_section_lines.append(match.group(0))
+
+            # Analysis body (we no longer inject a fixed "Image Analysis" title).
+            # The first non-empty line of `analysis_markdown` is normalized to be a
+            # level-4 heading (####) in the post-processing above.
+            analysis_section_lines.extend(
+                [
+                    "",  # blank line between image and analysis body
+                    analysis_markdown,
+                ]
+            )
+
+            # Optional separator after the analysis block
+            if include_bottom_rule:
+                analysis_section_lines.append("")  # blank line before closing separator
+                analysis_section_lines.append("---")
+
+            analysis_section_lines.append("")  # blank line after entire block
+
             return "\n".join(analysis_section_lines)
 
         # Apply replacement across the entire markdown content
-        return image_pattern.sub(_analyze_and_replace, md_content)
+        processed = image_pattern.sub(_analyze_and_replace, md_content)
+
+        # Normalize duplicate horizontal rules that may appear when multiple
+        # image+analysis blocks are adjacent. If there are two or more '---'
+        # separators with only blank lines between them, collapse them into a
+        # single separator so the UI doesn't show double lines.
+        lines = processed.splitlines()
+        normalized_lines = []
+        for line in lines:
+            if line.strip() == "---":
+                # Look back to the last non-empty line in the normalized output
+                # to see if we've just emitted another '---'. If so, skip this
+                # one to avoid duplicate separators.
+                j = len(normalized_lines) - 1
+                while j >= 0 and not normalized_lines[j].strip():
+                    j -= 1
+                if j >= 0 and normalized_lines[j].strip() == "---":
+                    continue
+            normalized_lines.append(line)
+
+        return "\n".join(normalized_lines)
 
 
     # def post_process_results(self, response, prompt_mode, save_dir, save_name, origin_image, image, min_pixels, max_pixels)

@@ -59,3 +59,33 @@ def test_add_image_analysis_to_markdown(monkeypatch) -> None:
     # Ensure the original image tag is still present
     assert "![](data:image/png;base64," in md_output
 
+
+
+
+class _DummyLanguageResponse:
+    def __init__(self, response_text: str) -> None:
+        self.status_code = 200
+        self.text = "OK"
+        self._response_text = response_text
+
+    def json(self) -> dict[str, str]:  # pragma: no cover - trivial container
+        return {"response": self._response_text}
+
+
+class _DummyRequests:
+    @staticmethod
+    def post(url, json, timeout, headers):  # type: ignore[override]
+        # Always claim the language is Chinese for testing
+        return _DummyLanguageResponse("Chinese")
+
+
+def test_gemma_language_detection_uses_model(monkeypatch) -> None:
+    """Gemma3OCRConverter.detect_primary_language should parse model output."""
+    import gemma_ocr_service.gemma3_ocr_converter as gemma_module
+
+    # Patch requests used inside the converter module to avoid real HTTP calls
+    monkeypatch.setattr(gemma_module, "requests", _DummyRequests, raising=False)
+
+    converter = Gemma3OCRConverter()
+    lang = converter.detect_primary_language("这是一个中文文档。")
+    assert lang == "Chinese"
