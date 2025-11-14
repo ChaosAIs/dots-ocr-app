@@ -177,24 +177,25 @@ class DotsOCRParser:
 
         logger = logging.getLogger(__name__)
 
-        # Build a small snippet of the document content to give Gemma context
-        # about the main language and style of the surrounding text. The model
-        # will be instructed to align the image analysis language with this
-        # snippet instead of us hard-coding specific languages.
-        context_sample = md_content.strip()
-        if len(context_sample) > 2000:
-            # Keep both the beginning and end so that headings and footers can
-            # influence the detected language.
-            head = context_sample[:1000]
-            tail = context_sample[-1000:]
-            context_sample = f"{head}\n...\n{tail}"
-
         # Match markdown images with data URLs
         image_pattern = re.compile(r"!\[(.*?)\]\((data:image/[^)]+)\)")
 
         def _analyze_and_replace(match: re.Match) -> str:  # type: ignore[name-defined]
             alt_text = match.group(1)
             data_url = match.group(2)
+
+            # Build a *small* local snippet of the markdown around this image to
+            # give Gemma context about the document language and style without
+            # sending the entire file content. We only keep a limited window
+            # around the image location as sample data.
+            window_chars = 600
+            start = max(0, match.start() - window_chars)
+            end = min(len(md_content), match.end() + window_chars)
+            local_context = md_content[start:end].strip()
+            if len(local_context) > 800:
+                head = local_context[:400]
+                tail = local_context[-400:]
+                local_context = f"{head}\n...\n{tail}"
 
             # Extract raw base64 string from data URL if present
             base64_str = data_url
@@ -208,10 +209,10 @@ class DotsOCRParser:
                     "- The image belongs to a larger document whose surrounding Markdown "
                     "content is shown below between triple backticks.\n"
                     "```markdown\n"
-                    f"{context_sample}\n"
+                    f"{local_context}\n"
                     "```\n"
                     "- Detect the primary human language used in that content and in "
-                    "any visible text in the image (for example, Chinese, English, etc.).\n"
+                    "any visible text in the image (for example, Chinese, English, French, etc.).\n"
                     "- Write your entire analysis and any transcribed text in the same "
                     "language as that content.\n"
                     "- Do not translate the document into another language; preserve "
