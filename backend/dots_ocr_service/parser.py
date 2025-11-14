@@ -1,5 +1,8 @@
 import os
 import json
+import logging
+import re
+
 from tqdm import tqdm
 from multiprocessing.pool import ThreadPool, Pool
 import argparse
@@ -15,6 +18,8 @@ from dots_ocr.utils.doc_utils import fitz_doc_to_image, load_images_from_pdf
 from dots_ocr.utils.prompts import dict_promptmode_to_prompt
 from dots_ocr.utils.layout_utils import post_process_output, draw_layout_on_image, pre_process_bboxes
 from dots_ocr.utils.format_transformer import layoutjson2md
+from gemma_ocr_service.gemma3_ocr_converter import Gemma3OCRConverter
+
 
 
 class DotsOCRParser:
@@ -59,6 +64,13 @@ class DotsOCRParser:
 
         assert self.min_pixels is None or self.min_pixels >= MIN_PIXELS
         assert self.max_pixels is None or self.max_pixels <= MAX_PIXELS
+        # Initialize Gemma3 OCR converter for optional image analysis
+        try:
+            self.gemma3_converter = Gemma3OCRConverter()
+        except Exception:
+            # If initialization fails, continue without Gemma3 so core OCR still works
+            self.gemma3_converter = None
+
 
 
     def _inference_with_vllm(self, image, prompt, smooth_progress=True):
@@ -150,6 +162,57 @@ class DotsOCRParser:
             bbox = pre_process_bboxes(origin_image, bboxes, input_width=image.width, input_height=image.height, min_pixels=min_pixels, max_pixels=max_pixels)[0]
             prompt = prompt + str(bbox)
         return prompt
+    def _add_image_analysis_to_markdown(self, md_content: str) -> str:
+        """Insert Gemma3 image analysis sections before embedded base64 images.
+
+        This scans for markdown image tags that use a base64 data URL, for example:
+            ![](data:image/png;base64,AAAA...)
+
+        For each image found, it calls Gemma3 via the Gemma3OCRConverter and inserts
+        an "Image Analysis" section immediately before the image tag.
+        """
+        # If Gemma3 converter is not available, return content unchanged
+        if not getattr(self, "gemma3_converter", None):
+            return md_content
+
+        logger = logging.getLogger(__name__)
+
+        # Match markdown images with data URLs
+        image_pattern = re.compile(r"!\[(.*?)\]\((data:image/[^)]+)\)")
+
+        def _analyze_and_replace(match: re.Match) -> str:  # type: ignore[name-defined]
+            alt_text = match.group(1)
+            data_url = match.group(2)
+
+            # Extract raw base64 string from data URL if present
+            base64_str = data_url
+            if "base64," in data_url:
+                base64_str = data_url.split("base64,", 1)[1]
+
+            try:
+                analysis_markdown = self.gemma3_converter.convert_image_base64_to_markdown(base64_str)
+            except Exception as e:  # pragma: no cover - safety net
+                logger.error(f"Error during Gemma3 image analysis: {e}")
+                return match.group(0)
+
+            if not analysis_markdown:
+                return match.group(0)
+
+            analysis_markdown = analysis_markdown.strip()
+
+            # Build the injected section: image first, then analysis under it
+            analysis_section_lines = [
+                match.group(0),
+                "",
+                "### Image Analysis",
+                "",
+                analysis_markdown,
+            ]
+            return "\n".join(analysis_section_lines)
+
+        # Apply replacement across the entire markdown content
+        return image_pattern.sub(_analyze_and_replace, md_content)
+
 
     # def post_process_results(self, response, prompt_mode, save_dir, save_name, origin_image, image, min_pixels, max_pixels)
     def _parse_single_image(
@@ -236,7 +299,11 @@ class DotsOCRParser:
                 })
                 if prompt_mode != "prompt_layout_only_en":  # no text md when detection only
                     md_content = layoutjson2md(origin_image, cells, text_key='text')
-                    md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True) # used for clean output or metric of omnidocbench、olmbench 
+                    md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True)  # used for clean output or metric of omnidocbench、olmbench
+
+                    # Post-process the no-header/footer markdown to insert Gemma3 image analysis
+                    md_content_no_hf = self._add_image_analysis_to_markdown(md_content_no_hf)
+
                     md_file_path = os.path.join(save_dir, f"{save_name}.md")
                     with open(md_file_path, "w", encoding="utf-8") as md_file:
                         md_file.write(md_content)
@@ -263,7 +330,7 @@ class DotsOCRParser:
             })
 
         return result
-    
+
     def parse_image(self, input_path, filename, prompt_mode, save_dir, bbox=None, fitz_preprocess=False):
         # Report progress: loading image
         if self.progress_callback:
@@ -291,7 +358,7 @@ class DotsOCRParser:
             self.progress_callback(progress=95, message="Finalizing conversion...")
 
         return [result]
-        
+
     def parse_pdf(self, input_path, filename, prompt_mode, save_dir):
         print(f"loading pdf: {input_path}")
         images_origin = load_images_from_pdf(input_path)
@@ -389,25 +456,25 @@ def main():
     parser = argparse.ArgumentParser(
         description="dots.ocr Multilingual Document Layout Parser",
     )
-    
+
     parser.add_argument(
         "input_path", type=str,
         help="Input PDF/image file path"
     )
-    
+
     parser.add_argument(
         "--output", type=str, default="./output",
         help="Output directory (default: ./output)"
     )
-    
+
     parser.add_argument(
         "--prompt", choices=prompts, type=str, default="prompt_layout_all_en",
         help="prompt to query the model, different prompts for different tasks"
     )
     parser.add_argument(
-        '--bbox', 
-        type=int, 
-        nargs=4, 
+        '--bbox',
+        type=int,
+        nargs=4,
         metavar=('x1', 'y1', 'x2', 'y2'),
         help='should give this argument if you want to prompt_grounding_ocr'
     )
@@ -466,17 +533,17 @@ def main():
         max_completion_tokens=args.max_completion_tokens,
         num_thread=args.num_thread,
         dpi=args.dpi,
-        output_dir=args.output, 
+        output_dir=args.output,
         min_pixels=args.min_pixels,
         max_pixels=args.max_pixels,
     )
 
     result = dots_ocr_parser.parse_file(
-        args.input_path, 
+        args.input_path,
         prompt_mode=args.prompt,
         bbox=args.bbox,
         )
-    
+
 
 
 if __name__ == "__main__":
