@@ -20,3 +20,4 @@ backend/dots_ocr_service/utils/__pycache__/
 backend/__pycache__/
 backend/__pycache__/main.cpython-313.pyc
 backend/__pycache__/worker_pool.cpython-313.pyc
+DeepSeek-OCR-Web-main/

@@ -7,9 +7,16 @@ The DeepSeek-OCR model is served via vLLM and provides an OpenAI-compatible API 
 This converter communicates with the vLLM server to perform OCR on images.
 
 Reference Implementation:
-    - DeepSeek-OCR vLLM server: DeekSeek-OCR--Dockerized-API/start_server.py
-    - Image processing: DeekSeek-OCR--Dockerized-API/custom_run_dpsk_ocr_image.py
-    - Configuration: DeekSeek-OCR--Dockerized-API/custom_config.py
+    Based on DeepSeek-OCR-Web-main official sample code:
+    - Main script: DeepSeek-OCR-Web-main/backend/run_dpsk_ocr_image.py
+    - Image processing: DeepSeek-OCR-Web-main/backend/process/image_process.py
+    - Configuration: DeepSeek-OCR-Web-main/backend/config.py
+    - Model definition: DeepSeek-OCR-Web-main/backend/deepseek_ocr.py
+
+    Key improvements from sample code:
+    - Grounding mode prompts for better OCR accuracy
+    - Proper bounding box and grounding tag removal
+    - Recommended prompt formats for different image types
 
 Default Prompt Format:
     The default prompt is: "<|grounding|>Convert the document to markdown."
@@ -261,8 +268,8 @@ class DeepSeekOCRConverter:
         """
         Get optimized prompt based on image type.
 
-        These prompts are designed to encourage intelligent analysis and explanation,
-        not just text extraction. They ask the model to understand context and meaning.
+        Based on DeepSeek-OCR-Web-main/backend/config.py recommended prompts.
+        Uses grounding mode for better OCR accuracy.
 
         Args:
             image_type: Type of image ('flowchart', 'diagram', 'chart', 'infographic',
@@ -271,130 +278,265 @@ class DeepSeekOCRConverter:
         Returns:
             Optimized prompt string
         """
+        # Recommended prompts from sample code:
+        # document: <|grounding|>Convert the document to markdown.
+        # other image: <|grounding|>OCR this image.
+        # without layouts: Free OCR.
+        # figures in document: Parse the figure.
+        # general: Describe this image in detail.
+
         if image_type == 'receipt':
-            # Receipt/invoice - precise extraction
-            return "Extract all text from this receipt. Include merchant name, date, itemized list with prices, subtotal, tax, and total. Convert to markdown."
+            # Receipt/invoice - use grounding mode for precise extraction
+            return "<|grounding|>OCR this receipt."
 
         elif image_type == 'form':
-            # Form - field extraction
-            return "Extract all form fields with their labels and values. Identify the form purpose. Convert to markdown."
+            # Form - use grounding mode
+            return "<|grounding|>OCR this form."
 
         elif image_type == 'flowchart':
-            # Flowchart - tested prompt that works well
-            return "Extract all text from this flowchart and describe the flow, further, convert the flowchart to ascii flow diagram."
+            # Flowchart - parse as figure
+            return "Parse the figure."
 
         elif image_type == 'diagram':
-            # Diagram - component extraction
-            return "Extract all text labels and components from this diagram. Describe what the diagram represents, the relationships between components, and the overall architecture. Convert to markdown."
+            # Diagram - parse as figure
+            return "Parse the figure."
 
         elif image_type == 'chart':
-            # Chart - use grounding mode to avoid hallucination loops
-            return "<|grounding|>Extract all text and data from this chart."
+            # Chart - parse as figure
+            return "Parse the figure."
 
         elif image_type == 'dashboard':
-            # Dashboard/Business Report - use grounding mode to avoid hallucination loops
-            # Grounding mode extracts text accurately without getting stuck in loops
-            return "<|grounding|>Extract all text and data from this dashboard."
+            # Dashboard/Business Report - use grounding mode
+            return "<|grounding|>OCR this image."
 
         elif image_type == 'infographic':
-            # Infographic - SIMPLE prompt
-            return "Extract all text, statistics, and data from this infographic. Convert to markdown preserving the structure."
+            # Infographic - use grounding mode
+            return "<|grounding|>OCR this image."
 
         elif image_type == 'table':
-            # Table - tested prompt that works
-            return "Convert this table to markdown format. Preserve the table structure, headers, and all cell contents accurately."
+            # Table - use grounding mode for accurate table extraction
+            return "<|grounding|>Convert the document to markdown."
 
         elif image_type == 'screenshot':
-            # Screenshot - SIMPLE prompt
-            return "Extract all visible text, labels, and UI elements from this screenshot. Convert to markdown."
+            # Screenshot - use grounding mode
+            return "<|grounding|>OCR this image."
 
         else:  # document (default)
-            # Document - SIMPLE prompt
-            return "Convert the document to markdown format, preserving the structure and formatting."
+            # Document - recommended default prompt from sample code
+            return "<|grounding|>Convert the document to markdown."
 
     def _remove_bounding_boxes(self, content: str) -> str:
-        """
-        Remove bounding box coordinates and grounding tags from grounding mode output.
-        Convert to markdown format with intelligent pairing of labels and values.
+        """Post-process grounding output using spatial layout.
 
-        Grounding mode can return different formats:
-        - "Revenue Breakdown[[606, 562, 871, 583]]"
-        - "<|ref|>Revenue Breakdown<|/ref|><|det|><|/det|>"
+        The raw grounding output has the form:
 
-        This function removes both formats and converts to markdown with explanations.
+            <|ref|>TEXT<|/ref|><|det|>[[x1, y1, x2, y2]]<|/det|>
 
-        Args:
-            content: Raw content from grounding mode
+        where the coordinates describe the position of TEXT on the page.
 
-        Returns:
-            Clean markdown text with value-label pairs explained
+        Instead of just stripping tags, we use the coordinates to build a
+        more structured text where numeric values (percentages, $ amounts,
+        etc.) are linked to their nearest textual labels. This greatly
+        improves dashboards/infographics like the sample "One Pager Business
+        Monthly" report.
+
+        NOTE: We intentionally avoid hard-coding specific label strings and
+        rely purely on spatial layout + simple numeric detection.
         """
         import re
+        from collections import defaultdict
+        from statistics import median
 
-        # Remove bounding box coordinates like [[x1, y1, x2, y2]]
-        cleaned = re.sub(r'\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]', '', content)
+        # Normalise LaTeX-style equality symbols (matches official code)
+        content = content.replace("\\coloneqq", ":=").replace("\\eqqcolon", "=:")
 
-        # Remove grounding tags like <|ref|>text<|/ref|><|det|><|/det|>
-        # Extract just the text content
-        cleaned = re.sub(r'<\|ref\|>(.*?)<\|/ref\|><\|det\|>.*?<\|/det\|>', r'\1\n', cleaned)
+        # Regex capturing <|ref|>TEXT</|ref|><|det|>[[x1, y1, x2, y2]]</|det|>
+        pattern = (
+            r"<\|ref\|>(.*?)<\|/ref\|>"  # TEXT
+            r"<\|det\|>\[\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]\]<\|/det\|>"
+        )
+        matches = list(re.finditer(pattern, content, re.DOTALL))
 
-        # Split into lines and clean
-        lines = [line.strip() for line in cleaned.split('\n') if line.strip()]
+        # If we cannot parse coordinates, fall back to simple tag stripping
+        if not matches:
+            content_simple = re.sub(
+                r"<\|ref\|>image<\|/ref\|><\|det\|>\[\[[^\]]*\]\]<\|/det\|>",
+                "",
+                content,
+                flags=re.DOTALL,
+            )
+            content_simple = re.sub(
+                r"<\|ref\|>(.*?)<\|/ref\|><\|det\|>\[\[[^\]]*\]\]<\|/det\|>",
+                r"\1\n",
+                content_simple,
+                flags=re.DOTALL,
+            )
+            content_simple = re.sub(r"\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]", "", content_simple)
+            content_simple = re.sub(r"<\|/?ref\|>", "", content_simple)
+            content_simple = re.sub(r"<\|/?det\|>", "", content_simple)
+            lines = [line.strip() for line in content_simple.split("\n")]
+            lines = [line for line in lines if line]
+            return "\n".join(lines)
 
-        # Collect percentage values that need pairing
-        # Grounding mode extracts in reading order, so percentages appear before their labels
-        percentage_buffer = []
-
-        # Intelligent pairing and formatting
-        formatted_lines = []
-        i = 0
-
-        while i < len(lines):
-            line = lines[i]
-
-            # Detect section headers
-            if any(keyword in line.lower() for keyword in ['report', 'financial', 'analysis', 'breakdown', 'position', 'opex', 'forecast', 'revenue', 'costs']):
-                if len(line) < 60 and not any(c in line for c in ['$', '%']) and ':' not in line:
-                    formatted_lines.append(f"\n## {line}\n")
-                    i += 1
-                    continue
-
-            # Collect standalone percentages into buffer
-            if re.match(r'^\d+%$', line):
-                percentage_buffer.append(line)
-                i += 1
+        # Parse items with coordinates
+        items = []
+        for m in matches:
+            text = m.group(1).strip()
+            if not text:
                 continue
-
-            # Check if this line is a label that should be paired with a buffered percentage
-            # Labels like "Gross profit", "Operating profit margin", "Net profit margin"
-            if percentage_buffer and ('profit' in line.lower() or 'margin' in line.lower()):
-                if percentage_buffer:
-                    value = percentage_buffer.pop(0)
-                    formatted_lines.append(f"- **{line}**: {value}")
-                    i += 1
-                    continue
-
-            # Handle cash flow items (IN/OUT with amounts)
-            if line in ['IN', 'OUT'] and i + 1 < len(lines) and '$' in lines[i + 1]:
-                formatted_lines.append(f"- **Cash {line}**: {lines[i + 1]}")
-                i += 2
+            if text.lower() == "image":
+                # Skip pure image refs; they don't carry textual information
                 continue
+            x1, y1, x2, y2 = map(int, m.groups()[1:])
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            items.append(
+                {
+                    "text": text,
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                    "cx": cx,
+                    "cy": cy,
+                }
+            )
 
-            # Handle pie chart labels (product categories)
-            if line in ['Desktops', 'Portables', 'iPod', 'Accessories']:
-                formatted_lines.append(f"- {line}")
-                i += 1
-                continue
+        if not items:
+            return ""
 
-            # Default: just add the line
-            if '$' in line or '%' in line:
-                formatted_lines.append(f"- **{line}**")
+        def is_numeric_token(t: str) -> bool:
+            """Heuristic: token with digits and relatively few letters."""
+            has_digit = any(ch.isdigit() for ch in t)
+            if not has_digit:
+                return False
+            letters = sum(ch.isalpha() for ch in t)
+            digits = sum(ch.isdigit() for ch in t)
+            return digits >= letters
+
+        label_items = []
+        numeric_items = []
+        for it in items:
+            if is_numeric_token(it["text"]):
+                numeric_items.append(it)
             else:
-                formatted_lines.append(f"- {line}")
+                label_items.append(it)
 
-            i += 1
+        # If we don't have both labels and numbers, fall back to simple cleanup
+        if not numeric_items or not label_items:
+            content_simple = re.sub(
+                r"<\|ref\|>image<\|/ref\|><\|det\|>\[\[[^\]]*\]\]<\|/det\|>",
+                "",
+                content,
+                flags=re.DOTALL,
+            )
+            content_simple = re.sub(
+                r"<\|ref\|>(.*?)<\|/ref\|><\|det\|>\[\[[^\]]*\]\]<\|/det\|>",
+                r"\1\n",
+                content_simple,
+                flags=re.DOTALL,
+            )
+            content_simple = re.sub(r"\[\[\d+,\s*\d+,\s*\d+,\s*\d+\]\]", "", content_simple)
+            content_simple = re.sub(r"<\|/?ref\|>", "", content_simple)
+            content_simple = re.sub(r"<\|/?det\|>", "", content_simple)
+            lines = [line.strip() for line in content_simple.split("\n")]
+            lines = [line for line in lines if line]
+            return "\n".join(lines)
 
-        return '\n'.join(formatted_lines)
+        # Approximate page dimensions to set distance thresholds.
+        min_x = min(it["x1"] for it in items)
+        max_x = max(it["x2"] for it in items)
+        min_y = min(it["y1"] for it in items)
+        max_y = max(it["y2"] for it in items)
+        page_width = max(max_x - min_x, 1)
+        page_height = max(max_y - min_y, 1)
+
+        # Use relative text height to distinguish headings / subheadings from labels.
+        label_heights = [it["y2"] - it["y1"] for it in label_items]
+        base_height = median(label_heights) if label_heights else 1.0
+
+        heading_height_threshold = 1.6 * base_height
+        subheading_height_threshold = 1.25 * base_height
+
+        heading_items = []
+        subheading_items = []
+        value_label_items = []
+        for it in label_items:
+            height = it["y2"] - it["y1"]
+            if height >= heading_height_threshold:
+                heading_items.append(it)
+            elif height >= subheading_height_threshold:
+                subheading_items.append(it)
+            else:
+                value_label_items.append(it)
+
+        if not value_label_items:
+            # If everything looks like a heading, treat them all as labels.
+            value_label_items = label_items
+            heading_items = []
+            subheading_items = []
+
+        # Map each numeric item to its nearest label using spatial distance,
+        # but only if it is reasonably close in both x and y.
+        def score(num, lab):
+            dx = abs(num["cx"] - lab["cx"])
+            dy = abs(num["cy"] - lab["cy"])
+            # Prefer labels that are vertically close and roughly aligned in x,
+            # and (for dashboards like the sample) slightly below the number.
+            penalty = 0.0
+            if lab["cy"] >= num["cy"]:
+                penalty -= 0.3 * dy
+            return dy + 0.5 * dx + penalty
+
+        max_vertical_dist = page_height * 0.10
+        max_horizontal_dist = page_width * 0.30
+
+        label_to_values = defaultdict(list)
+        mapped_numeric_ids = set()
+
+        for num in numeric_items:
+            candidates = [
+                lab
+                for lab in value_label_items
+                if abs(num["cy"] - lab["cy"]) <= max_vertical_dist
+                and abs(num["cx"] - lab["cx"]) <= max_horizontal_dist
+            ]
+            if not candidates:
+                continue
+            best_label = min(candidates, key=lambda lab: score(num, lab))
+            label_to_values[best_label["text"]].append((num["cy"], num["text"]))
+            mapped_numeric_ids.add(id(num))
+
+        # Build markdown: headings, subheadings, and labels in reading order.
+        nodes = (
+            [("heading", it) for it in heading_items]
+            + [("subheading", it) for it in subheading_items]
+            + [("label", it) for it in value_label_items]
+        )
+        nodes.sort(key=lambda pair: (pair[1]["cy"], pair[1]["cx"]))
+
+        lines = []
+        for idx, (kind, it) in enumerate(nodes):
+            text = it["text"]
+            if kind == "heading":
+                level = 1 if idx == 0 else 2
+                lines.append(f"{'#' * level} {text}")
+            elif kind == "subheading":
+                lines.append(f"### {text}")
+            else:
+                values = label_to_values.get(text)
+                if values:
+                    values_sorted = [v for _, v in sorted(values)]
+                    lines.append(f"- {text}: {', '.join(values_sorted)}")
+                else:
+                    lines.append(f"- {text}")
+
+        # Add any numeric tokens that did not get mapped (rare)
+        for num in sorted(numeric_items, key=lambda v: (v["cy"], v["cx"])):
+            if id(num) not in mapped_numeric_ids:
+                lines.append(f"- {num['text']}")
+
+        return "\n".join(lines)
 
     def _detect_hallucination_loop(self, content: str) -> bool:
         """
@@ -636,12 +778,18 @@ class DeepSeekOCRConverter:
             markdown_content = response.choices[0].message.content
 
             # Clean up the result - remove end-of-sentence tokens if present
+            # Based on sample code's output cleaning approach
             if '<｜end▁of▁sentence｜>' in markdown_content:
                 markdown_content = markdown_content.replace('<｜end▁of▁sentence｜>', '')
                 self.logger.info("Removed end-of-sentence tokens from output")
 
+            # Save original output for debugging (like sample code does)
+            self.logger.debug(f"Original OCR output length: {len(markdown_content)} characters")
+
             # Remove bounding boxes and grounding tags from grounding mode output
+            # This matches the sample code's post-processing in run_dpsk_ocr_image.py
             if ('[[' in markdown_content and ']]' in markdown_content) or '<|ref|>' in markdown_content:
+                self.logger.info("Detected grounding mode output, cleaning bounding boxes and tags")
                 markdown_content = self._remove_bounding_boxes(markdown_content)
                 self.logger.info("Removed bounding box coordinates/grounding tags from output")
 
