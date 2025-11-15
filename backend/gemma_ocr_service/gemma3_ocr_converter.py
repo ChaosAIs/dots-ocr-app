@@ -63,8 +63,8 @@ class Gemma3OCRConverter:
         else:
             temp_env = (
                 os.getenv("GEMMA_TEMPERATURE")
-                or os.getenv("GEMMA3_TEMPERATURE")
-                or os.getenv("OLLAMA_TEMPERATURE")
+                #or os.getenv("GEMMA3_TEMPERATURE")
+                #or os.getenv("OLLAMA_TEMPERATURE")
                 or "0.1"
             )
             self.temperature = float(temp_env)
@@ -76,8 +76,8 @@ class Gemma3OCRConverter:
         else:
             timeout_env = (
                 os.getenv("GEMMA_TIMEOUT")
-                or os.getenv("GEMMA3_TIMEOUT")
-                or os.getenv("OLLAMA_TIMEOUT")
+                #or os.getenv("GEMMA3_TIMEOUT")
+                #or os.getenv("OLLAMA_TIMEOUT")
                 or "120"
             )
             self.timeout = int(timeout_env)

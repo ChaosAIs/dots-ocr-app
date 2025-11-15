@@ -19,6 +19,7 @@ from dots_ocr.utils.prompts import dict_promptmode_to_prompt
 from dots_ocr.utils.layout_utils import post_process_output, draw_layout_on_image, pre_process_bboxes
 from dots_ocr.utils.format_transformer import layoutjson2md
 from gemma_ocr_service.gemma3_ocr_converter import Gemma3OCRConverter
+from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
 
 
 
@@ -64,12 +65,23 @@ class DotsOCRParser:
 
         assert self.min_pixels is None or self.min_pixels >= MIN_PIXELS
         assert self.max_pixels is None or self.max_pixels <= MAX_PIXELS
-        # Initialize Gemma3 OCR converter for optional image analysis
+
+        # Initialize OCR image analysis converters (Gemma3 and Qwen3 via Ollama).
+        # These are optional helpers; if initialization fails, core OCR still works.
+        self.gemma3_converter = None
+        self.qwen3_converter = None
+
         try:
             self.gemma3_converter = Gemma3OCRConverter()
         except Exception:
             # If initialization fails, continue without Gemma3 so core OCR still works
             self.gemma3_converter = None
+
+        try:
+            self.qwen3_converter = Qwen3OCRConverter()
+        except Exception:
+            # If initialization fails, continue without Qwen3 so core OCR still works
+            self.qwen3_converter = None
 
 
 
@@ -154,6 +166,43 @@ class DotsOCRParser:
 
         return response[0]
 
+    def _get_image_analysis_converter(self):
+        # Determine which image analysis backend to use (Gemma3 or Qwen3)
+        backend = (os.getenv("IMAGE_ANALYSIS_BACKEND", "gemma3") or "").strip().lower()
+        logger = logging.getLogger(__name__)
+
+        gemma = getattr(self, "gemma3_converter", None)
+        qwen = getattr(self, "qwen3_converter", None)
+
+        if backend == "qwen3":
+            if qwen is not None:
+                return qwen, "qwen3"
+            if gemma is not None:
+                logger.warning(
+                    "IMAGE_ANALYSIS_BACKEND=qwen3 but Qwen3 converter is not available; "
+                    "falling back to Gemma3.",
+                )
+                return gemma, "gemma3"
+            logger.info(
+                "IMAGE_ANALYSIS_BACKEND=qwen3 but no image analysis converter is "
+                "available; skipping image analysis.",
+            )
+            return None, backend or "qwen3"
+
+        # Default: gemma3
+        if gemma is not None:
+            return gemma, "gemma3"
+        if qwen is not None:
+            logger.warning(
+                "IMAGE_ANALYSIS_BACKEND=%s but Gemma3 converter is not available; "
+                "falling back to Qwen3.",
+                backend or "gemma3",
+            )
+            return qwen, "qwen3"
+
+        logger.info("No image analysis converter is available; skipping image analysis.")
+        return None, backend or "gemma3"
+
     def get_prompt(self, prompt_mode, bbox=None, origin_image=None, image=None, min_pixels=None, max_pixels=None):
         prompt = dict_promptmode_to_prompt[prompt_mode]
         if prompt_mode == 'prompt_grounding_ocr':
@@ -162,17 +211,20 @@ class DotsOCRParser:
             bbox = pre_process_bboxes(origin_image, bboxes, input_width=image.width, input_height=image.height, min_pixels=min_pixels, max_pixels=max_pixels)[0]
             prompt = prompt + str(bbox)
         return prompt
+
     def _add_image_analysis_to_markdown(self, md_content: str) -> str:
-        """Insert Gemma3 image analysis sections before embedded base64 images.
+        """Insert image analysis sections before embedded base64 images.
 
         This scans for markdown image tags that use a base64 data URL, for example:
             ![](data:image/png;base64,AAAA...)
 
-        For each image found, it calls Gemma3 via the Gemma3OCRConverter and inserts
-        an "Image Analysis" section immediately before the image tag.
+        The active backend (Gemma3 or Qwen3, selected via IMAGE_ANALYSIS_BACKEND)
+        is called to analyze each image, and the resulting markdown is inserted
+        immediately before the corresponding image tag.
         """
-        # If Gemma3 converter is not available, return content unchanged
-        if not getattr(self, "gemma3_converter", None):
+        converter, backend_name = self._get_image_analysis_converter()
+        if converter is None:
+            # No image analysis backend configured or available
             return md_content
 
         logger = logging.getLogger(__name__)
@@ -203,7 +255,7 @@ class DotsOCRParser:
                 base64_str = data_url.split("base64,", 1)[1]
 
             try:
-                base_prompt = self.gemma3_converter._build_default_prompt()
+                base_prompt = converter._build_default_prompt()
                 language_instruction = (
                     "\n\nLanguage and style requirements:\n"
                     "- The image belongs to a larger document whose surrounding Markdown "
@@ -220,12 +272,12 @@ class DotsOCRParser:
                 )
 
                 prompt = base_prompt + language_instruction
-                analysis_markdown = self.gemma3_converter.convert_image_base64_to_markdown(
+                analysis_markdown = converter.convert_image_base64_to_markdown(
                     base64_str,
                     prompt=prompt,
                 )
             except Exception as e:  # pragma: no cover - safety net
-                logger.error(f"Error during Gemma3 image analysis: {e}")
+                logger.error("Error during %s image analysis: %s", backend_name, e)
                 return match.group(0)
 
             if not analysis_markdown:
@@ -291,29 +343,23 @@ class DotsOCRParser:
                 break
 
             # Build the injected section: ensure clear separation from main content.
-            # We add a horizontal rule before the image and after the whole section so the
+            # We add a horizontal rule before and after the whole section so the
             # image+analysis block is visually isolated, but only if there isn't already
             # a separator there.
             analysis_section_lines = []
 
-            # Optional separator before the image
+            # Optional separator before the analysis+image block
             analysis_section_lines.append("")  # blank line before block
             if include_top_rule:
                 analysis_section_lines.append("---")
                 analysis_section_lines.append("")
 
+            # Analysis body first (so it appears before the image tag in the markdown)
+            analysis_section_lines.append(analysis_markdown)
+            analysis_section_lines.append("")  # blank line between analysis and image
+
             # Image itself
             analysis_section_lines.append(match.group(0))
-
-            # Analysis body (we no longer inject a fixed "Image Analysis" title).
-            # The first non-empty line of `analysis_markdown` is normalized to be a
-            # level-4 heading (####) in the post-processing above.
-            analysis_section_lines.extend(
-                [
-                    "",  # blank line between image and analysis body
-                    analysis_markdown,
-                ]
-            )
 
             # Optional separator after the analysis block
             if include_bottom_rule:
