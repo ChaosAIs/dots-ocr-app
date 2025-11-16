@@ -255,7 +255,16 @@ class DotsOCRParser:
                 base64_str = data_url.split("base64,", 1)[1]
 
             try:
-                base_prompt = converter._build_default_prompt()
+                # Let the converter choose the appropriate prompt based on image size
+                # (simple for small images, complex for large images)
+                # Then we'll get that prompt and append language instructions
+
+                # Determine which prompt to use based on image size
+                if hasattr(converter, '_is_simple_image') and converter._is_simple_image(base64_str):
+                    base_prompt = converter._build_simple_prompt()
+                else:
+                    base_prompt = converter._build_complex_prompt() if hasattr(converter, '_build_complex_prompt') else converter._build_default_prompt()
+
                 language_instruction = (
                     "\n\nLanguage and style requirements:\n"
                     "- The image belongs to a larger document whose surrounding Markdown "

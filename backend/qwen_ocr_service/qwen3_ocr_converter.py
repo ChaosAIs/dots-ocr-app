@@ -9,7 +9,9 @@ model and get markdown analysis back.
 import os
 import logging
 import re
-from typing import Optional
+import base64
+import io
+from typing import Optional, Tuple
 
 try:
     import requests  # type: ignore
@@ -28,6 +30,11 @@ except ImportError:  # pragma: no cover - handled gracefully at runtime
     Qwen3VLForConditionalGeneration = None  # type: ignore
     AutoProcessor = None  # type: ignore
     torch = None  # type: ignore
+
+try:
+    from PIL import Image  # type: ignore
+except ImportError:  # pragma: no cover - handled gracefully at runtime
+    Image = None  # type: ignore
 
 
 class Qwen3OCRConverter:
@@ -78,6 +85,10 @@ class Qwen3OCRConverter:
 
         # Transformers model name (set later if using transformers backend)
         self.transformers_model_name = None
+
+        # Image size detection thresholds (configurable via environment variables)
+        self.min_dimension_threshold = int(os.getenv("QWEN_IMAGE_MIN_DIMENSION_THRESHOLD", "100"))
+        self.pixel_area_threshold = int(os.getenv("QWEN_IMAGE_PIXEL_AREA_THRESHOLD", "1000"))
 
         # Temperature precedence:
         #   QWEN_TEMPERATURE / QWEN3_TEMPERATURE / OLLAMA_TEMPERATURE / default 0.1
@@ -249,12 +260,98 @@ class Qwen3OCRConverter:
             self.model = None
             self.processor = None
 
-    def _build_default_prompt(self) -> str:
-        """Build the default prompt used for Qwen3-VL image analysis."""
+    def _get_image_dimensions(self, image_base64: str) -> Tuple[int, int]:
+        """Get image dimensions (width, height) from base64 string.
+
+        Args:
+            image_base64: Raw base64 string of the image content.
+
+        Returns:
+            Tuple of (width, height) in pixels. Returns (0, 0) if unable to determine.
+        """
+        if Image is None:  # pragma: no cover - PIL not available
+            self.logger.warning("PIL not available - cannot determine image dimensions")
+            return (0, 0)
+
+        try:
+            # Decode base64 to bytes
+            image_bytes = base64.b64decode(image_base64)
+
+            # Open image with PIL
+            image = Image.open(io.BytesIO(image_bytes))
+
+            return image.size  # Returns (width, height)
+        except Exception as e:  # pragma: no cover - invalid image data
+            self.logger.warning(f"Failed to get image dimensions: {e}")
+            return (0, 0)
+
+    def _is_simple_image(self, image_base64: str) -> bool:
+        """Determine if an image is simple (small) or complex (large) based on dimensions.
+
+        Simple images are typically:
+        - Small icons, logos, labels
+        - Single words or short phrases
+        - Width or height < min_dimension_threshold pixels
+        - Total pixel area < pixel_area_threshold pixels
+
+        Complex images are typically:
+        - Charts, tables, diagrams
+        - Multi-paragraph documents
+        - Width and height >= min_dimension_threshold pixels
+        - Total pixel area >= pixel_area_threshold pixels
+
+        Thresholds are configurable via environment variables:
+        - QWEN_IMAGE_MIN_DIMENSION_THRESHOLD (default: 100)
+        - QWEN_IMAGE_PIXEL_AREA_THRESHOLD (default: 1000)
+
+        Args:
+            image_base64: Raw base64 string of the image content.
+
+        Returns:
+            True if image is simple (use simple analysis), False if complex (use deep analysis).
+        """
+        width, height = self._get_image_dimensions(image_base64)
+
+        # If we couldn't get dimensions, default to complex analysis (safer)
+        if width == 0 or height == 0:
+            return False
+
+        # Calculate total pixel area
+        pixel_area = width * height
+
+        # Image is simple if either dimension is small OR total area is small
+        is_small_dimension = width < self.min_dimension_threshold or height < self.min_dimension_threshold
+        is_small_area = pixel_area < self.pixel_area_threshold
+
+        is_simple = is_small_dimension or is_small_area
+
+        self.logger.info(
+            f"Image analysis: dimensions={width}x{height}, area={pixel_area}, "
+            f"classification={'SIMPLE' if is_simple else 'COMPLEX'} "
+            f"(thresholds: dimension={self.min_dimension_threshold}, area={self.pixel_area_threshold})"
+        )
+
+        return is_simple
+
+    def _build_simple_prompt(self) -> str:
+        """Build a simple prompt for small/basic images (icons, labels, single words)."""
         return (
             "You are a helpful assistant that can read and understand images.\n"
-            "You will be given a single image from a larger document.\n\n"
-            "Carefully analyze the image and extract its content with detailed analysis. Structure your output as follows:\n\n"
+            "This is a small image, likely containing simple content.\n\n"
+            "Extract the content directly without extra analysis:\n"
+            "- If it's a single word or short phrase: output just the text\n"
+            "- If it's a logo or icon: output the name/label\n"
+            "- If it's a simple label or tag: output the text content\n"
+            "- If it's a small diagram: briefly describe it\n\n"
+            "Keep your response concise and direct. No need for sections or detailed analysis.\n"
+        )
+
+    def _build_complex_prompt(self) -> str:
+        """Build a detailed prompt for complex images (charts, tables, diagrams, forms)."""
+        return (
+            "You are a helpful assistant that can read and understand images.\n"
+            "This is a complex image containing detailed information.\n\n"
+            "Structure your output with these sections:\n\n"
             "## Document Analysis\n"
             "Provide a brief overview of what this image contains (e.g., financial report section, chart, table, diagram, form, etc.).\n\n"
             "## Content\n"
@@ -286,6 +383,13 @@ class Qwen3OCRConverter:
             "- What is the main purpose or message of this content?\n\n"
             "Focus on accuracy, especially for numbers and data. Use clear markdown formatting with headers, tables, lists, and emphasis where appropriate.\n"
         )
+
+    def _build_default_prompt(self) -> str:
+        """Build the default prompt used for Qwen3-VL image analysis.
+
+        This is an alias for _build_complex_prompt() for backward compatibility.
+        """
+        return self._build_complex_prompt()
 
     def _extract_markdown_from_reasoning_output(self, raw: str) -> str:
         """Strip Qwen3 `<think>` reasoning blocks and return only the final answer.
@@ -321,10 +425,15 @@ class Qwen3OCRConverter:
         This dispatches to the Ollama, vLLM (OpenAI-compatible), or transformers
         backend depending on ``self.backend`` / ``QWEN_BACKEND``.
 
+        The method automatically detects image size and applies:
+        - Simple analysis for small images (< 200px dimension or < 50k pixels)
+        - Complex/deep analysis for larger images (charts, tables, diagrams)
+
         Args:
             image_base64: Raw base64 string of the image content. Do NOT include a
                 data URL prefix like 'data:image/png;base64,'.
-            prompt: Optional custom prompt. If omitted, a default analysis prompt is used.
+            prompt: Optional custom prompt. If omitted, automatically selects simple
+                or complex prompt based on image dimensions.
 
         Returns:
             Markdown text with the analysis results. If the call fails, a short
@@ -333,7 +442,14 @@ class Qwen3OCRConverter:
         if not image_base64:
             return "Image analysis error: no image data was provided for analysis.\n"
 
-        final_prompt = prompt or self._build_default_prompt()
+        # If no custom prompt provided, choose based on image size
+        if prompt is None:
+            if self._is_simple_image(image_base64):
+                final_prompt = self._build_simple_prompt()
+            else:
+                final_prompt = self._build_complex_prompt()
+        else:
+            final_prompt = prompt
 
         if self.backend == "transformers":
             return self._convert_with_transformers(image_base64, final_prompt)
