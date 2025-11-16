@@ -24,13 +24,6 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
     await uploadFiles(files);
   };
 
-  const handleClear = () => {
-    // This is called when the FileUpload component is cleared
-    // Don't call clear() here as it would cause infinite recursion
-    // Just reset any local state if needed
-    setUploadProgress(0);
-  };
-
   const uploadFiles = async (files) => {
     try {
       setUploading(true);
@@ -38,11 +31,11 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
-        
+
         // Validate file type
         const validExtensions = [".pdf", ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".doc", ".docx", ".xls", ".xlsx", ".txt", ".csv", ".tsv"];
         const fileExtension = "." + file.name.split(".").pop().toLowerCase();
-        
+
         if (!validExtensions.includes(fileExtension)) {
           messageService.errorToast(
             t("FileUpload.InvalidFileType", { filename: file.name })
@@ -53,11 +46,15 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         try {
           const response = await documentService.uploadDocument(file);
           if (response.status === "success") {
-            messageService.successToast(t("FileUpload.UploadSuccess", { filename: file.name }));
+            messageService.successToast(
+              t("FileUpload.UploadSuccess", { filename: file.name })
+            );
             setUploadProgress(((i + 1) / files.length) * 100);
           }
         } catch (error) {
-          messageService.errorToast(t("FileUpload.UploadFailed", { filename: file.name }));
+          messageService.errorToast(
+            t("FileUpload.UploadFailed", { filename: file.name })
+          );
           console.error("Upload error:", error);
         }
       }
@@ -80,21 +77,6 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
     }
   };
 
-  const handleDrop = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-    const files = Array.from(e.dataTransfer.files);
-    if (files && files.length > 0 && fileUploadRef.current) {
-      // Add dropped files to the FileUpload component
-      fileUploadRef.current.setFiles(files);
-    }
-  };
-
-  const handleDragOver = (e) => {
-    e.preventDefault();
-    e.stopPropagation();
-  };
-
   return (
     <div className="file-upload-container">
       <div className="file-upload-header">
@@ -102,11 +84,7 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         <p>{t("FileUpload.Description")}</p>
       </div>
 
-      <div
-        className="file-upload-area"
-        onDrop={handleDrop}
-        onDragOver={handleDragOver}
-      >
+      <div className="file-upload-area">
         <FileUpload
           ref={fileUploadRef}
           name="files"
@@ -115,30 +93,29 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
           maxFileSize={52428800} // 50MB
           customUpload
           uploadHandler={handleUpload}
-          onClear={handleClear}
-          auto={false}
           chooseLabel={t("FileUpload.ChooseFiles")}
           uploadLabel={t("FileUpload.Upload")}
           cancelLabel={t("FileUpload.Cancel")}
-          disabled={uploading}
-          className="file-upload-component"
-          emptyTemplate={<p className="m-0">{t("FileUpload.Description")}</p>}
         />
       </div>
 
       {uploading && (
         <div className="upload-progress">
           <ProgressBar value={uploadProgress} />
-          <p>{t("FileUpload.Uploading")} {Math.round(uploadProgress)}%</p>
+          <p>
+            {t("FileUpload.Uploading")} {Math.round(uploadProgress)}%
+          </p>
         </div>
       )}
 
       <div className="file-upload-info">
         <p>
-          <strong>{t("FileUpload.SupportedFormats")}</strong> {t("FileUpload.SupportedFormatsList")}
+          <strong>{t("FileUpload.SupportedFormats")}</strong>{" "}
+          {t("FileUpload.SupportedFormatsList")}
         </p>
         <p>
-          <strong>{t("FileUpload.MaxFileSize")}</strong> {t("FileUpload.MaxFileSizeValue")}
+          <strong>{t("FileUpload.MaxFileSize")}</strong>{" "}
+          {t("FileUpload.MaxFileSizeValue")}
         </p>
       </div>
     </div>
