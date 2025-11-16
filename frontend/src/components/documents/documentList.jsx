@@ -112,8 +112,10 @@ export const DocumentList = ({ refreshTrigger }) => {
         )
       );
 
-      // Always use Dots OCR service
-      const converterType = "dots_ocr_service";
+      // Use auto-detection to route to the appropriate converter
+      // - doc_service for Word/Excel/Text files
+      // - dots_ocr_service for PDF and images
+      const converterType = "auto";
 
       // Start conversion (returns immediately with conversion_id)
       const response = await documentService.convertDocument(

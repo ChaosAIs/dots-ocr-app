@@ -463,9 +463,14 @@ async def upload_file(file: UploadFile = File(...)):
             logger.info(f"   Original: {resize_info['original_size'][0]}x{resize_info['original_size'][1]} = {resize_info['original_size'][0] * resize_info['original_size'][1]:,} pixels")
             logger.info(f"   New: {resize_info['new_size'][0]}x{resize_info['new_size'][1]} = {resize_info['new_size'][0] * resize_info['new_size'][1]:,} pixels")
             logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
-        else:
+        elif resize_info['original_size'] is not None:
+            # Image file that didn't need resizing
             orig_w, orig_h = resize_info['original_size']
             logger.info(f"📏 Image size OK: {orig_w}x{orig_h} = {orig_w * orig_h:,} pixels")
+            logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
+        else:
+            # Non-image file (PDF, Excel, Word, etc.)
+            logger.info(f"📄 File uploaded: {file.filename}")
             logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
 
         return JSONResponse(content=response_data)
