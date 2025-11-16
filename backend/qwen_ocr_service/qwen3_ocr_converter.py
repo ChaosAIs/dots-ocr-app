@@ -343,6 +343,7 @@ class Qwen3OCRConverter:
             "- If it's a logo or icon: output the name/label\n"
             "- If it's a simple label or tag: output the text content\n"
             "- If it's a small diagram: briefly describe it\n\n"
+            "- If it's a small object or entity: briefly describe it\n\n"
             "Keep your response concise and direct. No need for sections or detailed analysis.\n"
         )
 
