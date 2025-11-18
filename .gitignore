@@ -22,3 +22,4 @@ backend/__pycache__/main.cpython-313.pyc
 backend/__pycache__/worker_pool.cpython-313.pyc
 DeepSeek-OCR-Web-main/
 backend/gemma_ocr_service/__pycache__/
+backend/qwen_ocr_service/__pycache__/

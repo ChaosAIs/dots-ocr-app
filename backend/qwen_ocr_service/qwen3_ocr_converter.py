@@ -340,9 +340,10 @@ class Qwen3OCRConverter:
             "This is a small image, likely containing simple content.\n\n"
             "Extract the content directly without extra analysis:\n"
             "- If it's a single word or short phrase: output just the text\n"
-            "- If it's a logo or icon: output the name/label\n"
+            "- If it's a table or form: output the text and layout as original format with markdown\n"            
+            "- If it's a logo or icon: output the name/label only\n"
             "- If it's a simple label or tag: output the text content\n"
-            "- If it's a small diagram: briefly describe it\n\n"
+            "- If it's a small diagram: briefly describe its workflow.\n\n"
             "- If it's a small object or entity: briefly describe it\n\n"
             "Keep your response concise and direct. No need for sections or detailed analysis.\n"
         )
