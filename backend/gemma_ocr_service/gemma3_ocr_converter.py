@@ -9,6 +9,7 @@ and get markdown analysis back.
 import os
 import logging
 from typing import Optional
+from utils.image_utils import resize_image_if_needed
 
 try:
     import requests  # type: ignore
@@ -116,6 +117,11 @@ class Gemma3OCRConverter:
         """
         if not image_base64:
             return "Image analysis error: no image data was provided for analysis.\n"
+
+        # Resize image if needed to prevent processing issues
+        # Get max dimension from environment or use default 1600px
+        max_dim = int(os.getenv("GEMMA_TRANSFORMERS_MAX_IMAGE_DIMENSION", "1600"))
+        image_base64 = resize_image_if_needed(image_base64, max_dimension=max_dim, logger_instance=self.logger)
 
         if requests is None:  # pragma: no cover - hit only when requests missing
             self.logger.error("requests library not installed - cannot call Ollama/Gemma3")

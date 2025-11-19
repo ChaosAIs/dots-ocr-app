@@ -12,6 +12,7 @@ import re
 import base64
 import io
 from typing import Optional, Tuple
+from utils.image_utils import resize_image_if_needed
 
 try:
     import requests  # type: ignore
@@ -339,13 +340,13 @@ class Qwen3OCRConverter:
             "You are a helpful assistant that can read and understand images.\n"
             "This is a small image, likely containing simple content.\n\n"
             "Extract the content directly without extra analysis:\n"
-            "- If it's a single word or short phrase: output just the text\n"
-            "- If it's a table or form: output the text and layout as original format with markdown\n"            
-            "- If it's a logo or icon: output the name/label only\n"
-            "- If it's a simple label or tag: output the text content\n"
-            "- If it's a small diagram: briefly describe its workflow.\n\n"
-            "- If it's a small object or entity: briefly describe it\n\n"
-            "Keep your response concise and direct. No need for sections or detailed analysis.\n"
+            "- If it's a single word or short phrase: output just the text.\n"
+            "- If it's a table or form: output the text and layout as original format with markdown.\n"            
+            "- If it's a logo or icon: output the name/label only.\n"
+            "- If it's a label: output the text content.\n"
+            "- If it's a diagram: briefly describe its workflow.\n\n"
+            "- If it's an object: briefly describe what is it.\n\n"
+            "Note: Keep your response concise and direct. No need for sections or detailed analysis.\n"
         )
 
     def _build_complex_prompt(self) -> str:
@@ -428,6 +429,7 @@ class Qwen3OCRConverter:
         backend depending on ``self.backend`` / ``QWEN_BACKEND``.
 
         The method automatically detects image size and applies:
+        - Automatic resizing to half size if either dimension > 2000px
         - Simple analysis for small images (< 200px dimension or < 50k pixels)
         - Complex/deep analysis for larger images (charts, tables, diagrams)
 
@@ -444,7 +446,8 @@ class Qwen3OCRConverter:
         if not image_base64:
             return "Image analysis error: no image data was provided for analysis.\n"
 
-        # If no custom prompt provided, choose based on image size
+        # If no custom prompt provided, choose based on ORIGINAL image size
+        # This ensures classification is based on content complexity, not GPU constraints
         if prompt is None:
             if self._is_simple_image(image_base64):
                 final_prompt = self._build_simple_prompt()
@@ -452,6 +455,12 @@ class Qwen3OCRConverter:
                 final_prompt = self._build_complex_prompt()
         else:
             final_prompt = prompt
+
+        # Resize image if needed to prevent CUDA timeout errors
+        # This happens AFTER classification to avoid affecting prompt selection
+        # Get max dimension from environment or use default 1600px
+        max_dim = int(os.getenv("QWEN_TRANSFORMERS_MAX_IMAGE_DIMENSION", "1600"))
+        image_base64 = resize_image_if_needed(image_base64, max_dimension=max_dim, logger_instance=self.logger)
 
         if self.backend == "transformers":
             return self._convert_with_transformers(image_base64, final_prompt)
@@ -713,19 +722,34 @@ class Qwen3OCRConverter:
 
             # Get generation hyperparameters from environment or use defaults
             # Based on VL hyperparameters from the task reference
-            max_new_tokens = int(os.getenv("QWEN_TRANSFORMERS_MAX_NEW_TOKENS", "16384"))
+            max_new_tokens = int(os.getenv("QWEN_TRANSFORMERS_MAX_NEW_TOKENS", "2048"))
             top_p = float(os.getenv("QWEN_TRANSFORMERS_TOP_P", "0.8"))
             top_k = int(os.getenv("QWEN_TRANSFORMERS_TOP_K", "20"))
             repetition_penalty = float(os.getenv("QWEN_TRANSFORMERS_REPETITION_PENALTY", "1.0"))
 
-            # Generate output
+            # Use do_sample=False for faster deterministic generation (reduces GPU time)
+            # This helps prevent CUDA watchdog timeouts
+            do_sample = os.getenv("QWEN_TRANSFORMERS_DO_SAMPLE", "false").lower() == "true"
+
+            # Generate output with timeout-friendly settings
+            generate_kwargs = {
+                "max_new_tokens": max_new_tokens,
+                "repetition_penalty": repetition_penalty,
+            }
+
+            # Only add sampling parameters if do_sample=True
+            if do_sample:
+                generate_kwargs["temperature"] = self.temperature
+                generate_kwargs["top_p"] = top_p
+                generate_kwargs["top_k"] = top_k
+                generate_kwargs["do_sample"] = True
+            else:
+                # Deterministic generation (faster, no sampling overhead)
+                generate_kwargs["do_sample"] = False
+
             generated_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=max_new_tokens,
-                temperature=self.temperature,
-                top_p=top_p,
-                top_k=top_k,
-                repetition_penalty=repetition_penalty,
+                **generate_kwargs
             )
 
             # Trim the input tokens from the generated output

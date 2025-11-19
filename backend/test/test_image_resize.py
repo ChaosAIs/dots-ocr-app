@@ -1,103 +1,134 @@
 #!/usr/bin/env python3
-"""
-Test script to verify image resizing functionality.
-"""
+"""Test script to verify image resize functionality."""
 
 import os
 import sys
-from PIL import Image
+import base64
+from io import BytesIO
 
-# Add parent directory to path to import main module
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Add parent directory to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from main import _resize_image_if_needed
+try:
+    from PIL import Image
+except ImportError:
+    print("❌ PIL/Pillow not installed. Please install: pip install Pillow")
+    sys.exit(1)
 
-def test_resize_functionality():
-    """Test the image resize function with the large PNG image."""
+from utils.image_utils import resize_image_if_needed
+
+
+def create_test_image(width: int, height: int) -> str:
+    """Create a test image with specified dimensions and return base64."""
+    # Create a simple test image with gradient
+    img = Image.new('RGB', (width, height), color='white')
     
-    # Test with the large PNG image
-    test_image_path = "input/PP-Overall-Flow.png"
+    # Add some visual content (gradient)
+    pixels = img.load()
+    for y in range(height):
+        for x in range(width):
+            r = int(255 * x / width)
+            g = int(255 * y / height)
+            b = 128
+            pixels[x, y] = (r, g, b)
     
-    if not os.path.exists(test_image_path):
-        print(f"❌ Test image not found: {test_image_path}")
-        return False
-    
-    # Get original image info
-    with Image.open(test_image_path) as img:
-        original_width, original_height = img.size
-        original_pixels = original_width * original_height
-    
-    # Get max_pixels from environment
-    max_pixels_env = os.getenv('MAX_PIXELS', '8000000')
-    if max_pixels_env.lower() == 'none':
-        max_pixels = 11289600
+    # Convert to base64
+    buffer = BytesIO()
+    img.save(buffer, format='PNG')
+    buffer.seek(0)
+    return base64.b64encode(buffer.read()).decode('utf-8')
+
+
+def get_image_dimensions(image_base64: str) -> tuple:
+    """Get dimensions from base64 image."""
+    image_bytes = base64.b64decode(image_base64)
+    img = Image.open(BytesIO(image_bytes))
+    return img.size
+
+
+def test_resize():
+    """Test the resize functionality."""
+    print("=" * 80)
+    print("Testing Image Resize Functionality")
+    print("=" * 80)
+
+    # Test 1: Image smaller than threshold (should not resize)
+    print("\n📝 Test 1: Small image (1000x800) - should NOT resize")
+    small_img = create_test_image(1000, 800)
+    original_size = get_image_dimensions(small_img)
+    print(f"   Original size: {original_size[0]}x{original_size[1]}")
+
+    resized_img = resize_image_if_needed(small_img, max_dimension=2000)
+    new_size = get_image_dimensions(resized_img)
+    print(f"   After resize: {new_size[0]}x{new_size[1]}")
+
+    if original_size == new_size:
+        print("   ✅ PASS: Image was not resized (as expected)")
     else:
-        max_pixels = int(max_pixels_env)
-    safe_max_pixels = int(max_pixels * 0.9)
+        print("   ❌ FAIL: Image was resized when it shouldn't be")
 
-    print(f"\n📊 Original Image Info:")
-    print(f"   Path: {test_image_path}")
-    print(f"   Size: {original_width} x {original_height}")
-    print(f"   Total Pixels: {original_pixels:,}")
-    print(f"   Max Allowed (from env): {max_pixels:,}")
-    print(f"   Safe Max (90%): {safe_max_pixels:,}")
-    print(f"   Exceeds Limit: {'Yes' if original_pixels > safe_max_pixels else 'No'}")
-    
-    # Create a copy for testing
-    test_copy_path = "input/PP-Overall-Flow_test_copy.png"
-    with Image.open(test_image_path) as img:
-        img.save(test_copy_path)
-    
-    print(f"\n🔄 Testing resize function...")
-    
-    # Test resize
-    result = _resize_image_if_needed(test_copy_path)
-    
-    print(f"\n📋 Resize Result:")
-    print(f"   Resized: {result['resized']}")
-    print(f"   Message: {result['message']}")
-    
-    if result['resized']:
-        print(f"   Original Size: {result['original_size']}")
-        print(f"   New Size: {result['new_size']}")
-        
-        # Verify the resized image
-        with Image.open(test_copy_path) as img:
-            new_width, new_height = img.size
-            new_pixels = new_width * new_height
-        
-        print(f"\n✅ Verification:")
-        print(f"   New dimensions: {new_width} x {new_height}")
-        print(f"   New total pixels: {new_pixels:,}")
-        print(f"   Within safe limit: {'Yes' if new_pixels <= safe_max_pixels else 'No'}")
-        print(f"   Within max limit: {'Yes' if new_pixels <= max_pixels else 'No'}")
-        print(f"   Divisible by 28: Width={new_width % 28 == 0}, Height={new_height % 28 == 0}")
-        
-        # Calculate reduction percentage
-        reduction = ((original_pixels - new_pixels) / original_pixels) * 100
-        print(f"   Size reduction: {reduction:.1f}%")
-        
-        # Clean up test copy
-        os.remove(test_copy_path)
-        print(f"\n🧹 Cleaned up test copy")
-        
-        return True
+    # Test 2: Image with width > threshold (should resize maintaining aspect ratio)
+    print("\n📝 Test 2: Wide image (3068x1000) - should resize to fit max_dimension")
+    wide_img = create_test_image(3068, 1000)
+    original_size = get_image_dimensions(wide_img)
+    print(f"   Original size: {original_size[0]}x{original_size[1]}")
+
+    max_dim = 2000
+    resized_img = resize_image_if_needed(wide_img, max_dimension=max_dim)
+    new_size = get_image_dimensions(resized_img)
+    print(f"   After resize: {new_size[0]}x{new_size[1]}")
+
+    # Calculate expected size: scale so largest dimension = max_dim
+    scale = max_dim / max(original_size)
+    expected_size = (int(original_size[0] * scale), int(original_size[1] * scale))
+    if new_size == expected_size:
+        print(f"   ✅ PASS: Image resized to {new_size[0]}x{new_size[1]} (expected {expected_size[0]}x{expected_size[1]})")
     else:
-        print(f"\n⚠️  Image was not resized (might already be within limits)")
-        os.remove(test_copy_path)
-        return True
+        print(f"   ❌ FAIL: Expected {expected_size[0]}x{expected_size[1]}, got {new_size[0]}x{new_size[1]}")
+    
+    # Test 3: Image with height > threshold (should resize maintaining aspect ratio)
+    print("\n📝 Test 3: Tall image (1000x3835) - should resize to fit max_dimension")
+    tall_img = create_test_image(1000, 3835)
+    original_size = get_image_dimensions(tall_img)
+    print(f"   Original size: {original_size[0]}x{original_size[1]}")
+
+    max_dim = 2000
+    resized_img = resize_image_if_needed(tall_img, max_dimension=max_dim)
+    new_size = get_image_dimensions(resized_img)
+    print(f"   After resize: {new_size[0]}x{new_size[1]}")
+
+    # Calculate expected size: scale so largest dimension = max_dim
+    scale = max_dim / max(original_size)
+    expected_size = (int(original_size[0] * scale), int(original_size[1] * scale))
+    if new_size == expected_size:
+        print(f"   ✅ PASS: Image resized to {new_size[0]}x{new_size[1]} (expected {expected_size[0]}x{expected_size[1]})")
+    else:
+        print(f"   ❌ FAIL: Expected {expected_size[0]}x{expected_size[1]}, got {new_size[0]}x{new_size[1]}")
+
+    # Test 4: Very large image (both dimensions > threshold)
+    print("\n📝 Test 4: Large image (3068x3835) - should resize to fit max_dimension")
+    large_img = create_test_image(3068, 3835)
+    original_size = get_image_dimensions(large_img)
+    print(f"   Original size: {original_size[0]}x{original_size[1]}")
+
+    max_dim = 2000
+    resized_img = resize_image_if_needed(large_img, max_dimension=max_dim)
+    new_size = get_image_dimensions(resized_img)
+    print(f"   After resize: {new_size[0]}x{new_size[1]}")
+
+    # Calculate expected size: scale so largest dimension = max_dim
+    scale = max_dim / max(original_size)
+    expected_size = (int(original_size[0] * scale), int(original_size[1] * scale))
+    if new_size == expected_size:
+        print(f"   ✅ PASS: Image resized to {new_size[0]}x{new_size[1]} (expected {expected_size[0]}x{expected_size[1]})")
+    else:
+        print(f"   ❌ FAIL: Expected {expected_size[0]}x{expected_size[1]}, got {new_size[0]}x{new_size[1]}")
+    
+    print("\n" + "=" * 80)
+    print("✅ All tests completed!")
+    print("=" * 80)
+
 
 if __name__ == "__main__":
-    print("=" * 60)
-    print("Image Resize Functionality Test")
-    print("=" * 60)
-    
-    success = test_resize_functionality()
-    
-    print("\n" + "=" * 60)
-    if success:
-        print("✅ Test completed successfully!")
-    else:
-        print("❌ Test failed!")
-    print("=" * 60)
+    test_resize()
 
