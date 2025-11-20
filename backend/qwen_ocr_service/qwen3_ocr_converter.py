@@ -286,27 +286,181 @@ class Qwen3OCRConverter:
             self.logger.warning(f"Failed to get image dimensions: {e}")
             return (0, 0)
 
-    def _is_simple_image(self, image_base64: str) -> bool:
-        """Determine if an image is simple (small) or complex (large) based on pixel area.
+    def _classify_image_content_with_llm(self, image_base64: str) -> bool:
+        """Use LLM to determine if image contains complex content requiring detailed analysis.
 
-        Simple images are typically:
-        - Small icons, logos, labels
-        - Single words or short phrases
-        - Total pixel area < pixel_area_threshold
-
-        Complex images are typically:
-        - Charts, tables, diagrams
-        - Multi-paragraph documents
-        - Total pixel area >= pixel_area_threshold
-
-        Threshold is configurable via environment variable:
-        - QWEN_IMAGE_PIXEL_AREA_THRESHOLD (default: 40000, approximately 200x200)
+        This method sends a lightweight classification prompt to the LLM to detect:
+        - Statistical reports, charts, graphs with numbers
+        - Diagrams, flowcharts, process flows
+        - Mechanical or electrical components/schematics
+        - Tables with data, forms with multiple fields
+        - Technical drawings or blueprints
 
         Args:
             image_base64: Raw base64 string of the image content.
 
         Returns:
-            True if image is simple (use simple analysis), False if complex (use deep analysis).
+            True if image needs complex analysis, False if simple analysis is sufficient.
+        """
+        classification_prompt = (
+            "You are an image content classifier. Analyze this image and determine if it requires COMPLEX or SIMPLE analysis.\n\n"
+            "Return COMPLEX if the image contains ANY of the following:\n"
+            "- Statistical reports, charts, graphs, or dashboards with numbers\n"
+            "- Diagrams with flows, processes, or relationships\n"
+            "- Mechanical components, electrical circuits, or technical schematics\n"
+            "- Tables with multiple rows/columns of data\n"
+            "- Forms with many fields or complex layouts\n"
+            "- Technical drawings, blueprints, or architectural plans\n"
+            "- Multi-section documents with structured information\n\n"
+            "Return SIMPLE if the image contains:\n"
+            "- Single words, short phrases, or labels\n"
+            "- Simple icons or logos\n"
+            "- Basic objects without special logic or structure\n"
+            "- Plain text without complex structure\n\n"
+            "Respond with ONLY one word: either 'COMPLEX' or 'SIMPLE' (no explanation needed)."
+        )
+
+        try:
+            # Use a lightweight call with minimal tokens for fast classification
+            if self.backend == "transformers":
+                result = self._classify_with_transformers(image_base64, classification_prompt)
+            elif self.backend == "vllm":
+                result = self._classify_with_vllm(image_base64, classification_prompt)
+            else:
+                result = self._classify_with_ollama(image_base64, classification_prompt)
+
+            # Parse the response
+            result_upper = result.strip().upper()
+            is_complex = "COMPLEX" in result_upper
+
+            self.logger.info(
+                f"LLM content classification: result='{result.strip()}', "
+                f"classification={'COMPLEX' if is_complex else 'SIMPLE'}"
+            )
+
+            return is_complex
+
+        except Exception as e:
+            self.logger.warning(f"LLM classification failed: {e}, defaulting to area-based classification")
+            # If LLM classification fails, fall back to area-based classification
+            return not self._is_simple_image_by_area(image_base64)
+
+    def _classify_with_ollama(self, image_base64: str, prompt: str) -> str:
+        """Lightweight classification call using Ollama backend."""
+        if requests is None:
+            raise RuntimeError("requests library not available")
+
+        payload = {
+            "model": self.model_name,
+            "prompt": prompt,
+            "images": [image_base64],
+            "stream": False,
+            "options": {
+                "temperature": 0.0,  # Use deterministic output for classification
+                "num_predict": 10,   # Only need one word response
+            },
+        }
+
+        response = requests.post(
+            self.generate_endpoint,
+            json=payload,
+            timeout=30,  # Short timeout for classification
+            headers={"Content-Type": "application/json"},
+        )
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Ollama API error: {response.status_code}")
+
+        data = response.json()
+        return (data.get("response") or "").strip()
+
+    def _classify_with_vllm(self, image_base64: str, prompt: str) -> str:
+        """Lightweight classification call using vLLM backend."""
+        if self.client is None:
+            raise RuntimeError("OpenAI client not available")
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                    },
+                ],
+            }
+        ]
+
+        response = self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            max_tokens=10,  # Only need one word response
+            temperature=0.0,  # Deterministic output
+        )
+
+        return response.choices[0].message.content.strip()
+
+    def _classify_with_transformers(self, image_base64: str, prompt: str) -> str:
+        """Lightweight classification call using transformers backend."""
+        if self.model is None or self.processor is None:
+            raise RuntimeError("Transformers model/processor not available")
+
+        # Decode base64 to PIL Image
+        image_bytes = base64.b64decode(image_base64)
+        image = Image.open(io.BytesIO(image_bytes))
+
+        # Prepare messages
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+
+        # Apply chat template and prepare inputs (same as main transformers method)
+        inputs = self.processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt"
+        )
+        inputs = inputs.to(self.model.device)
+
+        # Generate with minimal tokens for fast classification
+        with torch.no_grad():
+            generated_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=10,  # Only need one word
+                do_sample=False,    # Deterministic
+            )
+
+        # Trim and decode
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        output_text = self.processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False
+        )
+
+        return output_text[0].strip() if output_text else "SIMPLE"
+
+    def _is_simple_image_by_area(self, image_base64: str) -> bool:
+        """Determine if an image is simple based on pixel area only.
+
+        This is the original area-based classification method.
+
+        Args:
+            image_base64: Raw base64 string of the image content.
+
+        Returns:
+            True if image is simple (small area), False if complex (large area).
         """
         width, height = self._get_image_dimensions(image_base64)
 
@@ -317,15 +471,71 @@ class Qwen3OCRConverter:
         # Calculate total pixel area
         pixel_area = width * height
 
-        self.logger.info(f"Image analysis: dimensions={width}x{height}, area={pixel_area:,}")
-
         # Image is simple if total area is small
         is_simple = pixel_area < self.pixel_area_threshold
 
         self.logger.info(
-            f"Image analysis: dimensions={width}x{height}, area={pixel_area:,}, "
+            f"Area-based classification: dimensions={width}x{height}, area={pixel_area:,}, "
             f"classification={'SIMPLE' if is_simple else 'COMPLEX'} "
             f"(area_threshold={self.pixel_area_threshold:,})"
+        )
+
+        return is_simple
+
+    def _is_simple_image(self, image_base64: str) -> bool:
+        """Determine if an image is simple or complex using both area and LLM-based classification.
+
+        This method combines two classification approaches:
+        1. Area-based: Small images (< threshold pixels) are typically simple
+        2. LLM-based: Content analysis to detect charts, diagrams, technical content, etc.
+
+        An image is considered COMPLEX if:
+        - It's large (area >= threshold), OR
+        - LLM detects complex content (charts, diagrams, statistics, technical drawings)
+
+        An image is considered SIMPLE only if:
+        - It's small (area < threshold), AND
+        - LLM confirms simple content (labels, icons, plain text)
+
+        Environment variables:
+        - QWEN_IMAGE_PIXEL_AREA_THRESHOLD: Pixel area threshold (default: 40000)
+        - QWEN_USE_LLM_CLASSIFICATION: Enable/disable LLM classification (default: true)
+
+        Args:
+            image_base64: Raw base64 string of the image content.
+
+        Returns:
+            True if image is simple (use simple analysis), False if complex (use deep analysis).
+        """
+        # Check if LLM classification is enabled (default: true)
+        use_llm_classification = os.getenv("QWEN_USE_LLM_CLASSIFICATION", "true").lower() in ("true", "1", "yes")
+
+        # First check: area-based classification
+        is_simple_by_area = self._is_simple_image_by_area(image_base64)
+
+        # If LLM classification is disabled, use only area-based classification
+        if not use_llm_classification:
+            self.logger.info(
+                f"Final classification (area-only): {'SIMPLE' if is_simple_by_area else 'COMPLEX'}"
+            )
+            return is_simple_by_area
+
+        # If image is large by area, it's definitely complex - skip LLM call for efficiency
+        if not is_simple_by_area:
+            self.logger.info("Image is large by area - classified as COMPLEX (skipping LLM check)")
+            return False
+
+        # Image is small by area, but use LLM to check if content is complex
+        # (e.g., small chart, small technical diagram)
+        is_complex_by_content = self._classify_image_content_with_llm(image_base64)
+
+        # Final decision: simple only if small area AND simple content
+        is_simple = is_simple_by_area and not is_complex_by_content
+
+        self.logger.info(
+            f"Final classification: area={'SIMPLE' if is_simple_by_area else 'COMPLEX'}, "
+            f"content={'COMPLEX' if is_complex_by_content else 'SIMPLE'}, "
+            f"final={'SIMPLE' if is_simple else 'COMPLEX'}"
         )
 
         return is_simple
