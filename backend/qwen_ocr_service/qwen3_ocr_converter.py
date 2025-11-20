@@ -87,9 +87,9 @@ class Qwen3OCRConverter:
         # Transformers model name (set later if using transformers backend)
         self.transformers_model_name = None
 
-        # Image size detection thresholds (configurable via environment variables)
-        self.min_dimension_threshold = int(os.getenv("QWEN_IMAGE_MIN_DIMENSION_THRESHOLD", "100"))
-        self.pixel_area_threshold = int(os.getenv("QWEN_IMAGE_PIXEL_AREA_THRESHOLD", "1000"))
+        # Image size detection threshold (configurable via environment variable)
+        # Images with area below this threshold use simple prompt, above use complex prompt
+        self.pixel_area_threshold = int(os.getenv("QWEN_IMAGE_PIXEL_AREA_THRESHOLD", "40000"))
 
         # Temperature precedence:
         #   QWEN_TEMPERATURE / QWEN3_TEMPERATURE / OLLAMA_TEMPERATURE / default 0.1
@@ -287,23 +287,20 @@ class Qwen3OCRConverter:
             return (0, 0)
 
     def _is_simple_image(self, image_base64: str) -> bool:
-        """Determine if an image is simple (small) or complex (large) based on dimensions.
+        """Determine if an image is simple (small) or complex (large) based on pixel area.
 
         Simple images are typically:
         - Small icons, logos, labels
         - Single words or short phrases
-        - Width or height < min_dimension_threshold pixels
-        - Total pixel area < pixel_area_threshold pixels
+        - Total pixel area < pixel_area_threshold
 
         Complex images are typically:
         - Charts, tables, diagrams
         - Multi-paragraph documents
-        - Width and height >= min_dimension_threshold pixels
-        - Total pixel area >= pixel_area_threshold pixels
+        - Total pixel area >= pixel_area_threshold
 
-        Thresholds are configurable via environment variables:
-        - QWEN_IMAGE_MIN_DIMENSION_THRESHOLD (default: 100)
-        - QWEN_IMAGE_PIXEL_AREA_THRESHOLD (default: 1000)
+        Threshold is configurable via environment variable:
+        - QWEN_IMAGE_PIXEL_AREA_THRESHOLD (default: 40000, approximately 200x200)
 
         Args:
             image_base64: Raw base64 string of the image content.
@@ -320,16 +317,15 @@ class Qwen3OCRConverter:
         # Calculate total pixel area
         pixel_area = width * height
 
-        # Image is simple if either dimension is small OR total area is small
-        is_small_dimension = width < self.min_dimension_threshold or height < self.min_dimension_threshold
-        is_small_area = pixel_area < self.pixel_area_threshold
+        self.logger.info(f"Image analysis: dimensions={width}x{height}, area={pixel_area:,}")
 
-        is_simple = is_small_dimension or is_small_area
+        # Image is simple if total area is small
+        is_simple = pixel_area < self.pixel_area_threshold
 
         self.logger.info(
-            f"Image analysis: dimensions={width}x{height}, area={pixel_area}, "
+            f"Image analysis: dimensions={width}x{height}, area={pixel_area:,}, "
             f"classification={'SIMPLE' if is_simple else 'COMPLEX'} "
-            f"(thresholds: dimension={self.min_dimension_threshold}, area={self.pixel_area_threshold})"
+            f"(area_threshold={self.pixel_area_threshold:,})"
         )
 
         return is_simple
@@ -341,50 +337,49 @@ class Qwen3OCRConverter:
             "This is a small image, likely containing simple content.\n\n"
             "Extract the content directly without extra analysis:\n"
             "- If it's a single word or short phrase: output just the text.\n"
-            "- If it's a table or form: output the text and layout as original format with markdown.\n"            
+            "- If it's a table or form: output the text and layout as original format with markdown.\n"
             "- If it's a logo or icon: output the name/label only.\n"
             "- If it's a label: output the text content.\n"
             "- If it's a diagram: briefly describe its workflow.\n\n"
             "- If it's an object: briefly describe what is it.\n\n"
+            "IMPORTANT: Preserve the original language of the content in the image. "
+            "If the text is in Chinese, output in Chinese. If it's in English, output in English. If it's in French, output in French."
+            "Do NOT translate the extracted content to another language.\n\n"
             "Note: Keep your response concise and direct. No need for sections or detailed analysis.\n"
         )
 
     def _build_complex_prompt(self) -> str:
         """Build a detailed prompt for complex images (charts, tables, diagrams, forms)."""
         return (
-            "You are a helpful assistant that can read and understand images.\n"
-            "This is a complex image containing detailed information.\n\n"
-            "Structure your output with these sections:\n\n"
-            "## Document Analysis\n"
-            "Provide a brief overview of what this image contains (e.g., financial report section, chart, table, diagram, form, etc.).\n\n"
-            "## Content\n"
+            "CRITICAL INSTRUCTION - READ FIRST:\n"
+            "You MUST preserve the ORIGINAL LANGUAGE of the text in the image.\n"
+            "- If the image contains Chinese text, respond ENTIRELY in Chinese\n"
+            "- If the image contains English text, respond ENTIRELY in English\n"
+            "- If the image contains other languages, respond in that language\n"
+            "- Do NOT translate the content\n"
+            "- All section headers, descriptions, and analysis MUST be in the same language as the image content\n\n"
+            "You are analyzing a complex image containing detailed information.\n\n"
+            "Structure your output with these sections (use the appropriate language for section headers):\n\n"
+            "Section 1: Document Analysis\n"
+            "Provide a brief overview of what this image contains.\n\n"
+            "Section 2: Content\n"
             "Extract and present the content using appropriate markdown formatting:\n"
-            "- **Tables/Forms**: Reconstruct as properly formatted Markdown tables with headers and aligned columns\n"
-            "- **Charts/Dashboards**: \n"
-            "  - List all data points, values, and labels\n"
-            "  - Describe trends, patterns, or notable insights\n"
-            "  - Include percentages, amounts, and units\n"
-            "- **Diagrams/Flowcharts**: \n"
-            "  - Describe the workflow or process flow\n"
-            "  - Create ASCII/text-based flow diagram if possible\n"
-            "  - Explain relationships between components\n"
-            "- **Text Content**: \n"
-            "  - Transcribe all important text accurately\n"
-            "  - Preserve hierarchical structure using markdown headers (###, ####)\n"
-            "  - Use bullet points or numbered lists where appropriate\n"
-            "  - Maintain original formatting and layout\n\n"
-            "## Key Information\n"
+            "- **Tables/Forms**: Reconstruct as properly formatted Markdown tables\n"
+            "- **Charts/Dashboards**: List all data points, values, labels, trends, and insights\n"
+            "- **Diagrams/Flowcharts**: Describe the workflow, process flow, and relationships between components\n"
+            "- **Text Content**: Transcribe all text accurately, preserve hierarchical structure, use markdown headers and lists\n\n"
+            "Section 3: Key Information\n"
             "Highlight the most important information:\n"
             "- Critical numbers, amounts, percentages\n"
             "- Dates and time periods\n"
             "- Titles, labels, and categories\n"
             "- Any warnings, notes, or special annotations\n\n"
-            "## Insights\n"
+            "Section 4: Insights\n"
             "Provide brief analytical observations:\n"
             "- What does this data show or indicate?\n"
             "- Are there any notable trends, comparisons, or outliers?\n"
             "- What is the main purpose or message of this content?\n\n"
-            "Focus on accuracy, especially for numbers and data. Use clear markdown formatting with headers, tables, lists, and emphasis where appropriate.\n"
+            "REMEMBER: Use the SAME LANGUAGE as the text in the image for ALL sections and content.\n"
         )
 
     def _build_default_prompt(self) -> str:
@@ -458,9 +453,9 @@ class Qwen3OCRConverter:
 
         # Resize image if needed to prevent CUDA timeout errors
         # This happens AFTER classification to avoid affecting prompt selection
-        # Get max dimension from environment or use default 1600px
-        max_dim = int(os.getenv("QWEN_TRANSFORMERS_MAX_IMAGE_DIMENSION", "1600"))
-        image_base64 = resize_image_if_needed(image_base64, max_dimension=max_dim, logger_instance=self.logger)
+        # Get max area from environment or use default 2.56M pixels (e.g., 1600x1600)
+        max_area = int(os.getenv("QWEN_TRANSFORMERS_MAX_IMAGE_AREA", "2560000"))
+        image_base64 = resize_image_if_needed(image_base64, max_area=max_area, logger_instance=self.logger)
 
         if self.backend == "transformers":
             return self._convert_with_transformers(image_base64, final_prompt)

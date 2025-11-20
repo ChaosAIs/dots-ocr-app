@@ -18,19 +18,15 @@ When `convert_image_base64_to_markdown()` is called without a custom prompt, the
 3. Calculates total pixel area
 4. Classifies as SIMPLE or COMPLEX based on thresholds
 
-### 2. Classification Thresholds
+### 2. Classification Threshold
 
-**SIMPLE Images** (any of these conditions):
+**SIMPLE Images**:
 
-- Width < 200 pixels, OR
-- Height < 200 pixels, OR
-- Total area < 50,000 pixels
+- Total pixel area < 40,000 pixels (approximately 200×200)
 
-**COMPLEX Images** (all of these conditions):
+**COMPLEX Images**:
 
-- Width ≥ 200 pixels, AND
-- Height ≥ 200 pixels, AND
-- Total area ≥ 50,000 pixels
+- Total pixel area ≥ 40,000 pixels
 
 ### 3. Prompt Selection
 
@@ -55,17 +51,18 @@ Based on classification:
 
 ### Simple Images
 
-| Dimensions | Area   | Classification        | Output Style        |
-| ---------- | ------ | --------------------- | ------------------- |
-| 100×50     | 5,000  | SIMPLE                | Direct text: "Alt"  |
-| 150×100    | 15,000 | SIMPLE                | Direct text: "Logo" |
-| 180×180    | 32,400 | SIMPLE                | Direct text: "Icon" |
-| 300×200    | 60,000 | SIMPLE (by dimension) | Brief description   |
+| Dimensions | Area   | Classification | Output Style        |
+| ---------- | ------ | -------------- | ------------------- |
+| 100×50     | 5,000  | SIMPLE         | Direct text: "Alt"  |
+| 150×100    | 15,000 | SIMPLE         | Direct text: "Logo" |
+| 180×180    | 32,400 | SIMPLE         | Direct text: "Icon" |
+| 200×150    | 30,000 | SIMPLE         | Brief description   |
 
 ### Complex Images
 
 | Dimensions | Area    | Classification | Output Style             |
 | ---------- | ------- | -------------- | ------------------------ |
+| 200×200    | 40,000  | COMPLEX        | Full structured analysis |
 | 500×500    | 250,000 | COMPLEX        | Full structured analysis |
 | 800×600    | 480,000 | COMPLEX        | Full structured analysis |
 | 1024×768   | 786,432 | COMPLEX        | Full structured analysis |
@@ -126,35 +123,39 @@ This will create test images of various sizes and show how they're classified.
 
 ## Configuration
 
-The thresholds are configurable via environment variables in `backend/.env`:
+The threshold is configurable via environment variable in `backend/.env`:
 
 ```bash
-# Image Size Detection Thresholds for Qwen3 OCR
-QWEN_IMAGE_MIN_DIMENSION_THRESHOLD=100
-QWEN_IMAGE_PIXEL_AREA_THRESHOLD=1000
+# Image Size Detection Threshold for Qwen3 OCR
+QWEN_IMAGE_PIXEL_AREA_THRESHOLD=40000
 ```
 
-**Default values:**
+**Default value:**
 
-- `QWEN_IMAGE_MIN_DIMENSION_THRESHOLD`: 100 pixels
-- `QWEN_IMAGE_PIXEL_AREA_THRESHOLD`: 1000 pixels
+- `QWEN_IMAGE_PIXEL_AREA_THRESHOLD`: 40,000 pixels (approximately 200×200)
 
-**To adjust the thresholds:**
+**To adjust the threshold:**
 
 1. Edit `backend/.env`
-2. Change the values of `QWEN_IMAGE_MIN_DIMENSION_THRESHOLD` and/or `QWEN_IMAGE_PIXEL_AREA_THRESHOLD`
+2. Change the value of `QWEN_IMAGE_PIXEL_AREA_THRESHOLD`
 3. Restart the backend server
+
+**Example values:**
+
+- `10000` (100×100): Very aggressive - treats most images as complex
+- `40000` (200×200): Default - balanced classification
+- `100000` (316×316): Conservative - treats more images as simple
 
 ## Logging
 
-The system logs classification decisions with threshold information:
+The system logs classification decisions with area threshold information:
 
 ```
-INFO: Image analysis: dimensions=100x50, area=5000, classification=SIMPLE (thresholds: dimension=100, area=1000)
-INFO: Image analysis: dimensions=800x600, area=480000, classification=COMPLEX (thresholds: dimension=100, area=1000)
+INFO: Image analysis: dimensions=100x50, area=5,000, classification=SIMPLE (area_threshold=40,000)
+INFO: Image analysis: dimensions=800x600, area=480,000, classification=COMPLEX (area_threshold=40,000)
 ```
 
-This helps debug and understand which analysis mode is being used and what thresholds are active.
+This helps debug and understand which analysis mode is being used and what threshold is active.
 
 ## Backward Compatibility
 

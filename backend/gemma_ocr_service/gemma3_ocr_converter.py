@@ -119,9 +119,9 @@ class Gemma3OCRConverter:
             return "Image analysis error: no image data was provided for analysis.\n"
 
         # Resize image if needed to prevent processing issues
-        # Get max dimension from environment or use default 1600px
-        max_dim = int(os.getenv("GEMMA_TRANSFORMERS_MAX_IMAGE_DIMENSION", "1600"))
-        image_base64 = resize_image_if_needed(image_base64, max_dimension=max_dim, logger_instance=self.logger)
+        # Get max area from environment or use default 2.56M pixels (e.g., 1600x1600)
+        max_area = int(os.getenv("GEMMA_TRANSFORMERS_MAX_IMAGE_AREA", "2560000"))
+        image_base64 = resize_image_if_needed(image_base64, max_area=max_area, logger_instance=self.logger)
 
         if requests is None:  # pragma: no cover - hit only when requests missing
             self.logger.error("requests library not installed - cannot call Ollama/Gemma3")

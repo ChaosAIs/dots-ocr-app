@@ -13,7 +13,7 @@ import io
 from PIL import Image, ImageDraw, ImageFont
 
 # Add backend to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
 
@@ -54,8 +54,7 @@ def test_parser_integration():
     print("🔧 Initializing Qwen3OCRConverter...")
     converter = Qwen3OCRConverter()
     print(f"   Backend: {converter.backend}")
-    print(f"   Min Dimension Threshold: {converter.min_dimension_threshold} pixels")
-    print(f"   Pixel Area Threshold: {converter.pixel_area_threshold} pixels")
+    print(f"   Pixel Area Threshold: {converter.pixel_area_threshold:,} pixels")
     print()
     
     # Test 1: Small image (should use simple prompt)

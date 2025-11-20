@@ -41,68 +41,77 @@ def create_test_image(width: int, height: int) -> str:
 def test_classification_before_resize():
     """Test that classification happens on original image, not resized."""
     print("=" * 80)
-    print("Testing Prompt Classification Logic (Before vs After Resize)")
+    print("Testing Area-Based Prompt Classification (Before vs After Resize)")
     print("=" * 80)
-    
+
     # Set aggressive resize to make the issue obvious
-    os.environ["QWEN_TRANSFORMERS_MAX_IMAGE_DIMENSION"] = "150"
-    os.environ["QWEN_IMAGE_MIN_DIMENSION_THRESHOLD"] = "200"
-    os.environ["QWEN_IMAGE_PIXEL_AREA_THRESHOLD"] = "1000"
-    
+    # 22500 pixels = 150x150 image area
+    os.environ["QWEN_TRANSFORMERS_MAX_IMAGE_AREA"] = "22500"
+    # Set area threshold to 50000 pixels (approximately 224x224)
+    os.environ["QWEN_IMAGE_PIXEL_AREA_THRESHOLD"] = "50000"
+
     # Create converter (we'll use internal methods to test classification)
     converter = Qwen3OCRConverter()
-    
-    # Test Case 1: Small icon - should be SIMPLE (before and after resize)
-    print("\n📝 Test 1: Small icon (80x80)")
+
+    # Test Case 1: Small icon - should be SIMPLE (area < 50K)
+    print("\n📝 Test 1: Small icon (80x80 = 6.4K pixels)")
     small_icon = create_test_image(80, 80)
     is_simple = converter._is_simple_image(small_icon)
     print(f"   Classification: {'SIMPLE' if is_simple else 'COMPLEX'}")
-    print(f"   Expected: SIMPLE")
+    print(f"   Expected: SIMPLE (area < 50K)")
     print(f"   ✅ PASS" if is_simple else "   ❌ FAIL")
-    
-    # Test Case 2: Tall image - should be COMPLEX (original), would be SIMPLE if resized first
-    print("\n📝 Test 2: Tall image (250x2000) - Critical test case")
+
+    # Test Case 2: Medium image - should be SIMPLE (area < 50K)
+    print("\n📝 Test 2: Medium image (200x200 = 40K pixels)")
+    medium_img = create_test_image(200, 200)
+    is_simple = converter._is_simple_image(medium_img)
+    print(f"   Classification: {'SIMPLE' if is_simple else 'COMPLEX'}")
+    print(f"   Expected: SIMPLE (area < 50K)")
+    print(f"   ✅ PASS" if is_simple else "   ❌ FAIL")
+
+    # Test Case 3: Tall image - should be COMPLEX (original area > 50K), would be SIMPLE if resized first
+    print("\n📝 Test 3: Tall image (250x2000 = 500K pixels) - Critical test case")
     print("   Original: 250x2000 (500K pixels)")
-    print("   After resize (max=150): ~19x150 (2.8K pixels)")
+    print("   After resize (max_area=22.5K): ~75x300 (22.5K pixels)")
     tall_img = create_test_image(250, 2000)
     is_simple = converter._is_simple_image(tall_img)
     print(f"   Classification: {'SIMPLE' if is_simple else 'COMPLEX'}")
-    print(f"   Expected: COMPLEX (based on original dimensions)")
+    print(f"   Expected: COMPLEX (original area 500K > 50K threshold)")
     if not is_simple:
         print(f"   ✅ PASS - Correctly classified as COMPLEX")
     else:
         print(f"   ❌ FAIL - Incorrectly classified as SIMPLE (resize happened first!)")
-    
-    # Test Case 3: Wide banner - should be COMPLEX (original), would be SIMPLE if resized first
-    print("\n📝 Test 3: Wide banner (3000x200)")
+
+    # Test Case 4: Wide banner - should be COMPLEX (original area > 50K), would be SIMPLE if resized first
+    print("\n📝 Test 4: Wide banner (3000x200 = 600K pixels)")
     print("   Original: 3000x200 (600K pixels)")
-    print("   After resize (max=150): 150x10 (1.5K pixels)")
+    print("   After resize (max_area=22.5K): ~335x67 (22.5K pixels)")
     wide_img = create_test_image(3000, 200)
     is_simple = converter._is_simple_image(wide_img)
     print(f"   Classification: {'SIMPLE' if is_simple else 'COMPLEX'}")
-    print(f"   Expected: COMPLEX (based on original dimensions)")
+    print(f"   Expected: COMPLEX (original area 600K > 50K threshold)")
     if not is_simple:
         print(f"   ✅ PASS - Correctly classified as COMPLEX")
     else:
         print(f"   ❌ FAIL - Incorrectly classified as SIMPLE (resize happened first!)")
-    
-    # Test Case 4: Large image - should be COMPLEX (before and after resize)
-    print("\n📝 Test 4: Large image (3068x3835)")
+
+    # Test Case 5: Large image - should be COMPLEX (area > 50K)
+    print("\n📝 Test 5: Large image (3068x3835 = 11.7M pixels)")
     print("   Original: 3068x3835 (11.7M pixels)")
-    print("   After resize (max=150): ~120x150 (18K pixels)")
+    print("   After resize (max_area=22.5K): ~81x101 (8.2K pixels)")
     large_img = create_test_image(3068, 3835)
     is_simple = converter._is_simple_image(large_img)
     print(f"   Classification: {'SIMPLE' if is_simple else 'COMPLEX'}")
-    print(f"   Expected: COMPLEX (based on original dimensions)")
+    print(f"   Expected: COMPLEX (original area 11.7M > 50K threshold)")
     if not is_simple:
         print(f"   ✅ PASS - Correctly classified as COMPLEX")
     else:
         print(f"   ❌ FAIL - Incorrectly classified as SIMPLE (resize happened first!)")
-    
+
     print("\n" + "=" * 80)
     print("✅ Classification test completed!")
     print("=" * 80)
-    print("\nNote: If Test 2, 3, or 4 failed, it means resize is happening BEFORE")
+    print("\nNote: If Test 3, 4, or 5 failed, it means resize is happening BEFORE")
     print("classification, which causes incorrect prompt selection.")
 
 
