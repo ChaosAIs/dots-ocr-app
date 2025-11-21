@@ -565,7 +565,13 @@ class Qwen3OCRConverter:
             "   - Do NOT return any base64 strings, encoded data, or technical information\n"
             "   - Do NOT return any explanations or warnings\n"
             "   - Just return empty/blank response\n\n"
-            "2. If you CAN extract content, follow these rules:\n"
+            "2. NEVER RETURN ENCODED DATA:\n"
+            "   - Do NOT return base64 strings (long strings of random characters)\n"
+            "   - Do NOT return binary data or encoded image data\n"
+            "   - Do NOT return data URLs (data:image/png;base64,...)\n"
+            "   - Do NOT return any technical metadata or file information\n"
+            "   - ONLY return human-readable text content extracted from the image\n\n"
+            "3. If you CAN extract content, follow these rules:\n"
             "   - If it's a single word or short phrase: output just the text.\n"
             "   - If it's a table or form: output the text and layout as original format with markdown.\n"
             "   - If it's a logo or icon: output the name/label only.\n"
@@ -588,14 +594,20 @@ class Qwen3OCRConverter:
             "   - Do NOT return any base64 strings, encoded data, or technical information\n"
             "   - Do NOT return any explanations or warnings\n"
             "   - Just return empty/blank response\n\n"
-            "2. LANGUAGE PRESERVATION:\n"
+            "2. NEVER RETURN ENCODED DATA:\n"
+            "   - Do NOT return base64 strings (long strings of random characters)\n"
+            "   - Do NOT return binary data or encoded image data\n"
+            "   - Do NOT return data URLs (data:image/png;base64,...)\n"
+            "   - Do NOT return any technical metadata or file information\n"
+            "   - ONLY return human-readable text content extracted from the image\n\n"
+            "3. LANGUAGE PRESERVATION:\n"
             "   - You MUST preserve the ORIGINAL LANGUAGE of the text in the image\n"
             "   - If the image contains Chinese text, respond ENTIRELY in Chinese\n"
             "   - If the image contains English text, respond ENTIRELY in English\n"
             "   - If the image contains other languages, respond in that language\n"
             "   - Do NOT translate the content\n"
             "   - All section headers, descriptions, and analysis MUST be in the same language as the image content\n\n"
-            "3. If you CAN extract content, you are analyzing a complex image containing detailed information.\n\n"
+            "4. If you CAN extract content, you are analyzing a complex image containing detailed information.\n\n"
             "Structure your output with these sections (use the appropriate language for section headers):\n\n"
             "Section 1: Document Analysis\n"
             "Provide a brief overview of what this image contains.\n\n"
@@ -649,6 +661,55 @@ class Qwen3OCRConverter:
         # Fallback: return the original text trimmed. This covers non-reasoning
         # variants or future formats that do not use `<think>` tags.
         return text
+
+    def _filter_encoded_data(self, text: str) -> str:
+        """Remove base64 strings and other encoded data from the output.
+
+        This is a safety filter to catch any base64-encoded image data or other
+        binary/encoded content that the LLM might accidentally include in its response.
+
+        Args:
+            text: The raw text output from the LLM
+
+        Returns:
+            Cleaned text with encoded data removed
+        """
+        if not text:
+            return ""
+
+        # Pattern to detect base64-like strings (long sequences of alphanumeric + / + =)
+        # We look for strings that are:
+        # 1. At least 100 characters long (to avoid false positives)
+        # 2. Contain mostly base64 characters (A-Za-z0-9+/=)
+        # 3. Have very few spaces or newlines (typical of base64)
+
+        lines = text.split('\n')
+        filtered_lines = []
+
+        for line in lines:
+            line_stripped = line.strip()
+
+            # Skip lines that look like base64 data:
+            # - Very long lines (>200 chars) with mostly base64 characters
+            # - Lines that start with common data URL prefixes
+            if len(line_stripped) > 200:
+                # Count base64-like characters
+                base64_chars = sum(1 for c in line_stripped if c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=')
+                total_chars = len(line_stripped)
+
+                # If more than 90% of characters are base64-like, skip this line
+                if total_chars > 0 and (base64_chars / total_chars) > 0.9:
+                    self.logger.warning(f"Filtered out suspected base64 data (line length: {len(line_stripped)})")
+                    continue
+
+            # Skip lines that start with data URL prefixes
+            if line_stripped.startswith('data:image/') or line_stripped.startswith('iVBORw0KGgo'):
+                self.logger.warning("Filtered out data URL or base64 image data")
+                continue
+
+            filtered_lines.append(line)
+
+        return '\n'.join(filtered_lines)
 
     def convert_image_base64_to_markdown(
         self,
@@ -816,6 +877,9 @@ class Qwen3OCRConverter:
             )
             return ""
 
+        # Filter out any base64 or encoded data that might have slipped through
+        result = self._filter_encoded_data(result)
+
         return result
 
     def _convert_with_vllm(self, image_base64: str, final_prompt: str) -> str:
@@ -918,6 +982,9 @@ class Qwen3OCRConverter:
                 self.reasoning_mode,
             )
             return ""
+
+        # Filter out any base64 or encoded data that might have slipped through
+        result = self._filter_encoded_data(result)
 
         return result
 
@@ -1053,6 +1120,9 @@ class Qwen3OCRConverter:
                     self.reasoning_mode,
                 )
                 return ""
+
+            # Filter out any base64 or encoded data that might have slipped through
+            result = self._filter_encoded_data(result)
 
             return result
 
