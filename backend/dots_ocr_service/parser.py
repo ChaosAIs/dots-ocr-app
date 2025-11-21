@@ -66,6 +66,12 @@ class DotsOCRParser:
         assert self.min_pixels is None or self.min_pixels >= MIN_PIXELS
         assert self.max_pixels is None or self.max_pixels <= MAX_PIXELS
 
+        # Minimum image size threshold for Dots OCR processing
+        # Images smaller than this will be skipped entirely to avoid poor results on dense/complex content
+        # Default: 100000 pixels (e.g., 316x316, 250x400, etc.)
+        # This prevents processing of small technical diagrams with many dense objects
+        self.min_image_size_threshold = int(os.getenv('DOTS_MIN_IMAGE_SIZE_THRESHOLD', '100000'))
+
         # Initialize OCR image analysis converters (Gemma3 and Qwen3 via Ollama).
         # These are optional helpers; if initialization fails, core OCR still works.
         self.gemma3_converter = None
@@ -415,6 +421,29 @@ class DotsOCRParser:
         bbox=None,
         fitz_preprocess=False,
         ):
+        # Check if image is too small for reliable Dots OCR processing
+        # Small images with dense content (technical diagrams, engineering drawings) produce poor results
+        image_width, image_height = origin_image.size
+        image_pixels = image_width * image_height
+
+        if image_pixels < self.min_image_size_threshold:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"⚠️ Image/page too small for Dots OCR ({image_width}x{image_height}={image_pixels:,} pixels < {self.min_image_size_threshold:,}) "
+                f"- skipping {source} page {page_idx} to avoid poor results on dense/complex content"
+            )
+
+            # Return empty result indicating the image was skipped
+            return {
+                'page_no': page_idx,
+                'skipped': True,
+                'skip_reason': f'Image too small: {image_width}x{image_height}={image_pixels:,} pixels < {self.min_image_size_threshold:,} pixels',
+                'markdown': '',
+                'input_height': image_height,
+                'input_width': image_width,
+            }
+
         min_pixels, max_pixels = self.min_pixels, self.max_pixels
         if prompt_mode == "prompt_grounding_ocr":
             min_pixels = min_pixels or MIN_PIXELS  # preprocess image to the final input
@@ -526,6 +555,35 @@ class DotsOCRParser:
             self.progress_callback(progress=5, message="Loading image...")
 
         origin_image = fetch_image(input_path)
+
+        # Check if image is too small for reliable Dots OCR processing
+        # Small images with dense content (technical diagrams, engineering drawings) produce poor results
+        image_width, image_height = origin_image.size
+        image_pixels = image_width * image_height
+
+        if image_pixels < self.min_image_size_threshold:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"⚠️ Image too small for Dots OCR ({image_width}x{image_height}={image_pixels:,} pixels < {self.min_image_size_threshold:,}) "
+                f"- skipping processing to avoid poor results on dense/complex content"
+            )
+
+            # Report progress: skipped
+            if self.progress_callback:
+                self.progress_callback(
+                    progress=100,
+                    message=f"Image too small ({image_width}x{image_height}={image_pixels:,} pixels) - skipped"
+                )
+
+            # Return empty result indicating the image was skipped
+            return [{
+                'file_path': input_path,
+                'page_no': 0,
+                'skipped': True,
+                'skip_reason': f'Image too small: {image_width}x{image_height}={image_pixels:,} pixels < {self.min_image_size_threshold:,} pixels',
+                'markdown': '',
+            }]
 
         # Report progress: image loaded, preparing
         if self.progress_callback:

@@ -50,6 +50,7 @@
         "DeleteFailed": "Failed to delete document",
         "StartingConversion": "Starting conversion...",
         "ConversionSuccess": "Document converted successfully",
+        "ConversionWarning": "Conversion completed with warnings",
         "ConversionFailed": "Conversion failed",
         "ConnectionError": "Connection error during conversion",
         "FailedToLoad": "Failed to load documents",

@@ -195,19 +195,47 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
     """Callback for worker pool progress updates"""
     try:
         if status == "completed":
-            conversion_manager.update_conversion(
-                conversion_id,
-                status="completed",
-                progress=100,
-                message="Conversion completed successfully",
-                completed_at=datetime.now().isoformat(),
-            )
-            asyncio.run(connection_manager.broadcast(conversion_id, {
-                "status": "completed",
-                "progress": 100,
-                "message": "Conversion completed successfully",
-                "results": result,
-            }))
+            # Check if the result indicates the file was skipped
+            is_skipped = False
+            skip_reason = None
+
+            if result and isinstance(result, list) and len(result) > 0:
+                # Check if any result has 'skipped' flag
+                first_result = result[0]
+                if isinstance(first_result, dict) and first_result.get('skipped'):
+                    is_skipped = True
+                    skip_reason = first_result.get('skip_reason', 'Image was skipped')
+
+            if is_skipped:
+                # Send warning status instead of completed
+                conversion_manager.update_conversion(
+                    conversion_id,
+                    status="warning",
+                    progress=100,
+                    message=f"⚠️ {skip_reason}",
+                    completed_at=datetime.now().isoformat(),
+                )
+                asyncio.run(connection_manager.broadcast(conversion_id, {
+                    "status": "warning",
+                    "progress": 100,
+                    "message": f"⚠️ {skip_reason}",
+                    "results": result,
+                }))
+            else:
+                # Normal completion
+                conversion_manager.update_conversion(
+                    conversion_id,
+                    status="completed",
+                    progress=100,
+                    message="Conversion completed successfully",
+                    completed_at=datetime.now().isoformat(),
+                )
+                asyncio.run(connection_manager.broadcast(conversion_id, {
+                    "status": "completed",
+                    "progress": 100,
+                    "message": "Conversion completed successfully",
+                    "results": result,
+                }))
         elif status == "error":
             conversion_manager.update_conversion(
                 conversion_id,

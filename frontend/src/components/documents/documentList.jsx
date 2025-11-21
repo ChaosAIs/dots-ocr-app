@@ -155,6 +155,23 @@ export const DocumentList = ({ refreshTrigger }) => {
               setTimeout(() => loadDocuments(), 1000);
             }
 
+            // Handle warnings (e.g., image skipped due to size)
+            if (progressData.status === "warning") {
+              messageService.warnToast(
+                progressData.message || t("DocumentList.ConversionWarning")
+              );
+              setDocuments((prev) =>
+                prev.map((doc) =>
+                  doc.filename === document.filename
+                    ? { ...doc, conversionStatus: "warning", conversionProgress: 100 }
+                    : doc
+                )
+              );
+              setConverting(null);
+              // Reload documents to update status
+              setTimeout(() => loadDocuments(), 1000);
+            }
+
             // Handle errors
             if (progressData.status === "error") {
               messageService.errorToast(
