@@ -352,6 +352,19 @@ class Gemma3OCRConverter:
             self.logger.info("Image is large by area - classified as COMPLEX (skipping LLM check)")
             return False
 
+        # If image is extremely small (< 5000 pixels), it's definitely simple - skip LLM call
+        # Examples: small icons, labels, single characters (e.g., 27x8=216, 100x50=5000)
+        width, height = self._get_image_dimensions(image_base64)
+        pixel_area = width * height
+        min_llm_check_threshold = 5000
+
+        if pixel_area < min_llm_check_threshold:
+            self.logger.info(
+                f"Image is very small ({width}x{height}={pixel_area:,} pixels < {min_llm_check_threshold:,}) "
+                f"- classified as SIMPLE (skipping LLM check)"
+            )
+            return True
+
         # Image is small by area, but use LLM to check if content is complex
         # (e.g., small chart, small technical diagram)
         is_complex_by_content = self._classify_image_content_with_llm(image_base64)
@@ -389,6 +402,19 @@ class Gemma3OCRConverter:
         """
         if not image_base64:
             return "Image analysis error: no image data was provided for analysis.\n"
+
+        # Check if image is extremely small (< 1000 pixels) - likely unreadable
+        # Skip OCR entirely to avoid LLM returning base64 strings or warning messages
+        width, height = self._get_image_dimensions(image_base64)
+        pixel_area = width * height
+        min_ocr_threshold = 1000
+
+        if pixel_area < min_ocr_threshold:
+            self.logger.info(
+                f"⚠️ Image too small for OCR ({width}x{height}={pixel_area:,} pixels < {min_ocr_threshold:,}) "
+                f"- returning empty result"
+            )
+            return ""
 
         # If no custom prompt provided, choose based on ORIGINAL image size and content
         # This ensures classification is based on content complexity, not GPU constraints

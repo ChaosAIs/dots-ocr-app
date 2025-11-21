@@ -12,7 +12,7 @@ import re
 import base64
 import io
 from typing import Optional, Tuple
-from utils.image_utils import resize_image_if_needed
+from utils.image_utils import resize_image_if_needed, get_image_dimensions
 
 try:
     import requests  # type: ignore
@@ -525,6 +525,19 @@ class Qwen3OCRConverter:
             self.logger.info("Image is large by area - classified as COMPLEX (skipping LLM check)")
             return False
 
+        # If image is extremely small (< 5000 pixels), it's definitely simple - skip LLM call
+        # Examples: small icons, labels, single characters (e.g., 27x8=216, 100x50=5000)
+        width, height = self._get_image_dimensions(image_base64)
+        pixel_area = width * height
+        min_llm_check_threshold = 5000
+
+        if pixel_area < min_llm_check_threshold:
+            self.logger.info(
+                f"Image is very small ({width}x{height}={pixel_area:,} pixels < {min_llm_check_threshold:,}) "
+                f"- classified as SIMPLE (skipping LLM check)"
+            )
+            return True
+
         # Image is small by area, but use LLM to check if content is complex
         # (e.g., small chart, small technical diagram)
         is_complex_by_content = self._classify_image_content_with_llm(image_base64)
@@ -665,6 +678,19 @@ class Qwen3OCRConverter:
         if not image_base64:
             return "Image analysis error: no image data was provided for analysis.\n"
 
+        # Check if image is extremely small (< 1000 pixels) - likely unreadable
+        # Skip OCR entirely to avoid LLM returning base64 strings or warning messages
+        width, height = self._get_image_dimensions(image_base64)
+        pixel_area = width * height
+        min_ocr_threshold = 1000
+
+        if pixel_area < min_ocr_threshold:
+            self.logger.info(
+                f"⚠️ Image too small for OCR ({width}x{height}={pixel_area:,} pixels < {min_ocr_threshold:,}) "
+                f"- returning empty result"
+            )
+            return ""
+
         # If no custom prompt provided, choose based on ORIGINAL image size
         # This ensures classification is based on content complexity, not GPU constraints
         if prompt is None:
@@ -681,24 +707,23 @@ class Qwen3OCRConverter:
         max_area = int(os.getenv("QWEN_TRANSFORMERS_MAX_IMAGE_AREA", "2560000"))
 
         # Get original image dimensions for debug logging
-        from backend.utils.image_utils import get_image_dimensions
         original_dims = get_image_dimensions(image_base64)
         original_area = original_dims[0] * original_dims[1] if original_dims else 0
 
         # Resize if needed
         resized_image_base64 = resize_image_if_needed(image_base64, max_area=max_area, logger_instance=self.logger)
 
-        # Debug log: show resize result
+        # Info log: show resize result
         if resized_image_base64 != image_base64:
             new_dims = get_image_dimensions(resized_image_base64)
             new_area = new_dims[0] * new_dims[1] if new_dims else 0
-            self.logger.debug(
+            self.logger.info(
                 f"🔄 Image resize completed: {original_dims[0]}x{original_dims[1]} ({original_area:,} pixels) "
                 f"→ {new_dims[0]}x{new_dims[1]} ({new_area:,} pixels), "
                 f"reduction: {((1 - new_area/original_area) * 100):.1f}%"
             )
         else:
-            self.logger.debug(
+            self.logger.info(
                 f"✓ Image resize skipped: {original_dims[0]}x{original_dims[1]} ({original_area:,} pixels) "
                 f"≤ max_area ({max_area:,} pixels)"
             )
