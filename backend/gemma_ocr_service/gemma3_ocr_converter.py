@@ -11,7 +11,7 @@ import logging
 import base64
 import io
 from typing import Optional, Tuple
-from utils.image_utils import resize_image_if_needed
+from utils.image_utils import resize_image_if_needed, get_image_dimensions
 
 try:
     import requests  # type: ignore
@@ -127,13 +127,20 @@ class Gemma3OCRConverter:
         return (
             "You are a helpful assistant that can read and understand images.\n"
             "This is a small image, likely containing simple content.\n\n"
-            "Extract the content directly without extra analysis:\n"
-            "- If it's a single word or short phrase: output just the text.\n"
-            "- If it's a table or form: output the text and layout as original format with markdown.\n"
-            "- If it's a logo or icon: output the name/label only.\n"
-            "- If it's a label: output the text content.\n"
-            "- If it's a diagram: briefly describe its workflow.\n"
-            "- If it's an object: briefly describe what is it.\n\n"
+            "CRITICAL RULES:\n"
+            "1. If the image is too blurry, corrupted, empty, or contains no readable text/content:\n"
+            "   - Return absolutely NOTHING (completely empty response)\n"
+            "   - Do NOT return any messages like 'The image is too blurry' or 'No content found'\n"
+            "   - Do NOT return any base64 strings, encoded data, or technical information\n"
+            "   - Do NOT return any explanations or warnings\n"
+            "   - Just return empty/blank response\n\n"
+            "2. If you CAN extract content, follow these rules:\n"
+            "   - If it's a single word or short phrase: output just the text.\n"
+            "   - If it's a table or form: output the text and layout as original format with markdown.\n"
+            "   - If it's a logo or icon: output the name/label only.\n"
+            "   - If it's a label: output the text content.\n"
+            "   - If it's a diagram: briefly describe its workflow.\n"
+            "   - If it's an object: briefly describe what is it.\n\n"
             "IMPORTANT: Preserve the original language of the content in the image. "
             "If the text is in Chinese, output in Chinese. If it's in English, output in English. "
             "Do NOT translate the extracted content to another language.\n\n"
@@ -143,14 +150,21 @@ class Gemma3OCRConverter:
     def _build_complex_prompt(self) -> str:
         """Build a detailed prompt for complex images (charts, tables, diagrams, forms)."""
         return (
-            "CRITICAL INSTRUCTION - READ FIRST:\n"
-            "You MUST preserve the ORIGINAL LANGUAGE of the text in the image.\n"
-            "- If the image contains Chinese text, respond ENTIRELY in Chinese\n"
-            "- If the image contains English text, respond ENTIRELY in English\n"
-            "- If the image contains other languages, respond in that language\n"
-            "- Do NOT translate the content\n"
-            "- All section headers, descriptions, and analysis MUST be in the same language as the image content\n\n"
-            "You are analyzing a complex image containing detailed information.\n\n"
+            "CRITICAL RULES - READ FIRST:\n\n"
+            "1. If the image is too blurry, corrupted, empty, or contains no readable text/content:\n"
+            "   - Return absolutely NOTHING (completely empty response)\n"
+            "   - Do NOT return any messages like 'The image is too blurry' or 'No content found'\n"
+            "   - Do NOT return any base64 strings, encoded data, or technical information\n"
+            "   - Do NOT return any explanations or warnings\n"
+            "   - Just return empty/blank response\n\n"
+            "2. LANGUAGE PRESERVATION:\n"
+            "   - You MUST preserve the ORIGINAL LANGUAGE of the text in the image\n"
+            "   - If the image contains Chinese text, respond ENTIRELY in Chinese\n"
+            "   - If the image contains English text, respond ENTIRELY in English\n"
+            "   - If the image contains other languages, respond in that language\n"
+            "   - Do NOT translate the content\n"
+            "   - All section headers, descriptions, and analysis MUST be in the same language as the image content\n\n"
+            "3. If you CAN extract content, you are analyzing a complex image containing detailed information.\n\n"
             "Structure your output with these sections (use the appropriate language for section headers):\n\n"
             "Section 1: Document Analysis\n"
             "Provide a brief overview of what this image contains.\n\n"
@@ -390,7 +404,30 @@ class Gemma3OCRConverter:
         # This happens AFTER classification to avoid affecting prompt selection
         # Get max area from environment or use default 2.56M pixels (e.g., 1600x1600)
         max_area = int(os.getenv("GEMMA_TRANSFORMERS_MAX_IMAGE_AREA", "2560000"))
-        image_base64 = resize_image_if_needed(image_base64, max_area=max_area, logger_instance=self.logger)
+
+        # Get original image dimensions for debug logging
+        original_dims = get_image_dimensions(image_base64)
+        original_area = original_dims[0] * original_dims[1] if original_dims else 0
+
+        # Resize if needed
+        resized_image_base64 = resize_image_if_needed(image_base64, max_area=max_area, logger_instance=self.logger)
+
+        # Debug log: show resize result
+        if resized_image_base64 != image_base64:
+            new_dims = get_image_dimensions(resized_image_base64)
+            new_area = new_dims[0] * new_dims[1] if new_dims else 0
+            self.logger.debug(
+                f"🔄 Image resize completed: {original_dims[0]}x{original_dims[1]} ({original_area:,} pixels) "
+                f"→ {new_dims[0]}x{new_dims[1]} ({new_area:,} pixels), "
+                f"reduction: {((1 - new_area/original_area) * 100):.1f}%"
+            )
+        else:
+            self.logger.debug(
+                f"✓ Image resize skipped: {original_dims[0]}x{original_dims[1]} ({original_area:,} pixels) "
+                f"≤ max_area ({max_area:,} pixels)"
+            )
+
+        image_base64 = resized_image_base64
 
         if requests is None:  # pragma: no cover - hit only when requests missing
             self.logger.error("requests library not installed - cannot call Ollama/Gemma3")
@@ -451,7 +488,7 @@ class Gemma3OCRConverter:
         result = (data.get("response") or "").strip()
         if not result:
             self.logger.warning("Gemma3/Ollama response contained no 'response' text")
-            return "No analysis text was returned by the Gemma3 model.\n"
+            return ""
 
         return result
 

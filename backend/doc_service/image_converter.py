@@ -82,6 +82,8 @@ class ImageDocumentConverter(BaseDocumentConverter):
         # Create the vision prompt - enhanced for flowchart detection and ASCII conversion
         prompt = """Extract content from this image based on what type of content it contains. Return ONLY the extracted content without any explanations or analysis steps.
 
+CRITICAL: If the image is too blurry, corrupted, empty, or you cannot extract any readable content, return NOTHING (empty response). Do NOT return any warning messages, error messages, or explanations.
+
 If this is a FLOWCHART/PROCESS DIAGRAM/WORKFLOW:
 - Convert to ASCII flow diagram using text characters
 - Use arrows (→, ↓, ←, ↑) and boxes made with characters like ┌─┐│└─┘
