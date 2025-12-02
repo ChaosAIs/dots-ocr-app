@@ -615,6 +615,70 @@ class DotsOCRParser:
         if self.progress_callback:
             self.progress_callback(progress=10, message=f"PDF loaded with {total_pages} pages")
 
+        # Check which pages already have markdown files (skip already converted pages)
+        pages_to_skip = set()
+        existing_results = []
+
+        for page_idx in range(total_pages):
+            # Check if _nohf.md file exists (this is the main output file)
+            page_md_nohf = os.path.join(save_dir, f"{filename}_page_{page_idx}_nohf.md")
+            page_json = os.path.join(save_dir, f"{filename}_page_{page_idx}.json")
+
+            # Skip if the markdown file exists
+            if os.path.exists(page_md_nohf):
+                pages_to_skip.add(page_idx)
+                print(f"⏭️  Skipping page {page_idx + 1}/{total_pages} (already converted)")
+
+                # Try to load existing result from JSON if available
+                if os.path.exists(page_json):
+                    try:
+                        with open(page_json, 'r', encoding='utf-8') as f:
+                            json_data = json.load(f)
+
+                            # Handle different JSON formats
+                            if isinstance(json_data, list):
+                                # JSON is a list of layout objects (old format)
+                                existing_result = {
+                                    'page_no': page_idx,
+                                    'file_path': input_path,
+                                    'md_content': '',
+                                    'layout_dets': json_data
+                                }
+                            elif isinstance(json_data, dict):
+                                # JSON is a dict with layout_dets key (new format)
+                                existing_result = json_data
+                                existing_result['page_no'] = page_idx
+                                existing_result['file_path'] = input_path
+                            else:
+                                # Unknown format, create minimal result
+                                existing_result = {
+                                    'page_no': page_idx,
+                                    'file_path': input_path,
+                                    'md_content': '',
+                                    'layout_dets': []
+                                }
+
+                            existing_results.append(existing_result)
+                    except Exception as e:
+                        print(f"⚠️  Warning: Could not load existing JSON for page {page_idx}: {e}")
+                        # Create a minimal result entry even if JSON is missing
+                        existing_results.append({
+                            'page_no': page_idx,
+                            'file_path': input_path,
+                            'md_content': '',
+                            'layout_dets': []
+                        })
+                else:
+                    # JSON doesn't exist but markdown does - create minimal result
+                    print(f"ℹ️  Page {page_idx + 1} has markdown but no JSON, creating minimal result")
+                    existing_results.append({
+                        'page_no': page_idx,
+                        'file_path': input_path,
+                        'md_content': '',
+                        'layout_dets': []
+                    })
+
+        # Create tasks only for pages that need conversion
         tasks = [
             {
                 "origin_image": image,
@@ -623,30 +687,50 @@ class DotsOCRParser:
                 "save_name": filename,
                 "source":"pdf",
                 "page_idx": i,
-            } for i, image in enumerate(images_origin)
+            } for i, image in enumerate(images_origin) if i not in pages_to_skip
         ]
+
+        pages_to_convert = len(tasks)
+        pages_skipped = len(pages_to_skip)
+
+        if pages_skipped > 0:
+            print(f"📊 Conversion summary: {pages_to_convert} pages to convert, {pages_skipped} pages already converted")
+            if self.progress_callback:
+                self.progress_callback(
+                    progress=10,
+                    message=f"Resuming: {pages_to_convert} pages to convert, {pages_skipped} already done"
+                )
 
         def _execute_task(task_args):
             return self._parse_single_image(**task_args)
 
-        num_thread = min(total_pages, self.num_thread)
-        print(f"Parsing PDF with {total_pages} pages using {num_thread} threads...")
+        results = existing_results.copy()  # Start with existing results
 
-        results = []
-        with ThreadPool(num_thread) as pool:
-            with tqdm(total=total_pages, desc="Processing PDF pages") as pbar:
-                for result in pool.imap_unordered(_execute_task, tasks):
-                    results.append(result)
-                    pbar.update(1)
+        if pages_to_convert > 0:
+            num_thread = min(pages_to_convert, self.num_thread)
+            print(f"Parsing PDF with {pages_to_convert} pages using {num_thread} threads...")
 
-                    # Report progress: pages processed
-                    pages_processed = len(results)
-                    progress = 10 + int((pages_processed / total_pages) * 80)  # 10-90% for processing
-                    if self.progress_callback:
-                        self.progress_callback(
-                            progress=progress,
-                            message=f"Processing pages: {pages_processed}/{total_pages}"
-                        )
+            with ThreadPool(num_thread) as pool:
+                with tqdm(total=pages_to_convert, desc="Processing PDF pages") as pbar:
+                    for result in pool.imap_unordered(_execute_task, tasks):
+                        results.append(result)
+                        pbar.update(1)
+
+                        # Report progress: pages processed (including skipped pages)
+                        pages_processed = len(results)
+                        progress = 10 + int((pages_processed / total_pages) * 80)  # 10-90% for processing
+                        if self.progress_callback:
+                            self.progress_callback(
+                                progress=progress,
+                                message=f"Processing pages: {pages_processed}/{total_pages}"
+                            )
+        else:
+            print(f"✅ All {total_pages} pages already converted, skipping conversion")
+            if self.progress_callback:
+                self.progress_callback(
+                    progress=90,
+                    message=f"All {total_pages} pages already converted"
+                )
 
         results.sort(key=lambda x: x["page_no"])
         for i in range(len(results)):

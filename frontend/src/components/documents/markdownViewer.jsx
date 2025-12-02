@@ -101,7 +101,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const loadMarkdownContent = async () => {
     try {
       setLoading(true);
-      const filename = document.filename.split(".")[0];
+      // Remove only the last file extension (e.g., "file.v6.0.pdf" -> "file.v6.0")
+      const filename = document.filename.substring(0, document.filename.lastIndexOf('.'));
 
       const filesResponse = await documentService.getMarkdownFiles(filename);
       if (filesResponse.status === "success") {
@@ -165,7 +166,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const handleSaveMarkdown = async () => {
     try {
       setSaving(true);
-      const filename = document.filename.split(".")[0];
+      // Remove only the last file extension (e.g., "file.v6.0.pdf" -> "file.v6.0")
+      const filename = document.filename.substring(0, document.filename.lastIndexOf('.'));
 
       // For multi-page documents, we need to save each page separately
       const filesResponse = await documentService.getMarkdownFiles(filename);
@@ -281,7 +283,9 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
     const element = window.document.createElement("a");
     const file = new Blob([content], { type: "text/markdown" });
     element.href = URL.createObjectURL(file);
-    element.download = `${document.filename.split(".")[0]}.md`;
+    // Remove only the last file extension (e.g., "file.v6.0.pdf" -> "file.v6.0")
+    const filenameWithoutExt = document.filename.substring(0, document.filename.lastIndexOf('.'));
+    element.download = `${filenameWithoutExt}.md`;
     window.document.body.appendChild(element);
     element.click();
     window.document.body.removeChild(element);

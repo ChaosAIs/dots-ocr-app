@@ -39,12 +39,12 @@ def inference_with_vllm(
     base64_size_mb = len(base64_image) / (1024 * 1024)
     logger.info(f"📦 Base64 image size: {base64_size_mb:.2f} MB")
 
-    # Set timeout to 10 minutes (600 seconds) for large images
+    # Set timeout to 20 minutes (1200 seconds) for large images
     # Set max_retries to 2 to allow some retries for transient connection issues
     client = OpenAI(
         api_key="{}".format(os.environ.get("API_KEY", "0")),
         base_url=addr,
-        timeout=600.0,  # 10 minutes timeout per request for large images
+        timeout=1200.0,  # 20 minutes timeout per request for large images
         max_retries=2   # Allow 2 retries for connection errors
     )
 

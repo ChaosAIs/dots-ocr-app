@@ -17,7 +17,10 @@ from dots_ocr_service.parser import DotsOCRParser
 from worker_pool import WorkerPool
 from doc_service.document_converter_manager import DocumentConverterManager
 from deepseek_ocr_service.deepseek_ocr_converter import DeepSeekOCRConverter
+from gemma_ocr_service.gemma3_ocr_converter import Gemma3OCRConverter
+from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
 from pathlib import Path
+import base64
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -81,6 +84,19 @@ deepseek_ocr_converter = DeepSeekOCRConverter(
     whitelist_token_ids=deepseek_ocr_whitelist,
 )
 
+# Reuse converters from DotsOCRParser to avoid duplicate model loading (CUDA OOM)
+# The parser already initializes Gemma3 and Qwen3 converters during __init__
+gemma3_ocr_converter = parser.gemma3_converter
+qwen3_ocr_converter = parser.qwen3_converter
+
+# Create fallback converters only if the parser's converters are None
+if gemma3_ocr_converter is None:
+    logger.warning("Parser's gemma3_converter is None, creating standalone Gemma3OCRConverter")
+    gemma3_ocr_converter = Gemma3OCRConverter()
+if qwen3_ocr_converter is None:
+    logger.warning("Parser's qwen3_converter is None, creating standalone Qwen3OCRConverter")
+    qwen3_ocr_converter = Qwen3OCRConverter()
+
 # Get number of worker threads from environment (default: 4)
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 
@@ -117,9 +133,11 @@ class ConversionManager:
                 self.conversions[conversion_id].update(kwargs)
 
     def get_conversion(self, conversion_id: str) -> dict:
-        """Get conversion status"""
+        """Get conversion status - returns a copy to avoid race conditions"""
         with self.lock:
-            return self.conversions.get(conversion_id, {})
+            conversion = self.conversions.get(conversion_id, {})
+            # Return a copy to avoid race conditions with concurrent updates
+            return dict(conversion) if conversion else {}
 
     def delete_conversion(self, conversion_id: str):
         """Delete conversion record"""
@@ -135,6 +153,25 @@ class ConnectionManager:
     def __init__(self):
         self.active_connections: Dict[str, Set[WebSocket]] = {}  # conversion_id -> set of websockets
         self.lock = threading.Lock()
+        self._message_queue: asyncio.Queue = None
+        self._broadcast_task = None
+        self._main_loop = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
+        """Set the main event loop for broadcasting messages from worker threads"""
+        self._main_loop = loop
+        self._message_queue = asyncio.Queue()
+
+    async def start_broadcast_worker(self):
+        """Start the background worker that processes broadcast messages"""
+        while True:
+            try:
+                conversion_id, message = await self._message_queue.get()
+                await self._do_broadcast(conversion_id, message)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in broadcast worker: {e}")
 
     async def connect(self, conversion_id: str, websocket: WebSocket):
         """Register a new WebSocket connection"""
@@ -152,8 +189,8 @@ class ConnectionManager:
                 if not self.active_connections[conversion_id]:
                     del self.active_connections[conversion_id]
 
-    async def broadcast(self, conversion_id: str, message: dict):
-        """Send message to all connected clients for a conversion"""
+    async def _do_broadcast(self, conversion_id: str, message: dict):
+        """Actually send message to all connected clients for a conversion"""
         with self.lock:
             connections = self.active_connections.get(conversion_id, set()).copy()
 
@@ -161,8 +198,21 @@ class ConnectionManager:
             try:
                 await connection.send_json(message)
             except Exception as e:
-                print(f"Error sending message: {e}")
-                await self.disconnect(conversion_id, connection)
+                logger.error(f"Error sending message: {e}")
+                # Don't disconnect here to avoid async issues
+
+    async def broadcast(self, conversion_id: str, message: dict):
+        """Send message to all connected clients for a conversion (async context)"""
+        await self._do_broadcast(conversion_id, message)
+
+    def broadcast_from_thread(self, conversion_id: str, message: dict):
+        """Thread-safe method to broadcast message from worker threads"""
+        if self._main_loop and self._message_queue:
+            # Use call_soon_threadsafe to schedule the coroutine on the main loop
+            asyncio.run_coroutine_threadsafe(
+                self._message_queue.put((conversion_id, message)),
+                self._main_loop
+            )
 
 
 conversion_manager = ConversionManager()
@@ -179,11 +229,12 @@ def _create_parser_progress_callback(conversion_id: str):
                 progress=progress,
                 message=message,
             )
-            asyncio.run(connection_manager.broadcast(conversion_id, {
+            # Use thread-safe broadcast method
+            connection_manager.broadcast_from_thread(conversion_id, {
                 "status": "processing",
                 "progress": progress,
                 "message": message,
-            }))
+            })
             logger.info(f"Conversion {conversion_id}: {progress}% - {message}")
         except Exception as e:
             logger.error(f"Error in parser progress callback: {str(e)}")
@@ -215,12 +266,13 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     message=f"⚠️ {skip_reason}",
                     completed_at=datetime.now().isoformat(),
                 )
-                asyncio.run(connection_manager.broadcast(conversion_id, {
+                # Use thread-safe broadcast method
+                connection_manager.broadcast_from_thread(conversion_id, {
                     "status": "warning",
                     "progress": 100,
                     "message": f"⚠️ {skip_reason}",
                     "results": result,
-                }))
+                })
             else:
                 # Normal completion
                 conversion_manager.update_conversion(
@@ -230,12 +282,13 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     message="Conversion completed successfully",
                     completed_at=datetime.now().isoformat(),
                 )
-                asyncio.run(connection_manager.broadcast(conversion_id, {
+                # Use thread-safe broadcast method
+                connection_manager.broadcast_from_thread(conversion_id, {
                     "status": "completed",
                     "progress": 100,
                     "message": "Conversion completed successfully",
                     "results": result,
-                }))
+                })
         elif status == "error":
             conversion_manager.update_conversion(
                 conversion_id,
@@ -245,18 +298,30 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                 error=error,
                 completed_at=datetime.now().isoformat(),
             )
-            asyncio.run(connection_manager.broadcast(conversion_id, {
+            # Use thread-safe broadcast method
+            connection_manager.broadcast_from_thread(conversion_id, {
                 "status": "error",
                 "progress": 0,
                 "message": f"Conversion failed: {error}",
                 "error": error,
-            }))
+            })
     except Exception as e:
         logger.error(f"Error in progress callback: {str(e)}")
 
 
 # Initialize worker pool
 worker_pool = WorkerPool(num_workers=NUM_WORKERS, progress_callback=_worker_progress_callback)
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize async components on startup"""
+    # Set up the connection manager with the current event loop
+    loop = asyncio.get_event_loop()
+    connection_manager.set_event_loop(loop)
+    # Start the background broadcast worker
+    asyncio.create_task(connection_manager.start_broadcast_worker())
+    logger.info("WebSocket broadcast worker started")
 
 
 @app.get("/")
@@ -516,14 +581,14 @@ def _check_markdown_exists(file_name_without_ext: str) -> tuple:
     Both OCR and doc_service converters use _nohf.md format.
 
     Returns:
-    - (markdown_exists: bool, markdown_path: str or None, is_multipage: bool)
+    - (markdown_exists: bool, markdown_path: str or None, is_multipage: bool, converted_pages: int)
     """
     output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
 
     # Check for single markdown file (for single-page documents, images, Word, Excel, TXT)
     markdown_path_nohf = os.path.join(output_dir, f"{file_name_without_ext}_nohf.md")
     if os.path.exists(markdown_path_nohf):
-        return True, markdown_path_nohf, False
+        return True, markdown_path_nohf, False, 1
 
     # Check for multi-page markdown files (for PDFs with multiple pages)
     if os.path.exists(output_dir):
@@ -536,9 +601,30 @@ def _check_markdown_exists(file_name_without_ext: str) -> tuple:
         if page_files:
             # Sort by page number
             page_files.sort(key=lambda x: int(x.split("_page_")[1].split("_")[0]))
-            return True, os.path.join(output_dir, page_files[0]), True
+            return True, os.path.join(output_dir, page_files[0]), True, len(page_files)
 
-    return False, None, False
+    return False, None, False, 0
+
+
+def _get_pdf_page_count(file_path: str) -> int:
+    """
+    Get the total number of pages in a PDF file.
+
+    Returns:
+    - Total page count, or 0 if not a PDF or error occurs
+    """
+    try:
+        if not file_path.lower().endswith('.pdf'):
+            return 0
+
+        import fitz  # PyMuPDF
+        doc = fitz.open(file_path)
+        page_count = len(doc)
+        doc.close()
+        return page_count
+    except Exception as e:
+        logger.error(f"Error getting PDF page count for {file_path}: {str(e)}")
+        return 0
 
 
 @app.get("/documents")
@@ -548,6 +634,7 @@ async def list_documents():
 
     Returns:
     - JSON with list of documents and their markdown conversion status
+    - Includes total_pages (for PDFs) and converted_pages to track partial conversions
     """
     try:
         documents = []
@@ -568,7 +655,14 @@ async def list_documents():
 
                 # Check if markdown file exists (handles both single and multi-page)
                 file_name_without_ext = os.path.splitext(filename)[0]
-                markdown_exists, markdown_path, is_multipage = _check_markdown_exists(file_name_without_ext)
+                markdown_exists, markdown_path, is_multipage, converted_pages = _check_markdown_exists(file_name_without_ext)
+
+                # Get total page count for PDFs
+                total_pages = _get_pdf_page_count(file_path)
+
+                # For non-PDF files, set total_pages to 1 if converted, 0 otherwise
+                if total_pages == 0 and markdown_exists:
+                    total_pages = 1
 
                 documents.append({
                     "filename": filename,
@@ -578,6 +672,8 @@ async def list_documents():
                     "markdown_exists": markdown_exists,
                     "markdown_path": markdown_path if markdown_exists else None,
                     "is_multipage": is_multipage,
+                    "total_pages": total_pages,
+                    "converted_pages": converted_pages,
                 })
 
         return JSONResponse(content={
@@ -1537,6 +1633,383 @@ async def parse_batch(
         # Clean up temporary directory
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
+
+
+@app.get("/uncompleted-pages/{filename}")
+async def get_uncompleted_pages(filename: str):
+    """
+    Get list of uncompleted pages for a document.
+
+    An uncompleted page is one that has a JPG file but no corresponding _nohf.md file.
+    This is useful for finding pages that failed during initial conversion.
+
+    Parameters:
+    - filename: The document filename (without extension) or with extension
+
+    Returns:
+    - JSON with list of page numbers that need re-conversion
+    """
+    try:
+        # Remove extension if provided
+        file_name_without_ext = os.path.splitext(filename)[0]
+
+        output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+        if not os.path.exists(output_dir):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Output directory not found for: {filename}"
+            )
+
+        # Find all JPG files and their corresponding _nohf.md files
+        uncompleted_pages = []
+        all_pages = []
+
+        for file in os.listdir(output_dir):
+            # Match page JPG files like "document_page_11.jpg"
+            if file.endswith(".jpg") and "_page_" in file:
+                # Extract page number from filename
+                try:
+                    page_part = file.split("_page_")[1]
+                    page_no = int(page_part.split(".")[0])
+                    all_pages.append(page_no)
+
+                    # Check if corresponding _nohf.md file exists
+                    md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
+                    md_path = os.path.join(output_dir, md_filename)
+
+                    if not os.path.exists(md_path):
+                        uncompleted_pages.append({
+                            "page_no": page_no,
+                            "jpg_file": file,
+                            "expected_md_file": md_filename
+                        })
+                except (ValueError, IndexError):
+                    # Skip files that don't match the expected pattern
+                    continue
+
+        # Sort pages by page number
+        all_pages.sort()
+        uncompleted_pages.sort(key=lambda x: x["page_no"])
+
+        return JSONResponse(content={
+            "status": "success",
+            "filename": file_name_without_ext,
+            "total_pages": len(all_pages),
+            "completed_pages": len(all_pages) - len(uncompleted_pages),
+            "uncompleted_count": len(uncompleted_pages),
+            "uncompleted_pages": uncompleted_pages
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting uncompleted pages: {str(e)}"
+        )
+
+
+def _get_image_analysis_backend():
+    """
+    Get the configured image analysis backend.
+    Returns tuple of (backend_name, converter_instance)
+    """
+    backend = (os.getenv("IMAGE_ANALYSIS_BACKEND", "qwen3") or "").strip().lower()
+
+    if backend == "deepseek":
+        return "deepseek", deepseek_ocr_converter
+    elif backend == "gemma3" or backend == "gemma":
+        return "gemma3", gemma3_ocr_converter
+    else:  # Default to qwen3
+        return "qwen3", qwen3_ocr_converter
+
+
+def _convert_page_directly(
+    jpg_path: Path,
+    output_path: Path,
+    backend_name: str,
+    converter
+) -> str:
+    """
+    Convert a page image directly to markdown using the specified converter.
+
+    Args:
+        jpg_path: Path to the JPG image file
+        output_path: Path to save the markdown file
+        backend_name: Name of the backend (qwen3, gemma3, deepseek)
+        converter: The converter instance to use
+
+    Returns:
+        The markdown content
+    """
+    logger.info(f"Converting {jpg_path} using {backend_name} backend")
+
+    if backend_name == "deepseek":
+        # DeepSeek has convert_file method
+        success = converter.convert_file(jpg_path, output_path)
+        if not success:
+            raise Exception(f"DeepSeek conversion failed for {jpg_path}")
+        with open(output_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    else:
+        # Qwen3 and Gemma3 use base64 image input
+        with open(jpg_path, 'rb') as f:
+            image_data = f.read()
+        image_base64 = base64.b64encode(image_data).decode('utf-8')
+
+        markdown_content = converter.convert_image_base64_to_markdown(image_base64)
+
+        # Save markdown to file
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(markdown_content)
+
+        return markdown_content
+
+
+@app.post("/reconvert-page")
+async def reconvert_page(
+    filename: str = Form(...),
+    page_no: int = Form(...)
+):
+    """
+    Re-convert a specific page directly using the configured IMAGE_ANALYSIS_BACKEND.
+
+    This endpoint skips dots_ocr_service and directly uses qwen3, gemma, or deepseek
+    based on the IMAGE_ANALYSIS_BACKEND environment variable.
+
+    The page's JPG file (e.g., "document_page_11.jpg") is read and converted
+    directly to markdown, saved as "_nohf.md" format.
+
+    Parameters:
+    - filename: The document filename (without extension) or with extension
+    - page_no: The page number to re-convert (0-indexed)
+
+    Returns:
+    - JSON with conversion result
+    """
+    try:
+        # Remove extension if provided
+        file_name_without_ext = os.path.splitext(filename)[0]
+
+        output_dir = Path(OUTPUT_DIR) / file_name_without_ext
+
+        if not output_dir.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"Output directory not found for: {filename}"
+            )
+
+        # Find the JPG file for this page
+        jpg_filename = f"{file_name_without_ext}_page_{page_no}.jpg"
+        jpg_path = output_dir / jpg_filename
+
+        if not jpg_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail=f"JPG file not found: {jpg_filename}"
+            )
+
+        # Get the configured backend
+        backend_name, converter = _get_image_analysis_backend()
+
+        # Define output markdown file
+        md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
+        md_path = output_dir / md_filename
+
+        logger.info(
+            f"Re-converting page {page_no} of {file_name_without_ext} "
+            f"using {backend_name} backend (skipping dots_ocr_service)"
+        )
+
+        # Convert the page directly
+        markdown_content = _convert_page_directly(
+            jpg_path, md_path, backend_name, converter
+        )
+
+        return JSONResponse(content={
+            "status": "success",
+            "filename": file_name_without_ext,
+            "page_no": page_no,
+            "backend_used": backend_name,
+            "output_file": str(md_path),
+            "content_length": len(markdown_content),
+            "message": f"Page {page_no} re-converted successfully using {backend_name}"
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error re-converting page: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error re-converting page: {str(e)}"
+        )
+
+
+@app.post("/reconvert-uncompleted")
+async def reconvert_all_uncompleted(
+    filename: str = Form(...)
+):
+    """
+    Re-convert all uncompleted pages for a document.
+
+    This endpoint finds all pages that have JPG but no _nohf.md file,
+    and converts them directly using the configured IMAGE_ANALYSIS_BACKEND.
+
+    Parameters:
+    - filename: The document filename (without extension) or with extension
+
+    Returns:
+    - JSON with list of re-converted pages and their status
+    """
+    try:
+        # Remove extension if provided
+        file_name_without_ext = os.path.splitext(filename)[0]
+
+        output_dir = Path(OUTPUT_DIR) / file_name_without_ext
+
+        if not output_dir.exists():
+            # Document hasn't been converted yet - trigger full conversion
+            # Find the input file with any extension
+            input_file = None
+            for f in os.listdir(INPUT_DIR):
+                if os.path.splitext(f)[0] == file_name_without_ext:
+                    input_file = f
+                    break
+
+            if not input_file:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Input file not found for: {filename}"
+                )
+
+            # Trigger conversion using the same logic as /convert endpoint
+            conversion_id = conversion_manager.create_conversion(input_file)
+
+            conversion_manager.update_conversion(
+                conversion_id,
+                status="processing",
+                started_at=datetime.now().isoformat(),
+                message="Conversion queued, waiting for worker..."
+            )
+
+            await connection_manager.broadcast(conversion_id, {
+                "status": "processing",
+                "progress": 5,
+                "message": "Conversion queued, waiting for worker...",
+            })
+
+            progress_callback = _create_parser_progress_callback(conversion_id)
+
+            success = worker_pool.submit_task(
+                conversion_id=conversion_id,
+                func=_convert_document_background,
+                args=(input_file, "prompt_layout_all_en"),
+                kwargs={
+                    "conversion_id": conversion_id,
+                    "progress_callback": progress_callback,
+                }
+            )
+
+            if not success:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Conversion already in progress for: {filename}"
+                )
+
+            logger.info(f"Triggered full conversion for new file: {input_file}")
+
+            return JSONResponse(content={
+                "status": "accepted",
+                "conversion_id": conversion_id,
+                "filename": file_name_without_ext,
+                "message": "New file - full conversion started. Use WebSocket to track progress.",
+                "queue_size": worker_pool.get_queue_size(),
+                "active_tasks": worker_pool.get_active_tasks_count(),
+            })
+
+        # Find uncompleted pages
+        uncompleted_pages = []
+        for file in os.listdir(output_dir):
+            if file.endswith(".jpg") and "_page_" in file:
+                try:
+                    page_part = file.split("_page_")[1]
+                    page_no = int(page_part.split(".")[0])
+
+                    md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
+                    md_path = output_dir / md_filename
+
+                    if not md_path.exists():
+                        uncompleted_pages.append(page_no)
+                except (ValueError, IndexError):
+                    continue
+
+        uncompleted_pages.sort()
+
+        if not uncompleted_pages:
+            return JSONResponse(content={
+                "status": "success",
+                "filename": file_name_without_ext,
+                "message": "No uncompleted pages found",
+                "converted_count": 0,
+                "results": []
+            })
+
+        # Get the configured backend
+        backend_name, converter = _get_image_analysis_backend()
+
+        logger.info(
+            f"Re-converting {len(uncompleted_pages)} uncompleted pages of "
+            f"{file_name_without_ext} using {backend_name} backend"
+        )
+
+        results = []
+        for page_no in uncompleted_pages:
+            jpg_filename = f"{file_name_without_ext}_page_{page_no}.jpg"
+            jpg_path = output_dir / jpg_filename
+            md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
+            md_path = output_dir / md_filename
+
+            try:
+                markdown_content = _convert_page_directly(
+                    jpg_path, md_path, backend_name, converter
+                )
+                results.append({
+                    "page_no": page_no,
+                    "status": "success",
+                    "content_length": len(markdown_content)
+                })
+                logger.info(f"Successfully re-converted page {page_no}")
+            except Exception as e:
+                results.append({
+                    "page_no": page_no,
+                    "status": "error",
+                    "error": str(e)
+                })
+                logger.error(f"Failed to re-convert page {page_no}: {str(e)}")
+
+        success_count = sum(1 for r in results if r["status"] == "success")
+
+        return JSONResponse(content={
+            "status": "success" if success_count == len(results) else "partial",
+            "filename": file_name_without_ext,
+            "backend_used": backend_name,
+            "total_uncompleted": len(uncompleted_pages),
+            "converted_count": success_count,
+            "failed_count": len(results) - success_count,
+            "results": results
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error re-converting uncompleted pages: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error re-converting uncompleted pages: {str(e)}"
+        )
 
 
 if __name__ == "__main__":

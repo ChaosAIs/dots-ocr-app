@@ -149,6 +149,46 @@ class DocumentService {
   }
 
   /**
+   * Re-convert uncompleted pages directly using configured backend (qwen3/gemma/deepseek)
+   * Skips dots_ocr_service and directly uses IMAGE_ANALYSIS_BACKEND setting
+   * @param {string} filename - The filename to re-convert uncompleted pages
+   * @returns {Promise} - Response with re-conversion results
+   */
+  async reconvertUncompletedPages(filename) {
+    try {
+      const formData = new FormData();
+      formData.append("filename", filename);
+
+      const response = await http.post(
+        `${this.apiDomain}/reconvert-uncompleted`,
+        formData
+      );
+
+      return response.data;
+    } catch (error) {
+      console.error("Error re-converting uncompleted pages:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get list of uncompleted pages for a document
+   * @param {string} filename - The filename to check
+   * @returns {Promise} - Response with uncompleted pages info
+   */
+  async getUncompletedPages(filename) {
+    try {
+      const response = await http.get(
+        `${this.apiDomain}/uncompleted-pages/${encodeURIComponent(filename)}`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error getting uncompleted pages:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Start document conversion (non-blocking)
    * Automatically detects file type and routes to appropriate converter
    * @param {string} filename - The filename to convert
@@ -256,7 +296,7 @@ class DocumentService {
   async getMarkdownFiles(filename) {
     try {
       const response = await http.get(
-        `${this.apiDomain}/markdown-files/${filename}`
+        `${this.apiDomain}/markdown-files/${encodeURIComponent(filename)}`
       );
       return response.data;
     } catch (error) {
@@ -273,7 +313,7 @@ class DocumentService {
    */
   async getMarkdownContent(filename, pageNo = null) {
     try {
-      let url = `${this.apiDomain}/markdown/${filename}`;
+      let url = `${this.apiDomain}/markdown/${encodeURIComponent(filename)}`;
       if (pageNo !== null) {
         url += `?page_no=${pageNo}`;
       }
@@ -294,7 +334,7 @@ class DocumentService {
    */
   async saveMarkdownContent(filename, content, pageNo = null) {
     try {
-      let url = `${this.apiDomain}/markdown/${filename}`;
+      let url = `${this.apiDomain}/markdown/${encodeURIComponent(filename)}`;
       if (pageNo !== null) {
         url += `?page_no=${pageNo}`;
       }
@@ -313,7 +353,7 @@ class DocumentService {
    * @returns {string} - Image URL
    */
   getImageUrl(filename, pageNo = null) {
-    let url = `${this.apiDomain}/image/${filename}`;
+    let url = `${this.apiDomain}/image/${encodeURIComponent(filename)}`;
     if (pageNo !== null) {
       url += `?page_no=${pageNo}`;
     }
@@ -341,7 +381,7 @@ class DocumentService {
   async deleteDocument(filename) {
     try {
       const response = await http.delete(
-        `${this.apiDomain}/documents/${filename}`
+        `${this.apiDomain}/documents/${encodeURIComponent(filename)}`
       );
       return response.data;
     } catch (error) {

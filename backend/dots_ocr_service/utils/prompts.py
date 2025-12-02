@@ -9,7 +9,7 @@ dict_promptmode_to_prompt = {
 3. Text Extraction & Formatting Rules:
     - Picture: For the 'Picture' category, the text field should be omitted.
     - Formula: Format its text as LaTeX.
-    - Table: Format its text as HTML.
+    - Table: Format its text as Markdown table.
     - All Others (Text, Title, etc.): Format their text as Markdown.
 
 4. Constraints:

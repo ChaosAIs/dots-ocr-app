@@ -99,9 +99,11 @@ export const DocumentList = ({ refreshTrigger }) => {
   };
 
   const handleConvert = async (document) => {
+    const { total_pages = 0, converted_pages = 0 } = document;
+    const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
+
     try {
       setConverting(document.filename);
-      messageService.infoToast(t("DocumentList.StartingConversion"));
 
       // Update document with conversion status
       setDocuments((prev) =>
@@ -111,6 +113,123 @@ export const DocumentList = ({ refreshTrigger }) => {
             : doc
         )
       );
+
+      // For partially converted documents, use direct reconversion (skip dots_ocr_service)
+      if (isPartiallyConverted) {
+        messageService.infoToast(t("DocumentList.ReconvertingUncompleted"));
+        console.log(`Using direct reconversion for partial document: ${document.filename}`);
+
+        const response = await documentService.reconvertUncompletedPages(document.filename);
+
+        // Handle "accepted" status - this means the file was new and full conversion was started
+        // We need to connect to WebSocket for progress tracking
+        if (response.status === "accepted" && response.conversion_id) {
+          const conversionId = response.conversion_id;
+          messageService.infoToast(t("DocumentList.StartingConversion"));
+
+          // Connect to WebSocket for progress updates (same as fresh conversion flow)
+          const ws = documentService.connectToConversionProgress(
+            conversionId,
+            (progressData) => {
+              setDocuments((prev) =>
+                prev.map((doc) =>
+                  doc.filename === document.filename
+                    ? { ...doc, conversionProgress: progressData.progress || 0 }
+                    : doc
+                )
+              );
+
+              if (progressData.status === "completed") {
+                messageService.successToast(t("DocumentList.ConversionSuccess"));
+                setDocuments((prev) =>
+                  prev.map((doc) =>
+                    doc.filename === document.filename
+                      ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
+                      : doc
+                  )
+                );
+                setConverting(null);
+                setTimeout(() => loadDocuments(), 1000);
+              }
+
+              if (progressData.status === "warning") {
+                messageService.warnToast(progressData.message || t("DocumentList.ConversionWarning"));
+                setDocuments((prev) =>
+                  prev.map((doc) =>
+                    doc.filename === document.filename
+                      ? { ...doc, conversionStatus: "warning", conversionProgress: 100 }
+                      : doc
+                  )
+                );
+                setConverting(null);
+                setTimeout(() => loadDocuments(), 1000);
+              }
+
+              if (progressData.status === "error") {
+                messageService.errorToast(progressData.message || t("DocumentList.ConversionFailed"));
+                setDocuments((prev) =>
+                  prev.map((doc) =>
+                    doc.filename === document.filename
+                      ? { ...doc, conversionStatus: "error" }
+                      : doc
+                  )
+                );
+                setConverting(null);
+              }
+            },
+            (error) => {
+              console.error("WebSocket error:", error);
+              messageService.errorToast(t("DocumentList.ConnectionError"));
+              setDocuments((prev) =>
+                prev.map((doc) =>
+                  doc.filename === document.filename
+                    ? { ...doc, conversionStatus: "error" }
+                    : doc
+                )
+              );
+              setConverting(null);
+            }
+          );
+
+          setWebSockets((prev) => ({
+            ...prev,
+            [conversionId]: ws,
+          }));
+          return;
+        }
+
+        if (response.status === "success" || response.status === "partial") {
+          const successCount = response.converted_count || 0;
+          const failedCount = response.failed_count || 0;
+
+          if (failedCount === 0) {
+            messageService.successToast(
+              `${t("DocumentList.ConversionSuccess")} (${successCount} pages)`
+            );
+          } else {
+            messageService.warnToast(
+              `Converted ${successCount} pages, ${failedCount} failed`
+            );
+          }
+
+          setDocuments((prev) =>
+            prev.map((doc) =>
+              doc.filename === document.filename
+                ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
+                : doc
+            )
+          );
+          setConverting(null);
+          // Reload documents to update status
+          setTimeout(() => loadDocuments(), 1000);
+        } else {
+          throw new Error(response.message || "Reconversion failed");
+        }
+        return;
+      }
+
+      // For fresh conversions, use the normal flow with WebSocket progress
+      messageService.infoToast(t("DocumentList.StartingConversion"));
 
       // Use auto-detection to route to the appropriate converter
       // - doc_service for Word/Excel/Text files
@@ -222,9 +341,30 @@ export const DocumentList = ({ refreshTrigger }) => {
   };
 
   const actionBodyTemplate = (rowData) => {
+    const { markdown_exists, total_pages = 0, converted_pages = 0 } = rowData;
+    const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
+
     return (
       <div className="action-buttons">
-        {rowData.markdown_exists ? (
+        {/* Always show convert button */}
+        <Button
+          icon="pi pi-refresh"
+          className={`p-button-rounded ${isPartiallyConverted ? "p-button-info" : "p-button-warning"}`}
+          onClick={() => handleConvert(rowData)}
+          loading={converting === rowData.filename}
+          disabled={converting !== null}
+          tooltip={
+            isPartiallyConverted
+              ? t("DocumentList.ResumeConversion")
+              : markdown_exists
+                ? t("DocumentList.ReconvertDocument")
+                : t("DocumentList.ConvertToMarkdown")
+          }
+          tooltipPosition="top"
+        />
+
+        {/* Show view button only if markdown exists */}
+        {markdown_exists && (
           <Button
             icon="pi pi-eye"
             className="p-button-rounded p-button-success"
@@ -232,17 +372,8 @@ export const DocumentList = ({ refreshTrigger }) => {
             tooltip={t("DocumentList.ViewMarkdown")}
             tooltipPosition="top"
           />
-        ) : (
-          <Button
-            icon="pi pi-refresh"
-            className="p-button-rounded p-button-warning"
-            onClick={() => handleConvert(rowData)}
-            loading={converting === rowData.filename}
-            disabled={converting !== null}
-            tooltip={t("DocumentList.ConvertToMarkdown")}
-            tooltipPosition="top"
-          />
         )}
+
         <Button
           icon="pi pi-trash"
           className="p-button-rounded p-button-danger"
@@ -264,12 +395,27 @@ export const DocumentList = ({ refreshTrigger }) => {
 
   const statusBodyTemplate = (rowData) => {
     // Force re-render when language changes by using i18n.language
-    const statusText = rowData.markdown_exists
-      ? t("DocumentList.Converted")
-      : t("DocumentList.Pending");
+    const { markdown_exists, total_pages = 0, converted_pages = 0 } = rowData;
+
+    // Determine status based on page counts
+    let statusText, statusClass;
+
+    if (!markdown_exists) {
+      // No conversion done yet
+      statusText = t("DocumentList.Pending");
+      statusClass = "pending";
+    } else if (total_pages > 0 && converted_pages < total_pages) {
+      // Partial conversion (some pages converted but not all)
+      statusText = `${t("DocumentList.Partial")} (${converted_pages}/${total_pages})`;
+      statusClass = "partial";
+    } else {
+      // Fully converted
+      statusText = t("DocumentList.Converted");
+      statusClass = "converted";
+    }
 
     return (
-      <span className={`status-badge ${rowData.markdown_exists ? "converted" : "pending"}`}>
+      <span className={`status-badge ${statusClass}`}>
         {statusText}
       </span>
     );

@@ -614,6 +614,8 @@ class Qwen3OCRConverter:
             "Section 2: Content\n"
             "Extract and present the content using appropriate markdown formatting:\n"
             "- **Tables/Forms**: Reconstruct as properly formatted Markdown tables\n"
+            "  * For tables containing code, JSON, or technical data: preserve the exact structure and formatting\n"
+            "  * Use code blocks (```json or ```code) inside table cells when appropriate\n"
             "- **Charts/Dashboards**: List all data points, values, labels, trends, and insights\n"
             "- **Diagrams/Flowcharts**: Describe the workflow, process flow, and relationships between components\n"
             "- **Text Content**: Transcribe all text accurately, preserve hierarchical structure, use markdown headers and lists\n\n"
