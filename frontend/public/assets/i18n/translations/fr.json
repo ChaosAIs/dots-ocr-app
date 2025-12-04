@@ -1,6 +1,7 @@
 {
   "Nav": {
     "Home": "Domicile",
+    "Chat": "Discussion",
     "SiteManagement": "Administration du site",
     "UserManagement": "Gestion des utilisateurs",
     "MyProfile": "Mon profil",

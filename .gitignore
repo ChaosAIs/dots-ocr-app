@@ -24,3 +24,4 @@ DeepSeek-OCR-Web-main/
 backend/gemma_ocr_service/__pycache__/
 backend/qwen_ocr_service/__pycache__/
 backend/utils/__pycache__/
+backend/rag_service/__pycache__/

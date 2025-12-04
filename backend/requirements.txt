@@ -14,3 +14,13 @@ python-dotenv
 fastapi
 uvicorn
 python-multipart
+
+# RAG Chatbot dependencies
+langchain>=0.3.0
+langchain-qdrant
+langchain-ollama
+langchain-community
+langgraph
+qdrant-client
+watchdog
+requests

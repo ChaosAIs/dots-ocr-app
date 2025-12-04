@@ -10,6 +10,7 @@ import { Role } from "../core/enumertions/role";
 import { UserManagement } from "../pages/usermanagement";
 import { NotFound } from "../pages/notfound";
 import { Home } from "../pages/home";
+import { Chat } from "../pages/chat";
 
 /** Global routes definition.
  *  Link specified url to specified component.
@@ -26,6 +27,7 @@ export const AppRoutes = () => (
     
     {/* Public routes */}
     <Route path="/home" element={<Home />} />
+    <Route path="/chat" element={<Chat />} />
     <Route path="/" element={<Home />} />
     {/* <Route path="/sample" element={<Sample />} /> */}
     <Route path="*" element={<NotFound />} />

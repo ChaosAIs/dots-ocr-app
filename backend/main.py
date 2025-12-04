@@ -22,6 +22,15 @@ from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
 from pathlib import Path
 import base64
 
+# Import RAG service for chatbot functionality
+from rag_service.chat_api import router as chat_router
+from rag_service.indexer import (
+    index_existing_documents,
+    start_watching_output,
+    trigger_embedding_for_document,
+    reindex_document,
+)
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -44,6 +53,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Include chat router for RAG chatbot
+app.include_router(chat_router)
 
 # Initialize parser
 parser = DotsOCRParser()
@@ -249,6 +261,7 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
             # Check if the result indicates the file was skipped
             is_skipped = False
             skip_reason = None
+            source_name = None  # For embedding trigger
 
             if result and isinstance(result, list) and len(result) > 0:
                 # Check if any result has 'skipped' flag
@@ -256,6 +269,13 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                 if isinstance(first_result, dict) and first_result.get('skipped'):
                     is_skipped = True
                     skip_reason = first_result.get('skip_reason', 'Image was skipped')
+
+                # Extract source_name for embedding (folder name under output)
+                if isinstance(first_result, dict):
+                    md_path = first_result.get('md_content_path') or first_result.get('md_content_nohf_path')
+                    if md_path:
+                        # Get the parent folder name as source_name
+                        source_name = Path(md_path).parent.name
 
             if is_skipped:
                 # Send warning status instead of completed
@@ -289,6 +309,12 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     "message": "Conversion completed successfully",
                     "results": result,
                 })
+
+                # Trigger embedding in background after successful conversion
+                if source_name:
+                    logger.info(f"Triggering embedding for document: {source_name}")
+                    trigger_embedding_for_document(source_name, OUTPUT_DIR)
+
         elif status == "error":
             conversion_manager.update_conversion(
                 conversion_id,
@@ -322,6 +348,26 @@ async def startup_event():
     # Start the background broadcast worker
     asyncio.create_task(connection_manager.start_broadcast_worker())
     logger.info("WebSocket broadcast worker started")
+
+    # Initialize RAG service - index existing documents and start watching for new ones
+    # Run indexing in a background thread to avoid blocking startup
+    def _init_rag_service():
+        try:
+            logger.info("Initializing RAG service in background...")
+            # Index existing markdown documents (pass the OUTPUT_DIR from main.py)
+            indexed_count = index_existing_documents(OUTPUT_DIR)
+            logger.info(f"RAG service: Indexed {indexed_count} document chunks on startup")
+            # Start watching for new documents
+            start_watching_output(OUTPUT_DIR)
+            logger.info("RAG service: File watcher started for output directory")
+        except Exception as e:
+            logger.error(f"Error initializing RAG service: {e}")
+            # Don't fail startup - the app can still work without RAG
+
+    import threading
+    rag_init_thread = threading.Thread(target=_init_rag_service, daemon=True)
+    rag_init_thread.start()
+    logger.info("RAG service initialization started in background thread")
 
 
 @app.get("/")
@@ -1341,6 +1387,10 @@ async def update_markdown_content(filename: str, request: Request, page_no: int 
         with open(markdown_path, "w", encoding="utf-8") as f:
             f.write(content)
 
+        # Trigger re-indexing in background after markdown update
+        logger.info(f"Triggering re-indexing for document after markdown update: {filename}")
+        reindex_document(filename, OUTPUT_DIR)
+
         return JSONResponse(content={
             "status": "success",
             "filename": filename,
@@ -1828,6 +1878,10 @@ async def reconvert_page(
             jpg_path, md_path, backend_name, converter
         )
 
+        # Trigger re-indexing in background after reconversion
+        logger.info(f"Triggering re-indexing for document after page reconvert: {file_name_without_ext}")
+        reindex_document(file_name_without_ext, OUTPUT_DIR)
+
         return JSONResponse(content={
             "status": "success",
             "filename": file_name_without_ext,
@@ -1991,6 +2045,11 @@ async def reconvert_all_uncompleted(
                 logger.error(f"Failed to re-convert page {page_no}: {str(e)}")
 
         success_count = sum(1 for r in results if r["status"] == "success")
+
+        # Trigger re-indexing in background after reconversion (if any pages were converted)
+        if success_count > 0:
+            logger.info(f"Triggering re-indexing for document after uncompleted reconvert: {file_name_without_ext}")
+            reindex_document(file_name_without_ext, OUTPUT_DIR)
 
         return JSONResponse(content={
             "status": "success" if success_count == len(results) else "partial",

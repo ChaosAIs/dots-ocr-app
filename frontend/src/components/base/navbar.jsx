@@ -45,6 +45,12 @@ export const NavBar = () => {
       visible: true, // It is custom property. Work for show/hide menu items based on user authentication.
     },
     {
+      label: t("Nav.Chat"),
+      icon: "pi pi-fw pi-comments",
+      url: `${APP_CONFIG.basePath}/chat`,
+      visible: true, // Chat is available to all users
+    },
+    {
       label: t("Nav.Admin"),
       icon: "pi pi-fw pi-cog",
       visible: isSystemAdmin,
