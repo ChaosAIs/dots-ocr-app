@@ -4,6 +4,7 @@ import { Column } from "primereact/column";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { ProgressBar } from "primereact/progressbar";
+import { Dialog } from "primereact/dialog";
 import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
@@ -18,12 +19,33 @@ export const DocumentList = ({ refreshTrigger }) => {
   const [showMarkdownViewer, setShowMarkdownViewer] = useState(false);
   const [converting, setConverting] = useState(null);
   const [webSockets, setWebSockets] = useState({}); // conversion_id -> websocket
+  const [indexing, setIndexing] = useState(null); // filename being indexed
+  const [batchIndexStatus, setBatchIndexStatus] = useState(null); // batch indexing status
+  const [showStatusLogs, setShowStatusLogs] = useState(false); // status logs dialog
+  const [statusLogs, setStatusLogs] = useState([]); // status logs data
+  const [statusLogsLoading, setStatusLogsLoading] = useState(false);
 
   // Load documents on component mount and when refreshTrigger changes
   useEffect(() => {
     loadDocuments();
+    checkBatchIndexStatus(); // Check if batch indexing is in progress on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [refreshTrigger]);
+
+  // Poll for batch index status when running
+  useEffect(() => {
+    let intervalId = null;
+    if (batchIndexStatus?.status === "running") {
+      intervalId = setInterval(() => {
+        checkBatchIndexStatus();
+      }, 2000); // Poll every 2 seconds
+    }
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [batchIndexStatus?.status]);
 
   // Force re-render when language changes to update translations
   useEffect(() => {
@@ -41,6 +63,15 @@ export const DocumentList = ({ refreshTrigger }) => {
       });
     };
   }, [webSockets]);
+
+  const checkBatchIndexStatus = async () => {
+    try {
+      const status = await documentService.getIndexStatus();
+      setBatchIndexStatus(status);
+    } catch (error) {
+      console.error("Error checking batch index status:", error);
+    }
+  };
 
   const loadDocuments = async () => {
     try {
@@ -98,6 +129,68 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
+  const handleIndex = async (document) => {
+    try {
+      setIndexing(document.filename);
+      messageService.infoToast(t("DocumentList.StartingIndex"));
+
+      const response = await documentService.indexDocument(document.filename);
+
+      if (response.status === "success") {
+        messageService.successToast(
+          `${t("DocumentList.IndexSuccess")} (${response.chunks_indexed} chunks)`
+        );
+        // Reload documents to update indexed status
+        loadDocuments();
+      } else {
+        messageService.warnToast(t("DocumentList.IndexWarning"));
+      }
+    } catch (error) {
+      messageService.errorToast(t("DocumentList.IndexFailed"));
+      console.error("Error indexing document:", error);
+    } finally {
+      setIndexing(null);
+    }
+  };
+
+  const handleViewStatusLogs = async (document) => {
+    try {
+      setStatusLogsLoading(true);
+      setSelectedDocument(document);
+      setShowStatusLogs(true);
+
+      const response = await documentService.getDocumentStatusLogs(document.filename);
+      if (response.status === "success") {
+        setStatusLogs(response.logs || []);
+      } else {
+        setStatusLogs([]);
+      }
+    } catch (error) {
+      console.error("Error fetching status logs:", error);
+      setStatusLogs([]);
+      messageService.errorToast(t("DocumentList.FailedToLoadLogs"));
+    } finally {
+      setStatusLogsLoading(false);
+    }
+  };
+
+  const handleIndexAll = async () => {
+    try {
+      const response = await documentService.indexAllDocuments();
+
+      if (response.status === "accepted") {
+        messageService.infoToast(t("DocumentList.BatchIndexStarted"));
+        // Start polling for status
+        checkBatchIndexStatus();
+      } else if (response.status === "conflict") {
+        messageService.warnToast(t("DocumentList.BatchIndexInProgress"));
+      }
+    } catch (error) {
+      messageService.errorToast(t("DocumentList.BatchIndexFailed"));
+      console.error("Error starting batch indexing:", error);
+    }
+  };
+
   const handleConvert = async (document) => {
     const { total_pages = 0, converted_pages = 0 } = document;
     const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
@@ -149,7 +242,26 @@ export const DocumentList = ({ refreshTrigger }) => {
                   )
                 );
                 setConverting(null);
-                setTimeout(() => loadDocuments(), 1000);
+                // Note: Don't close WebSocket yet - wait for indexing to complete
+              }
+
+              // Handle indexing status updates
+              if (progressData.status === "indexing") {
+                messageService.infoToast(t("DocumentList.IndexingDocument") || "Indexing document...");
+              }
+
+              if (progressData.status === "indexed") {
+                messageService.successToast(
+                  `${t("DocumentList.IndexSuccess")} (${progressData.chunks_indexed || 0} chunks)`
+                );
+                // Reload documents to update status after indexing completes
+                loadDocuments();
+              }
+
+              if (progressData.status === "index_error") {
+                messageService.warnToast(progressData.message || t("DocumentList.IndexFailed"));
+                // Still reload to show current status
+                loadDocuments();
               }
 
               if (progressData.status === "warning") {
@@ -162,7 +274,6 @@ export const DocumentList = ({ refreshTrigger }) => {
                   )
                 );
                 setConverting(null);
-                setTimeout(() => loadDocuments(), 1000);
               }
 
               if (progressData.status === "error") {
@@ -270,8 +381,26 @@ export const DocumentList = ({ refreshTrigger }) => {
                 )
               );
               setConverting(null);
-              // Reload documents to update status
-              setTimeout(() => loadDocuments(), 1000);
+              // Note: Don't reload yet - wait for indexing to complete
+            }
+
+            // Handle indexing status updates
+            if (progressData.status === "indexing") {
+              messageService.infoToast(t("DocumentList.IndexingDocument") || "Indexing document...");
+            }
+
+            if (progressData.status === "indexed") {
+              messageService.successToast(
+                `${t("DocumentList.IndexSuccess")} (${progressData.chunks_indexed || 0} chunks)`
+              );
+              // Reload documents to update status after indexing completes
+              loadDocuments();
+            }
+
+            if (progressData.status === "index_error") {
+              messageService.warnToast(progressData.message || t("DocumentList.IndexFailed"));
+              // Still reload to show current status
+              loadDocuments();
             }
 
             // Handle warnings (e.g., image skipped due to size)
@@ -287,8 +416,6 @@ export const DocumentList = ({ refreshTrigger }) => {
                 )
               );
               setConverting(null);
-              // Reload documents to update status
-              setTimeout(() => loadDocuments(), 1000);
             }
 
             // Handle errors
@@ -374,6 +501,30 @@ export const DocumentList = ({ refreshTrigger }) => {
           />
         )}
 
+        {/* Show index button only if markdown exists */}
+        {markdown_exists && (
+          <Button
+            icon="pi pi-database"
+            className="p-button-rounded p-button-help"
+            onClick={() => handleIndex(rowData)}
+            loading={indexing === rowData.filename}
+            disabled={indexing !== null || batchIndexStatus?.status === "running"}
+            tooltip={t("DocumentList.IndexDocument")}
+            tooltipPosition="top"
+          />
+        )}
+
+        {/* Show status logs button if document has database record */}
+        {rowData.document_id && (
+          <Button
+            icon="pi pi-history"
+            className="p-button-rounded p-button-secondary"
+            onClick={() => handleViewStatusLogs(rowData)}
+            tooltip={t("DocumentList.ViewStatusLogs")}
+            tooltipPosition="top"
+          />
+        )}
+
         <Button
           icon="pi pi-trash"
           className="p-button-rounded p-button-danger"
@@ -395,9 +546,9 @@ export const DocumentList = ({ refreshTrigger }) => {
 
   const statusBodyTemplate = (rowData) => {
     // Force re-render when language changes by using i18n.language
-    const { markdown_exists, total_pages = 0, converted_pages = 0 } = rowData;
+    const { markdown_exists, total_pages = 0, converted_pages = 0, indexed } = rowData;
 
-    // Determine status based on page counts
+    // Determine status based on page counts and indexing
     let statusText, statusClass;
 
     if (!markdown_exists) {
@@ -408,8 +559,12 @@ export const DocumentList = ({ refreshTrigger }) => {
       // Partial conversion (some pages converted but not all)
       statusText = `${t("DocumentList.Partial")} (${converted_pages}/${total_pages})`;
       statusClass = "partial";
+    } else if (indexed) {
+      // Fully converted and indexed
+      statusText = t("DocumentList.Indexed");
+      statusClass = "indexed";
     } else {
-      // Fully converted
+      // Fully converted but not indexed
       statusText = t("DocumentList.Converted");
       statusClass = "converted";
     }
@@ -453,18 +608,84 @@ export const DocumentList = ({ refreshTrigger }) => {
     );
   }
 
+  const renderBatchIndexStatus = () => {
+    if (!batchIndexStatus || batchIndexStatus.status === "idle") {
+      return null;
+    }
+
+    const { status, indexed_documents, total_documents, current_index, message } = batchIndexStatus;
+
+    if (status === "running") {
+      // Calculate progress based on current_index (0-based) if available
+      // When processing document i of n, show progress as (i + 0.5) / n to indicate in-progress
+      // Use indexed_documents / total_documents as fallback (for completed documents)
+      let progress = 0;
+      if (total_documents > 0) {
+        if (current_index !== undefined && current_index !== null) {
+          // Show progress as midpoint of current document (e.g., processing doc 0 of 2 = 25%)
+          progress = Math.round(((current_index + 0.5) / total_documents) * 100);
+        } else {
+          // Fallback to completed documents ratio
+          progress = Math.round((indexed_documents / total_documents) * 100);
+        }
+      }
+      return (
+        <div className="batch-index-status running">
+          <ProgressSpinner style={{ width: '20px', height: '20px' }} strokeWidth="4" />
+          <span className="status-message">
+            {message || `${t("DocumentList.Indexing")} ${indexed_documents}/${total_documents}`}
+          </span>
+          <span className="status-progress">({progress}%)</span>
+        </div>
+      );
+    }
+
+    if (status === "completed") {
+      return (
+        <div className="batch-index-status completed">
+          <i className="pi pi-check-circle" />
+          <span className="status-message">{message || t("DocumentList.IndexCompleted")}</span>
+        </div>
+      );
+    }
+
+    if (status === "error") {
+      return (
+        <div className="batch-index-status error">
+          <i className="pi pi-times-circle" />
+          <span className="status-message">{message || t("DocumentList.IndexError")}</span>
+        </div>
+      );
+    }
+
+    return null;
+  };
+
   return (
     <div className="document-list-container">
       <div className="document-list-header">
         <h2>{t("DocumentList.Title")}</h2>
-        <Button
-          icon="pi pi-refresh"
-          className="p-button-rounded p-button-text"
-          onClick={loadDocuments}
-          loading={loading}
-          tooltip={t("DocumentList.Refresh")}
-          tooltipPosition="top"
-        />
+        <div className="header-actions">
+          <Button
+            icon="pi pi-database"
+            label={t("DocumentList.IndexAll")}
+            className="p-button-outlined p-button-help"
+            onClick={handleIndexAll}
+            loading={batchIndexStatus?.status === "running"}
+            disabled={batchIndexStatus?.status === "running"}
+            tooltip={t("DocumentList.IndexAllTooltip")}
+            tooltipPosition="top"
+          />
+          {renderBatchIndexStatus()}
+          <Button
+            icon="pi pi-refresh"
+            className="p-button-rounded p-button-text"
+            onClick={loadDocuments}
+            loading={loading}
+            tooltip={t("DocumentList.Refresh")}
+            tooltipPosition="top"
+          />
+        </div>
       </div>
 
       {documents.length === 0 ? (
@@ -527,6 +748,34 @@ export const DocumentList = ({ refreshTrigger }) => {
           }}
         />
       )}
+
+      {/* Status Logs Dialog */}
+      <Dialog
+        header={`${t("DocumentList.StatusLogs")} - ${selectedDocument?.filename || ""}`}
+        visible={showStatusLogs}
+        style={{ width: "50vw" }}
+        onHide={() => {
+          setShowStatusLogs(false);
+          setStatusLogs([]);
+        }}
+      >
+        {statusLogsLoading ? (
+          <div className="status-logs-loading">
+            <ProgressSpinner style={{ width: "30px", height: "30px" }} />
+          </div>
+        ) : statusLogs.length === 0 ? (
+          <p>{t("DocumentList.NoStatusLogs")}</p>
+        ) : (
+          <DataTable value={statusLogs} size="small" stripedRows>
+            <Column field="created_at" header={t("DocumentList.Time")}
+              body={(rowData) => documentService.formatDate(rowData.created_at)} />
+            <Column field="status_type" header={t("DocumentList.Type")} />
+            <Column field="old_status" header={t("DocumentList.OldStatus")} />
+            <Column field="new_status" header={t("DocumentList.NewStatus")} />
+            <Column field="message" header={t("DocumentList.Message")} />
+          </DataTable>
+        )}
+      </Dialog>
     </div>
   );
 };

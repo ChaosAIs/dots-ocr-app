@@ -391,6 +391,72 @@ class DocumentService {
   }
 
   /**
+   * Index a single document into the vector database
+   * @param {string} filename - The filename to index (with extension)
+   * @returns {Promise} - Index response with chunks count
+   */
+  async indexDocument(filename) {
+    try {
+      const response = await http.post(
+        `${this.apiDomain}/documents/${encodeURIComponent(filename)}/index`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error indexing document:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Start batch indexing of all documents
+   * @returns {Promise} - Response indicating indexing started
+   */
+  async indexAllDocuments() {
+    try {
+      const response = await http.post(
+        `${this.apiDomain}/documents/index-all`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error starting batch indexing:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the current status of batch indexing
+   * @returns {Promise} - Current indexing status
+   */
+  async getIndexStatus() {
+    try {
+      const response = await http.get(
+        `${this.apiDomain}/documents/index-status`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error getting index status:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get status logs for a document (audit trail)
+   * @param {string} filename - The filename to get logs for
+   * @returns {Promise} - Status logs
+   */
+  async getDocumentStatusLogs(filename) {
+    try {
+      const response = await http.get(
+        `${this.apiDomain}/documents/${encodeURIComponent(filename)}/status-logs`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error getting document status logs:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Format date for display
    * @param {string} isoString - ISO date string
    * @returns {string} - Formatted date

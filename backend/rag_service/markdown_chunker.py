@@ -1,12 +1,15 @@
 """
 Markdown chunking utilities for semantic document splitting.
 Uses LangChain's text splitters to chunk markdown files by headers.
+Includes LLM-based summarization for enhanced RAG retrieval.
 """
 
 import logging
 import re
-from typing import List
+import uuid
+from typing import List, Tuple, Optional
 from pathlib import Path
+from dataclasses import dataclass, field
 
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
@@ -15,6 +18,31 @@ from langchain_text_splitters import (
 from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
+
+
+# Minimum content size for chunk summarization
+MIN_CONTENT_SIZE_FOR_SUMMARIZATION = 1000
+
+
+@dataclass
+class ChunkSummaryInfo:
+    """Information about a chunk summary for embedding.
+
+    A single summary may cover multiple chunks when individual chunks are small.
+    """
+    chunk_indices: List[int]  # List of chunk indices covered by this summary
+    chunk_ids: List[str]  # List of chunk_ids covered by this summary
+    summary: str
+    heading_path: str = ""  # Combined heading path for the chunks
+
+
+@dataclass
+class ChunkingResult:
+    """Result of chunking a markdown file with summaries."""
+    chunks: List[Document]
+    file_summary: str
+    chunk_summaries: List[str]
+    chunk_summary_infos: List[ChunkSummaryInfo] = field(default_factory=list)
 
 # Headers to split on for markdown documents
 HEADERS_TO_SPLIT_ON = [
@@ -160,6 +188,8 @@ def chunk_markdown_file(md_path: str, source_name: str = None) -> List[Document]
                 # Skip sub-chunks that are mostly base64
                 if is_mostly_base64(sub_content):
                     continue
+                # Generate unique chunk_id for each chunk
+                chunk_id = str(uuid.uuid4())
                 final_chunks.append(
                     Document(
                         page_content=sub_content,
@@ -171,10 +201,13 @@ def chunk_markdown_file(md_path: str, source_name: str = None) -> List[Document]
                             "chunk_type": "recursive",
                             "chunk_index": j,
                             "parent_chunk_index": i,
+                            "chunk_id": chunk_id,
                         },
                     )
                 )
         else:
+            # Generate unique chunk_id for each chunk
+            chunk_id = str(uuid.uuid4())
             # Keep chunk as-is
             final_chunks.append(
                 Document(
@@ -186,6 +219,7 @@ def chunk_markdown_file(md_path: str, source_name: str = None) -> List[Document]
                         "heading_path": heading_path,
                         "chunk_type": "semantic_header",
                         "chunk_index": i,
+                        "chunk_id": chunk_id,
                     },
                 )
             )
@@ -263,3 +297,178 @@ def chunk_text_content(
 
     return final_chunks
 
+
+def chunk_markdown_with_summaries(
+    md_path: str,
+    source_name: str = None,
+    generate_summaries: bool = True,
+) -> ChunkingResult:
+    """
+    Chunk a markdown file with LLM-based summarization.
+
+    This function:
+    1. Chunks the markdown file into semantic chunks based on headers
+    2. Combines small chunks (< MIN_CONTENT_SIZE_FOR_SUMMARIZATION) for efficient summarization
+    3. Skips chunk summarization if total file content < MIN_CONTENT_SIZE_FOR_SUMMARIZATION
+    4. Generates a summary for each chunk group using LLM
+    5. Combines chunk summaries to generate a comprehensive file summary
+    6. Returns chunk summary infos for embedding in chunk summary collection
+
+    Args:
+        md_path: Path to the markdown file.
+        source_name: Name to use as source metadata. If None, uses the filename.
+        generate_summaries: Whether to generate LLM summaries. If False, uses truncated content.
+
+    Returns:
+        ChunkingResult with chunks, file_summary, chunk_summaries, and chunk_summary_infos.
+    """
+    from .summarizer import summarize_chunk, generate_file_summary, ChunkSummary
+
+    # First, get the regular chunks
+    chunks = chunk_markdown_file(md_path, source_name)
+
+    if not chunks:
+        return ChunkingResult(
+            chunks=[],
+            file_summary="",
+            chunk_summaries=[],
+            chunk_summary_infos=[],
+        )
+
+    # Determine source name for file summary
+    if source_name is None:
+        source_name = Path(md_path).stem
+
+    # Calculate total content size
+    total_content_size = sum(len(chunk.page_content) for chunk in chunks)
+
+    # If total file content is too small, skip chunk summarization
+    skip_chunk_summaries = total_content_size < MIN_CONTENT_SIZE_FOR_SUMMARIZATION
+    if skip_chunk_summaries:
+        logger.info(
+            f"File {source_name} has {total_content_size} chars (< {MIN_CONTENT_SIZE_FOR_SUMMARIZATION}), "
+            "skipping chunk summarization"
+        )
+
+    chunk_summary_objects: List[ChunkSummary] = []
+    chunk_summaries: List[str] = []
+    chunk_summary_infos: List[ChunkSummaryInfo] = []
+
+    if skip_chunk_summaries:
+        # Skip chunk summarization - just use truncated content for each chunk
+        for i, chunk in enumerate(chunks):
+            heading_path = chunk.metadata.get("heading_path", "")
+            summary = chunk.page_content[:300].strip()
+            chunk_summaries.append(summary)
+            chunk_summary_objects.append(ChunkSummary(
+                chunk_index=i,
+                summary=summary,
+                heading_path=heading_path,
+            ))
+        # No chunk_summary_infos when skipping (nothing to embed)
+    else:
+        # Group chunks for summarization - combine small chunks together
+        chunk_groups = _group_chunks_for_summarization(chunks)
+
+        for group_indices in chunk_groups:
+            group_chunks = [chunks[i] for i in group_indices]
+            group_chunk_ids = [chunk.metadata.get("chunk_id", "") for chunk in group_chunks]
+
+            # Combine content from all chunks in the group
+            combined_content = "\n\n".join(chunk.page_content for chunk in group_chunks)
+
+            # Combine heading paths
+            heading_paths = [chunk.metadata.get("heading_path", "") for chunk in group_chunks]
+            unique_headings = []
+            for hp in heading_paths:
+                if hp and hp not in unique_headings:
+                    unique_headings.append(hp)
+            combined_heading_path = " | ".join(unique_headings) if unique_headings else ""
+
+            if generate_summaries:
+                summary = summarize_chunk(combined_content, max_words=200)
+            else:
+                summary = combined_content[:300].strip()
+
+            # Store summary for each chunk in the group (for file summary generation)
+            for idx in group_indices:
+                chunk_summaries.append(summary)
+                chunk_summary_objects.append(ChunkSummary(
+                    chunk_index=idx,
+                    summary=summary,
+                    heading_path=chunks[idx].metadata.get("heading_path", ""),
+                ))
+
+            # Build chunk summary info for embedding (one per group)
+            chunk_summary_infos.append(ChunkSummaryInfo(
+                chunk_indices=group_indices,
+                chunk_ids=group_chunk_ids,
+                summary=summary,
+                heading_path=combined_heading_path,
+            ))
+
+            logger.debug(
+                f"Summarized chunk group {group_indices}: {summary[:50]}..."
+            )
+
+    # Generate comprehensive file summary from chunk summaries
+    if generate_summaries:
+        file_summary = generate_file_summary(source_name, chunk_summary_objects)
+    else:
+        file_summary = f"Document: {source_name}\n" + "\n".join(chunk_summaries[:5])
+
+    logger.info(f"Generated file summary for {source_name}: {file_summary[:100]}...")
+
+    return ChunkingResult(
+        chunks=chunks,
+        file_summary=file_summary,
+        chunk_summaries=chunk_summaries,
+        chunk_summary_infos=chunk_summary_infos,
+    )
+
+
+def _group_chunks_for_summarization(chunks: List[Document]) -> List[List[int]]:
+    """
+    Group chunks for summarization based on content size.
+
+    Combines small chunks together until their combined content size
+    is >= MIN_CONTENT_SIZE_FOR_SUMMARIZATION.
+
+    Args:
+        chunks: List of document chunks.
+
+    Returns:
+        List of chunk index groups, where each group should be summarized together.
+    """
+    groups = []
+    current_group = []
+    current_size = 0
+
+    for i, chunk in enumerate(chunks):
+        chunk_size = len(chunk.page_content)
+
+        if current_size + chunk_size >= MIN_CONTENT_SIZE_FOR_SUMMARIZATION:
+            if current_group:
+                # Current group is big enough, finalize it
+                current_group.append(i)
+                groups.append(current_group)
+                current_group = []
+                current_size = 0
+            else:
+                # Single chunk is big enough
+                groups.append([i])
+        else:
+            # Add to current group
+            current_group.append(i)
+            current_size += chunk_size
+
+    # Handle remaining chunks
+    if current_group:
+        if groups:
+            # Merge remaining small chunks with the last group
+            groups[-1].extend(current_group)
+        else:
+            # All chunks are small, create one group
+            groups.append(current_group)
+
+    return groups

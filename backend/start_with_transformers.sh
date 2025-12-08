@@ -1,6 +1,18 @@
 #!/bin/bash
 # Startup script for running the backend with Qwen3 transformers backend
 
+# Change to the script's directory
+cd "$(dirname "$0")"
+
+# Activate the virtual environment
+if [ -f "venv/bin/activate" ]; then
+    source venv/bin/activate
+    echo "Activated virtual environment: $(which python)"
+else
+    echo "Warning: Virtual environment not found at venv/bin/activate"
+    echo "Using system Python: $(which python)"
+fi
+
 # Set environment variables (these can also be in .env)
 export QWEN_BACKEND=transformers
 export QWEN_TRANSFORMERS_ATTN_IMPL=eager

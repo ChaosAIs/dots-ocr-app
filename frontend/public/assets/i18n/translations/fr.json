@@ -66,7 +66,22 @@
     "ConverterAuto": "Auto",
     "ConverterDocService": "Service Doc",
     "ConverterDotsOCR": "Dots OCR",
-    "ConverterDeepSeekOCR": "DeepSeek OCR"
+    "ConverterDeepSeekOCR": "DeepSeek OCR",
+    "Indexed": "Indexé",
+    "IndexDocument": "Indexer pour la recherche RAG",
+    "IndexAll": "Indexer tout",
+    "IndexAllTooltip": "Ré-indexer tous les documents pour la recherche RAG",
+    "Indexing": "Indexation",
+    "IndexingDocument": "Indexation du document pour la recherche...",
+    "IndexCompleted": "Indexation terminée",
+    "IndexError": "Erreur d'indexation",
+    "StartingIndex": "Démarrage de l'indexation...",
+    "IndexSuccess": "Document indexé avec succès",
+    "IndexWarning": "Indexation terminée avec des avertissements",
+    "IndexFailed": "Échec de l'indexation du document",
+    "BatchIndexStarted": "Indexation par lot démarrée en arrière-plan",
+    "BatchIndexInProgress": "Une indexation par lot est déjà en cours",
+    "BatchIndexFailed": "Échec du démarrage de l'indexation par lot"
   },
   "MarkdownViewer": {
     "DownloadMarkdown": "Télécharger le Markdown",

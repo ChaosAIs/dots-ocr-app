@@ -24,3 +24,6 @@ langgraph
 qdrant-client
 watchdog
 requests
+
+# Database dependencies
+psycopg2-binary

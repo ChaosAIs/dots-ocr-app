@@ -15,6 +15,55 @@
       font-size: 24px;
       color: #333;
     }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+    }
+
+    .batch-index-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+
+      .status-message {
+        max-width: 300px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .status-progress {
+        font-weight: 600;
+      }
+
+      &.running {
+        background-color: #e3f2fd;
+        color: #1565c0;
+      }
+
+      &.completed {
+        background-color: #e8f5e9;
+        color: #2e7d32;
+
+        .pi-check-circle {
+          color: #4caf50;
+        }
+      }
+
+      &.error {
+        background-color: #ffebee;
+        color: #c62828;
+
+        .pi-times-circle {
+          color: #f44336;
+        }
+      }
+    }
   }
 
   .document-list-loading {
@@ -68,6 +117,11 @@
     &.partial {
       background-color: #d1ecf1;
       color: #0c5460;
+    }
+
+    &.indexed {
+      background-color: #e8d4f0;
+      color: #6a1b9a;
     }
   }
 
@@ -133,5 +187,13 @@
       background-color: #f8f9fa;
       border-color: #ddd;
     }
+  }
+
+  // Status logs dialog
+  .status-logs-loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 20px;
   }
 }

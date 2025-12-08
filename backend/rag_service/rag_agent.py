@@ -10,12 +10,17 @@ from typing import Annotated, TypedDict, List
 from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.tools import tool
-from langchain_core.documents import Document
 from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .vectorstore import get_retriever
+from .vectorstore import (
+    get_retriever,
+    get_retriever_with_sources,
+    search_file_summaries,
+    search_chunk_summaries,
+    get_chunks_by_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +28,8 @@ logger = logging.getLogger(__name__)
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:30b-a3b")
+# Smaller, faster model for query analysis (default: qwen2.5:7b)
+OLLAMA_QUERY_MODEL = os.getenv("OLLAMA_QUERY_MODEL", "qwen2.5:7b")
 OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 
 
@@ -47,97 +54,169 @@ Always search for relevant information before answering questions about the docu
 Do not provide thinking or reflection tags in your response. Provide direct, clear answers."""
 
 
-def _keyword_boost_search(query: str, vector_results: list, boost_k: int = 5) -> list:
+# Prompt for query analysis - concise output to avoid repetition
+QUERY_ANALYSIS_PROMPT = """Analyze the user's question and create an optimized search query.
+
+User Question: {query}
+
+Create a concise, focused search query (50-100 words max) that:
+- Captures the main topic and user intent
+- Includes key concepts and relevant terms
+- Avoids repetition
+
+Output ONLY the search query text, nothing else."""
+
+
+def _analyze_query_with_llm(query: str) -> str:
     """
-    Boost search results by adding documents that contain query keywords.
-    This helps when semantic search doesn't find exact keyword matches.
+    Use LLM to analyze the user's query and generate an enhanced search query.
+
+    This function:
+    1. Sends the user query to LLM for analysis
+    2. LLM clarifies the query purpose and user intent
+    3. Extracts keywords, topics, and related concepts
+    4. Generates an enhanced query optimized for vector search
+
+    Args:
+        query: The original user query
+
+    Returns:
+        Enhanced search query string optimized for embedding-based search
     """
-    from qdrant_client import QdrantClient
-    from qdrant_client.http import models
-
-    # Extract keywords from query (simple word tokenization)
-    keywords = [w.lower() for w in query.split() if len(w) > 2]
-
-    if not keywords:
-        return vector_results
-
     try:
-        client = QdrantClient(
-            host=os.getenv("QDRANT_HOST", "localhost"),
-            port=int(os.getenv("QDRANT_PORT", "6333")),
-            check_compatibility=False
+        # Use smaller, faster model for query analysis
+        llm = ChatOllama(
+            base_url=OLLAMA_BASE_URL,
+            model=OLLAMA_QUERY_MODEL,
+            temperature=0.1,  # Low temperature for consistent analysis
+            num_ctx=2048,
+            num_predict=256,  # Limit output tokens to prevent endless generation
         )
 
-        # Get all unique sources first
-        all_points = client.scroll(
-            collection_name="dots_ocr_documents",
-            limit=1000,
-            with_payload=["metadata"],
-            with_vectors=False,
-        )
-        points, _ = all_points
+        prompt = QUERY_ANALYSIS_PROMPT.format(query=query)
+        response = llm.invoke([HumanMessage(content=prompt)])
 
-        # Find sources that match keywords (case-insensitive)
-        matching_sources = set()
-        for p in points:
-            source = p.payload.get("metadata", {}).get("source", "").lower()
-            for keyword in keywords:
-                if keyword in source:
-                    matching_sources.add(p.payload.get("metadata", {}).get("source", ""))
-                    break
+        enhanced_query = response.content.strip()
 
-        if not matching_sources:
-            return vector_results
+        # Clean up any thinking tags if present
+        if "</think>" in enhanced_query:
+            enhanced_query = enhanced_query.split("</think>")[-1].strip()
 
-        logger.info(f"Keyword boost found matching sources: {matching_sources}")
+        # Truncate if still too long (safety measure)
+        if len(enhanced_query) > 500:
+            enhanced_query = enhanced_query[:500]
+            logger.warning("Query analysis output truncated to 500 chars")
 
-        # Fetch documents from matching sources
-        keyword_docs = []
-        for source in matching_sources:
-            results = client.scroll(
-                collection_name="dots_ocr_documents",
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="metadata.source",
-                            match=models.MatchValue(value=source),
-                        )
-                    ]
-                ),
-                limit=boost_k,
-                with_payload=True,
-                with_vectors=False,
-            )
-            points, _ = results
-            for p in points:
-                doc = Document(
-                    page_content=p.payload.get("page_content", ""),
-                    metadata=p.payload.get("metadata", {}),
-                )
-                keyword_docs.append(doc)
+        logger.info(f"Query analysis: '{query[:50]}...' -> '{enhanced_query[:100]}...'")
 
-        # Combine: keyword matches first, then vector results
-        # Remove duplicates based on content
-        seen_content = set()
-        combined = []
-
-        for doc in keyword_docs + vector_results:
-            content_hash = hash(doc.page_content[:100])
-            if content_hash not in seen_content:
-                seen_content.add(content_hash)
-                combined.append(doc)
-
-        return combined[:len(vector_results) + boost_k]
+        return enhanced_query if enhanced_query else query
 
     except Exception as e:
-        logger.warning(f"Keyword boost search failed: {e}")
-        return vector_results
+        logger.warning(f"Query analysis failed, using original query: {e}")
+        return query
+
+
+def _find_relevant_files(query: str, k: int = 5) -> List[str]:
+    """
+    Find relevant files by searching file summaries first.
+
+    This implements the two-phase retrieval strategy:
+    1. Search file summaries to identify relevant documents
+    2. Return list of source names that are relevant to the query
+
+    Args:
+        query: The search query.
+        k: Maximum number of relevant files to return.
+
+    Returns:
+        List of source names that are relevant to the query.
+    """
+    try:
+        # Search file summaries using the query
+        summary_docs = search_file_summaries(query, k=k)
+
+        if not summary_docs:
+            logger.info("No file summaries found, will search all chunks")
+            return []
+
+        # Extract unique source names from the summary results
+        relevant_sources = []
+        seen_sources = set()
+
+        for doc in summary_docs:
+            source = doc.metadata.get("source", "")
+            if source and source not in seen_sources:
+                relevant_sources.append(source)
+                seen_sources.add(source)
+
+        logger.info(f"Found {len(relevant_sources)} relevant files from summaries: {relevant_sources}")
+        return relevant_sources
+
+    except Exception as e:
+        logger.warning(f"Error searching file summaries: {e}")
+        return []
+
+
+def _find_relevant_chunks_from_summaries(
+    query: str,
+    source_names: List[str] = None,
+    k: int = 15,
+) -> List[str]:
+    """
+    Find relevant chunks by searching chunk summaries.
+
+    Args:
+        query: The search query.
+        source_names: Optional list of source names to filter.
+        k: Maximum number of chunk summaries to return.
+
+    Returns:
+        List of chunk_ids that are relevant to the query.
+    """
+    try:
+        # Search chunk summaries
+        chunk_summary_docs = search_chunk_summaries(query, k=k, source_names=source_names)
+
+        if not chunk_summary_docs:
+            logger.info("No chunk summaries found")
+            return []
+
+        # Extract unique chunk_ids from the summary results
+        # Each summary may cover multiple chunks (combined small chunks)
+        chunk_ids = []
+        seen_ids = set()
+
+        for doc in chunk_summary_docs:
+            # Support both list format (new) and single string format (legacy)
+            doc_chunk_ids = doc.metadata.get("chunk_ids", [])
+            if not doc_chunk_ids:
+                # Fallback to single chunk_id for legacy data
+                single_id = doc.metadata.get("chunk_id", "")
+                if single_id:
+                    doc_chunk_ids = [single_id]
+
+            for chunk_id in doc_chunk_ids:
+                if chunk_id and chunk_id not in seen_ids:
+                    chunk_ids.append(chunk_id)
+                    seen_ids.add(chunk_id)
+
+        logger.info(f"Found {len(chunk_ids)} relevant chunks from chunk summaries")
+        return chunk_ids
+
+    except Exception as e:
+        logger.warning(f"Error searching chunk summaries: {e}")
+        return []
 
 
 @tool
 def search_documents(query: str) -> str:
     """
-    Search the indexed documents for relevant information.
+    Search the indexed documents for relevant information using three-phase retrieval.
+
+    Three-phase retrieval strategy:
+    1. First search file summaries to identify relevant documents
+    2. Then search chunk summaries to find relevant chunks within those files
+    3. Finally retrieve full chunk content for the relevant chunks
 
     Args:
         query: The search query to find relevant document chunks.
@@ -146,13 +225,46 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
-        # Increase k to retrieve more documents for better recall
-        # The LLM will filter for relevance from these results
-        retriever = get_retriever(k=15, fetch_k=50)
-        docs = retriever.invoke(query)
+        # Step 1: Use LLM to analyze and enhance the query
+        enhanced_query = _analyze_query_with_llm(query)
 
-        # Boost with keyword matching for better recall
-        docs = _keyword_boost_search(query, docs, boost_k=10)
+        # Step 2: Find relevant files by searching file summaries first
+        relevant_sources = _find_relevant_files(enhanced_query, k=5)
+
+        # Step 3: Search chunk summaries to find relevant chunks
+        chunk_ids = _find_relevant_chunks_from_summaries(
+            enhanced_query,
+            source_names=relevant_sources if relevant_sources else None,
+            k=15,
+        )
+
+        docs = []
+
+        # Step 4: Retrieve full chunk content
+        if chunk_ids:
+            # Get full chunks by their IDs
+            docs = get_chunks_by_ids(chunk_ids, source_names=relevant_sources if relevant_sources else None)
+            logger.info(f"Retrieved {len(docs)} full chunks by chunk_ids")
+
+        # Fallback: If no chunks found via chunk summaries, use direct chunk search
+        if not docs:
+            logger.info("No chunks found via chunk summaries, falling back to direct chunk search")
+            if relevant_sources:
+                retriever = get_retriever_with_sources(
+                    k=15, fetch_k=50, source_names=relevant_sources
+                )
+                logger.info(f"Searching chunks filtered by sources: {relevant_sources}")
+            else:
+                retriever = get_retriever(k=15, fetch_k=50)
+                logger.info("No relevant files from summaries, searching all chunks")
+
+            docs = retriever.invoke(enhanced_query)
+
+            if not docs and relevant_sources:
+                # Try without filter as last resort
+                logger.info("No results with source filter, trying without filter")
+                retriever = get_retriever(k=15, fetch_k=50)
+                docs = retriever.invoke(enhanced_query)
 
         if not docs:
             return "No relevant documents found for this query."
@@ -174,7 +286,13 @@ def search_documents(query: str) -> str:
             seen_sources.add(source)
 
         # Log which sources were found
-        logger.info(f"Search query '{query[:50]}...' found {len(docs)} docs from sources: {seen_sources}")
+        logger.info(
+            f"Original query: '{query[:50]}...' | "
+            f"Enhanced query: '{enhanced_query[:50]}...' | "
+            f"Relevant sources from summaries: {relevant_sources} | "
+            f"Chunk IDs from chunk summaries: {len(chunk_ids)} | "
+            f"Found {len(docs)} chunks from sources: {seen_sources}"
+        )
 
         return "\n\n---\n\n".join(results)
 

@@ -29,7 +29,14 @@ from rag_service.indexer import (
     start_watching_output,
     trigger_embedding_for_document,
     reindex_document,
+    index_document_now,
 )
+from rag_service.vectorstore import delete_documents_by_source, delete_file_summary_by_source, delete_chunk_summaries_by_source, get_collection_info, clear_collection, is_document_indexed
+
+# Import database services
+from db.database import init_db, get_db_session
+from db.document_repository import DocumentRepository
+from db.models import Document, UploadStatus, ConvertStatus, IndexStatus
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -262,6 +269,7 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
             is_skipped = False
             skip_reason = None
             source_name = None  # For embedding trigger
+            filename = None  # For database update
 
             if result and isinstance(result, list) and len(result) > 0:
                 # Check if any result has 'skipped' flag
@@ -276,6 +284,10 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     if md_path:
                         # Get the parent folder name as source_name
                         source_name = Path(md_path).parent.name
+                    # Get original filename from file_path
+                    file_path = first_result.get('file_path')
+                    if file_path:
+                        filename = Path(file_path).name
 
             if is_skipped:
                 # Send warning status instead of completed
@@ -310,10 +322,32 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     "results": result,
                 })
 
+                # Update database status
+                if filename:
+                    try:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename)
+                            if doc:
+                                output_path = os.path.join(OUTPUT_DIR, source_name) if source_name else None
+                                converted_pages = len(result) if result else 1
+                                repo.update_convert_status(
+                                    doc, ConvertStatus.CONVERTED, converted_pages, output_path,
+                                    message="Conversion completed successfully"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Could not update database status: {e}")
+
                 # Trigger embedding in background after successful conversion
                 if source_name:
                     logger.info(f"Triggering embedding for document: {source_name}")
-                    trigger_embedding_for_document(source_name, OUTPUT_DIR)
+                    trigger_embedding_for_document(
+                        source_name,
+                        OUTPUT_DIR,
+                        filename=filename,
+                        conversion_id=conversion_id,
+                        broadcast_callback=connection_manager.broadcast_from_thread
+                    )
 
         elif status == "error":
             conversion_manager.update_conversion(
@@ -331,6 +365,24 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                 "message": f"Conversion failed: {error}",
                 "error": error,
             })
+
+            # Update database status for error
+            # Try to get filename from conversion manager
+            try:
+                conversion_info = conversion_manager.get_conversion(conversion_id)
+                if conversion_info:
+                    filename = conversion_info.get('filename')
+                    if filename:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename)
+                            if doc:
+                                repo.update_convert_status(
+                                    doc, ConvertStatus.FAILED, 0, None,
+                                    message=f"Conversion failed: {error}"
+                                )
+            except Exception as e:
+                logger.warning(f"Could not update database status for error: {e}")
     except Exception as e:
         logger.error(f"Error in progress callback: {str(e)}")
 
@@ -339,9 +391,81 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
 worker_pool = WorkerPool(num_workers=NUM_WORKERS, progress_callback=_worker_progress_callback)
 
 
+def _sync_files_to_database():
+    """Synchronize existing files in input directory with the database."""
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            synced_count = 0
+
+            if os.path.exists(INPUT_DIR):
+                for filename in os.listdir(INPUT_DIR):
+                    file_path = os.path.join(INPUT_DIR, filename)
+
+                    if not os.path.isfile(file_path):
+                        continue
+
+                    # Check if already in database
+                    if repo.exists(filename):
+                        continue
+
+                    # Get file info
+                    file_size = os.path.getsize(file_path)
+                    file_name_without_ext = os.path.splitext(filename)[0]
+
+                    # Check conversion status
+                    markdown_exists, _, _, converted_pages = _check_markdown_exists(file_name_without_ext)
+                    total_pages = _get_pdf_page_count(file_path)
+                    if total_pages == 0 and markdown_exists:
+                        total_pages = 1
+
+                    # Determine convert status
+                    if not markdown_exists:
+                        convert_status = ConvertStatus.PENDING
+                    elif total_pages > 0 and converted_pages < total_pages:
+                        convert_status = ConvertStatus.PARTIAL
+                    else:
+                        convert_status = ConvertStatus.CONVERTED
+
+                    # Check index status
+                    indexed = is_document_indexed(file_name_without_ext) if markdown_exists else False
+                    index_status = IndexStatus.INDEXED if indexed else IndexStatus.PENDING
+
+                    # Create document record
+                    doc = repo.create(
+                        filename=filename,
+                        original_filename=filename,
+                        file_path=file_path,
+                        file_size=file_size,
+                        total_pages=total_pages,
+                    )
+
+                    # Update statuses
+                    if convert_status != ConvertStatus.PENDING:
+                        output_path = os.path.join(OUTPUT_DIR, file_name_without_ext)
+                        repo.update_convert_status(doc, convert_status, converted_pages, output_path, "Synced from existing files")
+
+                    if index_status == IndexStatus.INDEXED:
+                        repo.update_index_status(doc, index_status, message="Synced from existing index")
+
+                    synced_count += 1
+
+            logger.info(f"Database sync complete: {synced_count} new documents synced")
+    except Exception as e:
+        logger.error(f"Error syncing files to database: {e}")
+
+
 @app.on_event("startup")
 async def startup_event():
     """Initialize async components on startup"""
+    # Initialize database
+    try:
+        init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        # Continue without database - will fall back to file-based status
+
     # Set up the connection manager with the current event loop
     loop = asyncio.get_event_loop()
     connection_manager.set_event_loop(loop)
@@ -349,25 +473,29 @@ async def startup_event():
     asyncio.create_task(connection_manager.start_broadcast_worker())
     logger.info("WebSocket broadcast worker started")
 
-    # Initialize RAG service - index existing documents and start watching for new ones
-    # Run indexing in a background thread to avoid blocking startup
-    def _init_rag_service():
-        try:
-            logger.info("Initializing RAG service in background...")
-            # Index existing markdown documents (pass the OUTPUT_DIR from main.py)
-            indexed_count = index_existing_documents(OUTPUT_DIR)
-            logger.info(f"RAG service: Indexed {indexed_count} document chunks on startup")
-            # Start watching for new documents
-            start_watching_output(OUTPUT_DIR)
-            logger.info("RAG service: File watcher started for output directory")
-        except Exception as e:
-            logger.error(f"Error initializing RAG service: {e}")
-            # Don't fail startup - the app can still work without RAG
+    # Initialize services in background thread
+    def _init_services():
+        # Sync existing files to database
+        _sync_files_to_database()
+
+        # Initialize RAG service (controlled by AUTO_INDEX_ON_STARTUP env var)
+        auto_index = os.getenv("AUTO_INDEX_ON_STARTUP", "false").lower() in ("true", "1", "yes")
+        if auto_index:
+            try:
+                logger.info("Initializing RAG service in background...")
+                indexed_count = index_existing_documents(OUTPUT_DIR)
+                logger.info(f"RAG service: Indexed {indexed_count} document chunks on startup")
+                start_watching_output(OUTPUT_DIR)
+                logger.info("RAG service: File watcher started for output directory")
+            except Exception as e:
+                logger.error(f"Error initializing RAG service: {e}")
+        else:
+            logger.info("Auto-indexing disabled (set AUTO_INDEX_ON_STARTUP=true to enable)")
 
     import threading
-    rag_init_thread = threading.Thread(target=_init_rag_service, daemon=True)
-    rag_init_thread.start()
-    logger.info("RAG service initialization started in background thread")
+    init_thread = threading.Thread(target=_init_services, daemon=True)
+    init_thread.start()
+    logger.info("Services initialization started in background thread")
 
 
 @app.get("/")
@@ -584,12 +712,30 @@ async def upload_file(file: UploadFile = File(...)):
         file_size = os.path.getsize(file_path)
         upload_time = datetime.now().isoformat()
 
+        # Create database record
+        doc_id = None
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc, created = repo.get_or_create(
+                    filename=file.filename,
+                    original_filename=file.filename,
+                    file_path=file_path,
+                    file_size=file_size,
+                )
+                doc_id = str(doc.id)
+                if not created:
+                    logger.info(f"Document record already exists: {file.filename}")
+        except Exception as e:
+            logger.warning(f"Could not create database record: {e}")
+
         response_data = {
             "status": "success",
             "filename": file.filename,
             "file_path": file_path,
             "file_size": file_size,
             "upload_time": upload_time,
+            "document_id": doc_id,
         }
 
         # Add resize information if image was resized
@@ -681,9 +827,20 @@ async def list_documents():
     Returns:
     - JSON with list of documents and their markdown conversion status
     - Includes total_pages (for PDFs) and converted_pages to track partial conversions
+    - Includes database info (document_id, upload_status, convert_status, index_status)
     """
     try:
         documents = []
+
+        # Get database records for faster lookup
+        db_docs = {}
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                for doc in repo.get_all():
+                    db_docs[doc.filename] = doc.to_dict()
+        except Exception as e:
+            logger.warning(f"Could not fetch database records: {e}")
 
         # List all files in input directory
         if os.path.exists(INPUT_DIR):
@@ -710,16 +867,29 @@ async def list_documents():
                 if total_pages == 0 and markdown_exists:
                     total_pages = 1
 
+                # Check if document is indexed in vector database
+                indexed = is_document_indexed(file_name_without_ext) if markdown_exists else False
+
+                # Get database info if available
+                db_info = db_docs.get(filename, {})
+
                 documents.append({
                     "filename": filename,
                     "file_path": file_path,
                     "file_size": file_size,
-                    "upload_time": upload_time,
+                    "upload_time": db_info.get("created_at") or upload_time,
                     "markdown_exists": markdown_exists,
                     "markdown_path": markdown_path if markdown_exists else None,
                     "is_multipage": is_multipage,
                     "total_pages": total_pages,
                     "converted_pages": converted_pages,
+                    "indexed": indexed,
+                    # Database fields
+                    "document_id": db_info.get("id"),
+                    "upload_status": db_info.get("upload_status", "uploaded" if os.path.exists(file_path) else "pending"),
+                    "convert_status": db_info.get("convert_status", "converted" if markdown_exists else "pending"),
+                    "index_status": db_info.get("index_status", "indexed" if indexed else "pending"),
+                    "indexed_chunks": db_info.get("indexed_chunks", 0),
                 })
 
         return JSONResponse(content={
@@ -1470,6 +1640,30 @@ async def delete_document(filename: str):
                 errors.append(error_msg)
                 logger.error(error_msg)
 
+        # Delete vector embeddings from Qdrant (all collections)
+        try:
+            delete_documents_by_source(file_name_without_ext)
+            delete_file_summary_by_source(file_name_without_ext)
+            delete_chunk_summaries_by_source(file_name_without_ext)
+            logger.info(f"Deleted vector embeddings for: {file_name_without_ext}")
+        except Exception as e:
+            error_msg = f"Failed to delete vector embeddings: {str(e)}"
+            errors.append(error_msg)
+            logger.error(error_msg)
+
+        # Hard delete from database (removes document and status logs via cascade)
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.hard_delete(doc)
+                    logger.info(f"Hard deleted database record for: {filename}")
+        except Exception as e:
+            error_msg = f"Failed to delete database record: {str(e)}"
+            errors.append(error_msg)
+            logger.warning(error_msg)
+
         # If no files were deleted and no errors occurred, the file didn't exist
         if not deleted_files and not errors:
             raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
@@ -1493,6 +1687,263 @@ async def delete_document(filename: str):
     except Exception as e:
         logger.error(f"Error deleting document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
+
+# ===== Indexing Status Tracking =====
+# Persistent status tracker for batch indexing (survives page refresh)
+_batch_index_status = {
+    "status": "idle",  # idle, running, completed, error
+    "total_documents": 0,
+    "indexed_documents": 0,
+    "current_document": None,
+    "started_at": None,
+    "completed_at": None,
+    "errors": [],
+    "message": None,
+}
+_batch_index_lock = threading.Lock()
+
+
+@app.post("/documents/{filename}/index")
+async def index_single_document(filename: str):
+    """
+    Index a single document's markdown files into the vector database.
+    Re-indexes if already indexed.
+
+    Parameters:
+    - filename: The name of the file to index (with extension)
+
+    Returns:
+    - Success status with number of chunks indexed
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename to prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        file_name_without_ext = os.path.splitext(filename)[0]
+        doc_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+        # Check if document directory exists
+        if not os.path.exists(doc_dir):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document output folder not found: {file_name_without_ext}"
+            )
+
+        # Delete existing embeddings and re-index
+        try:
+            delete_documents_by_source(file_name_without_ext)
+            logger.info(f"Deleted existing embeddings for: {file_name_without_ext}")
+        except Exception as e:
+            logger.warning(f"Error deleting existing embeddings (may not exist): {e}")
+
+        # Index the document
+        chunks = index_document_now(file_name_without_ext, OUTPUT_DIR)
+
+        # Update database status
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_index_status(
+                        doc, IndexStatus.INDEXED, chunks,
+                        message=f"Indexed {chunks} chunks"
+                    )
+        except Exception as e:
+            logger.warning(f"Could not update database index status: {e}")
+
+        return JSONResponse(content={
+            "status": "success",
+            "filename": filename,
+            "source_name": file_name_without_ext,
+            "chunks_indexed": chunks,
+            "message": f"Indexed {chunks} chunks from {file_name_without_ext}",
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error indexing document: {str(e)}")
+        # Update database status for error
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_index_status(
+                        doc, IndexStatus.FAILED, 0,
+                        message=f"Indexing failed: {str(e)}"
+                    )
+        except Exception as db_e:
+            logger.warning(f"Could not update database index status: {db_e}")
+        raise HTTPException(status_code=500, detail=f"Error indexing document: {str(e)}")
+
+
+@app.get("/documents/{filename}/status-logs")
+async def get_document_status_logs(filename: str):
+    """
+    Get status change logs for a document (audit trail).
+
+    Parameters:
+    - filename: The name of the file
+
+    Returns:
+    - List of status change logs with timestamps
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+
+            logs = repo.get_status_logs(doc.id)
+            return JSONResponse(content={
+                "status": "success",
+                "filename": filename,
+                "document_id": str(doc.id),
+                "logs": [log.to_dict() for log in logs],
+                "total": len(logs),
+            })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting status logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting status logs: {str(e)}")
+
+
+@app.post("/documents/index-all")
+async def index_all_documents():
+    """
+    Start batch indexing of all documents in the background.
+    Clears all existing embeddings and re-indexes all documents.
+
+    Returns:
+    - Accepted status with message
+    """
+    global _batch_index_status
+
+    with _batch_index_lock:
+        if _batch_index_status["status"] == "running":
+            return JSONResponse(
+                status_code=409,
+                content={
+                    "status": "conflict",
+                    "message": "Batch indexing is already in progress",
+                    "current_status": _batch_index_status,
+                }
+            )
+
+    def _batch_index_task():
+        global _batch_index_status
+
+        try:
+            with _batch_index_lock:
+                _batch_index_status = {
+                    "status": "running",
+                    "total_documents": 0,
+                    "indexed_documents": 0,
+                    "current_index": 0,  # 0-based index of document currently being processed
+                    "current_document": None,
+                    "started_at": datetime.now().isoformat(),
+                    "completed_at": None,
+                    "errors": [],
+                    "message": "Initializing batch indexing...",
+                }
+
+            # Clear all existing embeddings
+            logger.info("Clearing all vector embeddings for re-indexing...")
+            with _batch_index_lock:
+                _batch_index_status["message"] = "Clearing existing embeddings..."
+
+            try:
+                clear_collection()
+                logger.info("Cleared all vector embeddings")
+            except Exception as e:
+                logger.error(f"Error clearing collection: {e}")
+
+            # Find all document directories
+            output_path = Path(OUTPUT_DIR)
+            doc_dirs = [d for d in output_path.iterdir() if d.is_dir()]
+
+            with _batch_index_lock:
+                _batch_index_status["total_documents"] = len(doc_dirs)
+                _batch_index_status["message"] = f"Found {len(doc_dirs)} documents to index"
+
+            logger.info(f"Found {len(doc_dirs)} documents to index")
+
+            total_chunks = 0
+            for i, doc_dir in enumerate(doc_dirs):
+                source_name = doc_dir.name
+
+                with _batch_index_lock:
+                    _batch_index_status["current_document"] = source_name
+                    _batch_index_status["current_index"] = i  # 0-based index of current document
+                    _batch_index_status["message"] = f"Indexing: {source_name} ({i+1}/{len(doc_dirs)})"
+
+                try:
+                    chunks = index_document_now(source_name, OUTPUT_DIR)
+                    total_chunks += chunks
+                    logger.info(f"Indexed {source_name}: {chunks} chunks")
+
+                    # Update to reflect completed count after successful indexing
+                    with _batch_index_lock:
+                        _batch_index_status["indexed_documents"] = i + 1
+
+                except Exception as e:
+                    error_msg = f"Error indexing {source_name}: {str(e)}"
+                    logger.error(error_msg)
+                    with _batch_index_lock:
+                        _batch_index_status["errors"].append(error_msg)
+                        # Still move forward even on error
+                        _batch_index_status["indexed_documents"] = i + 1
+
+            with _batch_index_lock:
+                _batch_index_status["status"] = "completed"
+                _batch_index_status["completed_at"] = datetime.now().isoformat()
+                _batch_index_status["current_document"] = None
+                _batch_index_status["message"] = f"Completed: indexed {total_chunks} chunks from {len(doc_dirs)} documents"
+
+            logger.info(f"Batch indexing completed: {total_chunks} chunks from {len(doc_dirs)} documents")
+
+        except Exception as e:
+            logger.error(f"Batch indexing error: {str(e)}")
+            with _batch_index_lock:
+                _batch_index_status["status"] = "error"
+                _batch_index_status["completed_at"] = datetime.now().isoformat()
+                _batch_index_status["message"] = f"Error: {str(e)}"
+
+    # Start background thread
+    thread = threading.Thread(target=_batch_index_task, daemon=True)
+    thread.start()
+
+    return JSONResponse(content={
+        "status": "accepted",
+        "message": "Batch indexing started in background",
+    })
+
+
+@app.get("/documents/index-status")
+async def get_index_status():
+    """
+    Get the current status of batch indexing.
+
+    Returns:
+    - Current indexing status
+    """
+    global _batch_index_status
+
+    with _batch_index_lock:
+        return JSONResponse(content=_batch_index_status.copy())
 
 
 @app.get("/image/{filename}")
