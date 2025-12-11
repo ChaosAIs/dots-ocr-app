@@ -179,6 +179,48 @@ class PostgresKVStorage(BaseKVStorage):
             await session.execute(query, {"workspace_id": self.workspace_id})
             await session.commit()
 
+    async def delete_by_source(self, source_name: str) -> int:
+        """
+        Delete records where source_chunk_id starts with source_name.
+
+        This is used to delete all entities/relationships for a specific document.
+
+        Args:
+            source_name: Source document name (e.g., "my_document")
+
+        Returns:
+            Number of deleted records
+        """
+        async with await self._get_session() as session:
+            # Match source_chunk_id that starts with source_name
+            # Pattern: source_name_% (e.g., "my_document_0", "my_document_1")
+            query = text(f"""
+                DELETE FROM {self.table_name}
+                WHERE workspace_id = :workspace_id
+                AND (
+                    source_chunk_id LIKE :source_pattern
+                    OR source_chunk_id = :source_name
+                )
+                RETURNING id
+            """)
+            result = await session.execute(
+                query,
+                {
+                    "workspace_id": self.workspace_id,
+                    "source_pattern": f"{source_name}_%",
+                    "source_name": source_name,
+                },
+            )
+            deleted_ids = result.fetchall()
+            await session.commit()
+            count = len(deleted_ids)
+            if count > 0:
+                logger.info(
+                    f"Deleted {count} records from {self.table_name} "
+                    f"for source: {source_name}"
+                )
+            return count
+
 
 class LLMCacheStorage(PostgresKVStorage):
     """Specialized storage for LLM response caching."""

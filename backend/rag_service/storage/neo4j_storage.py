@@ -180,6 +180,42 @@ class Neo4jStorage(BaseGraphStorage):
                 workspace_id=self.workspace_id,
             )
 
+    async def delete_by_source(self, source_name: str) -> int:
+        """
+        Delete all nodes where source_chunk_id starts with source_name.
+
+        This is used to delete all entities for a specific document.
+
+        Args:
+            source_name: Source document name (e.g., "my_document")
+
+        Returns:
+            Number of deleted nodes
+        """
+        driver = self._get_driver()
+        async with driver.session() as session:
+            # Delete nodes where source_chunk_id starts with source_name
+            result = await session.run(
+                """
+                MATCH (e:Entity {workspace_id: $workspace_id})
+                WHERE e.source_chunk_id STARTS WITH $source_pattern
+                   OR e.source_chunk_id = $source_name
+                WITH e, count(e) as cnt
+                DETACH DELETE e
+                RETURN cnt
+                """,
+                workspace_id=self.workspace_id,
+                source_pattern=f"{source_name}_",
+                source_name=source_name,
+            )
+            record = await result.single()
+            count = record["cnt"] if record else 0
+            if count > 0:
+                logger.info(
+                    f"Deleted {count} nodes from Neo4j for source: {source_name}"
+                )
+            return count
+
     async def get_nodes_by_name(
         self,
         names: List[str],

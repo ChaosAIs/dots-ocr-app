@@ -313,3 +313,128 @@ def delete_edges_by_workspace(workspace_id: str) -> None:
     )
     logger.info(f"Deleted edges for workspace: {workspace_id}")
 
+
+def delete_entities_by_source(workspace_id: str, source_name: str) -> None:
+    """
+    Delete entity vectors for a specific source document.
+
+    Args:
+        workspace_id: Workspace ID
+        source_name: Source document name
+    """
+    client = _get_qdrant_client()
+    _ensure_collection_exists(client, ENTITY_COLLECTION)
+
+    # Delete where source_chunk_id starts with source_name
+    # Qdrant doesn't support LIKE, so we use text match with prefix
+    # We need to scroll and delete matching points
+    try:
+        # Scroll to find matching points
+        offset = None
+        deleted_count = 0
+
+        while True:
+            points, offset = client.scroll(
+                collection_name=ENTITY_COLLECTION,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="workspace_id",
+                            match=models.MatchValue(value=workspace_id),
+                        )
+                    ]
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=True,
+            )
+
+            if not points:
+                break
+
+            # Filter points by source_chunk_id prefix
+            ids_to_delete = []
+            for point in points:
+                source_chunk_id = point.payload.get("source_chunk_id", "")
+                if (source_chunk_id.startswith(f"{source_name}_") or
+                        source_chunk_id == source_name):
+                    ids_to_delete.append(point.id)
+
+            if ids_to_delete:
+                client.delete(
+                    collection_name=ENTITY_COLLECTION,
+                    points_selector=models.PointIdsList(points=ids_to_delete),
+                )
+                deleted_count += len(ids_to_delete)
+
+            if offset is None:
+                break
+
+        if deleted_count > 0:
+            logger.info(
+                f"Deleted {deleted_count} entities for source: {source_name}"
+            )
+    except Exception as e:
+        logger.error(f"Error deleting entities by source: {e}")
+
+
+def delete_edges_by_source(workspace_id: str, source_name: str) -> None:
+    """
+    Delete edge vectors for a specific source document.
+
+    Args:
+        workspace_id: Workspace ID
+        source_name: Source document name
+    """
+    client = _get_qdrant_client()
+    _ensure_collection_exists(client, EDGE_COLLECTION)
+
+    try:
+        # Scroll to find matching points
+        offset = None
+        deleted_count = 0
+
+        while True:
+            points, offset = client.scroll(
+                collection_name=EDGE_COLLECTION,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="workspace_id",
+                            match=models.MatchValue(value=workspace_id),
+                        )
+                    ]
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=True,
+            )
+
+            if not points:
+                break
+
+            # Filter points by source_chunk_id prefix
+            ids_to_delete = []
+            for point in points:
+                source_chunk_id = point.payload.get("source_chunk_id", "")
+                if (source_chunk_id.startswith(f"{source_name}_") or
+                        source_chunk_id == source_name):
+                    ids_to_delete.append(point.id)
+
+            if ids_to_delete:
+                client.delete(
+                    collection_name=EDGE_COLLECTION,
+                    points_selector=models.PointIdsList(points=ids_to_delete),
+                )
+                deleted_count += len(ids_to_delete)
+
+            if offset is None:
+                break
+
+        if deleted_count > 0:
+            logger.info(
+                f"Deleted {deleted_count} edges for source: {source_name}"
+            )
+    except Exception as e:
+        logger.error(f"Error deleting edges by source: {e}")
+

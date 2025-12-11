@@ -14,6 +14,8 @@ from .qdrant_adapter import (
     QdrantEdgeVectorStore,
     delete_entities_by_workspace,
     delete_edges_by_workspace,
+    delete_entities_by_source,
+    delete_edges_by_source,
 )
 
 __all__ = [
@@ -24,5 +26,7 @@ __all__ = [
     "QdrantEdgeVectorStore",
     "delete_entities_by_workspace",
     "delete_edges_by_workspace",
+    "delete_entities_by_source",
+    "delete_edges_by_source",
 ]
 

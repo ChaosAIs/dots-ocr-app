@@ -57,6 +57,14 @@ from rag_service.indexer import (
 )
 from rag_service.vectorstore import delete_documents_by_source, delete_file_summary_by_source, delete_chunk_summaries_by_source, get_collection_info, clear_collection, is_document_indexed
 
+# Import GraphRAG for source-level deletion
+try:
+    from rag_service.graph_rag import delete_graphrag_by_source_sync, GRAPH_RAG_ENABLED
+    GRAPHRAG_DELETE_AVAILABLE = True
+except ImportError:
+    GRAPHRAG_DELETE_AVAILABLE = False
+    GRAPH_RAG_ENABLED = False
+
 # Import database services
 from db.database import init_db, get_db_session
 from db.document_repository import DocumentRepository
@@ -1674,6 +1682,16 @@ async def delete_document(filename: str):
             error_msg = f"Failed to delete vector embeddings: {str(e)}"
             errors.append(error_msg)
             logger.error(error_msg)
+
+        # Delete GraphRAG data (Neo4j, PostgreSQL GraphRAG tables, Qdrant entity/edge vectors)
+        if GRAPHRAG_DELETE_AVAILABLE and GRAPH_RAG_ENABLED:
+            try:
+                delete_graphrag_by_source_sync(file_name_without_ext)
+                logger.info(f"Deleted GraphRAG data for: {file_name_without_ext}")
+            except Exception as e:
+                error_msg = f"Failed to delete GraphRAG data: {str(e)}"
+                errors.append(error_msg)
+                logger.warning(error_msg)
 
         # Hard delete from database (removes document and status logs via cascade)
         try:

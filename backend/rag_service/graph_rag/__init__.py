@@ -18,7 +18,12 @@ from .base import (
     BaseGraphStorage,
 )
 from .entity_extractor import EntityExtractor
-from .graph_indexer import GraphRAGIndexer, index_chunks_sync, GRAPH_RAG_ENABLED
+from .graph_indexer import (
+    GraphRAGIndexer,
+    index_chunks_sync,
+    delete_graphrag_by_source_sync,
+    GRAPH_RAG_ENABLED,
+)
 from .query_mode_detector import QueryModeDetector
 from .graph_rag import GraphRAG, GraphRAGContext
 from .utils import (
@@ -43,6 +48,7 @@ __all__ = [
     # Graph indexing
     "GraphRAGIndexer",
     "index_chunks_sync",
+    "delete_graphrag_by_source_sync",
     "GRAPH_RAG_ENABLED",
     # Query processing
     "QueryModeDetector",

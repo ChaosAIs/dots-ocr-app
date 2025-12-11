@@ -224,15 +224,29 @@ class GraphRAGIndexer:
 
         logger.info(f"Deleting GraphRAG data for source: {source_name}")
 
-        # Get all entities for this source
-        # Note: This requires querying by source_chunk_id pattern
-        # For now, we'll use workspace-level deletion
-        # TODO: Implement source-level deletion
+        # Delete from PostgreSQL KV storage
+        try:
+            await self._kv_storage["entities"].delete_by_source(source_name)
+            await self._kv_storage["hyperedges"].delete_by_source(source_name)
+            await self._kv_storage["chunks"].delete_by_source(source_name)
+        except Exception as e:
+            logger.warning(f"Error deleting from PostgreSQL: {e}")
 
-        logger.warning(
-            f"Source-level deletion not yet implemented for GraphRAG. "
-            f"Use workspace-level deletion instead."
-        )
+        # Delete from Neo4j graph
+        try:
+            await self._graph_storage.delete_by_source(source_name)
+        except Exception as e:
+            logger.warning(f"Error deleting from Neo4j: {e}")
+
+        # Delete from Qdrant vector stores
+        try:
+            from ..storage import delete_entities_by_source, delete_edges_by_source
+            delete_entities_by_source(self.workspace_id, source_name)
+            delete_edges_by_source(self.workspace_id, source_name)
+        except Exception as e:
+            logger.warning(f"Error deleting from Qdrant: {e}")
+
+        logger.info(f"Deleted GraphRAG data for source: {source_name}")
 
     async def delete_workspace(self) -> None:
         """Delete all GraphRAG data for the current workspace."""
@@ -292,4 +306,32 @@ def index_chunks_sync(
     return loop.run_until_complete(
         indexer.index_chunks(chunks, source_name, use_gleaning)
     )
+
+
+def delete_graphrag_by_source_sync(
+    source_name: str,
+    workspace_id: str = "default",
+) -> None:
+    """
+    Synchronous wrapper for GraphRAG source deletion.
+
+    This can be called from the document delete endpoint.
+
+    Args:
+        source_name: Source document name
+        workspace_id: Workspace ID
+    """
+    if not GRAPH_RAG_ENABLED:
+        return
+
+    indexer = GraphRAGIndexer(workspace_id=workspace_id)
+
+    # Run async function in event loop
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    loop.run_until_complete(indexer.delete_by_source(source_name))
 
