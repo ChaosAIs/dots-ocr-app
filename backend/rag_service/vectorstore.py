@@ -225,6 +225,47 @@ def add_file_summary(source_name: str, file_path: str, summary: str) -> None:
         logger.error(f"Error adding file summary for {source_name}: {e}")
 
 
+def add_file_summary_with_scopes(
+    source_name: str,
+    file_path: str,
+    summary: str,
+    scopes: List[str] = None,
+    content_type: str = "document",
+    complexity: str = "intermediate",
+) -> None:
+    """
+    Add a file summary with topic scopes to the file summary collection.
+
+    Args:
+        source_name: The document source name.
+        file_path: Path to the original file.
+        summary: The generated file summary.
+        scopes: List of topic keywords/areas the document covers.
+        content_type: Type of document (e.g., technical_documentation, tutorial).
+        complexity: Complexity level (basic, intermediate, advanced).
+    """
+    try:
+        vectorstore = get_file_summary_vectorstore()
+        doc = Document(
+            page_content=summary,
+            metadata={
+                "source": source_name,
+                "file_path": file_path,
+                "type": "file_summary",
+                "scopes": scopes or [],
+                "content_type": content_type,
+                "complexity": complexity,
+            }
+        )
+        vectorstore.add_documents([doc])
+        logger.info(
+            f"Added file summary with scopes for source: {source_name} "
+            f"(scopes={len(scopes or [])})"
+        )
+    except Exception as e:
+        logger.error(f"Error adding file summary with scopes for {source_name}: {e}")
+
+
 def search_file_summaries(
     query: str, k: int = 5, score_threshold: float = 0.25
 ) -> List[Document]:
@@ -291,6 +332,118 @@ def search_file_summaries(
         return filtered_docs
     except Exception as e:
         logger.error(f"Error searching file summaries: {e}")
+        return []
+
+
+def search_file_summaries_with_scopes(
+    query: str,
+    k: int = 10,
+    score_threshold: float = 0.2,
+) -> List[Document]:
+    """
+    Search file summaries and return candidates with their scopes for LLM matching.
+
+    This function returns more candidates than search_file_summaries because
+    the final filtering will be done by LLM-based scope matching.
+
+    Args:
+        query: The search query.
+        k: Number of candidate documents to return.
+        score_threshold: Minimum similarity score to include a document.
+
+    Returns:
+        List of Document objects with file summaries and their scopes.
+    """
+    try:
+        vectorstore = get_file_summary_vectorstore()
+        # Fetch more results for LLM to filter
+        docs_with_scores = vectorstore.similarity_search_with_score(query, k=k * 3)
+
+        # Deduplicate by source
+        source_best_scores: dict = {}
+        for doc, score in docs_with_scores:
+            source = doc.metadata.get("source", "unknown")
+            if source not in source_best_scores or score > source_best_scores[source][1]:
+                source_best_scores[source] = (doc, score)
+
+        # Filter by score threshold and limit to k results
+        filtered_docs = []
+        sorted_sources = sorted(
+            source_best_scores.items(), key=lambda x: x[1][1], reverse=True
+        )
+        for source, (doc, score) in sorted_sources[:k]:
+            if score >= score_threshold:
+                filtered_docs.append(doc)
+                logger.debug(
+                    f"Candidate file '{source}' with score {score:.4f}, "
+                    f"scopes={doc.metadata.get('scopes', [])}"
+                )
+
+        logger.info(f"Found {len(filtered_docs)} candidate files for scope matching")
+        return filtered_docs
+
+    except Exception as e:
+        logger.error(f"Error searching file summaries with scopes: {e}")
+        return []
+
+
+def get_all_file_summaries() -> List[Document]:
+    """
+    Get all file summaries from the collection.
+
+    This is useful for LLM-based scope matching when we need to consider
+    all documents in the collection.
+
+    Returns:
+        List of all Document objects with file summaries.
+    """
+    try:
+        client = get_qdrant_client()
+
+        # Check if collection exists
+        collections = client.get_collections().collections
+        if FILE_SUMMARY_COLLECTION_NAME not in [c.name for c in collections]:
+            logger.warning(f"Collection {FILE_SUMMARY_COLLECTION_NAME} does not exist")
+            return []
+
+        # Get collection info to determine count
+        collection_info = client.get_collection(FILE_SUMMARY_COLLECTION_NAME)
+        points_count = collection_info.points_count
+
+        if points_count == 0:
+            return []
+
+        # Scroll through all points
+        from qdrant_client.http import models as qdrant_models
+
+        all_docs = []
+        offset = None
+
+        while True:
+            results, offset = client.scroll(
+                collection_name=FILE_SUMMARY_COLLECTION_NAME,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+
+            for point in results:
+                payload = point.payload or {}
+                doc = Document(
+                    page_content=payload.get("page_content", ""),
+                    metadata=payload.get("metadata", {}),
+                )
+                all_docs.append(doc)
+
+            if offset is None:
+                break
+
+        logger.info(f"Retrieved {len(all_docs)} file summaries from collection")
+        return all_docs
+
+    except Exception as e:
+        logger.error(f"Error getting all file summaries: {e}")
         return []
 
 

@@ -18,19 +18,36 @@ from .vectorstore import (
     get_retriever,
     get_retriever_with_sources,
     search_file_summaries,
+    search_file_summaries_with_scopes,
     search_chunk_summaries,
     get_chunks_by_ids,
 )
 
+# Import GraphRAG components
+try:
+    from .graph_rag import GraphRAG, GRAPH_RAG_ENABLED
+    GRAPHRAG_AVAILABLE = True
+except ImportError:
+    GRAPHRAG_AVAILABLE = False
+    GRAPH_RAG_ENABLED = False
+
 logger = logging.getLogger(__name__)
 
-# Ollama configuration
-OLLAMA_HOST = os.getenv("OLLAMA_HOST", "localhost")
-OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen3:30b-a3b")
-# Smaller, faster model for query analysis (default: qwen2.5:7b)
-OLLAMA_QUERY_MODEL = os.getenv("OLLAMA_QUERY_MODEL", "qwen2.5:7b")
-OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+# RAG Ollama configuration (Docker: ollama-llm, Port: 11434)
+# Used for: RAG query processing, text generation, agent responses
+RAG_OLLAMA_HOST = os.getenv("RAG_OLLAMA_HOST", os.getenv("OLLAMA_HOST", "localhost"))
+RAG_OLLAMA_PORT = os.getenv("RAG_OLLAMA_PORT", os.getenv("OLLAMA_PORT", "11434"))
+RAG_OLLAMA_MODEL = os.getenv("RAG_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5:latest"))
+# Smaller, faster model for query analysis (query enhancement before vector search)
+RAG_OLLAMA_QUERY_MODEL = os.getenv("RAG_OLLAMA_QUERY_MODEL", os.getenv("OLLAMA_QUERY_MODEL", "qwen2.5:latest"))
+RAG_OLLAMA_BASE_URL = f"http://{RAG_OLLAMA_HOST}:{RAG_OLLAMA_PORT}"
+
+# Legacy aliases for backward compatibility
+OLLAMA_HOST = RAG_OLLAMA_HOST
+OLLAMA_PORT = RAG_OLLAMA_PORT
+OLLAMA_MODEL = RAG_OLLAMA_MODEL
+OLLAMA_QUERY_MODEL = RAG_OLLAMA_QUERY_MODEL
+OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
 
 
 class AgentState(TypedDict):
@@ -65,6 +82,51 @@ Create a concise, focused search query (50-100 words max) that:
 - Avoids repetition
 
 Output ONLY the search query text, nothing else."""
+
+
+# Prompt for query analysis with scope extraction
+QUERY_ANALYSIS_WITH_SCOPES_PROMPT = """Analyze the user's question and extract search information.
+
+User Question: {query}
+
+Provide your analysis in JSON format:
+{{
+    "enhanced_query": "An optimized search query (50-100 words) capturing the main topic and intent",
+    "query_scopes": ["scope1", "scope2", "scope3", ...]
+}}
+
+Requirements:
+1. ENHANCED_QUERY: Create a focused search query with key concepts and relevant terms
+2. QUERY_SCOPES: List 3-8 topic keywords/areas the user is asking about (e.g., "authentication", "JWT", "security")
+
+Output ONLY valid JSON, nothing else."""
+
+
+# Prompt for LLM-based scope matching
+SCOPE_MATCHING_PROMPT = """You are analyzing document relevance based on topic scopes.
+
+The user is searching for information about these topics:
+QUERY SCOPES: {query_scopes}
+
+Here are candidate documents with their topic scopes:
+{candidates}
+
+For each document, determine if its scopes are semantically relevant to the query scopes.
+Consider:
+- Exact matches (e.g., "JWT" matches "JWT")
+- Semantic equivalence (e.g., "login" matches "authentication")
+- Related concepts (e.g., "password" relates to "security")
+- Hierarchical relationships (e.g., "OAuth" is a type of "authentication")
+
+Respond in JSON format:
+{{
+    "relevant_documents": [
+        {{"source": "doc_name", "relevance_score": 0.0-1.0, "reason": "brief explanation"}}
+    ]
+}}
+
+Only include documents with relevance_score >= 0.5.
+Output ONLY valid JSON, nothing else."""
 
 
 def _analyze_query_with_llm(query: str) -> str:
@@ -114,6 +176,203 @@ def _analyze_query_with_llm(query: str) -> str:
     except Exception as e:
         logger.warning(f"Query analysis failed, using original query: {e}")
         return query
+
+
+def _analyze_query_with_scopes(query: str) -> tuple:
+    """
+    Use LLM to analyze the query and extract both enhanced query and topic scopes.
+
+    Args:
+        query: The original user query
+
+    Returns:
+        Tuple of (enhanced_query, query_scopes)
+    """
+    import json
+    import re
+
+    try:
+        llm = ChatOllama(
+            base_url=OLLAMA_BASE_URL,
+            model=OLLAMA_QUERY_MODEL,
+            temperature=0.1,
+            num_ctx=2048,
+            num_predict=512,
+        )
+
+        prompt = QUERY_ANALYSIS_WITH_SCOPES_PROMPT.format(query=query)
+        response = llm.invoke([HumanMessage(content=prompt)])
+
+        content = response.content.strip()
+
+        # Clean up thinking tags
+        if "</think>" in content:
+            content = content.split("</think>")[-1].strip()
+
+        # Try to extract JSON
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
+        if json_match:
+            content = json_match.group(1).strip()
+
+        json_start = content.find('{')
+        json_end = content.rfind('}')
+        if json_start != -1 and json_end != -1:
+            content = content[json_start:json_end + 1]
+
+        result = json.loads(content)
+        enhanced_query = result.get("enhanced_query", query)
+        query_scopes = result.get("query_scopes", [])
+
+        # Validate scopes
+        if not isinstance(query_scopes, list):
+            query_scopes = []
+        query_scopes = [str(s).strip().lower() for s in query_scopes if s]
+
+        logger.info(
+            f"Query analysis with scopes: '{query[:50]}...' -> "
+            f"query='{enhanced_query[:50]}...', scopes={query_scopes}"
+        )
+
+        return enhanced_query, query_scopes
+
+    except Exception as e:
+        logger.warning(f"Query analysis with scopes failed: {e}")
+        # Fallback to basic query analysis
+        enhanced_query = _analyze_query_with_llm(query)
+        return enhanced_query, []
+
+
+def _match_scopes_with_llm(
+    query_scopes: List[str],
+    candidate_docs: List,
+) -> List[str]:
+    """
+    Use LLM to match query scopes with document scopes.
+
+    Args:
+        query_scopes: List of topic scopes from the query.
+        candidate_docs: List of Document objects with scopes in metadata.
+
+    Returns:
+        List of source names that are relevant based on scope matching.
+    """
+    import json
+    import re
+
+    if not query_scopes or not candidate_docs:
+        # If no scopes, return all candidates
+        return [doc.metadata.get("source", "") for doc in candidate_docs if doc.metadata.get("source")]
+
+    try:
+        # Build candidates string for prompt
+        candidates_str = ""
+        for doc in candidate_docs:
+            source = doc.metadata.get("source", "unknown")
+            scopes = doc.metadata.get("scopes", [])
+            if not scopes:
+                # If no scopes stored, extract from summary
+                scopes = ["general"]
+            candidates_str += f"- {source}: {scopes}\n"
+
+        llm = ChatOllama(
+            base_url=OLLAMA_BASE_URL,
+            model=OLLAMA_QUERY_MODEL,
+            temperature=0.1,
+            num_ctx=4096,
+            num_predict=1024,
+        )
+
+        prompt = SCOPE_MATCHING_PROMPT.format(
+            query_scopes=query_scopes,
+            candidates=candidates_str
+        )
+        response = llm.invoke([HumanMessage(content=prompt)])
+
+        content = response.content.strip()
+
+        # Clean up thinking tags
+        if "</think>" in content:
+            content = content.split("</think>")[-1].strip()
+
+        # Try to extract JSON
+        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
+        if json_match:
+            content = json_match.group(1).strip()
+
+        json_start = content.find('{')
+        json_end = content.rfind('}')
+        if json_start != -1 and json_end != -1:
+            content = content[json_start:json_end + 1]
+
+        result = json.loads(content)
+        relevant_docs = result.get("relevant_documents", [])
+
+        # Extract source names from relevant documents
+        relevant_sources = []
+        for doc_info in relevant_docs:
+            source = doc_info.get("source", "")
+            score = doc_info.get("relevance_score", 0)
+            if source and score >= 0.5:
+                relevant_sources.append(source)
+                logger.debug(f"Scope match: {source} (score={score})")
+
+        logger.info(f"LLM scope matching: {len(relevant_sources)}/{len(candidate_docs)} documents matched")
+        return relevant_sources
+
+    except Exception as e:
+        logger.warning(f"LLM scope matching failed: {e}")
+        # Fallback: return all candidates
+        return [doc.metadata.get("source", "") for doc in candidate_docs if doc.metadata.get("source")]
+
+
+def _find_relevant_files_with_scopes(
+    enhanced_query: str,
+    query_scopes: List[str],
+    k: int = 5,
+) -> List[str]:
+    """
+    Find relevant files using vector search + LLM scope matching.
+
+    This implements the enhanced retrieval strategy:
+    1. Vector search on file summaries to get candidates
+    2. LLM-based scope matching to filter candidates
+
+    Args:
+        enhanced_query: The enhanced search query.
+        query_scopes: List of topic scopes from the query.
+        k: Maximum number of relevant files to return.
+
+    Returns:
+        List of source names that are relevant to the query.
+    """
+    try:
+        # Step 1: Get candidate documents via vector search
+        candidate_docs = search_file_summaries_with_scopes(enhanced_query, k=k * 2)
+
+        if not candidate_docs:
+            logger.info("No file summaries found, will search all chunks")
+            return []
+
+        # Step 2: If we have query scopes, use LLM to filter candidates
+        if query_scopes:
+            relevant_sources = _match_scopes_with_llm(query_scopes, candidate_docs)
+        else:
+            # No scopes, use all candidates
+            relevant_sources = [
+                doc.metadata.get("source", "")
+                for doc in candidate_docs
+                if doc.metadata.get("source")
+            ]
+
+        # Limit to k results
+        relevant_sources = relevant_sources[:k]
+
+        logger.info(f"Found {len(relevant_sources)} relevant files with scope matching: {relevant_sources}")
+        return relevant_sources
+
+    except Exception as e:
+        logger.warning(f"Error in find_relevant_files_with_scopes: {e}")
+        return []
 
 
 def _find_relevant_files(query: str, k: int = 5) -> List[str]:
@@ -208,15 +467,59 @@ def _find_relevant_chunks_from_summaries(
         return []
 
 
+def _get_graphrag_context(query: str) -> str:
+    """
+    Get additional context from GraphRAG if enabled.
+
+    Args:
+        query: The search query.
+
+    Returns:
+        Formatted GraphRAG context string, or empty string if disabled/unavailable.
+    """
+    if not GRAPHRAG_AVAILABLE or not GRAPH_RAG_ENABLED:
+        return ""
+
+    try:
+        import asyncio
+
+        graphrag = GraphRAG()
+
+        # Run async query in sync context
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        context = loop.run_until_complete(graphrag.query(query))
+
+        if context.entities or context.relationships:
+            formatted = graphrag.format_context(context)
+            logger.info(
+                f"GraphRAG context: mode={context.mode.value}, "
+                f"entities={len(context.entities)}, "
+                f"relationships={len(context.relationships)}"
+            )
+            return formatted
+
+    except Exception as e:
+        logger.warning(f"GraphRAG context retrieval failed: {e}")
+
+    return ""
+
+
 @tool
 def search_documents(query: str) -> str:
     """
-    Search the indexed documents for relevant information using three-phase retrieval.
+    Search the indexed documents for relevant information using enhanced retrieval.
 
-    Three-phase retrieval strategy:
-    1. First search file summaries to identify relevant documents
-    2. Then search chunk summaries to find relevant chunks within those files
-    3. Finally retrieve full chunk content for the relevant chunks
+    Enhanced retrieval strategy:
+    1. LLM analyzes query and extracts topic scopes
+    2. Vector search on file summaries to get candidates
+    3. LLM-based scope matching to filter relevant files
+    4. Direct chunk search within relevant files
+    5. GraphRAG context for entity/relationship enrichment
 
     Args:
         query: The search query to find relevant document chunks.
@@ -225,46 +528,37 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
-        # Step 1: Use LLM to analyze and enhance the query
-        enhanced_query = _analyze_query_with_llm(query)
+        # Step 1: Use LLM to analyze query and extract scopes
+        enhanced_query, query_scopes = _analyze_query_with_scopes(query)
 
-        # Step 2: Find relevant files by searching file summaries first
-        relevant_sources = _find_relevant_files(enhanced_query, k=5)
-
-        # Step 3: Search chunk summaries to find relevant chunks
-        chunk_ids = _find_relevant_chunks_from_summaries(
-            enhanced_query,
-            source_names=relevant_sources if relevant_sources else None,
-            k=15,
+        # Step 2: Find relevant files using vector search + LLM scope matching
+        relevant_sources = _find_relevant_files_with_scopes(
+            enhanced_query, query_scopes, k=5
         )
+
+        # Fallback to basic file search if scope-based search returns nothing
+        if not relevant_sources:
+            relevant_sources = _find_relevant_files(enhanced_query, k=5)
 
         docs = []
 
-        # Step 4: Retrieve full chunk content
-        if chunk_ids:
-            # Get full chunks by their IDs
-            docs = get_chunks_by_ids(chunk_ids, source_names=relevant_sources if relevant_sources else None)
-            logger.info(f"Retrieved {len(docs)} full chunks by chunk_ids")
+        # Step 3: Direct chunk search (skip chunk summaries - simplified flow)
+        if relevant_sources:
+            retriever = get_retriever_with_sources(
+                k=15, fetch_k=50, source_names=relevant_sources
+            )
+            logger.info(f"Searching chunks filtered by sources: {relevant_sources}")
+        else:
+            retriever = get_retriever(k=15, fetch_k=50)
+            logger.info("No relevant files from summaries, searching all chunks")
 
-        # Fallback: If no chunks found via chunk summaries, use direct chunk search
-        if not docs:
-            logger.info("No chunks found via chunk summaries, falling back to direct chunk search")
-            if relevant_sources:
-                retriever = get_retriever_with_sources(
-                    k=15, fetch_k=50, source_names=relevant_sources
-                )
-                logger.info(f"Searching chunks filtered by sources: {relevant_sources}")
-            else:
-                retriever = get_retriever(k=15, fetch_k=50)
-                logger.info("No relevant files from summaries, searching all chunks")
+        docs = retriever.invoke(enhanced_query)
 
+        if not docs and relevant_sources:
+            # Try without filter as last resort
+            logger.info("No results with source filter, trying without filter")
+            retriever = get_retriever(k=15, fetch_k=50)
             docs = retriever.invoke(enhanced_query)
-
-            if not docs and relevant_sources:
-                # Try without filter as last resort
-                logger.info("No results with source filter, trying without filter")
-                retriever = get_retriever(k=15, fetch_k=50)
-                docs = retriever.invoke(enhanced_query)
 
         if not docs:
             return "No relevant documents found for this query."
@@ -272,6 +566,11 @@ def search_documents(query: str) -> str:
         # Format results - include all unique sources for better coverage
         results = []
         seen_sources = set()
+
+        # Step 4: Get GraphRAG context (entities and relationships)
+        graphrag_context = _get_graphrag_context(enhanced_query)
+        if graphrag_context:
+            results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
 
         for i, doc in enumerate(docs, 1):
             source = doc.metadata.get("source", "Unknown")
@@ -289,9 +588,10 @@ def search_documents(query: str) -> str:
         logger.info(
             f"Original query: '{query[:50]}...' | "
             f"Enhanced query: '{enhanced_query[:50]}...' | "
-            f"Relevant sources from summaries: {relevant_sources} | "
-            f"Chunk IDs from chunk summaries: {len(chunk_ids)} | "
-            f"Found {len(docs)} chunks from sources: {seen_sources}"
+            f"Query scopes: {query_scopes} | "
+            f"Relevant sources: {relevant_sources} | "
+            f"Found {len(docs)} chunks from sources: {seen_sources} | "
+            f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
         )
 
         return "\n\n---\n\n".join(results)

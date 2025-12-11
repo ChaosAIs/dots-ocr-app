@@ -19,10 +19,12 @@ from .vectorstore import (
     delete_documents_by_file_path,
     is_document_indexed,
     add_file_summary,
+    add_file_summary_with_scopes,
     delete_file_summary_by_source,
     add_chunk_summaries,
     delete_chunk_summaries_by_source,
 )
+from .summarizer import generate_file_summary_with_scopes
 
 # Import database utilities for checking index status
 # Note: These imports may fail if psycopg2 is not installed
@@ -34,6 +36,15 @@ except ImportError as e:
     DB_AVAILABLE = False
     import logging
     logging.getLogger(__name__).warning(f"Database not available for indexer: {e}")
+
+# Import GraphRAG indexer for entity extraction
+try:
+    from .graph_rag import index_chunks_sync, GRAPH_RAG_ENABLED
+    GRAPHRAG_AVAILABLE = True
+except ImportError as e:
+    GRAPHRAG_AVAILABLE = False
+    GRAPH_RAG_ENABLED = False
+    logging.getLogger(__name__).warning(f"GraphRAG not available for indexer: {e}")
 
 logger = logging.getLogger(__name__)
 
@@ -168,24 +179,51 @@ class MarkdownFileHandler(FileSystemEventHandler):
                 vectorstore.add_documents(result.chunks)
                 logger.info(f"Indexed {len(result.chunks)} chunks from {source_name}")
 
-                # Step 3: Add chunk summaries to chunk summary collection
-                if result.chunk_summary_infos:
-                    chunk_summary_dicts = [
-                        {
-                            "chunk_indices": cs.chunk_indices,
-                            "chunk_ids": cs.chunk_ids,
-                            "summary": cs.summary,
-                            "heading_path": cs.heading_path,
-                        }
-                        for cs in result.chunk_summary_infos
-                    ]
-                    add_chunk_summaries(source_name, file_path, chunk_summary_dicts)
-                    logger.info(f"Added {len(chunk_summary_dicts)} chunk summaries for {source_name}")
+                # Step 3: Generate file summary with scopes (enhanced)
+                # Read full content for file summary generation
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        full_content = f.read()
+                    file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
+                    add_file_summary_with_scopes(
+                        source_name=source_name,
+                        file_path=file_path,
+                        summary=file_summary_result.summary,
+                        scopes=file_summary_result.scopes,
+                        content_type=file_summary_result.content_type,
+                        complexity=file_summary_result.complexity,
+                    )
+                    logger.info(
+                        f"Added file summary with scopes for {source_name}: "
+                        f"{len(file_summary_result.scopes)} scopes, type={file_summary_result.content_type}"
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to generate file summary with scopes: {e}")
+                    # Fallback to basic file summary
+                    if result.file_summary:
+                        add_file_summary(source_name, file_path, result.file_summary)
+                        logger.info(f"Added basic file summary for {source_name}")
 
-                # Step 4: Add file summary to separate collection
-                if result.file_summary:
-                    add_file_summary(source_name, file_path, result.file_summary)
-                    logger.info(f"Added file summary for {source_name}")
+                # Step 5: GraphRAG - Extract entities and build knowledge graph
+                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                    try:
+                        graphrag_chunks = [
+                            {
+                                "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
+                                "content": chunk.page_content,
+                                "metadata": chunk.metadata,
+                            }
+                            for i, chunk in enumerate(result.chunks)
+                        ]
+                        num_entities, num_rels = index_chunks_sync(
+                            graphrag_chunks, source_name
+                        )
+                        logger.info(
+                            f"GraphRAG: Extracted {num_entities} entities, "
+                            f"{num_rels} relationships"
+                        )
+                    except Exception as e:
+                        logger.warning(f"GraphRAG indexing failed: {e}")
 
                 with _index_lock:
                     _indexed_files.add(file_key)
@@ -277,22 +315,23 @@ def index_existing_documents(output_dir: str = None):
                     total_chunks += len(result.chunks)
                     total_files += 1
 
-                    # Add chunk summaries to chunk summary collection
-                    if result.chunk_summary_infos:
-                        chunk_summary_dicts = [
-                            {
-                                "chunk_indices": cs.chunk_indices,
-                                "chunk_ids": cs.chunk_ids,
-                                "summary": cs.summary,
-                                "heading_path": cs.heading_path,
-                            }
-                            for cs in result.chunk_summary_infos
-                        ]
-                        add_chunk_summaries(source_name, file_path, chunk_summary_dicts)
-
-                    # Add file summary to separate collection
-                    if result.file_summary:
-                        add_file_summary(source_name, file_path, result.file_summary)
+                    # Generate file summary with scopes (enhanced)
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            full_content = f.read()
+                        file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
+                        add_file_summary_with_scopes(
+                            source_name=source_name,
+                            file_path=file_path,
+                            summary=file_summary_result.summary,
+                            scopes=file_summary_result.scopes,
+                            content_type=file_summary_result.content_type,
+                            complexity=file_summary_result.complexity,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to generate file summary with scopes: {e}")
+                        if result.file_summary:
+                            add_file_summary(source_name, file_path, result.file_summary)
 
                     with _index_lock:
                         _indexed_files.add(file_key)
@@ -458,22 +497,45 @@ def index_document_now(source_name: str, output_dir: str = None) -> int:
                 total_chunks += len(result.chunks)
                 indexed_files.append(filename)
 
-                # Add chunk summaries to chunk summary collection
-                if result.chunk_summary_infos:
-                    chunk_summary_dicts = [
-                        {
-                            "chunk_indices": cs.chunk_indices,
-                            "chunk_ids": cs.chunk_ids,
-                            "summary": cs.summary,
-                            "heading_path": cs.heading_path,
-                        }
-                        for cs in result.chunk_summary_infos
-                    ]
-                    add_chunk_summaries(source_name, file_path, chunk_summary_dicts)
+                # Generate file summary with scopes (enhanced)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        full_content = f.read()
+                    file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
+                    add_file_summary_with_scopes(
+                        source_name=source_name,
+                        file_path=file_path,
+                        summary=file_summary_result.summary,
+                        scopes=file_summary_result.scopes,
+                        content_type=file_summary_result.content_type,
+                        complexity=file_summary_result.complexity,
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to generate file summary with scopes: {e}")
+                    if result.file_summary:
+                        add_file_summary(source_name, file_path, result.file_summary)
 
-                # Add file summary to separate collection
-                if result.file_summary:
-                    add_file_summary(source_name, file_path, result.file_summary)
+                # GraphRAG: Extract entities and build knowledge graph
+                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED and result.chunks:
+                    try:
+                        # Prepare chunks for GraphRAG indexing
+                        graphrag_chunks = [
+                            {
+                                "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
+                                "content": chunk.page_content,
+                                "metadata": chunk.metadata,
+                            }
+                            for i, chunk in enumerate(result.chunks)
+                        ]
+                        num_entities, num_rels = index_chunks_sync(
+                            graphrag_chunks, source_name
+                        )
+                        logger.info(
+                            f"GraphRAG: Extracted {num_entities} entities, "
+                            f"{num_rels} relationships from {filename}"
+                        )
+                    except Exception as e:
+                        logger.warning(f"GraphRAG indexing failed for {filename}: {e}")
 
                 # Update indexed files tracking
                 file_stat = os.stat(file_path)

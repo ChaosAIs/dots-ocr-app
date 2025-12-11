@@ -1,4 +1,28 @@
+# CRITICAL: Set HF_HOME before ANY imports that might load transformers
+# This must happen before qwen3_ocr_converter.py imports the transformers library
 import os
+
+# Load .env file manually to get HF_HOME before other imports
+# We can't use load_dotenv() yet because it would be too late
+_env_path = os.path.join(os.path.dirname(__file__), '.env')
+if os.path.exists(_env_path):
+    with open(_env_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                key = key.strip()
+                value = value.strip()
+                # Only set HF_HOME if not already set in environment
+                if key == 'HF_HOME' and key not in os.environ:
+                    # Expand ~ to user home directory
+                    os.environ[key] = os.path.expanduser(value)
+                    break
+
+# Ensure HF_HOME is set (fallback to default if not in .env)
+if 'HF_HOME' not in os.environ:
+    os.environ['HF_HOME'] = os.path.expanduser('~/huggingface_cache')
+
 import json
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse, FileResponse

@@ -27,3 +27,8 @@ requests
 
 # Database dependencies
 psycopg2-binary
+asyncpg
+sqlalchemy[asyncio]
+
+# Graph database dependencies
+neo4j

@@ -26,3 +26,6 @@ backend/qwen_ocr_service/__pycache__/
 backend/utils/__pycache__/
 backend/rag_service/__pycache__/
 backend/db/__pycache__/
+backend/rag_service/storage/__pycache__/
+backend/test/__pycache__/
+backend/rag_service/graph_rag/__pycache__/

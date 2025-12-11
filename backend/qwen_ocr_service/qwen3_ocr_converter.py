@@ -75,13 +75,12 @@ class Qwen3OCRConverter:
         self.reasoning_mode = mode_env
 
         # Model name precedence (for Ollama/vLLM backends):
-        #   QWEN_MODEL / QWEN3_MODEL / OLLAMA_MODEL / default qwen3-vl:32b
+        #   OCR_OLLAMA_MODEL (new) / QWEN_MODEL (legacy) / default qwen3-vl:8b-instruct
         self.model_name = (
             model_name
-            or os.getenv("QWEN_MODEL")
-            #or os.getenv("QWEN3_MODEL")
-            #or os.getenv("OLLAMA_MODEL")
-            or "qwen3-vl:32b"
+            or os.getenv("OCR_OLLAMA_MODEL")
+            or os.getenv("QWEN_MODEL")  # legacy fallback
+            or "qwen3-vl:8b-instruct"
         )
 
         # Transformers model name (set later if using transformers backend)
@@ -92,34 +91,33 @@ class Qwen3OCRConverter:
         self.pixel_area_threshold = int(os.getenv("QWEN_IMAGE_PIXEL_AREA_THRESHOLD", "40000"))
 
         # Temperature precedence:
-        #   QWEN_TEMPERATURE / QWEN3_TEMPERATURE / OLLAMA_TEMPERATURE / default 0.1
+        #   OCR_OLLAMA_TEMPERATURE (new) / QWEN_TEMPERATURE (legacy) / default 0.1
         if temperature is not None:
             self.temperature = float(temperature)
         else:
             temp_env = (
-                os.getenv("QWEN_TEMPERATURE")
-                #or os.getenv("QWEN3_TEMPERATURE")
-                #or os.getenv("OLLAMA_TEMPERATURE")
+                os.getenv("OCR_OLLAMA_TEMPERATURE")
+                or os.getenv("QWEN_TEMPERATURE")  # legacy fallback
                 or "0.1"
             )
             self.temperature = float(temp_env)
 
         # Timeout precedence (used by both backends):
-        #   QWEN_TIMEOUT / QWEN3_TIMEOUT / OLLAMA_TIMEOUT / default 180
+        #   OCR_OLLAMA_TIMEOUT (new) / QWEN_TIMEOUT (legacy) / default 360
         if timeout is not None:
             self.timeout = int(timeout)
         else:
             timeout_env = (
-                os.getenv("QWEN_TIMEOUT")
-                or os.getenv("QWEN3_TIMEOUT")
-                or os.getenv("OLLAMA_TIMEOUT")
-                or "180"
+                os.getenv("OCR_OLLAMA_TIMEOUT")
+                or os.getenv("QWEN_TIMEOUT")  # legacy fallback
+                or "360"
             )
             self.timeout = int(timeout_env)
 
         # Optional max tokens hint for vLLM/OpenAI backend
-        max_tokens_env = os.getenv("QWEN_MAX_TOKENS")
-        self.max_tokens = int(max_tokens_env) if max_tokens_env is not None else 2048
+        #   OCR_OLLAMA_MAX_TOKENS (new) / QWEN_MAX_TOKENS (legacy) / default 40560
+        max_tokens_env = os.getenv("OCR_OLLAMA_MAX_TOKENS") or os.getenv("QWEN_MAX_TOKENS")
+        self.max_tokens = int(max_tokens_env) if max_tokens_env is not None else 40560
 
         # Configure backend-specific endpoints/clients
         if self.backend == "transformers":
@@ -245,15 +243,14 @@ class Qwen3OCRConverter:
         else:
             # Resolve configuration from explicit args or environment variables.
             # Environment variable precedence for base URL:
-            #   1) QWEN_OLLAMA_BASE_URL / QWEN3_OLLAMA_BASE_URL
-            #   2) OLLAMA_BASE_URL
-            #   3) default http://127.0.0.1:11434
+            #   1) OCR_OLLAMA_BASE_URL (new) - Docker: ollama-qwen3-vl, Port: 11435
+            #   2) QWEN_OLLAMA_BASE_URL (legacy fallback)
+            #   3) default http://127.0.0.1:11435
             resolved_base_url = (
                 base_url
-                or os.getenv("QWEN_OLLAMA_BASE_URL")
-               #or os.getenv("QWEN3_OLLAMA_BASE_URL")
-               #or os.getenv("OLLAMA_BASE_URL")
-                or "http://127.0.0.1:11434"
+                or os.getenv("OCR_OLLAMA_BASE_URL")
+                or os.getenv("QWEN_OLLAMA_BASE_URL")  # legacy fallback
+                or "http://127.0.0.1:11435"
             )
             self.base_url = resolved_base_url.rstrip("/")
             self.client = None

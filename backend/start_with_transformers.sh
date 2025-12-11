@@ -13,6 +13,10 @@ else
     echo "Using system Python: $(which python)"
 fi
 
+# Set HuggingFace cache directory BEFORE any Python imports
+# This MUST be set before transformers library is imported
+export HF_HOME=~/huggingface_cache
+
 # Set environment variables (these can also be in .env)
 export QWEN_BACKEND=transformers
 export QWEN_TRANSFORMERS_ATTN_IMPL=eager
@@ -22,6 +26,7 @@ export QWEN_TRANSFORMERS_GPU_DEVICES=4,5,6,7
 echo "=========================================="
 echo "Starting Backend with Transformers Backend"
 echo "=========================================="
+echo "HF_HOME: $HF_HOME"
 echo "QWEN_BACKEND: $QWEN_BACKEND"
 echo "QWEN_TRANSFORMERS_GPU_DEVICES: $QWEN_TRANSFORMERS_GPU_DEVICES"
 echo "QWEN_TRANSFORMERS_DTYPE: $QWEN_TRANSFORMERS_DTYPE"
