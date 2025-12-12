@@ -24,10 +24,10 @@ IAM_DOMAIN=http://localhost:5000
 CLIENT_ID=dots-ocr-app
 IAM_SCOPE=openid profile email
 
-# VLLM Server Configuration
-VLLM_IP=localhost
-VLLM_PORT=8001
-VLLM_MODEL_NAME=dots_ocr
+# Dots OCR vLLM Server Configuration
+DOTS_OCR_VLLM_HOST=localhost
+DOTS_OCR_VLLM_PORT=8001
+DOTS_OCR_VLLM_MODEL=dots_ocr
 
 # Inference Configuration
 TEMPERATURE=0.1
@@ -233,11 +233,11 @@ These settings are served to the frontend via the `/config` endpoint:
 - `CLIENT_ID`: Client ID for authentication (default: dots-ocr-app)
 - `IAM_SCOPE`: OAuth scopes for authentication (default: openid profile email)
 
-### VLLM Server
+### Dots OCR vLLM Server
 
-- `VLLM_IP`: IP address of vLLM server (default: localhost)
-- `VLLM_PORT`: Port of vLLM server (default: 8001)
-- `VLLM_MODEL_NAME`: Model name to use (default: dots_ocr)
+- `DOTS_OCR_VLLM_HOST`: Host/IP address of Dots OCR vLLM server (default: localhost)
+- `DOTS_OCR_VLLM_PORT`: Port of Dots OCR vLLM server (default: 8001)
+- `DOTS_OCR_VLLM_MODEL`: Model name to use for layout detection (default: dots_ocr)
 
 ### Inference
 
@@ -286,10 +286,10 @@ Error responses include a detail message:
 
 ## Troubleshooting
 
-### Connection Error to vLLM Server
+### Connection Error to Dots OCR vLLM Server
 
-- Check that vLLM server is running at the configured IP and port
-- Verify `VLLM_IP` and `VLLM_PORT` in `.env`
+- Check that Dots OCR vLLM server is running at the configured host and port
+- Verify `DOTS_OCR_VLLM_HOST` and `DOTS_OCR_VLLM_PORT` in `.env`
 
 ### Out of Memory
 

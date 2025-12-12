@@ -10,18 +10,18 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Get vLLM server configuration
-VLLM_IP = os.getenv('VLLM_IP', 'localhost')
-VLLM_PORT = os.getenv('VLLM_PORT', '8001')
-VLLM_MODEL_NAME = os.getenv('VLLM_MODEL_NAME', 'dots_ocr')
+# Get Dots OCR vLLM server configuration
+DOTS_OCR_VLLM_HOST = os.getenv('DOTS_OCR_VLLM_HOST', 'localhost')
+DOTS_OCR_VLLM_PORT = os.getenv('DOTS_OCR_VLLM_PORT', '8001')
+DOTS_OCR_VLLM_MODEL = os.getenv('DOTS_OCR_VLLM_MODEL', 'dots_ocr')
 
-base_url = f"http://{VLLM_IP}:{VLLM_PORT}"
+base_url = f"http://{DOTS_OCR_VLLM_HOST}:{DOTS_OCR_VLLM_PORT}"
 
 print("=" * 60)
-print("vLLM Inference Server Diagnostic")
+print("Dots OCR vLLM Inference Server Diagnostic")
 print("=" * 60)
 print(f"Server URL: {base_url}")
-print(f"Model Name: {VLLM_MODEL_NAME}")
+print(f"Model Name: {DOTS_OCR_VLLM_MODEL}")
 print("=" * 60)
 
 # Test 1: Check if server is reachable
@@ -34,8 +34,8 @@ try:
         print(f"✗ Server returned status code: {response.status_code}")
 except requests.exceptions.ConnectionError:
     print(f"✗ Cannot connect to server at {base_url}")
-    print("  → Make sure the vLLM server is running")
-    print("  → Check VLLM_IP and VLLM_PORT in .env file")
+    print("  → Make sure the Dots OCR vLLM server is running")
+    print("  → Check DOTS_OCR_VLLM_HOST and DOTS_OCR_VLLM_PORT in .env file")
     sys.exit(1)
 except requests.exceptions.Timeout:
     print("✗ Connection timeout")
@@ -56,8 +56,8 @@ try:
             for model in models['data']:
                 model_id = model.get('id', 'unknown')
                 print(f"    - {model_id}")
-                if model_id == VLLM_MODEL_NAME:
-                    print(f"      ✓ Configured model '{VLLM_MODEL_NAME}' is available")
+                if model_id == DOTS_OCR_VLLM_MODEL:
+                    print(f"      ✓ Configured model '{DOTS_OCR_VLLM_MODEL}' is available")
         else:
             print(f"  Response: {models}")
     else:
@@ -102,7 +102,7 @@ try:
     # Simple text-only test (no image)
     print("  Sending test request...")
     response = client.chat.completions.create(
-        model=VLLM_MODEL_NAME,
+        model=DOTS_OCR_VLLM_MODEL,
         messages=[
             {"role": "user", "content": "Hello"}
         ],

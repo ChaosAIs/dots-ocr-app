@@ -3,6 +3,7 @@
 ## Getting Started
 
 ### Prerequisites
+
 - Backend running on port 8080 (or configured API_DOMAIN)
 - Frontend running on port 3000
 - Python vLLM service running for OCR processing
@@ -10,19 +11,21 @@
 ### Starting the Application
 
 1. **Start the Backend:**
+
 ```bash
 cd backend
 python main.py --port 8080
 ```
 
 2. **Start the Frontend:**
+
 ```bash
 cd frontend
 npm start
 ```
 
 3. **Access the Application:**
-Open browser and navigate to `http://localhost:3000/docs`
+   Open browser and navigate to `http://localhost:3000/docs`
 
 ## Using the Document Upload Feature
 
@@ -30,10 +33,12 @@ Open browser and navigate to `http://localhost:3000/docs`
 
 1. Navigate to the Home page
 2. In the "Upload Documents" section, you can:
+
    - Click "Choose Files" button to select files
    - Or drag and drop files directly into the upload area
 
 3. Supported file types:
+
    - PDF (.pdf)
    - Images (.png, .jpg, .jpeg, .gif, .bmp)
    - Documents (.doc, .docx)
@@ -56,11 +61,13 @@ Open browser and navigate to `http://localhost:3000/docs`
 ### Step 3: Convert Document to Markdown
 
 **For PDF and Image files:**
+
 - If not already converted, click the refresh button (⟳) in the Actions column
 - The conversion process will start
 - A progress indicator will show the conversion is in progress
 
 **For DOC/EXCEL files:**
+
 - Click the refresh button (⟳) to start conversion
 - Note: Conversion for these formats may take longer
 
@@ -83,6 +90,7 @@ Open browser and navigate to `http://localhost:3000/docs`
 ## Features
 
 ### File Upload
+
 - ✅ Drag and drop support
 - ✅ Multiple file selection
 - ✅ File type validation
@@ -90,6 +98,7 @@ Open browser and navigate to `http://localhost:3000/docs`
 - ✅ File size validation
 
 ### Document Management
+
 - ✅ View all uploaded documents
 - ✅ See conversion status
 - ✅ File size and upload time display
@@ -97,12 +106,14 @@ Open browser and navigate to `http://localhost:3000/docs`
 - ✅ Refresh functionality
 
 ### Markdown Conversion
+
 - ✅ Automatic conversion for PDF/images
 - ✅ Manual conversion for documents
 - ✅ Progress indication
 - ✅ Error handling with user-friendly messages
 
 ### Markdown Viewing
+
 - ✅ Syntax-highlighted rendering
 - ✅ Responsive layout
 - ✅ Download functionality
@@ -111,24 +122,28 @@ Open browser and navigate to `http://localhost:3000/docs`
 ## Troubleshooting
 
 ### Upload Fails
+
 - Check file size (max 50MB)
 - Verify file type is supported
 - Ensure backend is running
 - Check browser console for errors
 
 ### Conversion Fails
+
 - Ensure vLLM service is running
 - Check backend logs for errors
 - Verify file is valid
 - Try uploading a different file
 
 ### Cannot View Markdown
+
 - Ensure conversion is complete (status shows "Converted")
 - Refresh the page
 - Check browser console for errors
 - Verify backend is running
 
 ### Slow Conversion
+
 - Conversion is time-consuming (may take several minutes)
 - Larger files take longer
 - Multiple pages in PDFs are processed in parallel
@@ -148,11 +163,13 @@ See `backend/DOCUMENT_API.md` for detailed API documentation.
 ## File Storage
 
 ### Input Directory
+
 - Location: `backend/input/`
 - Contains: Uploaded files
 - Naming: Original filename preserved
 
 ### Output Directory
+
 - Location: `backend/output/`
 - Structure: `output/{filename}/{filename}_nohf.md`
 - Contains: Converted markdown files
@@ -160,12 +177,15 @@ See `backend/DOCUMENT_API.md` for detailed API documentation.
 ## Configuration
 
 ### Environment Variables
+
 - `API_DOMAIN`: Backend API domain (default: http://localhost:8080)
 - `API_PORT`: Backend port (default: 8080)
-- `VLLM_IP`: vLLM server IP (default: localhost)
-- `VLLM_PORT`: vLLM server port (default: 8001)
+- `DOTS_OCR_VLLM_HOST`: Dots OCR vLLM server host (default: localhost)
+- `DOTS_OCR_VLLM_PORT`: Dots OCR vLLM server port (default: 8001)
+- `DOTS_OCR_VLLM_MODEL`: Dots OCR model name (default: dots_ocr)
 
 ### Frontend Configuration
+
 - Edit `frontend/.env` to change API endpoint
 - Example: `REACT_APP_CONFIG_API=http://localhost:8080/config`
 
@@ -180,6 +200,7 @@ See `backend/DOCUMENT_API.md` for detailed API documentation.
 ## Support
 
 For issues or questions:
+
 1. Check the browser console for error messages
 2. Review backend logs for server errors
 3. Verify all services are running
@@ -189,10 +210,10 @@ For issues or questions:
 ## Next Steps
 
 After converting documents to markdown:
+
 1. Download the markdown files
 2. Edit or process the markdown as needed
 3. Integrate with your workflow
 4. Archive original files if needed
 
 Enjoy using the Document Upload and Conversion feature!
-

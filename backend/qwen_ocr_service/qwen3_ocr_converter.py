@@ -49,7 +49,7 @@ class Qwen3OCRConverter:
       - "vllm": calls a vLLM OpenAI-compatible server's `/v1/chat/completions` endpoint.
       - "transformers": uses HuggingFace transformers library to run the model locally.
 
-    Backend selection is controlled via the ``QWEN_BACKEND`` environment variable.
+    Backend selection is controlled via the ``IMAGE_ANALYSIS_BACKEND`` environment variable.
     """
 
     def __init__(
@@ -62,7 +62,7 @@ class Qwen3OCRConverter:
         self.logger = logging.getLogger(self.__class__.__name__)
 
         # Determine backend: "ollama" (default), "vllm" (OpenAI-compatible API), or "transformers"
-        backend_env = (os.getenv("QWEN_BACKEND", "ollama") or "ollama").strip().lower()
+        backend_env = (os.getenv("IMAGE_ANALYSIS_BACKEND", "ollama") or "ollama").strip().lower()
         if backend_env not in {"ollama", "vllm", "transformers"}:
             backend_env = "ollama"
         self.backend = backend_env
@@ -718,7 +718,7 @@ class Qwen3OCRConverter:
         """Call Qwen3-VL to analyze a base64-encoded image.
 
         This dispatches to the Ollama, vLLM (OpenAI-compatible), or transformers
-        backend depending on ``self.backend`` / ``QWEN_BACKEND``.
+        backend depending on ``self.backend`` / ``IMAGE_ANALYSIS_BACKEND``.
 
         The method automatically detects image size and applies:
         - Automatic resizing to half size if either dimension > 2000px

@@ -46,9 +46,10 @@ class DotsOCRParser:
         load_dotenv()
 
         # Set defaults from environment variables or use hardcoded defaults
-        self.ip = ip or os.getenv('VLLM_IP', 'localhost')
-        self.port = port or int(os.getenv('VLLM_PORT', 8001))
-        self.model_name = model_name or os.getenv('VLLM_MODEL_NAME', 'dots_ocr')
+        # DOTS_OCR_VLLM_* for main document conversion to markdown with layout detection
+        self.ip = ip or os.getenv('DOTS_OCR_VLLM_HOST', 'localhost')
+        self.port = port or int(os.getenv('DOTS_OCR_VLLM_PORT', 8001))
+        self.model_name = model_name or os.getenv('DOTS_OCR_VLLM_MODEL', 'dots_ocr')
         self.temperature = temperature or float(os.getenv('TEMPERATURE', 0.1))
         self.top_p = top_p or float(os.getenv('TOP_P', 1.0))
         self.max_completion_tokens = max_completion_tokens or int(os.getenv('MAX_COMPLETION_TOKENS', 16384))
@@ -71,6 +72,15 @@ class DotsOCRParser:
         # Default: 100000 pixels (e.g., 316x316, 250x400, etc.)
         # This prevents processing of small technical diagrams with many dense objects
         self.min_image_size_threshold = int(os.getenv('DOTS_MIN_IMAGE_SIZE_THRESHOLD', '100000'))
+
+        # Log initialization configuration
+        import logging
+        init_logger = logging.getLogger(__name__)
+        init_logger.info(f"DotsOCRParser initialized:")
+        init_logger.info(f"  DOTS_OCR_VLLM_HOST: {self.ip}")
+        init_logger.info(f"  DOTS_OCR_VLLM_PORT: {self.port}")
+        init_logger.info(f"  DOTS_OCR_VLLM_MODEL: {self.model_name}")
+        init_logger.info(f"  vLLM endpoint: http://{self.ip}:{self.port}/v1")
 
         # Initialize OCR image analysis converters (Gemma3 and Qwen3 via Ollama).
         # These are optional helpers; if initialization fails, core OCR still works.

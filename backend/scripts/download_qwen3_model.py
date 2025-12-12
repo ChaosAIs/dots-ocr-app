@@ -97,7 +97,7 @@ if __name__ == "__main__":
         print("✅ Download Complete!")
         print("=" * 80)
         print("\nYou can now use the transformers backend by setting in .env:")
-        print("   QWEN_BACKEND=transformers")
+        print("   IMAGE_ANALYSIS_BACKEND=transformers")
         print("\nOr test it with:")
         print("   cd backend && python test/test_qwen_transformers.py")
         sys.exit(0)

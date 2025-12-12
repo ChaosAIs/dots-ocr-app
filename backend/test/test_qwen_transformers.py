@@ -19,16 +19,16 @@ def test_transformers_backend():
     print("=" * 80)
     
     # Set environment to use transformers backend
-    os.environ["QWEN_BACKEND"] = "transformers"
-    
+    os.environ["IMAGE_ANALYSIS_BACKEND"] = "transformers"
+
     # Optional: Configure GPU devices (default is 4,5,6,7)
     # os.environ["QWEN_TRANSFORMERS_GPU_DEVICES"] = "4,5,6,7"
-    
+
     # Optional: Configure model (default is Qwen/Qwen3-VL-8B-Instruct)
     # os.environ["QWEN_TRANSFORMERS_MODEL"] = "Qwen/Qwen3-VL-8B-Instruct"
-    
+
     print("\n📋 Configuration:")
-    print(f"   Backend: {os.environ.get('QWEN_BACKEND')}")
+    print(f"   Backend: {os.environ.get('IMAGE_ANALYSIS_BACKEND')}")
     print(f"   Model: {os.environ.get('QWEN_TRANSFORMERS_MODEL', 'Qwen/Qwen3-VL-8B-Instruct')}")
     print(f"   GPU Devices: {os.environ.get('QWEN_TRANSFORMERS_GPU_DEVICES', '4,5,6,7')}")
     

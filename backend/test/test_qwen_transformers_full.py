@@ -11,7 +11,7 @@ from io import BytesIO
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Set environment variables for transformers backend
-os.environ['QWEN_BACKEND'] = 'transformers'
+os.environ['IMAGE_ANALYSIS_BACKEND'] = 'transformers'
 os.environ['QWEN_TRANSFORMERS_ATTN_IMPL'] = 'eager'
 os.environ['QWEN_TRANSFORMERS_DTYPE'] = 'bfloat16'
 os.environ['QWEN_TRANSFORMERS_GPU_DEVICES'] = '4,5,6,7'

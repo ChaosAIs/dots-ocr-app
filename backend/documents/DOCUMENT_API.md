@@ -5,16 +5,19 @@ This document describes the new API endpoints for document upload and conversion
 ## Endpoints
 
 ### 1. Upload Document
+
 **Endpoint:** `POST /upload`
 
 Upload a document file to the server.
 
 **Request:**
+
 - Content-Type: `multipart/form-data`
 - Body:
   - `file`: The file to upload (required)
 
 **Response:**
+
 ```json
 {
   "status": "success",
@@ -26,6 +29,7 @@ Upload a document file to the server.
 ```
 
 **Error Response:**
+
 ```json
 {
   "detail": "Error message"
@@ -33,6 +37,7 @@ Upload a document file to the server.
 ```
 
 **Example:**
+
 ```bash
 curl -X POST http://localhost:8080/upload \
   -F "file=@document.pdf"
@@ -41,11 +46,13 @@ curl -X POST http://localhost:8080/upload \
 ---
 
 ### 2. List Documents
+
 **Endpoint:** `GET /documents`
 
 Get a list of all uploaded documents with their conversion status.
 
 **Response:**
+
 ```json
 {
   "status": "success",
@@ -64,6 +71,7 @@ Get a list of all uploaded documents with their conversion status.
 ```
 
 **Example:**
+
 ```bash
 curl http://localhost:8080/documents
 ```
@@ -71,17 +79,20 @@ curl http://localhost:8080/documents
 ---
 
 ### 3. Convert Document
+
 **Endpoint:** `POST /convert`
 
 Convert an uploaded document to markdown format.
 
 **Request:**
+
 - Content-Type: `application/x-www-form-urlencoded`
 - Body:
   - `filename`: The name of the file to convert (required)
   - `prompt_mode`: The prompt mode to use (optional, default: "prompt_layout_all_en")
 
 **Response:**
+
 ```json
 {
   "status": "success",
@@ -103,6 +114,7 @@ Convert an uploaded document to markdown format.
 ```
 
 **Error Response:**
+
 ```json
 {
   "detail": "File not found: filename.pdf"
@@ -110,6 +122,7 @@ Convert an uploaded document to markdown format.
 ```
 
 **Example:**
+
 ```bash
 curl -X POST http://localhost:8080/convert \
   -d "filename=document.pdf&prompt_mode=prompt_layout_all_en"
@@ -118,14 +131,17 @@ curl -X POST http://localhost:8080/convert \
 ---
 
 ### 4. Get Markdown Content
+
 **Endpoint:** `GET /markdown/{filename}`
 
 Get the markdown content of a converted document.
 
 **Parameters:**
+
 - `filename`: The filename without extension (path parameter)
 
 **Response:**
+
 ```json
 {
   "status": "success",
@@ -135,6 +151,7 @@ Get the markdown content of a converted document.
 ```
 
 **Error Response:**
+
 ```json
 {
   "detail": "Markdown file not found for: filename"
@@ -142,6 +159,7 @@ Get the markdown content of a converted document.
 ```
 
 **Example:**
+
 ```bash
 curl http://localhost:8080/markdown/document
 ```
@@ -151,11 +169,13 @@ curl http://localhost:8080/markdown/document
 ## File Structure
 
 ### Input Directory
+
 - Location: `backend/input/`
 - Contains: Uploaded document files
 - Naming: Original filename preserved
 
 ### Output Directory
+
 - Location: `backend/output/`
 - Structure:
   ```
@@ -186,6 +206,7 @@ curl http://localhost:8080/markdown/document
 ## Error Handling
 
 All endpoints return appropriate HTTP status codes:
+
 - `200`: Success
 - `400`: Bad request (invalid input)
 - `404`: Not found (file not found)
@@ -194,10 +215,12 @@ All endpoints return appropriate HTTP status codes:
 ## Configuration
 
 The API uses the following environment variables:
+
 - `API_HOST`: API host (default: 0.0.0.0)
 - `API_PORT`: API port (default: 8000)
-- `VLLM_IP`: vLLM server IP (default: localhost)
-- `VLLM_PORT`: vLLM server port (default: 8001)
+- `DOTS_OCR_VLLM_HOST`: Dots OCR vLLM server host (default: localhost)
+- `DOTS_OCR_VLLM_PORT`: Dots OCR vLLM server port (default: 8001)
+- `DOTS_OCR_VLLM_MODEL`: Dots OCR model name (default: dots_ocr)
 - `OUTPUT_DIR`: Output directory (default: ./output)
 
 ## Usage Example
@@ -205,23 +228,27 @@ The API uses the following environment variables:
 ### Complete Workflow
 
 1. **Upload a document:**
+
 ```bash
 curl -X POST http://localhost:8080/upload \
   -F "file=@myfile.pdf"
 ```
 
 2. **List documents:**
+
 ```bash
 curl http://localhost:8080/documents
 ```
 
 3. **Convert document (if not already converted):**
+
 ```bash
 curl -X POST http://localhost:8080/convert \
   -d "filename=myfile.pdf"
 ```
 
 4. **Get markdown content:**
+
 ```bash
 curl http://localhost:8080/markdown/myfile
 ```
@@ -232,4 +259,3 @@ curl http://localhost:8080/markdown/myfile
 - The markdown file is saved with the `_nohf` suffix (no page headers) for cleaner output
 - Multiple pages in PDFs are processed in parallel using thread pools
 - All file operations are validated to prevent security issues
-

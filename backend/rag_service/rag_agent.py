@@ -1,13 +1,12 @@
 """
 LangGraph-based RAG Agent with document search tool.
-Uses Ollama with qwen3:30b-a3b model for generation.
+Supports multiple LLM backends: Ollama and vLLM.
 """
 
 import os
 import logging
 from typing import Annotated, TypedDict, List
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.tools import tool
 from langgraph.graph import StateGraph, END
@@ -22,6 +21,7 @@ from .vectorstore import (
     search_chunk_summaries,
     get_chunks_by_ids,
 )
+from .llm_service import get_llm_service
 
 # Import GraphRAG components
 try:
@@ -33,16 +33,12 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# RAG Ollama configuration (Docker: ollama-llm, Port: 11434)
-# Used for: RAG query processing, text generation, agent responses
+# Legacy aliases for backward compatibility (used by other modules that import these)
 RAG_OLLAMA_HOST = os.getenv("RAG_OLLAMA_HOST", os.getenv("OLLAMA_HOST", "localhost"))
 RAG_OLLAMA_PORT = os.getenv("RAG_OLLAMA_PORT", os.getenv("OLLAMA_PORT", "11434"))
 RAG_OLLAMA_MODEL = os.getenv("RAG_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5:latest"))
-# Smaller, faster model for query analysis (query enhancement before vector search)
 RAG_OLLAMA_QUERY_MODEL = os.getenv("RAG_OLLAMA_QUERY_MODEL", os.getenv("OLLAMA_QUERY_MODEL", "qwen2.5:latest"))
 RAG_OLLAMA_BASE_URL = f"http://{RAG_OLLAMA_HOST}:{RAG_OLLAMA_PORT}"
-
-# Legacy aliases for backward compatibility
 OLLAMA_HOST = RAG_OLLAMA_HOST
 OLLAMA_PORT = RAG_OLLAMA_PORT
 OLLAMA_MODEL = RAG_OLLAMA_MODEL
@@ -147,9 +143,8 @@ def _analyze_query_with_llm(query: str) -> str:
     """
     try:
         # Use smaller, faster model for query analysis
-        llm = ChatOllama(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_QUERY_MODEL,
+        llm_service = get_llm_service()
+        llm = llm_service.get_query_model(
             temperature=0.1,  # Low temperature for consistent analysis
             num_ctx=2048,
             num_predict=256,  # Limit output tokens to prevent endless generation
@@ -192,9 +187,8 @@ def _analyze_query_with_scopes(query: str) -> tuple:
     import re
 
     try:
-        llm = ChatOllama(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_QUERY_MODEL,
+        llm_service = get_llm_service()
+        llm = llm_service.get_query_model(
             temperature=0.1,
             num_ctx=2048,
             num_predict=512,
@@ -274,9 +268,8 @@ def _match_scopes_with_llm(
                 scopes = ["general"]
             candidates_str += f"- {source}: {scopes}\n"
 
-        llm = ChatOllama(
-            base_url=OLLAMA_BASE_URL,
-            model=OLLAMA_QUERY_MODEL,
+        llm_service = get_llm_service()
+        llm = llm_service.get_query_model(
             temperature=0.1,
             num_ctx=4096,
             num_predict=1024,
@@ -606,13 +599,18 @@ tools = [search_documents]
 
 
 def create_llm():
-    """Create the Ollama LLM instance."""
-    return ChatOllama(
-        base_url=OLLAMA_BASE_URL,
-        model=OLLAMA_MODEL,
+    """Create the LLM instance based on configured backend."""
+    llm_service = get_llm_service()
+    return llm_service.get_chat_model(
         temperature=0.2,
         num_ctx=8192,
     )
+
+
+def is_vllm_backend() -> bool:
+    """Check if using vLLM backend (which doesn't support tool calling without special flags)."""
+    from .llm_service import RAG_LLM_BACKEND
+    return RAG_LLM_BACKEND == "vllm"
 
 
 def should_continue(state: AgentState) -> str:
@@ -637,9 +635,36 @@ def call_model(state: AgentState) -> AgentState:
         messages = [SystemMessage(content=SYSTEM_PROMPT)] + list(messages)
 
     llm = create_llm()
-    llm_with_tools = llm.bind_tools(tools)
 
-    response = llm_with_tools.invoke(messages)
+    # For vLLM backend: use RAG-first approach (search then respond)
+    # vLLM doesn't support tool calling without --enable-auto-tool-choice flag
+    if is_vllm_backend():
+        # Extract the user's query from the last human message
+        user_query = None
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                user_query = msg.content
+                break
+
+        if user_query:
+            # Always search for context first
+            context = search_documents.invoke({"query": user_query})
+
+            # Add context to the system message
+            context_message = f"\n\nRelevant document context:\n{context}"
+            augmented_messages = list(messages)
+            if isinstance(augmented_messages[0], SystemMessage):
+                augmented_messages[0] = SystemMessage(
+                    content=augmented_messages[0].content + context_message
+                )
+
+            response = llm.invoke(augmented_messages)
+        else:
+            response = llm.invoke(messages)
+    else:
+        # For Ollama and other backends: use tool binding
+        llm_with_tools = llm.bind_tools(tools)
+        response = llm_with_tools.invoke(messages)
 
     return {"messages": [response]}
 
