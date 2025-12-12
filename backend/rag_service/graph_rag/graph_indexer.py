@@ -316,6 +316,7 @@ def delete_graphrag_by_source_sync(
     Synchronous wrapper for GraphRAG source deletion.
 
     This can be called from the document delete endpoint.
+    Works correctly even when called from within an existing async event loop.
 
     Args:
         source_name: Source document name
@@ -326,12 +327,18 @@ def delete_graphrag_by_source_sync(
 
     indexer = GraphRAGIndexer(workspace_id=workspace_id)
 
-    # Run async function in event loop
+    # Check if we're already in an event loop
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
+        # We're in an existing event loop - run in a new thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                indexer.delete_by_source(source_name)
+            )
+            future.result()  # Wait for completion
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-    loop.run_until_complete(indexer.delete_by_source(source_name))
+        # No running event loop - use asyncio.run directly
+        asyncio.run(indexer.delete_by_source(source_name))
 
