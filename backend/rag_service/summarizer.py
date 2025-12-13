@@ -16,6 +16,9 @@ from .llm_service import get_llm_service
 
 logger = logging.getLogger(__name__)
 
+# Configuration flag to enable/disable file summary generation
+FILE_SUMMARY_ENABLED = os.getenv("FILE_SUMMARY_ENABLED", "false").lower() in ("true", "1", "yes")
+
 
 @dataclass
 class FileSummaryWithScopes:
@@ -432,6 +435,9 @@ def generate_file_summary_with_scopes(
        - Summarize each section
        - Combine section summaries into final summary with scopes
 
+    Note: If FILE_SUMMARY_ENABLED is False (default), returns a basic placeholder
+    without making any LLM calls.
+
     Args:
         filename: The document filename.
         content: The full document content.
@@ -439,6 +445,16 @@ def generate_file_summary_with_scopes(
     Returns:
         FileSummaryWithScopes object with summary, scopes, content_type, complexity.
     """
+    # Check if file summary generation is disabled
+    if not FILE_SUMMARY_ENABLED:
+        logger.info(f"[FILE_SUMMARY] File summary disabled, skipping for '{filename}'")
+        return FileSummaryWithScopes(
+            summary=f"Document: {filename}",
+            scopes=[],
+            content_type="document",
+            complexity="intermediate",
+        )
+
     content_len = len(content) if content else 0
     logger.info(f"[FILE_SUMMARY] Starting summary generation for '{filename}': {content_len} chars")
 

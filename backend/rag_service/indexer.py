@@ -1,6 +1,25 @@
 """
-Document indexer with watchdog-based file watching.
+Document indexer with two-phase indexing and watchdog-based file watching.
 Monitors the output folder for new markdown files and indexes them.
+
+Two-Phase Indexing Architecture:
+================================
+Phase 1 (Synchronous/Background): Chunk embedding to Qdrant
+    - Chunks markdown files and embeds them to Qdrant vector database
+    - Makes documents immediately queryable after completion
+    - Runs in background thread to not block main application
+
+Phase 2 (Background/Async): GraphRAG entity extraction
+    - Extracts entities and relationships using LLM
+    - Stores to Neo4j graph database and Qdrant
+    - Starts automatically after Phase 1 completes
+    - Runs in separate background thread, non-blocking
+    - Document remains queryable even if this phase fails
+
+Benefits:
+- Users can query documents immediately after Phase 1 completes
+- GraphRAG processing doesn't block user operations
+- Graceful degradation if GraphRAG fails
 """
 
 import os
@@ -22,7 +41,7 @@ from .vectorstore import (
     add_file_summary_with_scopes,
     delete_file_summary_by_source,
 )
-from .summarizer import generate_file_summary_with_scopes
+from .summarizer import generate_file_summary_with_scopes, FILE_SUMMARY_ENABLED
 
 # Import database utilities for checking index status
 # Note: These imports may fail if psycopg2 is not installed
@@ -149,7 +168,12 @@ class MarkdownFileHandler(FileSystemEventHandler):
         self._process_file(event.src_path)
 
     def _process_file(self, file_path: str):
-        """Process a markdown file for indexing with summarization."""
+        """
+        Process a markdown file for two-phase indexing.
+
+        Phase 1: Chunk embedding to Qdrant (makes document queryable)
+        Phase 2: GraphRAG entity extraction (runs in background)
+        """
         # Only process _nohf.md files (converted markdown without headers/footers)
         if not file_path.endswith("_nohf.md"):
             return
@@ -166,65 +190,59 @@ class MarkdownFileHandler(FileSystemEventHandler):
         try:
             # Get source name from directory name
             source_name = Path(file_path).parent.name
-            logger.info(f"Indexing new file with summaries: {file_path} (source: {source_name})")
+            logger.info(f"[Two-Phase] Processing file: {file_path} (source: {source_name})")
 
-            # Step 1 & 2: Chunk the markdown file with LLM summarization 
+            # ========== PHASE 1: Chunk embedding to Qdrant ==========
             result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
             if result.chunks:
-                # Add chunks to main vectorstore
+                # Add chunks to Qdrant vectorstore
                 vectorstore = get_vectorstore()
                 vectorstore.add_documents(result.chunks)
-                logger.info(f"Indexed {len(result.chunks)} chunks from {source_name}")
+                logger.info(f"[Phase 1] Indexed {len(result.chunks)} chunks from {source_name} to Qdrant")
 
-                # Step 3: Generate file summary with scopes (enhanced)
-                # Read full content for file summary generation
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        full_content = f.read()
-                    file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
-                    add_file_summary_with_scopes(
-                        source_name=source_name,
-                        file_path=file_path,
-                        summary=file_summary_result.summary,
-                        scopes=file_summary_result.scopes,
-                        content_type=file_summary_result.content_type,
-                        complexity=file_summary_result.complexity,
-                    )
-                    logger.info(
-                        f"Added file summary with scopes for {source_name}: "
-                        f"{len(file_summary_result.scopes)} scopes, type={file_summary_result.content_type}"
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to generate file summary with scopes: {e}")
-                    # Fallback to basic file summary
-                    if result.file_summary:
-                        add_file_summary(source_name, file_path, result.file_summary)
-                        logger.info(f"Added basic file summary for {source_name}")
-
-                # Step 5: GraphRAG - Extract entities and build knowledge graph
-                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                # Generate file summary with scopes
+                if FILE_SUMMARY_ENABLED:
                     try:
-                        graphrag_chunks = [
-                            {
-                                "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
-                                "content": chunk.page_content,
-                                "metadata": chunk.metadata,
-                            }
-                            for i, chunk in enumerate(result.chunks)
-                        ]
-                        num_entities, num_rels = index_chunks_sync(
-                            graphrag_chunks, source_name
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            full_content = f.read()
+                        file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
+                        add_file_summary_with_scopes(
+                            source_name=source_name,
+                            file_path=file_path,
+                            summary=file_summary_result.summary,
+                            scopes=file_summary_result.scopes,
+                            content_type=file_summary_result.content_type,
+                            complexity=file_summary_result.complexity,
                         )
                         logger.info(
-                            f"GraphRAG: Extracted {num_entities} entities, "
-                            f"{num_rels} relationships"
+                            f"Added file summary with scopes for {source_name}: "
+                            f"{len(file_summary_result.scopes)} scopes, type={file_summary_result.content_type}"
                         )
                     except Exception as e:
-                        logger.warning(f"GraphRAG indexing failed: {e}")
+                        logger.warning(f"Failed to generate file summary with scopes: {e}")
+                        if result.file_summary:
+                            add_file_summary(source_name, file_path, result.file_summary)
 
+                # Mark as indexed in tracking
                 with _index_lock:
                     _indexed_files.add(file_key)
+
+                # ========== PHASE 2: GraphRAG in background ==========
+                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                    graphrag_chunks = [
+                        {
+                            "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
+                            "content": chunk.page_content,
+                            "metadata": chunk.metadata,
+                        }
+                        for i, chunk in enumerate(result.chunks)
+                    ]
+                    # Start GraphRAG in background (non-blocking)
+                    _run_graphrag_background(
+                        chunks_data=graphrag_chunks,
+                        source_name=source_name,
+                    )
             else:
                 logger.warning(f"No chunks generated from {file_path}")
 
@@ -234,11 +252,13 @@ class MarkdownFileHandler(FileSystemEventHandler):
 
 def index_existing_documents(output_dir: str = None):
     """
-    Index all existing markdown files in the output directory.
+    Index all existing markdown files in the output directory using two-phase approach.
     Called on application startup.
 
+    Phase 1: Chunk embedding to Qdrant (synchronous, makes documents queryable)
+    Phase 2: GraphRAG entity extraction (background threads, non-blocking)
+
     Skips documents that are already FULLY indexed (checks database first, then Qdrant).
-    For partially indexed documents, only indexes the pending pages.
 
     Args:
         output_dir: Optional output directory path. If provided, sets it for future use.
@@ -257,25 +277,25 @@ def index_existing_documents(output_dir: str = None):
     total_files = 0
     skipped_files = 0
 
-    logger.info(f"Starting indexing of existing documents in {current_output_dir}")
+    logger.info(f"[Two-Phase] Starting indexing of existing documents in {current_output_dir}")
 
-    # Track which source names we've already checked (to avoid duplicate database/Qdrant queries)
+    # Track which source names we've already checked
     checked_sources: Set[str] = set()
+    # Track chunks per source for Phase 2
+    source_chunks_map: dict = {}
 
-    # Walk through all subdirectories
-    for root, dirs, files in os.walk(output_path):
+    # ========== PHASE 1: Index all chunks to Qdrant ==========
+    logger.info("[Phase 1] Starting chunk embedding to Qdrant...")
+
+    for root, _, files in os.walk(output_path):
         for filename in files:
-            # Only process _nohf.md files
             if not filename.endswith("_nohf.md"):
                 continue
 
             file_path = os.path.join(root, filename)
 
             try:
-                # Get source name from directory name
                 source_name = Path(file_path).parent.name
-
-                # Check in-memory cache first (for this session)
                 file_stat = os.stat(file_path)
                 file_key = f"{file_path}:{file_stat.st_mtime}"
 
@@ -283,28 +303,17 @@ def index_existing_documents(output_dir: str = None):
                     if file_key in _indexed_files:
                         continue
 
-                # Check if this source is already FULLY indexed (database first, then Qdrant)
-                # Only check once per source to avoid excessive queries
+                # Check if already fully indexed
                 if source_name not in checked_sources:
                     checked_sources.add(source_name)
                     if _is_document_fully_indexed_in_db(source_name):
-                        logger.info(f"Source '{source_name}' already fully indexed, skipping")
-                        # Add to in-memory cache so we don't check again
+                        logger.info(f"[Phase 1] Source '{source_name}' already fully indexed, skipping")
                         with _index_lock:
                             _indexed_files.add(file_key)
                         skipped_files += 1
                         continue
-                    else:
-                        # Log if partially indexed
-                        pending = _get_pending_pages_for_source(source_name)
-                        if pending:
-                            logger.info(f"Source '{source_name}' has {len(pending)} pending pages to index: {pending}")
-                else:
-                    # If we already checked this source and it wasn't fully indexed,
-                    # we still need to index additional files from the same source
-                    pass
 
-                # Chunk and index with summarization
+                # Chunk and index to Qdrant
                 result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
                 if result.chunks:
@@ -313,44 +322,66 @@ def index_existing_documents(output_dir: str = None):
                     total_chunks += len(result.chunks)
                     total_files += 1
 
-                    # Generate file summary with scopes (enhanced)
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            full_content = f.read()
-                        file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
-                        add_file_summary_with_scopes(
-                            source_name=source_name,
-                            file_path=file_path,
-                            summary=file_summary_result.summary,
-                            scopes=file_summary_result.scopes,
-                            content_type=file_summary_result.content_type,
-                            complexity=file_summary_result.complexity,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate file summary with scopes: {e}")
-                        if result.file_summary:
-                            add_file_summary(source_name, file_path, result.file_summary)
+                    # Generate file summary
+                    if FILE_SUMMARY_ENABLED:
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                full_content = f.read()
+                            file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
+                            add_file_summary_with_scopes(
+                                source_name=source_name,
+                                file_path=file_path,
+                                summary=file_summary_result.summary,
+                                scopes=file_summary_result.scopes,
+                                content_type=file_summary_result.content_type,
+                                complexity=file_summary_result.complexity,
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to generate file summary: {e}")
+                            if result.file_summary:
+                                add_file_summary(source_name, file_path, result.file_summary)
+
+                    # Collect chunks for Phase 2 (grouped by source)
+                    if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                        if source_name not in source_chunks_map:
+                            source_chunks_map[source_name] = []
+                        for i, chunk in enumerate(result.chunks):
+                            source_chunks_map[source_name].append({
+                                "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
+                                "content": chunk.page_content,
+                                "metadata": chunk.metadata,
+                            })
 
                     with _index_lock:
                         _indexed_files.add(file_key)
 
-                    # Update database status if available
+                    # Update database status
                     if DB_AVAILABLE:
                         try:
                             _update_db_index_status(source_name, len(result.chunks))
                         except Exception as db_e:
-                            logger.warning(f"Could not update database index status for '{source_name}': {db_e}")
+                            logger.warning(f"Could not update database index status: {db_e}")
 
-                    logger.debug(
-                        f"Indexed {len(result.chunks)} chunks from {source_name} with file and chunk summaries"
-                    )
+                    logger.debug(f"[Phase 1] Indexed {len(result.chunks)} chunks from {source_name}")
 
             except Exception as e:
-                logger.error(f"Error indexing {file_path}: {e}")
+                logger.error(f"[Phase 1] Error indexing {file_path}: {e}")
 
     logger.info(
-        f"Startup indexing complete: {total_files} files indexed, {total_chunks} chunks, {skipped_files} files skipped (already indexed)"
+        f"[Phase 1] Complete: {total_files} files indexed, {total_chunks} chunks in Qdrant, "
+        f"{skipped_files} files skipped"
     )
+
+    # ========== PHASE 2: Start GraphRAG in background for each source ==========
+    if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED and source_chunks_map:
+        logger.info(f"[Phase 2] Starting GraphRAG background processing for {len(source_chunks_map)} sources...")
+        for source_name, chunks in source_chunks_map.items():
+            _run_graphrag_background(
+                chunks_data=chunks,
+                source_name=source_name,
+            )
+        logger.info(f"[Phase 2] All GraphRAG background threads started (documents are queryable now)")
+
     return total_chunks
 
 
@@ -440,112 +471,33 @@ def get_indexed_count() -> int:
         return len(_indexed_files)
 
 
-def index_document_now(source_name: str, output_dir: str = None) -> int:
+def index_document_now(source_name: str, output_dir: str = None, run_graphrag: bool = True) -> int:
     """
     Index a specific document immediately with summarization.
     Deletes any existing embeddings for this source before re-indexing.
 
+    This function performs Phase 1 (Qdrant embedding) synchronously.
+    If run_graphrag=True, it also starts Phase 2 (GraphRAG) in background.
+
     Args:
         source_name: The document source name (folder name under output directory).
         output_dir: Optional output directory path.
+        run_graphrag: Whether to run GraphRAG in background after Qdrant indexing (default: True)
 
     Returns:
-        Number of chunks indexed.
+        Number of chunks indexed to Qdrant.
     """
-    if output_dir:
-        set_output_dir(output_dir)
+    # Use the shared Phase 1 function
+    total_chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir)
 
-    current_output_dir = get_output_dir()
-    doc_dir = Path(current_output_dir) / source_name
+    # Start Phase 2 (GraphRAG) in background if enabled
+    if run_graphrag and graphrag_chunks:
+        _run_graphrag_background(
+            chunks_data=graphrag_chunks,
+            source_name=source_name,
+        )
 
-    if not doc_dir.exists():
-        logger.warning(f"Document directory does not exist: {doc_dir}")
-        return 0
-
-    total_chunks = 0
-    indexed_files = []
-
-    # Delete existing summaries for this source first
-    delete_file_summary_by_source(source_name)
-
-    # Find all _nohf.md files in the document directory
-    for filename in os.listdir(doc_dir):
-        if not filename.endswith("_nohf.md"):
-            continue
-
-        file_path = str(doc_dir / filename)
-
-        try:
-            # Delete existing embeddings for this file
-            delete_documents_by_file_path(file_path)
-
-            # Remove from indexed files tracking
-            with _index_lock:
-                keys_to_remove = [k for k in _indexed_files if k.startswith(file_path + ":")]
-                for k in keys_to_remove:
-                    _indexed_files.discard(k)
-
-            # Chunk and index with summarization
-            result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
-
-            if result.chunks:
-                vectorstore = get_vectorstore()
-                vectorstore.add_documents(result.chunks)
-                total_chunks += len(result.chunks)
-                indexed_files.append(filename)
-
-                # Generate file summary with scopes (enhanced)
-                try:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        full_content = f.read()
-                    file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
-                    add_file_summary_with_scopes(
-                        source_name=source_name,
-                        file_path=file_path,
-                        summary=file_summary_result.summary,
-                        scopes=file_summary_result.scopes,
-                        content_type=file_summary_result.content_type,
-                        complexity=file_summary_result.complexity,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to generate file summary with scopes: {e}")
-                    if result.file_summary:
-                        add_file_summary(source_name, file_path, result.file_summary)
-
-                # GraphRAG: Extract entities and build knowledge graph
-                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED and result.chunks:
-                    try:
-                        # Prepare chunks for GraphRAG indexing
-                        graphrag_chunks = [
-                            {
-                                "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
-                                "content": chunk.page_content,
-                                "metadata": chunk.metadata,
-                            }
-                            for i, chunk in enumerate(result.chunks)
-                        ]
-                        num_entities, num_rels = index_chunks_sync(
-                            graphrag_chunks, source_name
-                        )
-                        logger.info(
-                            f"GraphRAG: Extracted {num_entities} entities, "
-                            f"{num_rels} relationships from {filename}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"GraphRAG indexing failed for {filename}: {e}")
-
-                # Update indexed files tracking
-                file_stat = os.stat(file_path)
-                file_key = f"{file_path}:{file_stat.st_mtime}"
-                with _index_lock:
-                    _indexed_files.add(file_key)
-
-                logger.info(f"Indexed {len(result.chunks)} chunks from {filename} with summaries")
-
-        except Exception as e:
-            logger.error(f"Error indexing {file_path}: {e}")
-
-    logger.info(f"Document indexing complete for {source_name}: {len(indexed_files)} files, {total_chunks} chunks")
+    logger.info(f"Document indexing complete for {source_name}: {total_chunks} chunks")
     return total_chunks
 
 
@@ -585,6 +537,178 @@ def reindex_document(source_name: str, output_dir: str = None) -> int:
     return 0
 
 
+def _run_graphrag_background(
+    chunks_data: list,
+    source_name: str,
+    filename: str = None,
+    conversion_id: str = None,
+    broadcast_callback=None
+):
+    """
+    Run GraphRAG indexing (entity extraction) in background thread.
+    This is Phase 2 of the two-phase indexing process.
+
+    Args:
+        chunks_data: List of chunk dicts with 'id', 'content', 'metadata'
+        source_name: The document source name
+        filename: Original filename for database updates
+        conversion_id: The conversion ID for WebSocket notifications
+        broadcast_callback: Function for WebSocket broadcasts
+    """
+    if not GRAPHRAG_AVAILABLE or not GRAPH_RAG_ENABLED:
+        logger.debug(f"[GraphRAG] Skipping background indexing - not enabled")
+        return
+
+    def _graphrag_task():
+        try:
+            logger.info(f"[GraphRAG Phase 2] Starting background entity extraction for: {source_name}")
+
+            # Send WebSocket notification that GraphRAG started
+            if broadcast_callback and conversion_id:
+                broadcast_callback(conversion_id, {
+                    "status": "graphrag_indexing",
+                    "progress": 100,
+                    "message": "Building knowledge graph (background)...",
+                    "graphrag_status": "started",
+                })
+
+            # Perform GraphRAG indexing
+            num_entities, num_rels = index_chunks_sync(chunks_data, source_name)
+
+            logger.info(
+                f"[GraphRAG Phase 2] Complete for {source_name}: "
+                f"{num_entities} entities, {num_rels} relationships"
+            )
+
+            # Send WebSocket notification that GraphRAG completed
+            if broadcast_callback and conversion_id:
+                broadcast_callback(conversion_id, {
+                    "status": "graphrag_indexed",
+                    "progress": 100,
+                    "message": f"Knowledge graph built ({num_entities} entities, {num_rels} relationships)",
+                    "graphrag_status": "completed",
+                    "entities_extracted": num_entities,
+                    "relationships_extracted": num_rels,
+                })
+
+        except Exception as e:
+            logger.error(f"[GraphRAG Phase 2] Failed for {source_name}: {e}", exc_info=True)
+
+            # Send WebSocket notification for error (non-blocking, document is still queryable)
+            if broadcast_callback and conversion_id:
+                broadcast_callback(conversion_id, {
+                    "status": "graphrag_error",
+                    "progress": 100,
+                    "message": f"Knowledge graph building failed (document still searchable): {str(e)}",
+                    "graphrag_status": "error",
+                })
+
+    # Run in background thread
+    thread = threading.Thread(target=_graphrag_task, daemon=True, name=f"graphrag-{source_name}")
+    thread.start()
+    logger.info(f"[GraphRAG Phase 2] Started background thread for: {source_name}")
+
+
+def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
+    """
+    Phase 1: Index all chunks to Qdrant vector database.
+    This makes the document queryable immediately.
+
+    Args:
+        source_name: The document source name
+        output_dir: Optional output directory path
+
+    Returns:
+        Tuple of (total_chunks, all_graphrag_chunks) where all_graphrag_chunks
+        is a list of chunk dicts for GraphRAG Phase 2
+    """
+    if output_dir:
+        set_output_dir(output_dir)
+
+    current_output_dir = get_output_dir()
+    doc_dir = Path(current_output_dir) / source_name
+
+    if not doc_dir.exists():
+        logger.warning(f"Document directory does not exist: {doc_dir}")
+        return 0, []
+
+    total_chunks = 0
+    indexed_files = []
+    all_graphrag_chunks = []  # Collect all chunks for Phase 2
+
+    # Delete existing summaries for this source first
+    delete_file_summary_by_source(source_name)
+
+    # Find all _nohf.md files in the document directory
+    for filename in os.listdir(doc_dir):
+        if not filename.endswith("_nohf.md"):
+            continue
+
+        file_path = str(doc_dir / filename)
+
+        try:
+            # Delete existing embeddings for this file
+            delete_documents_by_file_path(file_path)
+
+            # Remove from indexed files tracking
+            with _index_lock:
+                keys_to_remove = [k for k in _indexed_files if k.startswith(file_path + ":")]
+                for k in keys_to_remove:
+                    _indexed_files.discard(k)
+
+            # Chunk the markdown file
+            result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
+
+            if result.chunks:
+                # Phase 1: Add chunks to Qdrant vectorstore
+                vectorstore = get_vectorstore()
+                vectorstore.add_documents(result.chunks)
+                total_chunks += len(result.chunks)
+                indexed_files.append(filename)
+
+                # Generate file summary with scopes (enhanced)
+                if FILE_SUMMARY_ENABLED:
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            full_content = f.read()
+                        file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
+                        add_file_summary_with_scopes(
+                            source_name=source_name,
+                            file_path=file_path,
+                            summary=file_summary_result.summary,
+                            scopes=file_summary_result.scopes,
+                            content_type=file_summary_result.content_type,
+                            complexity=file_summary_result.complexity,
+                        )
+                    except Exception as e:
+                        logger.warning(f"Failed to generate file summary with scopes: {e}")
+                        if result.file_summary:
+                            add_file_summary(source_name, file_path, result.file_summary)
+
+                # Collect chunks for GraphRAG Phase 2
+                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                    for i, chunk in enumerate(result.chunks):
+                        all_graphrag_chunks.append({
+                            "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
+                            "content": chunk.page_content,
+                            "metadata": chunk.metadata,
+                        })
+
+                # Update indexed files tracking
+                file_stat = os.stat(file_path)
+                file_key = f"{file_path}:{file_stat.st_mtime}"
+                with _index_lock:
+                    _indexed_files.add(file_key)
+
+                logger.info(f"[Phase 1] Indexed {len(result.chunks)} chunks from {filename} to Qdrant")
+
+        except Exception as e:
+            logger.error(f"Error indexing {file_path}: {e}")
+
+    logger.info(f"[Phase 1] Complete for {source_name}: {len(indexed_files)} files, {total_chunks} chunks in Qdrant")
+    return total_chunks, all_graphrag_chunks
+
+
 def trigger_embedding_for_document(
     source_name: str,
     output_dir: str = None,
@@ -593,9 +717,14 @@ def trigger_embedding_for_document(
     broadcast_callback=None
 ):
     """
-    Trigger embedding for a document after conversion completes.
-    This is the main entry point called after conversion.
-    Runs in background without blocking.
+    Trigger two-phase indexing for a document after conversion completes.
+    Both phases run in background without blocking the main thread.
+
+    Phase 1: Chunk embedding to Qdrant (makes document queryable)
+    Phase 2: GraphRAG entity extraction to Neo4j (runs after Phase 1 completes)
+
+    This approach allows users to query the document immediately after Phase 1,
+    even while GraphRAG processing is still running in the background.
 
     Args:
         source_name: The document source name (folder name under output directory).
@@ -605,16 +734,15 @@ def trigger_embedding_for_document(
         broadcast_callback: Function to call for WebSocket broadcasts.
                           Signature: broadcast_callback(conversion_id, message_dict)
     """
-    import threading
     # Import IndexStatus here to avoid circular imports
     try:
         from db.models import IndexStatus
     except ImportError:
         IndexStatus = None
 
-    def _embedding_task():
+    def _two_phase_indexing_task():
         try:
-            logger.info(f"Starting background embedding for: {source_name}")
+            logger.info(f"[Two-Phase Indexing] Starting for: {source_name}")
 
             # Update database status to INDEXING
             if DB_AVAILABLE and filename and IndexStatus:
@@ -625,25 +753,26 @@ def trigger_embedding_for_document(
                         if doc:
                             repo.update_index_status(
                                 doc, IndexStatus.INDEXING, 0,
-                                message="Indexing started..."
+                                message="Phase 1: Indexing chunks to vector database..."
                             )
                 except Exception as e:
                     logger.warning(f"Could not update database to INDEXING status: {e}")
 
-            # Send WebSocket notification that indexing started
+            # Send WebSocket notification that Phase 1 started
             if broadcast_callback and conversion_id:
                 broadcast_callback(conversion_id, {
                     "status": "indexing",
                     "progress": 100,
-                    "message": "Indexing document for search...",
+                    "message": "Phase 1: Indexing document for search...",
                     "indexing_status": "started",
+                    "phase": 1,
                 })
 
-            # Perform the actual indexing
-            chunks = index_document_now(source_name, output_dir)
-            logger.info(f"Background embedding complete for {source_name}: {chunks} chunks")
+            # ========== PHASE 1: Chunk embedding to Qdrant ==========
+            chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir)
+            logger.info(f"[Phase 1] Complete for {source_name}: {chunks} chunks indexed to Qdrant")
 
-            # Update database status to INDEXED
+            # Update database status to INDEXED (document is now queryable)
             if DB_AVAILABLE and filename and IndexStatus:
                 try:
                     with get_db_session() as db:
@@ -652,23 +781,38 @@ def trigger_embedding_for_document(
                         if doc:
                             repo.update_index_status(
                                 doc, IndexStatus.INDEXED, chunks,
-                                message=f"Indexed {chunks} chunks"
+                                message=f"Indexed {chunks} chunks (GraphRAG processing in background)"
                             )
                 except Exception as e:
                     logger.warning(f"Could not update database to INDEXED status: {e}")
 
-            # Send WebSocket notification that indexing completed
+            # Send WebSocket notification that Phase 1 completed
             if broadcast_callback and conversion_id:
                 broadcast_callback(conversion_id, {
                     "status": "indexed",
                     "progress": 100,
-                    "message": f"Document indexed successfully ({chunks} chunks)",
+                    "message": f"Document indexed successfully ({chunks} chunks). Knowledge graph building in progress...",
                     "indexing_status": "completed",
                     "chunks_indexed": chunks,
+                    "phase": 1,
                 })
 
+            # ========== PHASE 2: GraphRAG entity extraction (background) ==========
+            # Start GraphRAG in a separate background thread
+            # This does NOT block - user can query the document immediately
+            if graphrag_chunks:
+                _run_graphrag_background(
+                    chunks_data=graphrag_chunks,
+                    source_name=source_name,
+                    filename=filename,
+                    conversion_id=conversion_id,
+                    broadcast_callback=broadcast_callback,
+                )
+            else:
+                logger.debug(f"[Phase 2] No chunks for GraphRAG or GraphRAG disabled for {source_name}")
+
         except Exception as e:
-            logger.error(f"Error in background embedding for {source_name}: {e}")
+            logger.error(f"Error in two-phase indexing for {source_name}: {e}")
 
             # Update database status to FAILED
             if DB_AVAILABLE and filename and IndexStatus:
@@ -693,8 +837,8 @@ def trigger_embedding_for_document(
                     "indexing_status": "error",
                 })
 
-    # Run in background thread to avoid blocking
-    thread = threading.Thread(target=_embedding_task, daemon=True)
+    # Run Phase 1 in background thread (Phase 2 will be spawned from within)
+    thread = threading.Thread(target=_two_phase_indexing_task, daemon=True, name=f"indexing-{source_name}")
     thread.start()
-    logger.info(f"Started background embedding thread for: {source_name}")
+    logger.info(f"[Two-Phase Indexing] Started background thread for: {source_name}")
 

@@ -21,6 +21,7 @@ from .vectorstore import (
     get_chunks_by_ids,
 )
 from .llm_service import get_llm_service
+from .summarizer import FILE_SUMMARY_ENABLED
 
 # Import GraphRAG components
 try:
@@ -329,6 +330,9 @@ def _find_relevant_files_with_scopes(
     1. Vector search on file summaries to get candidates
     2. LLM-based scope matching to filter candidates
 
+    Note: If FILE_SUMMARY_ENABLED is False, returns empty list to skip
+    file summary search and go directly to chunk search.
+
     Args:
         enhanced_query: The enhanced search query.
         query_scopes: List of topic scopes from the query.
@@ -337,6 +341,11 @@ def _find_relevant_files_with_scopes(
     Returns:
         List of source names that are relevant to the query.
     """
+    # Skip file summary search if disabled
+    if not FILE_SUMMARY_ENABLED:
+        logger.debug("File summary search disabled, skipping file-level filtering")
+        return []
+
     try:
         # Step 1: Get candidate documents via vector search
         candidate_docs = search_file_summaries_with_scopes(enhanced_query, k=k * 2)
@@ -375,6 +384,9 @@ def _find_relevant_files(query: str, k: int = 5) -> List[str]:
     1. Search file summaries to identify relevant documents
     2. Return list of source names that are relevant to the query
 
+    Note: If FILE_SUMMARY_ENABLED is False, returns empty list to skip
+    file summary search and go directly to chunk search.
+
     Args:
         query: The search query.
         k: Maximum number of relevant files to return.
@@ -382,6 +394,11 @@ def _find_relevant_files(query: str, k: int = 5) -> List[str]:
     Returns:
         List of source names that are relevant to the query.
     """
+    # Skip file summary search if disabled
+    if not FILE_SUMMARY_ENABLED:
+        logger.debug("File summary search disabled, skipping file-level filtering")
+        return []
+
     try:
         # Search file summaries using the query
         summary_docs = search_file_summaries(query, k=k)
@@ -418,12 +435,23 @@ def _get_graphrag_context(query: str) -> str:
     Returns:
         Formatted GraphRAG context string, or empty string if disabled/unavailable.
     """
-    if not GRAPHRAG_AVAILABLE or not GRAPH_RAG_ENABLED:
+    logger.debug(
+        f"[GraphRAG Query] Starting - GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}, "
+        f"GRAPH_RAG_ENABLED={GRAPH_RAG_ENABLED}"
+    )
+
+    if not GRAPHRAG_AVAILABLE:
+        logger.debug("[GraphRAG Query] Skipping - GraphRAG module not available")
+        return ""
+
+    if not GRAPH_RAG_ENABLED:
+        logger.debug("[GraphRAG Query] Skipping - GRAPH_RAG_ENABLED=false in .env")
         return ""
 
     try:
         import asyncio
 
+        logger.debug(f"[GraphRAG Query] Initializing GraphRAG for query: '{query[:100]}...'")
         graphrag = GraphRAG()
 
         # Run async query in sync context
@@ -433,19 +461,28 @@ def _get_graphrag_context(query: str) -> str:
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
 
+        logger.debug("[GraphRAG Query] Executing graph query...")
         context = loop.run_until_complete(graphrag.query(query))
+
+        logger.debug(
+            f"[GraphRAG Query] Raw result - mode={context.mode.value}, "
+            f"entities={len(context.entities)}, relationships={len(context.relationships)}, "
+            f"chunks={len(context.chunks)}, enhanced_query='{context.enhanced_query[:50]}...'"
+        )
 
         if context.entities or context.relationships:
             formatted = graphrag.format_context(context)
             logger.info(
-                f"GraphRAG context: mode={context.mode.value}, "
-                f"entities={len(context.entities)}, "
-                f"relationships={len(context.relationships)}"
+                f"[GraphRAG Query] Success - mode={context.mode.value}, "
+                f"entities={len(context.entities)}, relationships={len(context.relationships)}"
             )
+            logger.debug(f"[GraphRAG Query] Formatted context length: {len(formatted)} chars")
             return formatted
+        else:
+            logger.debug("[GraphRAG Query] No entities or relationships found")
 
     except Exception as e:
-        logger.warning(f"GraphRAG context retrieval failed: {e}")
+        logger.warning(f"[GraphRAG Query] Failed: {e}", exc_info=True)
 
     return ""
 

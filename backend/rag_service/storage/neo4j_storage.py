@@ -5,34 +5,47 @@ Provides async graph operations for storing and querying:
 - Entity nodes with properties
 - Relationship edges between entities
 - Graph traversal queries
+
+Key Features:
+- Document-level deduplication: Entities are unique per (name, entity_type, source_doc)
+- Chunk-by-chunk saving: Entities/relationships saved immediately after each chunk
+- Multi-page PDF support: Same entity appearing in multiple pages is stored once
+- Thread-safe: Creates driver per event loop to avoid cross-loop issues
 """
 
 import os
 import logging
+import asyncio
 from typing import Optional, List, Dict, Any, Tuple, Literal
+import threading
 
 from ..graph_rag.base import BaseGraphStorage
 
 logger = logging.getLogger(__name__)
 
-# Neo4j driver will be imported on first use to avoid import errors if not installed
-_neo4j_driver = None
+# Store drivers per thread to handle different event loops
+_thread_local = threading.local()
 
 
 def _get_neo4j_driver():
-    """Get or create the Neo4j driver instance."""
-    global _neo4j_driver
-    if _neo4j_driver is None:
+    """
+    Get or create Neo4j driver for current thread.
+
+    Each thread gets its own driver instance to avoid event loop conflicts
+    when async code runs in different threads.
+    """
+    # Check if we have a driver for this thread
+    if not hasattr(_thread_local, 'neo4j_driver') or _thread_local.neo4j_driver is None:
         from neo4j import AsyncGraphDatabase
 
         uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         user = os.getenv("NEO4J_USER", "neo4j")
         password = os.getenv("NEO4J_PASSWORD", "")
 
-        _neo4j_driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
-        logger.info(f"Connected to Neo4j at {uri}")
+        _thread_local.neo4j_driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        logger.info(f"Connected to Neo4j at {uri} (thread: {threading.current_thread().name})")
 
-    return _neo4j_driver
+    return _thread_local.neo4j_driver
 
 
 class Neo4jStorage(BaseGraphStorage):
@@ -46,13 +59,10 @@ class Neo4jStorage(BaseGraphStorage):
             workspace_id: Workspace ID for multi-tenant isolation
         """
         super().__init__(workspace_id)
-        self._driver = None
 
     def _get_driver(self):
-        """Get the Neo4j driver."""
-        if self._driver is None:
-            self._driver = _get_neo4j_driver()
-        return self._driver
+        """Get the Neo4j driver for current thread."""
+        return _get_neo4j_driver()
 
     async def has_node(self, node_id: str) -> bool:
         """Check if a node exists."""
@@ -123,6 +133,188 @@ class Neo4jStorage(BaseGraphStorage):
                 workspace_id=self.workspace_id,
                 data=edge_data,
             )
+
+    async def upsert_entity_for_document(
+        self,
+        name: str,
+        entity_type: str,
+        description: str,
+        source_doc: str,
+        source_chunk_id: str,
+        key_score: int = 50,
+    ) -> str:
+        """
+        Upsert an entity with document-level deduplication.
+
+        For multi-page PDFs, the same entity appearing in different pages
+        will be merged into one node with combined descriptions.
+
+        Args:
+            name: Entity name
+            entity_type: Entity type (e.g., person, organization)
+            description: Entity description
+            source_doc: Source document ID (for deduplication)
+            source_chunk_id: Source chunk ID
+            key_score: Importance score
+
+        Returns:
+            Entity ID used in the graph
+        """
+        driver = self._get_driver()
+
+        # Create a consistent entity ID based on name, type, and source document
+        # This ensures the same entity in different chunks of the same document is deduplicated
+        import hashlib
+        entity_key = f"{self.workspace_id}:{source_doc}:{entity_type.lower()}:{name.lower().strip()}"
+        entity_id = hashlib.md5(entity_key.encode()).hexdigest()
+
+        async with driver.session() as session:
+            # MERGE ensures deduplication, ON CREATE/ON MATCH handles updates
+            await session.run(
+                """
+                MERGE (e:Entity {id: $id, workspace_id: $workspace_id})
+                ON CREATE SET
+                    e.name = $name,
+                    e.entity_type = $entity_type,
+                    e.description = $description,
+                    e.source_doc = $source_doc,
+                    e.source_chunk_ids = [$source_chunk_id],
+                    e.key_score = $key_score
+                ON MATCH SET
+                    e.description = CASE
+                        WHEN e.description CONTAINS $description THEN e.description
+                        ELSE e.description + ' | ' + $description
+                    END,
+                    e.source_chunk_ids = CASE
+                        WHEN $source_chunk_id IN e.source_chunk_ids THEN e.source_chunk_ids
+                        ELSE e.source_chunk_ids + $source_chunk_id
+                    END,
+                    e.key_score = CASE
+                        WHEN $key_score > e.key_score THEN $key_score
+                        ELSE e.key_score
+                    END
+                """,
+                id=entity_id,
+                workspace_id=self.workspace_id,
+                name=name,
+                entity_type=entity_type,
+                description=description,
+                source_doc=source_doc,
+                source_chunk_id=source_chunk_id,
+                key_score=key_score,
+            )
+
+        logger.debug(f"Upserted entity: {name} ({entity_type}) for doc: {source_doc}")
+        return entity_id
+
+    async def upsert_relationship_for_document(
+        self,
+        src_name: str,
+        tgt_name: str,
+        src_entity_type: str,
+        tgt_entity_type: str,
+        description: str,
+        keywords: str,
+        source_doc: str,
+        source_chunk_id: str,
+        weight: float = 1.0,
+    ) -> None:
+        """
+        Upsert a relationship with document-level deduplication.
+
+        For multi-page PDFs, the same relationship appearing in different pages
+        will be merged with combined descriptions and weights.
+
+        Args:
+            src_name: Source entity name
+            tgt_name: Target entity name
+            src_entity_type: Source entity type
+            tgt_entity_type: Target entity type
+            description: Relationship description
+            keywords: Relationship keywords
+            source_doc: Source document ID (for deduplication)
+            source_chunk_id: Source chunk ID
+            weight: Relationship weight
+        """
+        driver = self._get_driver()
+
+        # Generate entity IDs consistent with upsert_entity_for_document
+        import hashlib
+        src_key = f"{self.workspace_id}:{source_doc}:{src_entity_type.lower()}:{src_name.lower().strip()}"
+        src_id = hashlib.md5(src_key.encode()).hexdigest()
+        tgt_key = f"{self.workspace_id}:{source_doc}:{tgt_entity_type.lower()}:{tgt_name.lower().strip()}"
+        tgt_id = hashlib.md5(tgt_key.encode()).hexdigest()
+
+        async with driver.session() as session:
+            # Use MERGE to ensure deduplication of relationships
+            await session.run(
+                """
+                MATCH (src:Entity {id: $src_id, workspace_id: $workspace_id})
+                MATCH (tgt:Entity {id: $tgt_id, workspace_id: $workspace_id})
+                MERGE (src)-[r:RELATES_TO]->(tgt)
+                ON CREATE SET
+                    r.description = $description,
+                    r.keywords = $keywords,
+                    r.weight = $weight,
+                    r.source_doc = $source_doc,
+                    r.source_chunk_ids = [$source_chunk_id]
+                ON MATCH SET
+                    r.description = CASE
+                        WHEN r.description CONTAINS $description THEN r.description
+                        ELSE r.description + ' | ' + $description
+                    END,
+                    r.keywords = CASE
+                        WHEN r.keywords CONTAINS $keywords THEN r.keywords
+                        ELSE r.keywords + ', ' + $keywords
+                    END,
+                    r.weight = CASE
+                        WHEN $weight > r.weight THEN $weight
+                        ELSE r.weight
+                    END,
+                    r.source_chunk_ids = CASE
+                        WHEN $source_chunk_id IN r.source_chunk_ids THEN r.source_chunk_ids
+                        ELSE r.source_chunk_ids + $source_chunk_id
+                    END
+                """,
+                src_id=src_id,
+                tgt_id=tgt_id,
+                workspace_id=self.workspace_id,
+                description=description,
+                keywords=keywords,
+                weight=weight,
+                source_doc=source_doc,
+                source_chunk_id=source_chunk_id,
+            )
+
+        logger.debug(f"Upserted relationship: {src_name} -> {tgt_name} for doc: {source_doc}")
+
+    async def delete_by_document(self, source_doc: str) -> int:
+        """
+        Delete all entities and relationships for a specific document.
+
+        Args:
+            source_doc: Source document ID
+
+        Returns:
+            Number of deleted nodes
+        """
+        driver = self._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (e:Entity {workspace_id: $workspace_id, source_doc: $source_doc})
+                WITH e, count(e) as cnt
+                DETACH DELETE e
+                RETURN cnt
+                """,
+                workspace_id=self.workspace_id,
+                source_doc=source_doc,
+            )
+            record = await result.single()
+            count = record["cnt"] if record else 0
+            if count > 0:
+                logger.info(f"Deleted {count} entities from Neo4j for document: {source_doc}")
+            return count
 
     async def get_node_edges(
         self,
@@ -218,45 +410,52 @@ class Neo4jStorage(BaseGraphStorage):
 
     async def get_nodes_by_name(
         self,
-        names: List[str],
-        fuzzy: bool = False
+        name: str,
+        limit: int = 10,
+        fuzzy: bool = True
     ) -> List[Dict[str, Any]]:
         """
-        Get nodes by name.
+        Get nodes by name (single name search with fuzzy matching).
 
         Args:
-            names: List of entity names to search for
-            fuzzy: If True, use CONTAINS for fuzzy matching
+            name: Entity name to search for
+            limit: Maximum number of results to return
+            fuzzy: If True, use CONTAINS for fuzzy matching (default True)
 
         Returns:
             List of node properties
         """
-        if not names:
+        if not name or not name.strip():
             return []
 
+        name_lower = name.lower().strip()
         driver = self._get_driver()
         async with driver.session() as session:
             if fuzzy:
-                # Fuzzy match using CONTAINS
+                # Fuzzy match using CONTAINS (case-insensitive)
                 result = await session.run(
                     """
                     MATCH (e:Entity {workspace_id: $workspace_id})
-                    WHERE any(name IN $names WHERE toLower(e.name) CONTAINS toLower(name))
+                    WHERE toLower(e.name) CONTAINS $name_lower
                     RETURN properties(e) as props
+                    LIMIT $limit
                     """,
                     workspace_id=self.workspace_id,
-                    names=names,
+                    name_lower=name_lower,
+                    limit=limit,
                 )
             else:
-                # Exact match
+                # Exact match (case-insensitive)
                 result = await session.run(
                     """
                     MATCH (e:Entity {workspace_id: $workspace_id})
-                    WHERE e.name IN $names
+                    WHERE toLower(e.name) = $name_lower
                     RETURN properties(e) as props
+                    LIMIT $limit
                     """,
                     workspace_id=self.workspace_id,
-                    names=names,
+                    name_lower=name_lower,
+                    limit=limit,
                 )
 
             nodes = []
