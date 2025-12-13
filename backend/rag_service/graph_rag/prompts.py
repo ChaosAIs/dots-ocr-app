@@ -19,17 +19,31 @@ Analyze the following user query and determine:
 2. An enhanced version of the query for better retrieval
 
 MODES:
-- LOCAL: Use when the query asks about a specific entity (person, organization, concept)
+- LOCAL: Use ONLY for simple entity definition/identification queries
   Examples: "Who is John Smith?", "What is machine learning?", "Tell me about Company X"
+  Use when: Query asks "who/what IS something" (identity/definition only)
 
-- GLOBAL: Use when the query asks about relationships between entities
-  Examples: "How does X relate to Y?", "What is the connection between A and B?"
+- GLOBAL: Use when query asks about relationships BETWEEN two or more entities
+  Examples: "How does X relate to Y?", "What is the connection between A and B?",
+            "Compare X and Y", "What's the difference between A and B?"
+  Use when: Query explicitly mentions two entities and asks about their relationship
 
-- HYBRID: Use when the query requires both entity information and relationships
-  Examples: "Explain the authentication system and how it connects to the database"
+- HYBRID: Use for complex queries about how something WORKS, FUNCTIONS, or OPERATES
+  Examples: "How does X work?", "How does X function?", "Explain how X operates",
+            "What are the components of X?", "How is X implemented?",
+            "Explain the authentication system", "What does X do and how?"
+  Use when: Query asks about mechanisms, processes, implementation, or internal workings
+  IMPORTANT: "How does X work/function?" queries should ALWAYS use HYBRID, not LOCAL
 
-- NAIVE: Use for simple factual lookups or when graph context isn't needed
-  Examples: "What is the date of the meeting?", "List all files"
+- NAIVE: Use for simple factual lookups where graph context isn't helpful
+  Examples: "What is the date of the meeting?", "List all files", "When was X created?"
+  Use when: Query asks for simple facts, dates, counts, or lists
+
+DECISION GUIDE:
+- "What IS X?" → LOCAL (definition)
+- "How does X WORK/FUNCTION?" → HYBRID (mechanism/process)
+- "How does X RELATE to Y?" → GLOBAL (cross-entity relationship)
+- "When/How many/List?" → NAIVE (simple facts)
 
 USER QUERY: {query}
 

@@ -11,11 +11,10 @@ Query Modes:
 - NAIVE: Simple vector search (fallback)
 """
 
-import os
 import json
 import logging
 import re
-from typing import Tuple, Optional
+from typing import Tuple
 
 from .base import QueryMode
 from .prompts import QUERY_MODE_DETECTION_PROMPT
@@ -38,30 +37,29 @@ class QueryModeDetector:
         Initialize the query mode detector.
 
         Args:
-            llm_client: Optional LLM client (uses Ollama by default)
+            llm_client: Optional LLM client (uses configured RAG LLM backend)
         """
         self.llm_client = llm_client
-        self._ollama_client = None
+        self._cached_llm_client = None
 
     def _get_llm_client(self):
-        """Get or create the LLM client."""
+        """Get or create the LLM client using the configured RAG LLM backend."""
         if self.llm_client is not None:
             return self.llm_client
 
-        if self._ollama_client is None:
-            from langchain_ollama import ChatOllama
+        if self._cached_llm_client is None:
+            # Use the same LLM service as the RAG agent (vLLM or Ollama based on config)
+            from ..llm_service import get_llm_service
 
-            host = os.getenv("OLLAMA_HOST", "localhost")
-            port = os.getenv("OLLAMA_PORT", "11434")
-            model = os.getenv("OLLAMA_MODEL", "qwen2.5:latest")
-
-            self._ollama_client = ChatOllama(
-                base_url=f"http://{host}:{port}",
-                model=model,
+            llm_service = get_llm_service()
+            self._cached_llm_client = llm_service.get_query_model(
                 temperature=0.1,
+                num_ctx=2048,
+                num_predict=256,
             )
+            logger.info(f"QueryModeDetector using LLM service: {type(llm_service).__name__}")
 
-        return self._ollama_client
+        return self._cached_llm_client
 
     async def detect_mode(self, query: str) -> Tuple[QueryMode, str]:
         """
@@ -134,40 +132,79 @@ class QueryModeDetector:
         Heuristic-based query mode detection (fast fallback).
 
         Uses keyword patterns to determine query mode without LLM.
+
+        Priority order (check HYBRID first since "how does X work" is common):
+        1. HYBRID - "how does X work/function" (mechanism/process queries)
+        2. GLOBAL - "how does X relate to Y" (cross-entity relationships)
+        3. NAIVE - simple facts (when, how many, list)
+        4. LOCAL - "what is X", "who is X" (entity definitions)
+        5. Default - HYBRID (safest for complex queries)
         """
         query_lower = query.lower()
 
-        # Patterns for different modes
-        local_patterns = [
-            r'\bwho is\b', r'\bwhat is\b', r'\btell me about\b',
-            r'\bdescribe\b', r'\bexplain\b.*\b(concept|term|entity)\b',
-            r'\bdefine\b', r'\bwhat does\b.*\bmean\b',
+        # HYBRID patterns - check FIRST (how does X work/function)
+        # These should NOT be confused with LOCAL "what is X"
+        hybrid_patterns = [
+            r'\bhow does\b.*\b(work|function|operate)\b',
+            r'\bhow is\b.*\b(implemented|built|designed|structured)\b',
+            r'\bexplain how\b',
+            r'\bwhat are the (components|parts|steps|stages)\b',
+            r'\bhow (to|can)\b',
+            r'\bexplain the\b.*\b(process|system|mechanism|architecture)\b',
+            r'\bwhat does\b.*\bdo\b',
         ]
 
+        # GLOBAL patterns - relationships BETWEEN entities
         global_patterns = [
-            r'\bhow does\b.*\brelate\b', r'\bconnection between\b',
-            r'\brelationship between\b', r'\bcompare\b.*\band\b',
-            r'\bdifference between\b', r'\bsimilarity between\b',
+            r'\bhow does\b.*\brelate\b',
+            r'\bconnection between\b',
+            r'\brelationship between\b',
+            r'\bcompare\b.*\b(and|with|to)\b',
+            r'\bdifference between\b',
+            r'\bsimilarity between\b',
+            r'\bhow (do|does)\b.*\binteract\b',
+            r'\bwhat links\b.*\bto\b',
         ]
 
+        # NAIVE patterns - simple facts
         naive_patterns = [
-            r'\blist\b', r'\bwhat date\b', r'\bwhen\b',
-            r'\bhow many\b', r'\bcount\b',
+            r'\blist\b',
+            r'\bwhat date\b',
+            r'\bwhen (was|is|did)\b',
+            r'\bhow many\b',
+            r'\bcount\b',
+            r'\bwhat time\b',
         ]
 
-        # Check patterns
-        for pattern in local_patterns:
-            if re.search(pattern, query_lower):
-                return QueryMode.LOCAL, query
+        # LOCAL patterns - entity definitions ONLY
+        local_patterns = [
+            r'\bwho is\b',
+            r'\bwhat is\b(?!.*\b(components|parts|steps|difference|connection)\b)',
+            r'\btell me about\b',
+            r'\bdefine\b',
+            r'\bwhat does\b.*\bmean\b',
+        ]
 
+        # Check HYBRID first (most common complex queries)
+        for pattern in hybrid_patterns:
+            if re.search(pattern, query_lower):
+                return QueryMode.HYBRID, query
+
+        # Check GLOBAL (cross-entity relationships)
         for pattern in global_patterns:
             if re.search(pattern, query_lower):
                 return QueryMode.GLOBAL, query
 
+        # Check NAIVE (simple facts)
         for pattern in naive_patterns:
             if re.search(pattern, query_lower):
                 return QueryMode.NAIVE, query
 
-        # Default to HYBRID
+        # Check LOCAL (entity definitions)
+        for pattern in local_patterns:
+            if re.search(pattern, query_lower):
+                return QueryMode.LOCAL, query
+
+        # Default to HYBRID (safest for complex/ambiguous queries)
         return QueryMode.HYBRID, query
 

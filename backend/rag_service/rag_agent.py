@@ -450,19 +450,28 @@ def _get_graphrag_context(query: str) -> str:
 
     try:
         import asyncio
+        import concurrent.futures
 
         logger.debug(f"[GraphRAG Query] Initializing GraphRAG for query: '{query[:100]}...'")
         graphrag = GraphRAG()
 
-        # Run async query in sync context
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
+        # Helper function to run the async query
+        async def _run_query():
+            return await graphrag.query(query)
 
-        logger.debug("[GraphRAG Query] Executing graph query...")
-        context = loop.run_until_complete(graphrag.query(query))
+        # Run async query in sync context - handle case when called from async context (FastAPI)
+        try:
+            # Check if we're already in an event loop (e.g., FastAPI request)
+            asyncio.get_running_loop()
+            # We're in an existing event loop - run in a new thread with its own event loop
+            logger.debug("[GraphRAG Query] Running in thread pool (existing event loop detected)")
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, _run_query())
+                context = future.result()
+        except RuntimeError:
+            # No running event loop - use asyncio.run directly
+            logger.debug("[GraphRAG Query] Running with asyncio.run (no existing event loop)")
+            context = asyncio.run(_run_query())
 
         logger.debug(
             f"[GraphRAG Query] Raw result - mode={context.mode.value}, "

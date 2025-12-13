@@ -79,6 +79,55 @@ class GraphRAG:
             logger.error(f"[GraphRAG Query] Failed to initialize Neo4j storage: {e}")
             raise
 
+    def _get_chunks_for_entities(self, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Retrieve source chunks from Qdrant for the given entities.
+
+        Entities have source_chunk_ids that link back to the original chunks
+        in the vector database. This method retrieves those chunks to provide
+        the full text context for LLM response generation.
+
+        Args:
+            entities: List of entity dictionaries with source_chunk_ids
+
+        Returns:
+            List of chunk dictionaries with page_content and metadata
+        """
+        from ..vectorstore import get_chunks_by_ids
+
+        # Collect all unique source_chunk_ids from entities
+        chunk_ids = set()
+        for entity in entities:
+            source_chunk_ids = entity.get("source_chunk_ids", [])
+            if isinstance(source_chunk_ids, list):
+                chunk_ids.update(source_chunk_ids)
+            elif isinstance(source_chunk_ids, str):
+                # Handle case where it's stored as single string
+                chunk_ids.add(source_chunk_ids)
+
+        if not chunk_ids:
+            logger.debug("[GraphRAG Query] No source_chunk_ids found in entities")
+            return []
+
+        logger.debug(f"[GraphRAG Query] Retrieving {len(chunk_ids)} chunks for entities")
+
+        # Retrieve chunks from Qdrant
+        try:
+            docs = get_chunks_by_ids(list(chunk_ids))
+            chunks = [
+                {
+                    "page_content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "chunk_id": doc.metadata.get("chunk_id", ""),
+                }
+                for doc in docs
+            ]
+            logger.debug(f"[GraphRAG Query] Retrieved {len(chunks)} chunks from Qdrant")
+            return chunks
+        except Exception as e:
+            logger.warning(f"[GraphRAG Query] Error retrieving chunks: {e}")
+            return []
+
     async def query(
         self,
         query: str,
@@ -149,6 +198,7 @@ class GraphRAG:
         1. Extract entity names from query
         2. Find matching entities in Neo4j graph
         3. Get entity descriptions
+        4. Retrieve source chunks for context
         """
         # Extract potential entity names from query
         entity_names = extract_entity_names_from_query(query)
@@ -165,12 +215,17 @@ class GraphRAG:
             except Exception as e:
                 logger.warning(f"[GraphRAG Query] Error finding entity '{name}': {e}")
 
+        # Limit entities to top_k
+        entities = entities[:params.top_k]
         logger.debug(f"[GraphRAG Query] LOCAL mode - found {len(entities)} entities")
 
+        # Retrieve source chunks for the found entities
+        chunks = self._get_chunks_for_entities(entities)
+
         return GraphRAGContext(
-            entities=entities[:params.top_k],
+            entities=entities,
             relationships=[],
-            chunks=[],
+            chunks=chunks,
             mode=QueryMode.LOCAL,
             enhanced_query=query,
         )
@@ -184,6 +239,7 @@ class GraphRAG:
         1. Extract entity names from query
         2. Find matching entities and their relationships
         3. Get connected entities via graph traversal
+        4. Retrieve source chunks for context
         """
         # Extract potential entity names from query
         entity_names = extract_entity_names_from_query(query)
@@ -215,15 +271,22 @@ class GraphRAG:
             except Exception as e:
                 logger.warning(f"[GraphRAG Query] Error finding entity '{name}': {e}")
 
+        # Limit to top_k
+        entities = entities[:params.top_k]
+        relationships = relationships[:params.top_k]
+
         logger.debug(
             f"[GraphRAG Query] GLOBAL mode - found {len(entities)} entities, "
             f"{len(relationships)} relationships"
         )
 
+        # Retrieve source chunks for the found entities
+        chunks = self._get_chunks_for_entities(entities)
+
         return GraphRAGContext(
-            entities=entities[:params.top_k],
-            relationships=relationships[:params.top_k],
-            chunks=[],
+            entities=entities,
+            relationships=relationships,
+            chunks=chunks,
             mode=QueryMode.GLOBAL,
             enhanced_query=query,
         )
@@ -237,6 +300,7 @@ class GraphRAG:
         1. Find entities matching the query
         2. Get their relationships
         3. Traverse graph from matched entities to get neighbors
+        4. Retrieve source chunks for context
         """
         # Extract potential entity names from query
         entity_names = extract_entity_names_from_query(query)
@@ -279,15 +343,22 @@ class GraphRAG:
             except Exception as e:
                 logger.warning(f"[GraphRAG Query] Error in hybrid retrieval for '{name}': {e}")
 
+        # Limit to top_k
+        entities = entities[:params.top_k]
+        relationships = relationships[:params.top_k]
+
         logger.debug(
             f"[GraphRAG Query] HYBRID mode - found {len(entities)} entities, "
             f"{len(relationships)} relationships"
         )
 
+        # Retrieve source chunks for the found entities
+        chunks = self._get_chunks_for_entities(entities)
+
         return GraphRAGContext(
-            entities=entities[:params.top_k],
-            relationships=relationships[:params.top_k],
-            chunks=[],
+            entities=entities,
+            relationships=relationships,
+            chunks=chunks,
             mode=QueryMode.HYBRID,
             enhanced_query=query,
         )
@@ -340,8 +411,10 @@ class GraphRAG:
         if context.chunks:
             parts.append("\n## Related Content\n")
             for chunk in context.chunks[:5]:
-                content = chunk.get("content", "")[:500]
-                parts.append(f"{content}\n---\n")
+                # Use page_content (from Qdrant Document) or content as fallback
+                content = chunk.get("page_content", chunk.get("content", ""))
+                if content:
+                    parts.append(f"{content[:500]}\n---\n")
 
         return "".join(parts) if parts else ""
 

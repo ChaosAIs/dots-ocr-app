@@ -23,27 +23,50 @@ from ..graph_rag.base import BaseGraphStorage
 
 logger = logging.getLogger(__name__)
 
-# Store drivers per thread to handle different event loops
+# Store drivers per thread AND event loop to handle different event loops
 _thread_local = threading.local()
 
 
 def _get_neo4j_driver():
     """
-    Get or create Neo4j driver for current thread.
+    Get or create Neo4j driver for current thread and event loop.
 
     Each thread gets its own driver instance to avoid event loop conflicts
-    when async code runs in different threads.
+    when async code runs in different threads. Additionally, we track the
+    event loop ID to recreate the driver if the event loop changes (which
+    happens when asyncio.run() is called multiple times in the same thread).
     """
-    # Check if we have a driver for this thread
-    if not hasattr(_thread_local, 'neo4j_driver') or _thread_local.neo4j_driver is None:
-        from neo4j import AsyncGraphDatabase
+    from neo4j import AsyncGraphDatabase
+
+    # Get current event loop ID
+    try:
+        current_loop = asyncio.get_running_loop()
+        current_loop_id = id(current_loop)
+    except RuntimeError:
+        # No running loop - will be created by asyncio.run()
+        current_loop_id = None
+
+    # Check if we have a driver for this thread with the same event loop
+    has_driver = hasattr(_thread_local, 'neo4j_driver') and _thread_local.neo4j_driver is not None
+    same_loop = hasattr(_thread_local, 'event_loop_id') and _thread_local.event_loop_id == current_loop_id
+
+    if not has_driver or not same_loop:
+        # Close old driver if exists (to avoid connection leaks)
+        if has_driver:
+            try:
+                # Note: close() is async, but we can't await here
+                # The driver will be garbage collected
+                logger.debug(f"Recreating Neo4j driver for new event loop (thread: {threading.current_thread().name})")
+            except Exception:
+                pass
 
         uri = os.getenv("NEO4J_URI", "bolt://localhost:7687")
         user = os.getenv("NEO4J_USER", "neo4j")
         password = os.getenv("NEO4J_PASSWORD", "")
 
         _thread_local.neo4j_driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
-        logger.info(f"Connected to Neo4j at {uri} (thread: {threading.current_thread().name})")
+        _thread_local.event_loop_id = current_loop_id
+        logger.info(f"Connected to Neo4j at {uri} (thread: {threading.current_thread().name}, loop_id: {current_loop_id})")
 
     return _thread_local.neo4j_driver
 
