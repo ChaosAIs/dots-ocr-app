@@ -55,7 +55,7 @@ from rag_service.indexer import (
     reindex_document,
     index_document_now,
 )
-from rag_service.vectorstore import delete_documents_by_source, delete_file_summary_by_source, delete_chunk_summaries_by_source, get_collection_info, clear_collection, is_document_indexed
+from rag_service.vectorstore import delete_documents_by_source, delete_file_summary_by_source, get_collection_info, clear_collection, is_document_indexed
 
 # Import GraphRAG for source-level deletion
 try:
@@ -1676,7 +1676,6 @@ async def delete_document(filename: str):
         try:
             delete_documents_by_source(file_name_without_ext)
             delete_file_summary_by_source(file_name_without_ext)
-            delete_chunk_summaries_by_source(file_name_without_ext)
             logger.info(f"Deleted vector embeddings for: {file_name_without_ext}")
         except Exception as e:
             error_msg = f"Failed to delete vector embeddings: {str(e)}"

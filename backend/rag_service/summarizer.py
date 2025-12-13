@@ -1,6 +1,6 @@
 """
 LLM-based summarization for RAG chunks and documents.
-Uses Ollama with a fast model for generating summaries.
+Uses the configured LLM backend (Ollama or vLLM) for generating summaries.
 """
 
 import os
@@ -10,33 +10,11 @@ import logging
 from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 
-from langchain_ollama import ChatOllama
 from langchain_core.messages import HumanMessage
 
+from .llm_service import get_llm_service
+
 logger = logging.getLogger(__name__)
-
-# RAG Ollama configuration (Docker: ollama-llm, Port: 11434)
-# Used for: Summarization (same server as RAG agent)
-RAG_OLLAMA_HOST = os.getenv("RAG_OLLAMA_HOST", os.getenv("OLLAMA_HOST", "localhost"))
-RAG_OLLAMA_PORT = os.getenv("RAG_OLLAMA_PORT", os.getenv("OLLAMA_PORT", "11434"))
-# Use RAG_OLLAMA_QUERY_MODEL for summarization (same model used for query analysis)
-RAG_OLLAMA_SUMMARY_MODEL = os.getenv("RAG_OLLAMA_QUERY_MODEL", os.getenv("OLLAMA_QUERY_MODEL",
-                                     os.getenv("RAG_OLLAMA_MODEL", os.getenv("OLLAMA_MODEL", "qwen2.5:latest"))))
-RAG_OLLAMA_BASE_URL = f"http://{RAG_OLLAMA_HOST}:{RAG_OLLAMA_PORT}"
-
-# Legacy aliases for backward compatibility
-OLLAMA_HOST = RAG_OLLAMA_HOST
-OLLAMA_PORT = RAG_OLLAMA_PORT
-OLLAMA_SUMMARY_MODEL = RAG_OLLAMA_SUMMARY_MODEL
-OLLAMA_BASE_URL = RAG_OLLAMA_BASE_URL
-
-
-@dataclass
-class ChunkSummary:
-    """Summary of a single chunk."""
-    chunk_index: int
-    summary: str
-    heading_path: str = ""
 
 
 @dataclass
@@ -51,7 +29,8 @@ class FileSummaryWithScopes:
 # Constants for map-reduce summarization
 MAX_DIRECT_SUMMARY_SIZE = 8000  # Characters - files larger than this use map-reduce
 MAX_SECTION_SIZE = 4000  # Characters per section for map-reduce
-MAX_SECTIONS_TO_PROCESS = 20  # Maximum sections to process in map-reduce
+MAX_SECTIONS_TO_PROCESS = 50  # Maximum sections to process in map-reduce
+MAX_RECURSION_DEPTH = 5  # Maximum recursion depth for nested summarization
 
 
 # Prompt for generating file summary with scopes (for direct summarization)
@@ -80,7 +59,7 @@ Output ONLY valid JSON, nothing else."""
 
 
 # Prompt for summarizing a section (for map-reduce)
-SECTION_SUMMARY_PROMPT = """Summarize this section of a document in 100-150 words.
+SECTION_SUMMARY_PROMPT = """Summarize this section of a document in 100-250 words.
 Focus on key concepts, procedures, and important details.
 
 Section content:
@@ -114,162 +93,37 @@ Requirements:
 Output ONLY valid JSON, nothing else."""
 
 
-CHUNK_SUMMARY_PROMPT = """Summarize the following text in no more than {max_words} words.
-Focus on the key information, main topics, and important concepts.
-Output ONLY the summary, nothing else.
-
-Text:
-{content}"""
-
-FILE_SUMMARY_PROMPT = """Based on the following chunk summaries from a document, generate a comprehensive file summary.
-
-Document filename: {filename}
-
-Chunk summaries:
-{chunk_summaries}
-
-Generate a summary that includes:
-1. Main topic/title of the document
-2. Category of the document (e.g., Technical Documentation, Research Paper, Legal Document, Financial Report, User Manual, Policy Document, Meeting Notes, Tutorial, Reference Guide, etc.)
-3. Purpose of the document
-4. Key themes and sections covered
-5. Brief description (2-3 sentences)
-
-Format your response as:
-Title: [document title or main topic]
-Category: [document category]
-Purpose: [purpose of the document]
-Topics: [comma-separated list of main topics]
-Description: [2-3 sentence description]
-
-Output ONLY the formatted summary, nothing else."""
-
-
 def _create_summary_llm():
-    """Create the Ollama LLM instance for summarization."""
-    return ChatOllama(
-        base_url=OLLAMA_BASE_URL,
-        model=OLLAMA_SUMMARY_MODEL,
+    """Create the LLM instance for section summarization using configured backend."""
+    llm_service = get_llm_service()
+    return llm_service.get_query_model(
         temperature=0.1,  # Low temperature for consistent summaries
         num_ctx=4096,
         num_predict=256,  # Limit output tokens
     )
 
 
-def summarize_chunk(content: str, max_words: int = 200) -> str:
-    """
-    Summarize a single chunk of text.
-
-    Args:
-        content: The text content to summarize.
-        max_words: Maximum words for the summary.
-
-    Returns:
-        Summary string.
-    """
-    if not content or len(content.strip()) < 50:
-        # Skip very short content
-        return content.strip()[:200] if content else ""
-
-    # Adjust max_words based on content length
-    content_words = len(content.split())
-    if content_words < max_words:
-        # Content is already short, just return it trimmed
-        return content.strip()[:500]
-
-    try:
-        llm = _create_summary_llm()
-        prompt = CHUNK_SUMMARY_PROMPT.format(
-            max_words=max_words,
-            content=content[:4000]  # Limit input size
-        )
-        response = llm.invoke([HumanMessage(content=prompt)])
-        summary = response.content.strip()
-
-        # Clean up any thinking tags if present
-        if "</think>" in summary:
-            summary = summary.split("</think>")[-1].strip()
-
-        return summary[:500]  # Safety limit
-
-    except Exception as e:
-        logger.warning(f"Chunk summarization failed: {e}")
-        # Fallback: return first 200 chars
-        return content.strip()[:200]
-
-
-def generate_file_summary(
-    filename: str,
-    chunk_summaries: List[ChunkSummary]
-) -> str:
-    """
-    Generate a comprehensive file summary from chunk summaries.
-
-    Args:
-        filename: The document filename.
-        chunk_summaries: List of ChunkSummary objects.
-
-    Returns:
-        Formatted file summary string.
-    """
-    if not chunk_summaries:
-        return f"Document: {filename}\nNo content available for summarization."
-
-    try:
-        llm = _create_summary_llm()
-
-        # Format chunk summaries for the prompt
-        formatted_summaries = []
-        for cs in chunk_summaries:
-            if cs.heading_path:
-                formatted_summaries.append(f"[{cs.heading_path}]: {cs.summary}")
-            else:
-                formatted_summaries.append(f"[Chunk {cs.chunk_index}]: {cs.summary}")
-
-        prompt = FILE_SUMMARY_PROMPT.format(
-            filename=filename,
-            chunk_summaries="\n".join(formatted_summaries)
-        )
-        response = llm.invoke([HumanMessage(content=prompt)])
-        summary = response.content.strip()
-
-        # Clean up any thinking tags if present
-        if "</think>" in summary:
-            summary = summary.split("</think>")[-1].strip()
-
-        return summary
-
-    except Exception as e:
-        logger.error(f"File summary generation failed for {filename}: {e}")
-        # Fallback: combine first few chunk summaries
-        fallback_parts = [f"Document: {filename}"]
-        for cs in chunk_summaries[:5]:
-            fallback_parts.append(cs.summary)
-        return "\n".join(fallback_parts)
-
-
-
-
 def _create_summary_llm_extended():
-    """Create the Ollama LLM instance for extended summarization (larger output)."""
-    return ChatOllama(
-        base_url=OLLAMA_BASE_URL,
-        model=OLLAMA_SUMMARY_MODEL,
+    """Create the LLM instance for extended summarization (larger output) using configured backend."""
+    llm_service = get_llm_service()
+    return llm_service.get_query_model(
         temperature=0.1,
         num_ctx=8192,  # Larger context for file summaries
         num_predict=1024,  # Allow longer output for 500 word summaries
     )
 
 
-def _split_by_headers(content: str) -> List[str]:
+def _split_by_headers(content: str, max_section_size: int = MAX_SECTION_SIZE) -> List[str]:
     """
     Split content by markdown headers for map-reduce summarization.
+    Recursively splits sections that are still too large.
 
     Args:
         content: The markdown content to split.
+        max_section_size: Maximum allowed size for each section.
 
     Returns:
-        List of content sections.
+        List of content sections, each within max_section_size.
     """
     # Pattern to match markdown headers (# to ######)
     header_pattern = re.compile(r'^(#{1,6})\s+(.+)$', re.MULTILINE)
@@ -294,9 +148,110 @@ def _split_by_headers(content: str) -> List[str]:
 
     # If no headers found or only one section, split by size
     if len(sections) <= 1:
-        sections = _split_by_size(content, MAX_SECTION_SIZE)
+        sections = _split_by_size(content, max_section_size)
+    else:
+        # Recursively split any sections that are still too large
+        final_sections = []
+        for section in sections:
+            if len(section) > max_section_size:
+                # Try to split by sub-headers first, then by size
+                sub_sections = _split_large_section(section, max_section_size)
+                final_sections.extend(sub_sections)
+            else:
+                final_sections.append(section)
+        sections = final_sections
 
     return sections[:MAX_SECTIONS_TO_PROCESS]
+
+
+def _split_large_section(content: str, max_section_size: int) -> List[str]:
+    """
+    Recursively split a large section into smaller chunks.
+    First tries to split by sub-headers (##, ###, etc.), then by paragraphs, then by size.
+
+    Args:
+        content: The section content to split.
+        max_section_size: Maximum allowed size for each section.
+
+    Returns:
+        List of smaller sections.
+    """
+    if len(content) <= max_section_size:
+        return [content]
+
+    # Try to find sub-headers to split on
+    header_pattern = re.compile(r'^(#{2,6})\s+(.+)$', re.MULTILINE)
+    header_matches = list(header_pattern.finditer(content))
+
+    if header_matches:
+        # Split by sub-headers
+        sections = []
+        last_end = 0
+        for match in header_matches:
+            if match.start() > last_end:
+                section_content = content[last_end:match.start()].strip()
+                if section_content and len(section_content) > 100:
+                    sections.append(section_content)
+            last_end = match.start()
+
+        # Add remaining content
+        if last_end < len(content):
+            section_content = content[last_end:].strip()
+            if section_content and len(section_content) > 100:
+                sections.append(section_content)
+
+        if len(sections) > 1:
+            # Recursively split any sections that are still too large
+            final_sections = []
+            for section in sections:
+                if len(section) > max_section_size:
+                    sub_sections = _split_large_section(section, max_section_size)
+                    final_sections.extend(sub_sections)
+                else:
+                    final_sections.append(section)
+            return final_sections
+
+    # Try to split by paragraph breaks (double newlines)
+    paragraphs = content.split('\n\n')
+    if len(paragraphs) > 1:
+        # Group paragraphs into chunks that fit max_section_size
+        sections = []
+        current_chunk = []
+        current_size = 0
+
+        for para in paragraphs:
+            para = para.strip()
+            if not para:
+                continue
+
+            para_size = len(para) + 2  # +2 for the \n\n separator
+
+            if current_size + para_size > max_section_size and current_chunk:
+                # Save current chunk and start new one
+                sections.append('\n\n'.join(current_chunk))
+                current_chunk = [para]
+                current_size = para_size
+            else:
+                current_chunk.append(para)
+                current_size += para_size
+
+        if current_chunk:
+            sections.append('\n\n'.join(current_chunk))
+
+        if len(sections) > 1:
+            # Check if any section is still too large and split further
+            final_sections = []
+            for section in sections:
+                if len(section) > max_section_size:
+                    # Last resort: split by size
+                    sub_sections = _split_by_size(section, max_section_size)
+                    final_sections.extend(sub_sections)
+                else:
+                    final_sections.append(section)
+            return final_sections
+
+    # Fallback: split by size
+    return _split_by_size(content, max_section_size)
 
 
 def _split_by_size(content: str, max_size: int) -> List[str]:
@@ -370,18 +325,77 @@ def _parse_json_response(response: str) -> Dict[str, Any]:
         return {}
 
 
-def _summarize_section(content: str) -> str:
+def _summarize_section(content: str, depth: int = 0) -> str:
     """
     Summarize a single section for map-reduce.
+    For very large sections, recursively splits and summarizes sub-sections first.
 
     Args:
         content: The section content.
+        depth: Current recursion depth (to prevent infinite recursion).
 
     Returns:
         Section summary string.
     """
-    if len(content) < 200:
+    content_len = len(content)
+    logger.debug(f"[SECTION] Processing section: {content_len} chars (depth={depth})")
+
+    if content_len < 200:
+        logger.debug(f"[SECTION] Short section, returning as-is: '{content[:100]}...'")
         return content
+
+    # If section is too large for direct summarization, use recursive map-reduce
+    if content_len > MAX_SECTION_SIZE and depth < MAX_RECURSION_DEPTH:
+        logger.info(f"[SECTION] Section too large ({content_len} chars), using recursive summarization (depth={depth})")
+
+        # Split the large section into smaller sub-sections
+        sub_sections = _split_large_section(content, MAX_SECTION_SIZE)
+        logger.info(f"[SECTION] Split into {len(sub_sections)} sub-sections")
+
+        if len(sub_sections) > 1:
+            # Recursively summarize each sub-section
+            sub_summaries = []
+            for i, sub_section in enumerate(sub_sections):
+                logger.debug(f"[SECTION] Processing sub-section {i+1}/{len(sub_sections)} ({len(sub_section)} chars)")
+                sub_summary = _summarize_section(sub_section, depth + 1)
+                sub_summaries.append(sub_summary)
+
+            # Combine sub-summaries
+            combined = " ".join(sub_summaries)
+
+            # If combined summaries are still too large, summarize them again
+            if len(combined) > MAX_SECTION_SIZE:
+                logger.info(f"[SECTION] Combined sub-summaries still large ({len(combined)} chars), summarizing again")
+                return _summarize_section(combined, depth + 1)
+
+            # If combined summaries are reasonable, summarize them into a single summary
+            logger.info(f"[SECTION] Combining {len(sub_summaries)} sub-summaries ({len(combined)} chars)")
+            try:
+                llm = _create_summary_llm()
+                prompt = f"""Synthesize these sub-section summaries into a single coherent summary (100-250 words):
+
+{combined}
+
+Output ONLY the summary, nothing else."""
+                response = llm.invoke([HumanMessage(content=prompt)])
+                summary = response.content.strip()
+
+                # Clean up thinking tags
+                if "</think>" in summary:
+                    summary = summary.split("</think>")[-1].strip()
+
+                summary = summary[:500]  # Safety limit
+                logger.info(f"[SECTION] Combined summary result ({len(summary)} chars): '{summary[:200]}...'")
+                return summary
+
+            except Exception as e:
+                logger.warning(f"[SECTION] Combining summaries failed: {e}")
+                # Fallback: return truncated combined summaries
+                return combined[:500]
+
+    # Direct summarization for sections within size limit
+    logger.info(f"[SECTION] Summarizing section: {content_len} chars")
+    logger.debug(f"[SECTION] Input text (first 500 chars): '{content[:500]}...'")
 
     try:
         llm = _create_summary_llm()
@@ -393,11 +407,15 @@ def _summarize_section(content: str) -> str:
         if "</think>" in summary:
             summary = summary.split("</think>")[-1].strip()
 
-        return summary[:500]  # Safety limit
+        summary = summary[:500]  # Safety limit
+        logger.info(f"[SECTION] Summary result ({len(summary)} chars): '{summary[:200]}...'")
+        return summary
 
     except Exception as e:
-        logger.warning(f"Section summarization failed: {e}")
-        return content[:300]
+        logger.warning(f"[SECTION] Summarization failed: {e}")
+        result = content[:300]
+        logger.debug(f"[SECTION] Fallback result: '{result[:100]}...'")
+        return result
 
 
 def generate_file_summary_with_scopes(
@@ -421,7 +439,11 @@ def generate_file_summary_with_scopes(
     Returns:
         FileSummaryWithScopes object with summary, scopes, content_type, complexity.
     """
+    content_len = len(content) if content else 0
+    logger.info(f"[FILE_SUMMARY] Starting summary generation for '{filename}': {content_len} chars")
+
     if not content or len(content.strip()) < 50:
+        logger.warning(f"[FILE_SUMMARY] No content or too short for '{filename}', skipping")
         return FileSummaryWithScopes(
             summary=f"Document: {filename}\nNo content available for summarization.",
             scopes=[],
@@ -429,42 +451,52 @@ def generate_file_summary_with_scopes(
             complexity="basic",
         )
 
+    logger.debug(f"[FILE_SUMMARY] Content preview (first 1000 chars): '{content[:1000]}...'")
+
     try:
         llm = _create_summary_llm_extended()
 
         # Decide between direct summarization and map-reduce
         if len(content) <= MAX_DIRECT_SUMMARY_SIZE:
             # Direct summarization for smaller files
-            logger.info(f"Using direct summarization for {filename} ({len(content)} chars)")
+            logger.info(f"[FILE_SUMMARY] Using DIRECT summarization for {filename} ({len(content)} chars)")
             prompt = FILE_SUMMARY_WITH_SCOPES_PROMPT.format(
                 filename=filename,
                 content=content
             )
+            logger.debug(f"[FILE_SUMMARY] Sending prompt to LLM ({len(prompt)} chars)")
             response = llm.invoke([HumanMessage(content=prompt)])
+            logger.debug(f"[FILE_SUMMARY] LLM raw response: '{response.content[:500]}...'")
             result = _parse_json_response(response.content)
 
         else:
             # Map-reduce for larger files
-            logger.info(f"Using map-reduce summarization for {filename} ({len(content)} chars)")
+            logger.info(f"[FILE_SUMMARY] Using MAP-REDUCE summarization for {filename} ({len(content)} chars)")
 
             # Step 1: Split content into sections
             sections = _split_by_headers(content)
-            logger.info(f"Split into {len(sections)} sections")
+            logger.info(f"[FILE_SUMMARY] Split into {len(sections)} sections")
+            for i, section in enumerate(sections):
+                logger.debug(f"[FILE_SUMMARY] Section {i+1} size: {len(section)} chars, preview: '{section[:200]}...'")
 
             # Step 2: Summarize each section
             section_summaries = []
             for i, section in enumerate(sections):
+                logger.info(f"[FILE_SUMMARY] Processing section {i + 1}/{len(sections)} ({len(section)} chars)")
                 summary = _summarize_section(section)
                 section_summaries.append(f"[Section {i + 1}]: {summary}")
-                logger.debug(f"Summarized section {i + 1}/{len(sections)}")
+                logger.info(f"[FILE_SUMMARY] Section {i + 1} summary: '{summary[:150]}...'")
 
             # Step 3: Combine section summaries
             combined_summaries = "\n\n".join(section_summaries)
+            logger.debug(f"[FILE_SUMMARY] Combined summaries ({len(combined_summaries)} chars): '{combined_summaries[:500]}...'")
             prompt = COMBINE_SUMMARIES_PROMPT.format(
                 filename=filename,
                 section_summaries=combined_summaries
             )
+            logger.debug(f"[FILE_SUMMARY] Sending combine prompt to LLM ({len(prompt)} chars)")
             response = llm.invoke([HumanMessage(content=prompt)])
+            logger.debug(f"[FILE_SUMMARY] LLM raw response: '{response.content[:500]}...'")
             result = _parse_json_response(response.content)
 
         # Extract and validate fields
@@ -494,9 +526,11 @@ def generate_file_summary_with_scopes(
             complexity = "intermediate"
 
         logger.info(
-            f"Generated summary with scopes for {filename}: "
+            f"[FILE_SUMMARY] Completed for '{filename}': "
             f"{len(summary)} chars, {len(scopes)} scopes, type={content_type}, complexity={complexity}"
         )
+        logger.debug(f"[FILE_SUMMARY] Final summary: '{summary[:500]}...'")
+        logger.debug(f"[FILE_SUMMARY] Scopes: {scopes}")
 
         return FileSummaryWithScopes(
             summary=summary,
@@ -506,7 +540,7 @@ def generate_file_summary_with_scopes(
         )
 
     except Exception as e:
-        logger.error(f"File summary with scopes generation failed for {filename}: {e}")
+        logger.error(f"[FILE_SUMMARY] Generation failed for '{filename}': {e}")
         # Fallback: basic summary without scopes
         return FileSummaryWithScopes(
             summary=f"Document: {filename}\nError generating summary: {str(e)}",

@@ -18,7 +18,6 @@ from .vectorstore import (
     get_retriever_with_sources,
     search_file_summaries,
     search_file_summaries_with_scopes,
-    search_chunk_summaries,
     get_chunks_by_ids,
 )
 from .llm_service import get_llm_service
@@ -406,57 +405,6 @@ def _find_relevant_files(query: str, k: int = 5) -> List[str]:
 
     except Exception as e:
         logger.warning(f"Error searching file summaries: {e}")
-        return []
-
-
-def _find_relevant_chunks_from_summaries(
-    query: str,
-    source_names: List[str] = None,
-    k: int = 15,
-) -> List[str]:
-    """
-    Find relevant chunks by searching chunk summaries.
-
-    Args:
-        query: The search query.
-        source_names: Optional list of source names to filter.
-        k: Maximum number of chunk summaries to return.
-
-    Returns:
-        List of chunk_ids that are relevant to the query.
-    """
-    try:
-        # Search chunk summaries
-        chunk_summary_docs = search_chunk_summaries(query, k=k, source_names=source_names)
-
-        if not chunk_summary_docs:
-            logger.info("No chunk summaries found")
-            return []
-
-        # Extract unique chunk_ids from the summary results
-        # Each summary may cover multiple chunks (combined small chunks)
-        chunk_ids = []
-        seen_ids = set()
-
-        for doc in chunk_summary_docs:
-            # Support both list format (new) and single string format (legacy)
-            doc_chunk_ids = doc.metadata.get("chunk_ids", [])
-            if not doc_chunk_ids:
-                # Fallback to single chunk_id for legacy data
-                single_id = doc.metadata.get("chunk_id", "")
-                if single_id:
-                    doc_chunk_ids = [single_id]
-
-            for chunk_id in doc_chunk_ids:
-                if chunk_id and chunk_id not in seen_ids:
-                    chunk_ids.append(chunk_id)
-                    seen_ids.add(chunk_id)
-
-        logger.info(f"Found {len(chunk_ids)} relevant chunks from chunk summaries")
-        return chunk_ids
-
-    except Exception as e:
-        logger.warning(f"Error searching chunk summaries: {e}")
         return []
 
 

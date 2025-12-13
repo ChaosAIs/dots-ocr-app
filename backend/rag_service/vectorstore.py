@@ -18,12 +18,10 @@ logger = logging.getLogger(__name__)
 # Collection names for document embeddings
 COLLECTION_NAME = "dots_ocr_documents"
 FILE_SUMMARY_COLLECTION_NAME = "dots_ocr_file_summaries"
-CHUNK_SUMMARY_COLLECTION_NAME = "dots_ocr_chunk_summaries"
 
 # Singleton instances
 _vectorstore: Optional[QdrantVectorStore] = None
 _file_summary_vectorstore: Optional[QdrantVectorStore] = None
-_chunk_summary_vectorstore: Optional[QdrantVectorStore] = None
 _embeddings: Optional[LocalQwen3Embedding] = None
 _client: Optional[QdrantClient] = None
 
@@ -147,57 +145,6 @@ def get_file_summary_vectorstore() -> QdrantVectorStore:
         logger.info("File summary vectorstore initialized")
 
     return _file_summary_vectorstore
-
-
-def ensure_chunk_summary_collection_exists(client: QdrantClient, embedding_dim: int = 2560):
-    """
-    Ensure the chunk summary Qdrant collection exists, create if not.
-
-    Args:
-        client: The Qdrant client.
-        embedding_dim: Dimension of the embedding vectors.
-    """
-    collections = client.get_collections().collections
-    collection_names = [c.name for c in collections]
-
-    if CHUNK_SUMMARY_COLLECTION_NAME not in collection_names:
-        logger.info(f"Creating collection: {CHUNK_SUMMARY_COLLECTION_NAME}")
-        client.create_collection(
-            collection_name=CHUNK_SUMMARY_COLLECTION_NAME,
-            vectors_config=models.VectorParams(
-                size=embedding_dim,
-                distance=models.Distance.COSINE,
-            ),
-        )
-        logger.info(f"Collection {CHUNK_SUMMARY_COLLECTION_NAME} created successfully")
-    else:
-        logger.debug(f"Collection {CHUNK_SUMMARY_COLLECTION_NAME} already exists")
-
-
-def get_chunk_summary_vectorstore() -> QdrantVectorStore:
-    """
-    Get or create the chunk summary Qdrant vectorstore instance.
-
-    Returns:
-        Configured QdrantVectorStore instance for chunk summaries.
-    """
-    global _chunk_summary_vectorstore
-
-    if _chunk_summary_vectorstore is None:
-        client = get_qdrant_client()
-        embeddings = get_embeddings()
-
-        # Ensure collection exists
-        ensure_chunk_summary_collection_exists(client)
-
-        _chunk_summary_vectorstore = QdrantVectorStore(
-            client=client,
-            collection_name=CHUNK_SUMMARY_COLLECTION_NAME,
-            embedding=embeddings,
-        )
-        logger.info("Chunk summary vectorstore initialized")
-
-    return _chunk_summary_vectorstore
 
 
 def add_file_summary(source_name: str, file_path: str, summary: str) -> None:
@@ -445,148 +392,6 @@ def get_all_file_summaries() -> List[Document]:
     except Exception as e:
         logger.error(f"Error getting all file summaries: {e}")
         return []
-
-
-def add_chunk_summaries(
-    source_name: str,
-    file_path: str,
-    chunk_summaries: List[dict],
-) -> None:
-    """
-    Add chunk summaries to the chunk summary collection.
-
-    Args:
-        source_name: The document source name.
-        file_path: Path to the original file.
-        chunk_summaries: List of dicts with keys:
-            - chunk_indices: List[int] - indices of chunks covered by this summary
-            - chunk_ids: List[str] - IDs of chunks covered by this summary
-            - summary: str - the summary text
-            - heading_path: str - combined heading path
-    """
-    try:
-        vectorstore = get_chunk_summary_vectorstore()
-        docs = []
-        for cs in chunk_summaries:
-            # Support both single chunk_id (legacy) and multiple chunk_ids (new)
-            chunk_ids = cs.get("chunk_ids", [])
-            if not chunk_ids and cs.get("chunk_id"):
-                chunk_ids = [cs["chunk_id"]]
-
-            chunk_indices = cs.get("chunk_indices", [])
-            if not chunk_indices and "chunk_index" in cs:
-                chunk_indices = [cs["chunk_index"]]
-
-            doc = Document(
-                page_content=cs["summary"],
-                metadata={
-                    "source": source_name,
-                    "file_path": file_path,
-                    "chunk_indices": chunk_indices,
-                    "heading_path": cs.get("heading_path", ""),
-                    "chunk_ids": chunk_ids,
-                    "type": "chunk_summary",
-                }
-            )
-            docs.append(doc)
-        if docs:
-            vectorstore.add_documents(docs)
-            logger.info(f"Added {len(docs)} chunk summaries for source: {source_name}")
-    except Exception as e:
-        logger.error(f"Error adding chunk summaries for {source_name}: {e}")
-
-
-def search_chunk_summaries(
-    query: str,
-    k: int = 10,
-    source_names: List[str] = None,
-    score_threshold: float = 0.25,
-) -> List[Document]:
-    """
-    Search chunk summaries to find relevant chunks.
-
-    Uses similarity_search_with_score to filter results by relevance threshold.
-
-    Args:
-        query: The search query.
-        k: Number of results to return.
-        source_names: Optional list of source names to filter results.
-        score_threshold: Minimum similarity score (0-1) to include a chunk.
-                        Default 0.25 (slightly lower than file summaries).
-
-    Returns:
-        List of Document objects with chunk summaries that meet the score threshold.
-    """
-    try:
-        vectorstore = get_chunk_summary_vectorstore()
-
-        if source_names and len(source_names) > 0:
-            # Search with source filter
-            filter_condition = models.Filter(
-                should=[
-                    models.FieldCondition(
-                        key="metadata.source",
-                        match=models.MatchValue(value=source_name),
-                    )
-                    for source_name in source_names
-                ]
-            )
-            docs_with_scores = vectorstore.similarity_search_with_score(
-                query, k=k, filter=filter_condition
-            )
-        else:
-            docs_with_scores = vectorstore.similarity_search_with_score(query, k=k)
-
-        # Filter by score threshold
-        filtered_docs = []
-        for doc, score in docs_with_scores:
-            source = doc.metadata.get("source", "unknown")
-            if score >= score_threshold:
-                filtered_docs.append(doc)
-            else:
-                logger.debug(
-                    f"Filtered out chunk from '{source}' with low score {score:.4f} < {score_threshold}"
-                )
-
-        return filtered_docs
-    except Exception as e:
-        logger.error(f"Error searching chunk summaries: {e}")
-        return []
-
-
-def delete_chunk_summaries_by_source(source_name: str) -> int:
-    """
-    Delete chunk summaries with a specific source from the chunk summary collection.
-
-    Args:
-        source_name: The source name to delete (e.g., document folder name).
-
-    Returns:
-        Number of deleted summaries.
-    """
-    client = get_qdrant_client()
-    try:
-        # Ensure collection exists before trying to delete
-        ensure_chunk_summary_collection_exists(client)
-
-        result = client.delete(
-            collection_name=CHUNK_SUMMARY_COLLECTION_NAME,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="metadata.source",
-                            match=models.MatchValue(value=source_name),
-                        )
-                    ]
-                )
-            ),
-        )
-        logger.info(f"Deleted chunk summaries with source '{source_name}'")
-        return result
-    except Exception as e:
-        logger.error(f"Error deleting chunk summaries for '{source_name}': {e}")
-        return 0
 
 
 def get_chunks_by_ids(chunk_ids: List[str], source_names: List[str] = None) -> List[Document]:

@@ -21,8 +21,6 @@ from .vectorstore import (
     add_file_summary,
     add_file_summary_with_scopes,
     delete_file_summary_by_source,
-    add_chunk_summaries,
-    delete_chunk_summaries_by_source,
 )
 from .summarizer import generate_file_summary_with_scopes
 
@@ -170,7 +168,7 @@ class MarkdownFileHandler(FileSystemEventHandler):
             source_name = Path(file_path).parent.name
             logger.info(f"Indexing new file with summaries: {file_path} (source: {source_name})")
 
-            # Step 1 & 2: Chunk the markdown file with LLM summarization
+            # Step 1 & 2: Chunk the markdown file with LLM summarization 
             result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
             if result.chunks:
@@ -469,7 +467,6 @@ def index_document_now(source_name: str, output_dir: str = None) -> int:
 
     # Delete existing summaries for this source first
     delete_file_summary_by_source(source_name)
-    delete_chunk_summaries_by_source(source_name)
 
     # Find all _nohf.md files in the document directory
     for filename in os.listdir(doc_dir):
@@ -571,9 +568,8 @@ def reindex_document(source_name: str, output_dir: str = None) -> int:
             logger.info(f"Starting background re-indexing for: {source_name}")
             # First delete all existing embeddings for this source
             delete_documents_by_source(source_name)
-            # Also delete existing summaries
+            # Also delete existing file summaries
             delete_file_summary_by_source(source_name)
-            delete_chunk_summaries_by_source(source_name)
             logger.info(f"Deleted existing embeddings and summaries for source: {source_name}")
 
             # Now index the document
