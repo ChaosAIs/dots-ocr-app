@@ -2,15 +2,17 @@
 Neo4j Graph Storage implementation for GraphRAG.
 
 Provides async graph operations for storing and querying:
-- Entity nodes with properties
-- Relationship edges between entities
+- Entity nodes with properties and embeddings
+- Relationship edges between entities with embeddings
 - Graph traversal queries
+- Vector similarity search using Neo4j native vector indexes
 
 Key Features:
 - Document-level deduplication: Entities are unique per (name, entity_type, source_doc)
 - Chunk-by-chunk saving: Entities/relationships saved immediately after each chunk
 - Multi-page PDF support: Same entity appearing in multiple pages is stored once
 - Thread-safe: Creates driver per event loop to avoid cross-loop issues
+- Vector embeddings: Semantic search using Neo4j 5.11+ native vector indexes
 """
 
 import os
@@ -22,6 +24,9 @@ import threading
 from ..graph_rag.base import BaseGraphStorage
 
 logger = logging.getLogger(__name__)
+
+# Vector embedding configuration
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "2560"))  # Qwen3-Embedding-4B dimension
 
 # Store drivers per thread AND event loop to handle different event loops
 _thread_local = threading.local()
@@ -165,9 +170,10 @@ class Neo4jStorage(BaseGraphStorage):
         source_doc: str,
         source_chunk_id: str,
         key_score: int = 50,
+        embedding: List[float] = None,
     ) -> str:
         """
-        Upsert an entity with document-level deduplication.
+        Upsert an entity with document-level deduplication and optional embedding.
 
         For multi-page PDFs, the same entity appearing in different pages
         will be merged into one node with combined descriptions.
@@ -179,6 +185,7 @@ class Neo4jStorage(BaseGraphStorage):
             source_doc: Source document ID (for deduplication)
             source_chunk_id: Source chunk ID
             key_score: Importance score
+            embedding: Optional embedding vector for semantic search
 
         Returns:
             Entity ID used in the graph
@@ -192,40 +199,79 @@ class Neo4jStorage(BaseGraphStorage):
         entity_id = hashlib.md5(entity_key.encode()).hexdigest()
 
         async with driver.session() as session:
-            # MERGE ensures deduplication, ON CREATE/ON MATCH handles updates
-            await session.run(
-                """
-                MERGE (e:Entity {id: $id, workspace_id: $workspace_id})
-                ON CREATE SET
-                    e.name = $name,
-                    e.entity_type = $entity_type,
-                    e.description = $description,
-                    e.source_doc = $source_doc,
-                    e.source_chunk_ids = [$source_chunk_id],
-                    e.key_score = $key_score
-                ON MATCH SET
-                    e.description = CASE
-                        WHEN e.description CONTAINS $description THEN e.description
-                        ELSE e.description + ' | ' + $description
-                    END,
-                    e.source_chunk_ids = CASE
-                        WHEN $source_chunk_id IN e.source_chunk_ids THEN e.source_chunk_ids
-                        ELSE e.source_chunk_ids + $source_chunk_id
-                    END,
-                    e.key_score = CASE
-                        WHEN $key_score > e.key_score THEN $key_score
-                        ELSE e.key_score
-                    END
-                """,
-                id=entity_id,
-                workspace_id=self.workspace_id,
-                name=name,
-                entity_type=entity_type,
-                description=description,
-                source_doc=source_doc,
-                source_chunk_id=source_chunk_id,
-                key_score=key_score,
-            )
+            if embedding:
+                # MERGE with embedding - store as property for vector index
+                await session.run(
+                    """
+                    MERGE (e:Entity {id: $id, workspace_id: $workspace_id})
+                    ON CREATE SET
+                        e.name = $name,
+                        e.entity_type = $entity_type,
+                        e.description = $description,
+                        e.source_doc = $source_doc,
+                        e.source_chunk_ids = [$source_chunk_id],
+                        e.key_score = $key_score,
+                        e.embedding = $embedding
+                    ON MATCH SET
+                        e.description = CASE
+                            WHEN e.description CONTAINS $description THEN e.description
+                            ELSE e.description + ' | ' + $description
+                        END,
+                        e.source_chunk_ids = CASE
+                            WHEN $source_chunk_id IN e.source_chunk_ids THEN e.source_chunk_ids
+                            ELSE e.source_chunk_ids + $source_chunk_id
+                        END,
+                        e.key_score = CASE
+                            WHEN $key_score > e.key_score THEN $key_score
+                            ELSE e.key_score
+                        END,
+                        e.embedding = $embedding
+                    """,
+                    id=entity_id,
+                    workspace_id=self.workspace_id,
+                    name=name,
+                    entity_type=entity_type,
+                    description=description,
+                    source_doc=source_doc,
+                    source_chunk_id=source_chunk_id,
+                    key_score=key_score,
+                    embedding=embedding,
+                )
+            else:
+                # MERGE without embedding
+                await session.run(
+                    """
+                    MERGE (e:Entity {id: $id, workspace_id: $workspace_id})
+                    ON CREATE SET
+                        e.name = $name,
+                        e.entity_type = $entity_type,
+                        e.description = $description,
+                        e.source_doc = $source_doc,
+                        e.source_chunk_ids = [$source_chunk_id],
+                        e.key_score = $key_score
+                    ON MATCH SET
+                        e.description = CASE
+                            WHEN e.description CONTAINS $description THEN e.description
+                            ELSE e.description + ' | ' + $description
+                        END,
+                        e.source_chunk_ids = CASE
+                            WHEN $source_chunk_id IN e.source_chunk_ids THEN e.source_chunk_ids
+                            ELSE e.source_chunk_ids + $source_chunk_id
+                        END,
+                        e.key_score = CASE
+                            WHEN $key_score > e.key_score THEN $key_score
+                            ELSE e.key_score
+                        END
+                    """,
+                    id=entity_id,
+                    workspace_id=self.workspace_id,
+                    name=name,
+                    entity_type=entity_type,
+                    description=description,
+                    source_doc=source_doc,
+                    source_chunk_id=source_chunk_id,
+                    key_score=key_score,
+                )
 
         logger.debug(f"Upserted entity: {name} ({entity_type}) for doc: {source_doc}")
         return entity_id
@@ -241,9 +287,10 @@ class Neo4jStorage(BaseGraphStorage):
         source_doc: str,
         source_chunk_id: str,
         weight: float = 1.0,
+        embedding: List[float] = None,
     ) -> None:
         """
-        Upsert a relationship with document-level deduplication.
+        Upsert a relationship with document-level deduplication and optional embedding.
 
         For multi-page PDFs, the same relationship appearing in different pages
         will be merged with combined descriptions and weights.
@@ -258,6 +305,7 @@ class Neo4jStorage(BaseGraphStorage):
             source_doc: Source document ID (for deduplication)
             source_chunk_id: Source chunk ID
             weight: Relationship weight
+            embedding: Optional embedding vector for semantic search
         """
         driver = self._get_driver()
 
@@ -269,45 +317,89 @@ class Neo4jStorage(BaseGraphStorage):
         tgt_id = hashlib.md5(tgt_key.encode()).hexdigest()
 
         async with driver.session() as session:
-            # Use MERGE to ensure deduplication of relationships
-            await session.run(
-                """
-                MATCH (src:Entity {id: $src_id, workspace_id: $workspace_id})
-                MATCH (tgt:Entity {id: $tgt_id, workspace_id: $workspace_id})
-                MERGE (src)-[r:RELATES_TO]->(tgt)
-                ON CREATE SET
-                    r.description = $description,
-                    r.keywords = $keywords,
-                    r.weight = $weight,
-                    r.source_doc = $source_doc,
-                    r.source_chunk_ids = [$source_chunk_id]
-                ON MATCH SET
-                    r.description = CASE
-                        WHEN r.description CONTAINS $description THEN r.description
-                        ELSE r.description + ' | ' + $description
-                    END,
-                    r.keywords = CASE
-                        WHEN r.keywords CONTAINS $keywords THEN r.keywords
-                        ELSE r.keywords + ', ' + $keywords
-                    END,
-                    r.weight = CASE
-                        WHEN $weight > r.weight THEN $weight
-                        ELSE r.weight
-                    END,
-                    r.source_chunk_ids = CASE
-                        WHEN $source_chunk_id IN r.source_chunk_ids THEN r.source_chunk_ids
-                        ELSE r.source_chunk_ids + $source_chunk_id
-                    END
-                """,
-                src_id=src_id,
-                tgt_id=tgt_id,
-                workspace_id=self.workspace_id,
-                description=description,
-                keywords=keywords,
-                weight=weight,
-                source_doc=source_doc,
-                source_chunk_id=source_chunk_id,
-            )
+            if embedding:
+                # Use MERGE with embedding
+                await session.run(
+                    """
+                    MATCH (src:Entity {id: $src_id, workspace_id: $workspace_id})
+                    MATCH (tgt:Entity {id: $tgt_id, workspace_id: $workspace_id})
+                    MERGE (src)-[r:RELATES_TO]->(tgt)
+                    ON CREATE SET
+                        r.description = $description,
+                        r.keywords = $keywords,
+                        r.weight = $weight,
+                        r.source_doc = $source_doc,
+                        r.source_chunk_ids = [$source_chunk_id],
+                        r.embedding = $embedding
+                    ON MATCH SET
+                        r.description = CASE
+                            WHEN r.description CONTAINS $description THEN r.description
+                            ELSE r.description + ' | ' + $description
+                        END,
+                        r.keywords = CASE
+                            WHEN r.keywords CONTAINS $keywords THEN r.keywords
+                            ELSE r.keywords + ', ' + $keywords
+                        END,
+                        r.weight = CASE
+                            WHEN $weight > r.weight THEN $weight
+                            ELSE r.weight
+                        END,
+                        r.source_chunk_ids = CASE
+                            WHEN $source_chunk_id IN r.source_chunk_ids THEN r.source_chunk_ids
+                            ELSE r.source_chunk_ids + $source_chunk_id
+                        END,
+                        r.embedding = $embedding
+                    """,
+                    src_id=src_id,
+                    tgt_id=tgt_id,
+                    workspace_id=self.workspace_id,
+                    description=description,
+                    keywords=keywords,
+                    weight=weight,
+                    source_doc=source_doc,
+                    source_chunk_id=source_chunk_id,
+                    embedding=embedding,
+                )
+            else:
+                # Use MERGE without embedding
+                await session.run(
+                    """
+                    MATCH (src:Entity {id: $src_id, workspace_id: $workspace_id})
+                    MATCH (tgt:Entity {id: $tgt_id, workspace_id: $workspace_id})
+                    MERGE (src)-[r:RELATES_TO]->(tgt)
+                    ON CREATE SET
+                        r.description = $description,
+                        r.keywords = $keywords,
+                        r.weight = $weight,
+                        r.source_doc = $source_doc,
+                        r.source_chunk_ids = [$source_chunk_id]
+                    ON MATCH SET
+                        r.description = CASE
+                            WHEN r.description CONTAINS $description THEN r.description
+                            ELSE r.description + ' | ' + $description
+                        END,
+                        r.keywords = CASE
+                            WHEN r.keywords CONTAINS $keywords THEN r.keywords
+                            ELSE r.keywords + ', ' + $keywords
+                        END,
+                        r.weight = CASE
+                            WHEN $weight > r.weight THEN $weight
+                            ELSE r.weight
+                        END,
+                        r.source_chunk_ids = CASE
+                            WHEN $source_chunk_id IN r.source_chunk_ids THEN r.source_chunk_ids
+                            ELSE r.source_chunk_ids + $source_chunk_id
+                        END
+                    """,
+                    src_id=src_id,
+                    tgt_id=tgt_id,
+                    workspace_id=self.workspace_id,
+                    description=description,
+                    keywords=keywords,
+                    weight=weight,
+                    source_doc=source_doc,
+                    source_chunk_id=source_chunk_id,
+                )
 
         logger.debug(f"Upserted relationship: {src_name} -> {tgt_name} for doc: {source_doc}")
 
@@ -530,7 +622,7 @@ class Neo4jStorage(BaseGraphStorage):
             return [], []
 
     async def ensure_indexes(self) -> None:
-        """Create indexes for better performance."""
+        """Create indexes for better performance including vector indexes."""
         driver = self._get_driver()
         async with driver.session() as session:
             # Create unique constraint on entity id + workspace
@@ -554,4 +646,181 @@ class Neo4jStorage(BaseGraphStorage):
                 )
             except Exception as e:
                 logger.debug(f"Index may already exist: {e}")
+
+            # Create vector index for entity embeddings (Neo4j 5.11+)
+            try:
+                await session.run(
+                    f"""
+                    CREATE VECTOR INDEX entity_embedding IF NOT EXISTS
+                    FOR (e:Entity) ON (e.embedding)
+                    OPTIONS {{
+                        indexConfig: {{
+                            `vector.dimensions`: {EMBEDDING_DIM},
+                            `vector.similarity_function`: 'cosine'
+                        }}
+                    }}
+                    """
+                )
+                logger.info(f"Created entity vector index (dim={EMBEDDING_DIM})")
+            except Exception as e:
+                logger.debug(f"Vector index may already exist or not supported: {e}")
+
+            # Create vector index for relationship embeddings (Neo4j 5.18+)
+            # Note: Relationship vector indexes require Neo4j 5.18+
+            try:
+                await session.run(
+                    f"""
+                    CREATE VECTOR INDEX relationship_embedding IF NOT EXISTS
+                    FOR ()-[r:RELATES_TO]-() ON (r.embedding)
+                    OPTIONS {{
+                        indexConfig: {{
+                            `vector.dimensions`: {EMBEDDING_DIM},
+                            `vector.similarity_function`: 'cosine'
+                        }}
+                    }}
+                    """
+                )
+                logger.info(f"Created relationship vector index (dim={EMBEDDING_DIM})")
+            except Exception as e:
+                logger.debug(f"Relationship vector index may not be supported: {e}")
+
+    async def vector_search_entities(
+        self,
+        query_embedding: List[float],
+        limit: int = 10,
+        min_score: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for entities using vector similarity.
+
+        Args:
+            query_embedding: Query embedding vector
+            limit: Maximum number of results
+            min_score: Minimum similarity score (0-1)
+
+        Returns:
+            List of entity dictionaries with similarity scores
+        """
+        driver = self._get_driver()
+        async with driver.session() as session:
+            try:
+                result = await session.run(
+                    """
+                    CALL db.index.vector.queryNodes('entity_embedding', $limit, $embedding)
+                    YIELD node, score
+                    WHERE node.workspace_id = $workspace_id AND score >= $min_score
+                    RETURN properties(node) as props, score
+                    ORDER BY score DESC
+                    """,
+                    embedding=query_embedding,
+                    limit=limit * 2,  # Fetch more to filter by workspace
+                    workspace_id=self.workspace_id,
+                    min_score=min_score,
+                )
+                entities = []
+                async for record in result:
+                    entity = dict(record["props"])
+                    entity["_score"] = record["score"]
+                    entities.append(entity)
+                    if len(entities) >= limit:
+                        break
+                return entities
+            except Exception as e:
+                logger.warning(f"Vector search failed (index may not exist): {e}")
+                return []
+
+    async def vector_search_relationships(
+        self,
+        query_embedding: List[float],
+        limit: int = 10,
+        min_score: float = 0.7,
+    ) -> List[Dict[str, Any]]:
+        """
+        Search for relationships using vector similarity.
+
+        Args:
+            query_embedding: Query embedding vector
+            limit: Maximum number of results
+            min_score: Minimum similarity score (0-1)
+
+        Returns:
+            List of relationship dictionaries with similarity scores
+        """
+        driver = self._get_driver()
+        async with driver.session() as session:
+            try:
+                result = await session.run(
+                    """
+                    CALL db.index.vector.queryRelationships('relationship_embedding', $limit, $embedding)
+                    YIELD relationship, score
+                    WHERE relationship.source_doc IS NOT NULL AND score >= $min_score
+                    WITH relationship, score,
+                         startNode(relationship) as src,
+                         endNode(relationship) as tgt
+                    WHERE src.workspace_id = $workspace_id
+                    RETURN properties(relationship) as props,
+                           src.name as src_name,
+                           tgt.name as tgt_name,
+                           src.entity_type as src_type,
+                           tgt.entity_type as tgt_type,
+                           score
+                    ORDER BY score DESC
+                    """,
+                    embedding=query_embedding,
+                    limit=limit * 2,
+                    workspace_id=self.workspace_id,
+                    min_score=min_score,
+                )
+                relationships = []
+                async for record in result:
+                    rel = dict(record["props"])
+                    rel["src_name"] = record["src_name"]
+                    rel["tgt_name"] = record["tgt_name"]
+                    rel["src_type"] = record["src_type"]
+                    rel["tgt_type"] = record["tgt_type"]
+                    rel["_score"] = record["score"]
+                    relationships.append(rel)
+                    if len(relationships) >= limit:
+                        break
+                return relationships
+            except Exception as e:
+                logger.warning(f"Relationship vector search failed: {e}")
+                return []
+
+    async def hybrid_search_entities(
+        self,
+        query_embedding: List[float],
+        text_query: str = None,
+        limit: int = 10,
+        min_score: float = 0.5,
+    ) -> List[Dict[str, Any]]:
+        """
+        Hybrid search combining vector similarity and text matching.
+
+        Args:
+            query_embedding: Query embedding vector
+            text_query: Optional text for name matching
+            limit: Maximum number of results
+            min_score: Minimum vector similarity score
+
+        Returns:
+            List of entity dictionaries with combined scores
+        """
+        # First get vector results
+        vector_results = await self.vector_search_entities(
+            query_embedding, limit=limit, min_score=min_score
+        )
+
+        # If text query provided, also get text matches
+        if text_query:
+            from .neo4j_storage import extract_entity_names_from_query
+            text_results = await self.get_nodes_by_name(text_query, limit=limit)
+            # Merge results, preferring vector scores
+            seen_ids = {r.get("id") for r in vector_results}
+            for entity in text_results:
+                if entity.get("id") not in seen_ids:
+                    entity["_score"] = 0.5  # Default score for text matches
+                    vector_results.append(entity)
+
+        return vector_results[:limit]
 

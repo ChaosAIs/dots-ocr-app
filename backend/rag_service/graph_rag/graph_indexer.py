@@ -5,11 +5,13 @@ This module integrates with the existing indexer to add GraphRAG capabilities:
 - Extract entities and relationships from document chunks using LLM
 - Store entities and relationships in Neo4j graph database
 - Build knowledge graph for graph-based retrieval
+- Generate embeddings for semantic entity/relationship search
 
 Key Features:
 - Chunk-by-chunk processing: Save to Neo4j after each chunk is processed
 - Document-level deduplication: Same entity in multi-page PDF stored once
 - Incremental saving: No data loss if processing fails mid-way
+- Vector embeddings: Semantic search using Neo4j native vector indexes
 """
 
 import os
@@ -23,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Feature flag
 GRAPH_RAG_ENABLED = os.getenv("GRAPH_RAG_ENABLED", "false").lower() == "true"
+GRAPH_RAG_EMBEDDINGS_ENABLED = os.getenv("GRAPH_RAG_EMBEDDINGS_ENABLED", "true").lower() == "true"
 
 
 class GraphRAGIndexer:
@@ -49,6 +52,50 @@ class GraphRAGIndexer:
         self.entity_extractor = entity_extractor or EntityExtractor()
         self._storage_initialized = False
         self._graph_storage = None
+        self._embedding_service = None
+        self._embeddings_enabled = GRAPH_RAG_EMBEDDINGS_ENABLED
+
+    async def _init_embedding_service(self):
+        """Initialize embedding service for entity/relationship embeddings."""
+        if self._embedding_service is not None:
+            return
+
+        if not self._embeddings_enabled:
+            logger.debug("[GraphRAG] Embeddings disabled, skipping embedding service init")
+            return
+
+        try:
+            from ..local_qwen_embedding import LocalQwen3Embedding
+            self._embedding_service = LocalQwen3Embedding()
+            logger.info("[GraphRAG] Embedding service initialized")
+        except Exception as e:
+            logger.warning(f"[GraphRAG] Failed to init embedding service: {e}")
+            self._embeddings_enabled = False
+
+    async def _generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for a list of texts.
+
+        Args:
+            texts: List of texts to embed
+
+        Returns:
+            List of embedding vectors (empty list if embeddings disabled)
+        """
+        if not self._embeddings_enabled or not texts:
+            return [None] * len(texts)
+
+        await self._init_embedding_service()
+
+        if not self._embedding_service:
+            return [None] * len(texts)
+
+        try:
+            embeddings = self._embedding_service.embed_documents(texts)
+            return embeddings
+        except Exception as e:
+            logger.warning(f"[GraphRAG] Failed to generate embeddings: {e}")
+            return [None] * len(texts)
 
     async def _init_storage(self):
         """Initialize Neo4j storage backend lazily."""
@@ -129,8 +176,19 @@ class GraphRAGIndexer:
                     logger.debug(f"[GraphRAG] No entities/relationships in chunk {chunk_id}")
                     continue
 
-                # Save entities to Neo4j immediately (with deduplication)
-                for entity in entities:
+                # Generate embeddings for entities (batch for efficiency)
+                entity_embeddings = []
+                if self._embeddings_enabled and entities:
+                    entity_texts = [
+                        f"{e.name}: {e.entity_type}. {e.description}" for e in entities
+                    ]
+                    entity_embeddings = await self._generate_embeddings(entity_texts)
+                else:
+                    entity_embeddings = [None] * len(entities)
+
+                # Save entities to Neo4j immediately (with deduplication and embeddings)
+                for idx, entity in enumerate(entities):
+                    embedding = entity_embeddings[idx] if idx < len(entity_embeddings) else None
                     await self._graph_storage.upsert_entity_for_document(
                         name=entity.name,
                         entity_type=entity.entity_type,
@@ -138,14 +196,26 @@ class GraphRAGIndexer:
                         source_doc=source_name,
                         source_chunk_id=chunk_id,
                         key_score=entity.key_score,
+                        embedding=embedding,
                     )
                     # Track entity type for relationship resolution
                     entity_type_map[entity.name.lower().strip()] = entity.entity_type
 
                 total_entities += len(entities)
 
-                # Save relationships to Neo4j immediately (with deduplication)
-                for rel in relationships:
+                # Generate embeddings for relationships (batch for efficiency)
+                rel_embeddings = []
+                if self._embeddings_enabled and relationships:
+                    rel_texts = [
+                        f"{r.metadata.get('src_name', '')} {r.description} {r.metadata.get('tgt_name', '')}"
+                        for r in relationships
+                    ]
+                    rel_embeddings = await self._generate_embeddings(rel_texts)
+                else:
+                    rel_embeddings = [None] * len(relationships)
+
+                # Save relationships to Neo4j immediately (with deduplication and embeddings)
+                for idx, rel in enumerate(relationships):
                     src_name = rel.metadata.get("src_name", "")
                     tgt_name = rel.metadata.get("tgt_name", "")
 
@@ -153,6 +223,7 @@ class GraphRAGIndexer:
                     src_type = entity_type_map.get(src_name.lower().strip(), "unknown")
                     tgt_type = entity_type_map.get(tgt_name.lower().strip(), "unknown")
 
+                    embedding = rel_embeddings[idx] if idx < len(rel_embeddings) else None
                     await self._graph_storage.upsert_relationship_for_document(
                         src_name=src_name,
                         tgt_name=tgt_name,
@@ -163,6 +234,7 @@ class GraphRAGIndexer:
                         source_doc=source_name,
                         source_chunk_id=chunk_id,
                         weight=rel.weight,
+                        embedding=embedding,
                     )
 
                 total_relationships += len(relationships)
