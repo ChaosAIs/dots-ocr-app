@@ -2,11 +2,12 @@
 PostgreSQL Key-Value Storage implementation for GraphRAG.
 
 Provides async KV storage operations on PostgreSQL tables for:
-- graphrag_doc_full: Full document content
-- graphrag_chunks: Document chunks
-- graphrag_entities: Extracted entities
-- graphrag_hyperedges: Relationships between entities
 - graphrag_llm_cache: LLM response cache
+
+Note: Other tables (graphrag_doc_full, graphrag_chunks, graphrag_entities,
+graphrag_hyperedges) were removed as they are redundant:
+- Chunks are stored in Qdrant (dots_ocr_documents collection)
+- Entities and relationships are stored in Neo4j
 """
 
 import json
@@ -28,27 +29,7 @@ class PostgresKVStorage(BaseKVStorage):
 
     # Valid table names for security
     VALID_TABLES = {
-        "graphrag_doc_full",
-        "graphrag_chunks",
-        "graphrag_entities",
-        "graphrag_hyperedges",
         "graphrag_llm_cache",
-    }
-
-    # Column name mapping: code field name -> database column name
-    # This handles mismatches between Entity/Relationship dataclass fields
-    # and database schema column names
-    COLUMN_MAPPING = {
-        "graphrag_entities": {
-            "name": "entity_name",  # Entity.name -> entity_name column
-        },
-    }
-
-    # Reverse mapping: database column name -> code field name
-    REVERSE_COLUMN_MAPPING = {
-        "graphrag_entities": {
-            "entity_name": "name",  # entity_name column -> Entity.name
-        },
     }
 
     def __init__(
@@ -74,24 +55,6 @@ class PostgresKVStorage(BaseKVStorage):
         self._engine = None
         self._session_factory = None
         self._connection_string = connection_string
-        self._column_map = self.COLUMN_MAPPING.get(table_name, {})
-        self._reverse_column_map = self.REVERSE_COLUMN_MAPPING.get(table_name, {})
-
-    def _map_column_name(self, field_name: str) -> str:
-        """Map a code field name to database column name."""
-        return self._column_map.get(field_name, field_name)
-
-    def _reverse_map_column_name(self, column_name: str) -> str:
-        """Map a database column name back to code field name."""
-        return self._reverse_column_map.get(column_name, column_name)
-
-    def _map_record_data(self, record_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Map record data field names to database column names."""
-        return {self._map_column_name(k): v for k, v in record_data.items()}
-
-    def _reverse_map_record_data(self, record_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Map database column names back to code field names."""
-        return {self._reverse_map_column_name(k): v for k, v in record_data.items()}
 
     def _serialize_jsonb_fields(self, record_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -159,8 +122,7 @@ class PostgresKVStorage(BaseKVStorage):
             )
             row = result.mappings().first()
             if row:
-                # Reverse map column names back to code field names
-                return self._reverse_map_record_data(dict(row))
+                return dict(row)
             return None
 
     async def get_by_ids(self, ids: List[str]) -> List[Dict[str, Any]]:
@@ -176,8 +138,7 @@ class PostgresKVStorage(BaseKVStorage):
             result = await session.execute(
                 query, {"ids": ids, "workspace_id": self.workspace_id}
             )
-            # Reverse map column names back to code field names
-            return [self._reverse_map_record_data(dict(row)) for row in result.mappings().all()]
+            return [dict(row) for row in result.mappings().all()]
 
     async def filter_keys(self, keys: List[str]) -> set:
         """Filter to return only keys that exist in storage."""
@@ -204,11 +165,8 @@ class PostgresKVStorage(BaseKVStorage):
                 # Filter out 'id' from record_data to avoid duplicate column
                 filtered_data = {k: v for k, v in record_data.items() if k != "id"}
 
-                # Apply column name mapping (code field names -> database column names)
-                mapped_data = self._map_record_data(filtered_data)
-
                 # Serialize dict/list values to JSON for JSONB columns
-                serialized_data = self._serialize_jsonb_fields(mapped_data)
+                serialized_data = self._serialize_jsonb_fields(filtered_data)
 
                 # Build dynamic column list and values
                 columns = ["id", "workspace_id"] + list(serialized_data.keys())
@@ -255,68 +213,6 @@ class PostgresKVStorage(BaseKVStorage):
             """)
             await session.execute(query, {"workspace_id": self.workspace_id})
             await session.commit()
-
-    async def delete_by_source(self, source_name: str) -> int:
-        """
-        Delete records associated with a source document.
-
-        This is used to delete all entities/relationships for a specific document.
-        Different tables use different column names for source identification:
-        - graphrag_entities, graphrag_hyperedges: source_chunk_id
-        - graphrag_chunks: full_doc_id
-
-        Args:
-            source_name: Source document name (e.g., "my_document")
-
-        Returns:
-            Number of deleted records
-        """
-        async with await self._get_session() as session:
-            # Determine which column to use based on table name
-            if self.table_name == "graphrag_chunks":
-                # graphrag_chunks uses full_doc_id
-                query = text(f"""
-                    DELETE FROM {self.table_name}
-                    WHERE workspace_id = :workspace_id
-                    AND (
-                        full_doc_id LIKE :source_pattern
-                        OR full_doc_id = :source_name
-                    )
-                    RETURNING id
-                """)
-            elif self.table_name in ("graphrag_entities", "graphrag_hyperedges"):
-                # These tables use source_chunk_id
-                query = text(f"""
-                    DELETE FROM {self.table_name}
-                    WHERE workspace_id = :workspace_id
-                    AND (
-                        source_chunk_id LIKE :source_pattern
-                        OR source_chunk_id = :source_name
-                    )
-                    RETURNING id
-                """)
-            else:
-                # For other tables, try a simple workspace-based delete if source column doesn't exist
-                logger.debug(f"Table {self.table_name} doesn't support delete_by_source, skipping")
-                return 0
-
-            result = await session.execute(
-                query,
-                {
-                    "workspace_id": self.workspace_id,
-                    "source_pattern": f"{source_name}_%",
-                    "source_name": source_name,
-                },
-            )
-            deleted_ids = result.fetchall()
-            await session.commit()
-            count = len(deleted_ids)
-            if count > 0:
-                logger.info(
-                    f"Deleted {count} records from {self.table_name} "
-                    f"for source: {source_name}"
-                )
-            return count
 
 
 class LLMCacheStorage(PostgresKVStorage):

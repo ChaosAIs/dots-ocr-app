@@ -112,18 +112,14 @@ except ImportError:
     HAS_NEO4J = False
 
 
-class TestPostgresKVStorage:
-    """Integration tests for PostgreSQL KV storage."""
+class TestLLMCacheStorage:
+    """Integration tests for LLM Cache storage."""
 
     @pytest.fixture
     def storage(self):
         """Create storage instance."""
-        from rag_service.storage.postgres_kv_storage import PostgresKVStorage
-        # PostgresKVStorage takes table_name, workspace_id, connection_string
-        return PostgresKVStorage(
-            table_name="graphrag_entities",
-            workspace_id="test_workspace"
-        )
+        from rag_service.storage.postgres_kv_storage import LLMCacheStorage
+        return LLMCacheStorage(workspace_id="test_workspace")
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not HAS_ASYNCPG, reason="asyncpg not installed")
@@ -131,25 +127,22 @@ class TestPostgresKVStorage:
         os.getenv("POSTGRES_HOST") is None,
         reason="PostgreSQL not available"
     )
-    async def test_upsert_and_get(self, storage):
-        """Test upserting and retrieving entities."""
-        test_entity = {
-            "id": "test_entity_1",
-            "entity_name": "Test Entity",
-            "entity_type": "TEST",
-            "description": "A test entity for integration testing",
-        }
+    async def test_cache_and_retrieve(self, storage):
+        """Test caching and retrieving LLM responses."""
+        test_prompt = "What is the capital of France?"
+        test_response = "The capital of France is Paris."
+        test_model = "gpt-4"
 
-        # Upsert
-        await storage.upsert({"test_entity_1": test_entity})
+        # Cache a response
+        await storage.cache_response(test_prompt, test_response, test_model)
 
-        # Get
-        result = await storage.get_by_id("test_entity_1")
+        # Retrieve the cached response
+        result = await storage.get_cached_response(test_prompt, test_model)
         assert result is not None
-        assert result["entity_name"] == "Test Entity"
+        assert result == test_response
 
-        # Cleanup
-        await storage.delete(["test_entity_1"])
+        # Cleanup - drop all data for this workspace
+        await storage.drop()
 
     @pytest.mark.asyncio
     @pytest.mark.skipif(not HAS_ASYNCPG, reason="asyncpg not installed")
@@ -157,26 +150,10 @@ class TestPostgresKVStorage:
         os.getenv("POSTGRES_HOST") is None,
         reason="PostgreSQL not available"
     )
-    async def test_filter_by_workspace(self, storage):
-        """Test filtering by workspace ID using filter_keys and get_by_ids."""
-        # Insert test data
-        await storage.upsert({
-            "ws_entity_1": {"entity_name": "WS Entity 1"},
-            "ws_entity_2": {"entity_name": "WS Entity 2"},
-        })
-
-        # Use filter_keys to check which keys exist
-        existing_keys = await storage.filter_keys(["ws_entity_1", "ws_entity_2", "nonexistent"])
-        assert "ws_entity_1" in existing_keys
-        assert "ws_entity_2" in existing_keys
-        assert "nonexistent" not in existing_keys
-
-        # Use get_by_ids to retrieve the data
-        results = await storage.get_by_ids(["ws_entity_1", "ws_entity_2"])
-        assert len(results) == 2
-
-        # Cleanup
-        await storage.delete(["ws_entity_1", "ws_entity_2"])
+    async def test_cache_miss(self, storage):
+        """Test that cache miss returns None."""
+        result = await storage.get_cached_response("nonexistent prompt", "gpt-4")
+        assert result is None
 
 
 class TestQueryModeDetection:

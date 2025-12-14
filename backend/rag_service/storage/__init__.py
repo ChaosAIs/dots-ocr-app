@@ -2,12 +2,12 @@
 Storage implementations for GraphRAG.
 
 This module provides storage implementations for:
-- PostgreSQL KV Storage: Key-value storage for chunks, entities, edges, LLM cache
+- LLMCacheStorage: PostgreSQL-based LLM response cache
 - Neo4j Graph Storage: Graph storage for entity nodes and relationship edges
-- Qdrant Vector Adapter: Vector storage for entity and edge embeddings
+- Qdrant Vector Adapter: Vector storage for document chunks, entities and edges
 """
 
-from .postgres_kv_storage import PostgresKVStorage, LLMCacheStorage
+from .postgres_kv_storage import LLMCacheStorage
 from .neo4j_storage import Neo4jStorage
 from .qdrant_adapter import (
     QdrantEntityVectorStore,
@@ -19,7 +19,6 @@ from .qdrant_adapter import (
 )
 
 __all__ = [
-    "PostgresKVStorage",
     "LLMCacheStorage",
     "Neo4jStorage",
     "QdrantEntityVectorStore",
