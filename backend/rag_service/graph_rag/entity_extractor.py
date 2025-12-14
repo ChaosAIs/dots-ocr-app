@@ -285,7 +285,7 @@ class EntityExtractor:
 
         for i, chunk in enumerate(chunks):
             chunk_id = chunk.get("id", f"chunk_{i}")
-            content = chunk.get("content", "")
+            content = chunk.get("page_content", "")
 
             if not content.strip():
                 continue

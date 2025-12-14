@@ -82,7 +82,7 @@ class GraphRAGIndexer:
         3. Same entity in different chunks is merged in Neo4j
 
         Args:
-            chunks: List of chunk dicts with 'id', 'content', 'metadata'
+            chunks: List of chunk dicts with 'id', 'page_content', 'metadata'
             source_name: Source document name (used for deduplication)
             use_gleaning: Whether to use gleaning loop for extraction
 
@@ -106,7 +106,7 @@ class GraphRAGIndexer:
         # Process each chunk and save to Neo4j immediately
         for i, chunk in enumerate(chunks):
             chunk_id = chunk.get("id", f"chunk_{i}")
-            content = chunk.get("content", "")
+            content = chunk.get("page_content", "")
 
             if not content.strip():
                 logger.debug(f"[GraphRAG] Skipping empty chunk {chunk_id}")
@@ -230,7 +230,7 @@ def index_chunks_sync(
     This can be called from the existing synchronous indexer.
 
     Args:
-        chunks: List of chunk dicts with 'id', 'content', 'metadata'
+        chunks: List of chunk dicts with 'id', 'page_content', 'metadata'
         source_name: Source document name
         workspace_id: Workspace ID
         use_gleaning: Whether to use gleaning loop

@@ -233,7 +233,7 @@ class MarkdownFileHandler(FileSystemEventHandler):
                     graphrag_chunks = [
                         {
                             "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
-                            "content": chunk.page_content,
+                            "page_content": chunk.page_content,
                             "metadata": chunk.metadata,
                         }
                         for i, chunk in enumerate(result.chunks)
@@ -348,7 +348,7 @@ def index_existing_documents(output_dir: str = None):
                         for i, chunk in enumerate(result.chunks):
                             source_chunks_map[source_name].append({
                                 "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
-                                "content": chunk.page_content,
+                                "page_content": chunk.page_content,
                                 "metadata": chunk.metadata,
                             })
 
@@ -690,7 +690,7 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
                     for i, chunk in enumerate(result.chunks):
                         all_graphrag_chunks.append({
                             "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
-                            "content": chunk.page_content,
+                            "page_content": chunk.page_content,
                             "metadata": chunk.metadata,
                         })
 

@@ -309,7 +309,7 @@ class TestGraphRAGOrchestrator:
                     "keywords": "leadership, management",
                 }
             ],
-            chunks=[{"content": "Acme Corp is a leading tech company."}],
+            chunks=[{"page_content": "Acme Corp is a leading tech company."}],
             mode=QueryMode.HYBRID,
             enhanced_query="Tell me about Acme Corp",
         )
