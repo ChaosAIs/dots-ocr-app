@@ -289,7 +289,7 @@ def chunk_markdown_with_summaries(
     Chunk a markdown file.
 
     Note: The 'generate_summaries' parameter is deprecated and ignored.
-    File summaries are now generated separately using generate_file_summary_with_scopes().
+    File summary generation has been removed due to performance issues.
 
     Args:
         md_path: Path to the markdown file.

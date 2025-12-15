@@ -13,11 +13,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .vectorstore import (
-    get_retriever,
-    get_retriever_with_sources,
-    get_chunks_by_ids,
-)
+from .vectorstore import get_retriever
 from .llm_service import get_llm_service
 
 # Import GraphRAG components
@@ -85,49 +81,7 @@ Create a concise, focused search query (50-100 words max) that:
 Output ONLY the search query text, nothing else."""
 
 
-# Prompt for query analysis with scope extraction
-QUERY_ANALYSIS_WITH_SCOPES_PROMPT = """Analyze the user's question and extract search information.
 
-User Question: {query}
-
-Provide your analysis in JSON format:
-{{
-    "enhanced_query": "An optimized search query (50-100 words) capturing the main topic and intent",
-    "query_scopes": ["scope1", "scope2", "scope3", ...]
-}}
-
-Requirements:
-1. ENHANCED_QUERY: Create a focused search query with key concepts and relevant terms
-2. QUERY_SCOPES: List 3-8 topic keywords/areas the user is asking about (e.g., "authentication", "JWT", "security")
-
-Output ONLY valid JSON, nothing else."""
-
-
-# Prompt for LLM-based scope matching
-SCOPE_MATCHING_PROMPT = """You are analyzing document relevance based on topic scopes.
-
-The user is searching for information about these topics:
-QUERY SCOPES: {query_scopes}
-
-Here are candidate documents with their topic scopes:
-{candidates}
-
-For each document, determine if its scopes are semantically relevant to the query scopes.
-Consider:
-- Exact matches (e.g., "JWT" matches "JWT")
-- Semantic equivalence (e.g., "login" matches "authentication")
-- Related concepts (e.g., "password" relates to "security")
-- Hierarchical relationships (e.g., "OAuth" is a type of "authentication")
-
-Respond in JSON format:
-{{
-    "relevant_documents": [
-        {{"source": "doc_name", "relevance_score": 0.0-1.0, "reason": "brief explanation"}}
-    ]
-}}
-
-Only include documents with relevance_score >= 0.5.
-Output ONLY valid JSON, nothing else."""
 
 
 def _analyze_query_with_llm(query: str) -> str:
@@ -178,192 +132,7 @@ def _analyze_query_with_llm(query: str) -> str:
         return query
 
 
-def _analyze_query_with_scopes(query: str) -> tuple:
-    """
-    Use LLM to analyze the query and extract both enhanced query and topic scopes.
 
-    Args:
-        query: The original user query
-
-    Returns:
-        Tuple of (enhanced_query, query_scopes)
-    """
-    import json
-    import re
-
-    try:
-        llm_service = get_llm_service()
-        llm = llm_service.get_query_model(
-            temperature=0.1,
-            num_ctx=2048,
-            num_predict=512,
-        )
-
-        prompt = QUERY_ANALYSIS_WITH_SCOPES_PROMPT.format(query=query)
-        response = llm.invoke([HumanMessage(content=prompt)])
-
-        content = response.content.strip()
-
-        # Clean up thinking tags
-        if "</think>" in content:
-            content = content.split("</think>")[-1].strip()
-
-        # Try to extract JSON
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
-        if json_match:
-            content = json_match.group(1).strip()
-
-        json_start = content.find('{')
-        json_end = content.rfind('}')
-        if json_start != -1 and json_end != -1:
-            content = content[json_start:json_end + 1]
-
-        result = json.loads(content)
-        enhanced_query = result.get("enhanced_query", query)
-        query_scopes = result.get("query_scopes", [])
-
-        # Validate scopes
-        if not isinstance(query_scopes, list):
-            query_scopes = []
-        query_scopes = [str(s).strip().lower() for s in query_scopes if s]
-
-        logger.info(
-            f"Query analysis with scopes: '{query[:50]}...' -> "
-            f"query='{enhanced_query[:50]}...', scopes={query_scopes}"
-        )
-
-        return enhanced_query, query_scopes
-
-    except Exception as e:
-        logger.warning(f"Query analysis with scopes failed: {e}")
-        # Fallback to basic query analysis
-        enhanced_query = _analyze_query_with_llm(query)
-        return enhanced_query, []
-
-
-def _match_scopes_with_llm(
-    query_scopes: List[str],
-    candidate_docs: List,
-) -> List[str]:
-    """
-    Use LLM to match query scopes with document scopes.
-
-    Args:
-        query_scopes: List of topic scopes from the query.
-        candidate_docs: List of Document objects with scopes in metadata.
-
-    Returns:
-        List of source names that are relevant based on scope matching.
-    """
-    import json
-    import re
-
-    if not query_scopes or not candidate_docs:
-        # If no scopes, return all candidates
-        return [doc.metadata.get("source", "") for doc in candidate_docs if doc.metadata.get("source")]
-
-    try:
-        # Build candidates string for prompt
-        candidates_str = ""
-        for doc in candidate_docs:
-            source = doc.metadata.get("source", "unknown")
-            scopes = doc.metadata.get("scopes", [])
-            if not scopes:
-                # If no scopes stored, extract from summary
-                scopes = ["general"]
-            candidates_str += f"- {source}: {scopes}\n"
-
-        llm_service = get_llm_service()
-        llm = llm_service.get_query_model(
-            temperature=0.1,
-            num_ctx=4096,
-            num_predict=1024,
-        )
-
-        prompt = SCOPE_MATCHING_PROMPT.format(
-            query_scopes=query_scopes,
-            candidates=candidates_str
-        )
-        response = llm.invoke([HumanMessage(content=prompt)])
-
-        content = response.content.strip()
-
-        # Clean up thinking tags
-        if "</think>" in content:
-            content = content.split("</think>")[-1].strip()
-
-        # Try to extract JSON
-        json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', content)
-        if json_match:
-            content = json_match.group(1).strip()
-
-        json_start = content.find('{')
-        json_end = content.rfind('}')
-        if json_start != -1 and json_end != -1:
-            content = content[json_start:json_end + 1]
-
-        result = json.loads(content)
-        relevant_docs = result.get("relevant_documents", [])
-
-        # Extract source names from relevant documents
-        relevant_sources = []
-        for doc_info in relevant_docs:
-            source = doc_info.get("source", "")
-            score = doc_info.get("relevance_score", 0)
-            if source and score >= 0.5:
-                relevant_sources.append(source)
-                logger.debug(f"Scope match: {source} (score={score})")
-
-        logger.info(f"LLM scope matching: {len(relevant_sources)}/{len(candidate_docs)} documents matched")
-        return relevant_sources
-
-    except Exception as e:
-        logger.warning(f"LLM scope matching failed: {e}")
-        # Fallback: return all candidates
-        return [doc.metadata.get("source", "") for doc in candidate_docs if doc.metadata.get("source")]
-
-
-def _find_relevant_files_with_scopes(
-    enhanced_query: str,
-    query_scopes: List[str],
-    k: int = 5,
-) -> List[str]:
-    """
-    Find relevant files using vector search + LLM scope matching.
-
-    NOTE: File summary feature has been deprecated. This function now returns
-    an empty list to skip file-level filtering and go directly to chunk search.
-
-    Args:
-        enhanced_query: The enhanced search query.
-        query_scopes: List of topic scopes from the query.
-        k: Maximum number of relevant files to return.
-
-    Returns:
-        Empty list (file summary feature deprecated).
-    """
-    # File summary feature deprecated - return empty list to search all chunks
-    logger.debug("File summary feature deprecated, skipping file-level filtering")
-    return []
-
-
-def _find_relevant_files(query: str, k: int = 5) -> List[str]:
-    """
-    Find relevant files by searching file summaries first.
-
-    NOTE: File summary feature has been deprecated. This function now returns
-    an empty list to skip file-level filtering and go directly to chunk search.
-
-    Args:
-        query: The search query.
-        k: Maximum number of relevant files to return.
-
-    Returns:
-        Empty list (file summary feature deprecated).
-    """
-    # File summary feature deprecated - return empty list to search all chunks
-    logger.debug("File summary feature deprecated, skipping file-level filtering")
-    return []
 
 
 # GraphRAG query mode: "auto", "local", "global", or "hybrid"
@@ -463,12 +232,10 @@ def search_documents(query: str) -> str:
     """
     Search the indexed documents for relevant information using enhanced retrieval.
 
-    Enhanced retrieval strategy:
-    1. LLM analyzes query and extracts topic scopes
-    2. Vector search on file summaries to get candidates
-    3. LLM-based scope matching to filter relevant files
-    4. Direct chunk search within relevant files
-    5. GraphRAG context for entity/relationship enrichment
+    Retrieval strategy:
+    1. LLM analyzes and enhances the query for better vector search
+    2. Vector search on document chunks
+    3. GraphRAG context for entity/relationship enrichment
 
     Args:
         query: The search query to find relevant document chunks.
@@ -477,37 +244,14 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
-        # Step 1: Use LLM to analyze query and extract scopes
-        enhanced_query, query_scopes = _analyze_query_with_scopes(query)
+        # Step 1: Use LLM to enhance the query
+        enhanced_query = _analyze_query_with_llm(query)
 
-        # Step 2: Find relevant files using vector search + LLM scope matching
-        relevant_sources = _find_relevant_files_with_scopes(
-            enhanced_query, query_scopes, k=5
-        )
-
-        # Fallback to basic file search if scope-based search returns nothing
-        if not relevant_sources:
-            relevant_sources = _find_relevant_files(enhanced_query, k=5)
-
-        docs = []
-
-        # Step 3: Direct chunk search (skip chunk summaries - simplified flow)
-        if relevant_sources:
-            retriever = get_retriever_with_sources(
-                k=15, fetch_k=50, source_names=relevant_sources
-            )
-            logger.info(f"Searching chunks filtered by sources: {relevant_sources}")
-        else:
-            retriever = get_retriever(k=15, fetch_k=50)
-            logger.info("No relevant files from summaries, searching all chunks")
+        # Step 2: Direct chunk search across all documents
+        retriever = get_retriever(k=15, fetch_k=50)
+        logger.info(f"Searching chunks with enhanced query: '{enhanced_query[:100]}...'")
 
         docs = retriever.invoke(enhanced_query)
-
-        if not docs and relevant_sources:
-            # Try without filter as last resort
-            logger.info("No results with source filter, trying without filter")
-            retriever = get_retriever(k=15, fetch_k=50)
-            docs = retriever.invoke(enhanced_query)
 
         if not docs:
             return "No relevant documents found for this query."
@@ -516,7 +260,7 @@ def search_documents(query: str) -> str:
         results = []
         seen_sources = set()
 
-        # Step 4: Get GraphRAG context (entities and relationships)
+        # Step 3: Get GraphRAG context (entities and relationships)
         graphrag_context = _get_graphrag_context(enhanced_query)
         if graphrag_context:
             results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
@@ -537,8 +281,6 @@ def search_documents(query: str) -> str:
         logger.info(
             f"Original query: '{query[:50]}...' | "
             f"Enhanced query: '{enhanced_query[:50]}...' | "
-            f"Query scopes: {query_scopes} | "
-            f"Relevant sources: {relevant_sources} | "
             f"Found {len(docs)} chunks from sources: {seen_sources} | "
             f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
         )
