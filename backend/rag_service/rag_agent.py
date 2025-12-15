@@ -61,8 +61,15 @@ When answering questions:
 4. Cite the source document when possible
 5. Provide clear, concise answers
 
-Always search for relevant information before answering questions about the documents.
-Do not provide thinking or reflection tags in your response. Provide direct, clear answers."""
+IMPORTANT INSTRUCTIONS:
+- Provide ONLY your final answer to the user's question
+- Do NOT include any JSON objects, XML tags, or structured data in your response
+- Do NOT echo or repeat the context format
+- Do NOT include <query>, <answer>, <think>, or any other XML tags
+- Do NOT include any metadata or processing information
+- Provide a direct, natural language answer only
+
+Always search for relevant information before answering questions about the documents."""
 
 
 # Prompt for query analysis - concise output to avoid repetition
@@ -575,6 +582,38 @@ def should_continue(state: AgentState) -> str:
     return END
 
 
+def _clean_llm_response(response_content: str) -> str:
+    """
+    Clean up LLM response to remove any JSON, XML, or structured data artifacts.
+
+    Args:
+        response_content: Raw LLM response content
+
+    Returns:
+        Cleaned response with only the natural language answer
+    """
+    import re
+
+    # Remove JSON objects (anything between { and })
+    cleaned = re.sub(r'\{[^}]*"[^"]*"[^}]*\}', '', response_content)
+
+    # Remove XML tags and their content if they appear at the start
+    cleaned = re.sub(r'^<[^>]+>.*?</[^>]+>\s*', '', cleaned, flags=re.DOTALL)
+
+    # Remove any remaining XML tags
+    cleaned = re.sub(r'<[^>]+>.*?</[^>]+>', '', cleaned, flags=re.DOTALL)
+    cleaned = re.sub(r'<[^>]+>', '', cleaned)
+
+    # Remove thinking tags content
+    cleaned = re.sub(r'<think>.*?</think>', '', cleaned, flags=re.DOTALL)
+
+    # Clean up extra whitespace
+    cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
+    cleaned = cleaned.strip()
+
+    return cleaned
+
+
 def call_model(state: AgentState) -> AgentState:
     """Call the LLM with the current state."""
     messages = state["messages"]
@@ -608,6 +647,11 @@ def call_model(state: AgentState) -> AgentState:
                 )
 
             response = llm.invoke(augmented_messages)
+
+            # Clean up the response to remove any artifacts
+            if hasattr(response, 'content'):
+                cleaned_content = _clean_llm_response(response.content)
+                response.content = cleaned_content
         else:
             response = llm.invoke(messages)
     else:
@@ -676,12 +720,36 @@ async def stream_agent_response(query: str, conversation_history: List[dict] = N
     messages.append(HumanMessage(content=query))
 
     # Stream the response
+    # We need to filter events to only stream the final agent response,
+    # not intermediate LLM calls from tools (query analysis, GraphRAG, etc.)
+
     async for event in agent.astream_events(
         {"messages": messages},
         version="v2",
     ):
+        # Only stream events from the main chat model in the "agent" node
         if event["event"] == "on_chat_model_stream":
-            content = event["data"]["chunk"].content
-            if content:
-                yield content
+            # Check the parent_ids to see if this is nested in a tool call
+            # Tool calls (search_documents, etc.) will have more parent IDs
+            # The main agent response will have fewer parent IDs (graph + agent node only)
+            parent_ids = event.get("parent_ids", [])
+            name = event.get("name", "")
+
+            # Debug logging to understand the event structure
+            logger.debug(
+                f"[Stream Event] name={name}, parent_ids_count={len(parent_ids)}, "
+                f"event={event['event']}"
+            )
+
+            # If there are multiple parent IDs (>2), this is likely a nested call from a tool
+            # Main agent has at most 2 levels: graph root + agent node
+            if len(parent_ids) <= 2:
+                content = event["data"]["chunk"].content
+                if content:
+                    logger.debug(f"[Stream] Yielding content from {name} (parent_ids={len(parent_ids)})")
+                    yield content
+            else:
+                # Skip tool-generated content
+                logger.debug(f"[Stream] Skipping content from {name} (parent_ids={len(parent_ids)})")
+
 

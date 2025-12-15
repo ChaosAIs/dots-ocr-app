@@ -10,6 +10,7 @@ Following Graph-R1 paper design:
 - HYBRID: Combined entity and relationship retrieval (default)
 """
 
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,6 +33,8 @@ class QueryParam:
         mode: Query mode (local, global, or hybrid)
         top_k: Number of top entities/relationships to retrieve
         max_steps: Maximum iterations for think-query-retrieve-rethink cycle
+                   Set to 1 for single-step retrieval (default)
+                   Set to 3-5 for iterative reasoning (Graph-R1 paper)
         only_need_context: Return only context without generating answer
         response_type: Type of response to generate
         max_token_for_text_unit: Max tokens for document chunks
@@ -39,8 +42,8 @@ class QueryParam:
         max_token_for_local_context: Max tokens for entity descriptions
     """
     mode: QueryMode = QueryMode.HYBRID
-    top_k: int = 60
-    max_steps: int = 5  # For iterative reasoning cycle (Graph-R1)
+    top_k: int = field(default_factory=lambda: int(os.getenv("GRAPH_RAG_TOP_K", "60")))
+    max_steps: int = field(default_factory=lambda: int(os.getenv("GRAPH_RAG_MAX_STEPS", "1")))
     only_need_context: bool = False
     response_type: str = "Multiple Paragraphs"
     max_token_for_text_unit: int = 4000

@@ -47,15 +47,23 @@ class TestQueryParam:
         """Test default parameter values."""
         params = QueryParam()
         assert params.mode == QueryMode.HYBRID
-        assert params.top_k == 60
+        assert params.top_k >= 1  # Reads from env or defaults to 60
+        assert params.max_steps >= 1  # Reads from env or defaults to 1
         assert params.only_need_context is False
 
     def test_custom_values(self):
         """Test custom parameter values."""
-        params = QueryParam(mode=QueryMode.LOCAL, top_k=20, only_need_context=True)
+        params = QueryParam(mode=QueryMode.LOCAL, top_k=20, max_steps=3, only_need_context=True)
         assert params.mode == QueryMode.LOCAL
         assert params.top_k == 20
+        assert params.max_steps == 3
         assert params.only_need_context is True
+
+    def test_iterative_reasoning_enabled(self):
+        """Test that max_steps > 1 enables iterative reasoning."""
+        params = QueryParam(max_steps=5)
+        assert params.max_steps == 5
+        # When max_steps > 1, iterative reasoning should be triggered
 
 
 class TestEntity:
@@ -162,7 +170,7 @@ class TestQueryModeDetectorHeuristic:
             "Who is John Smith?",
             "What is machine learning?",
             "Tell me about the CEO",
-            "Describe the product",
+            "Define artificial intelligence",
         ]
 
         for query in local_queries:

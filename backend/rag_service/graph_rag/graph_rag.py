@@ -192,10 +192,13 @@ class GraphRAG:
             return []
 
         try:
-            from ..vectorstore import search_documents
+            from ..vectorstore import get_vectorstore
 
-            # Perform vector search
-            docs = search_documents(query, k=top_k)
+            # Get vectorstore instance
+            vectorstore = get_vectorstore()
+
+            # Perform vector search using similarity_search
+            docs = vectorstore.similarity_search(query, k=top_k)
             chunks = [
                 {
                     "page_content": doc.page_content,
@@ -248,7 +251,7 @@ class GraphRAG:
         Following Graph-R1 paper design:
         - Supports LOCAL, GLOBAL, HYBRID modes
         - Always combines graph results with Qdrant vector search
-        - Optional iterative reasoning (controlled by params.max_steps)
+        - Iterative "think-query-retrieve-rethink" reasoning (when params.max_steps > 1)
 
         Args:
             query: User query string
@@ -272,6 +275,12 @@ class GraphRAG:
 
         params = params or QueryParam()
 
+        # Check if iterative reasoning is enabled (Graph-R1 paper design)
+        if params.max_steps > 1:
+            logger.info(f"[GraphRAG] Iterative reasoning enabled: max_steps={params.max_steps}")
+            return await self._iterative_reasoning_query(query, mode, params)
+
+        # Single-step retrieval (original behavior)
         # Determine query mode
         if mode and mode != "auto":
             query_mode = QueryMode(mode.lower())
@@ -299,6 +308,279 @@ class GraphRAG:
         )
 
         return context
+
+    async def _iterative_reasoning_query(
+        self,
+        question: str,
+        mode: str = None,
+        params: QueryParam = None,
+    ) -> GraphRAGContext:
+        """
+        Iterative "think-query-retrieve-rethink" reasoning cycle (Graph-R1 paper).
+
+        This implements the core Graph-R1 reasoning loop:
+        1. THINK: Analyze current knowledge and decide next action
+        2. QUERY: Generate a retrieval query if more info needed
+        3. RETRIEVE: Use LOCAL/GLOBAL/HYBRID to get graph + vector results
+        4. RETHINK: Evaluate if sufficient knowledge gathered
+        5. REPEAT: Continue up to max_steps or until answer found
+
+        Args:
+            question: User's original question
+            mode: Optional mode override for retrieval steps
+            params: Query parameters (max_steps controls iterations)
+
+        Returns:
+            GraphRAGContext with accumulated entities, relationships, and chunks
+        """
+        from .agent_prompts import (
+            AGENT_THINK_PROMPT,
+            INITIAL_QUERY_PROMPT,
+            KNOWLEDGE_FORMAT_TEMPLATE,
+            NO_KNOWLEDGE_TEMPLATE,
+        )
+        import re
+
+        logger.info("=" * 70)
+        logger.info("[GraphRAG] 🚀 STARTING ITERATIVE REASONING (Graph-R1)")
+        logger.info("=" * 70)
+        logger.info(f"[GraphRAG] Question: {question}")
+        logger.info(f"[GraphRAG] Max steps: {params.max_steps}")
+        logger.info("-" * 70)
+
+        # State tracking
+        step = 0
+        max_steps = params.max_steps
+        retrieved_knowledge = []
+        queries_made = []
+        is_complete = False
+
+        # Accumulated results
+        all_entities = []
+        all_relationships = []
+        all_chunks = []
+        seen_entity_ids = set()
+        modes_used = []
+
+        # Step 1: Generate initial query
+        logger.info("[GraphRAG] 📝 PHASE 1: Generating initial search query...")
+        initial_query_prompt = INITIAL_QUERY_PROMPT.format(question=question)
+
+        # Initialize LLM service if needed
+        if not self._llm_service:
+            from ..llm_service import get_llm_service
+            self._llm_service = get_llm_service()
+
+        # Get LLM chat model and invoke it
+        from langchain_core.messages import HumanMessage
+        llm = self._llm_service.get_query_model(temperature=0.1, num_predict=200)
+        initial_response_msg = await llm.ainvoke([HumanMessage(content=initial_query_prompt)])
+        initial_response = initial_response_msg.content.strip()
+
+        # Extract query from <query>...</query> tags
+        query_match = re.search(r'<query>(.*?)</query>', initial_response, re.DOTALL)
+        current_query = query_match.group(1).strip() if query_match else question
+
+        logger.info(f"[GraphRAG] Initial query: '{current_query}'")
+        logger.info("-" * 70)
+
+        # Iterative reasoning loop
+        while step < max_steps and not is_complete:
+            step += 1
+
+            logger.info("=" * 50)
+            logger.info(f"[GraphRAG] 🔄 ITERATION {step}/{max_steps}")
+            logger.info("=" * 50)
+            logger.info(f"[GraphRAG] Current query: '{current_query}'")
+
+            # Step 2: Retrieve knowledge using LOCAL/GLOBAL/HYBRID
+            logger.info(f"[GraphRAG] 🔍 RETRIEVING knowledge...")
+
+            # Determine retrieval mode for this step
+            if mode and mode != "auto":
+                retrieval_mode = QueryMode(mode.lower())
+                enhanced_query = current_query
+            else:
+                retrieval_mode, enhanced_query = await self.query_mode_detector.detect_mode(current_query)
+
+            logger.info(f"[GraphRAG] Using {retrieval_mode.value.upper()} mode for retrieval")
+
+            # Perform retrieval
+            if retrieval_mode == QueryMode.LOCAL:
+                context = await self._local_retrieval(enhanced_query, params)
+            elif retrieval_mode == QueryMode.GLOBAL:
+                context = await self._global_retrieval(enhanced_query, params)
+            else:  # HYBRID
+                context = await self._hybrid_retrieval(enhanced_query, params)
+
+            # Track this retrieval step
+            knowledge_step = {
+                "query": current_query,
+                "mode": retrieval_mode.value,
+                "entities": context.entities,
+                "relationships": context.relationships,
+                "chunks": context.chunks,
+            }
+            retrieved_knowledge.append(knowledge_step)
+            queries_made.append(current_query)
+
+            if retrieval_mode.value not in modes_used:
+                modes_used.append(retrieval_mode.value)
+
+            logger.info(f"[GraphRAG] Retrieved:")
+            logger.info(f"  - Entities: {len(context.entities)}")
+            logger.info(f"  - Relationships: {len(context.relationships)}")
+            logger.info(f"  - Chunks: {len(context.chunks)}")
+
+            # Accumulate results (deduplicate entities)
+            for entity in context.entities:
+                entity_id = entity.get("id")
+                if entity_id and entity_id not in seen_entity_ids:
+                    all_entities.append(entity)
+                    seen_entity_ids.add(entity_id)
+                elif not entity_id:
+                    all_entities.append(entity)
+
+            all_relationships.extend(context.relationships)
+            all_chunks.extend(context.chunks)
+
+            # Step 3: Think - decide to continue or answer
+            logger.info("-" * 50)
+            logger.info(f"[GraphRAG] 🤔 THINKING: Should I continue or answer?")
+
+            # Format knowledge summary for LLM
+            knowledge_summary = self._format_knowledge_summary(retrieved_knowledge)
+
+            think_prompt = AGENT_THINK_PROMPT.format(
+                question=question,
+                step=step,
+                max_steps=max_steps,
+                retrieved_knowledge=knowledge_summary,
+            )
+
+            # Get LLM chat model and invoke it
+            llm = self._llm_service.get_chat_model(temperature=0.2, num_predict=1000)
+            think_response_msg = await llm.ainvoke([HumanMessage(content=think_prompt)])
+            think_response = think_response_msg.content.strip()
+
+            logger.info(f"[GraphRAG] LLM response preview: {think_response[:200]}...")
+
+            # Parse response for <answer> or <query> tags
+            answer_match = re.search(r'<answer>(.*?)</answer>', think_response, re.DOTALL)
+            next_query_match = re.search(r'<query>(.*?)</query>', think_response, re.DOTALL)
+
+            if answer_match:
+                # LLM decided it has enough information
+                is_complete = True
+                logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE - Answer found")
+                logger.info(f"[GraphRAG] Termination reason: LLM provided <answer> tag")
+            elif next_query_match:
+                # LLM wants to continue with a new query
+                next_query = next_query_match.group(1).strip()
+                if next_query not in queries_made:
+                    current_query = next_query
+                    logger.info(f"[GraphRAG] 🔄 DECISION: CONTINUE - New query generated")
+                    logger.info(f"[GraphRAG] Next query: '{next_query}'")
+                else:
+                    # Duplicate query, terminate
+                    is_complete = True
+                    logger.info(f"[GraphRAG] ⚠️ DECISION: TERMINATE - Duplicate query")
+                    logger.info(f"[GraphRAG] Termination reason: Query already used")
+            else:
+                # No valid tags, terminate
+                is_complete = True
+                logger.info(f"[GraphRAG] ⚠️ DECISION: TERMINATE - No valid tags found")
+                logger.info(f"[GraphRAG] Termination reason: Missing <answer> or <query> tags")
+
+        # Check if max steps reached
+        if step >= max_steps and not is_complete:
+            logger.info(f"[GraphRAG] ⚠️ MAX STEPS REACHED ({max_steps})")
+
+        # Final summary
+        logger.info("=" * 70)
+        logger.info("[GraphRAG] 🏁 ITERATIVE REASONING COMPLETE")
+        logger.info("=" * 70)
+        logger.info(f"[GraphRAG] Summary:")
+        logger.info(f"  - Total iterations: {step}")
+        logger.info(f"  - Queries made: {queries_made}")
+        logger.info(f"  - Retrieval modes used: {modes_used}")
+        logger.info(f"  - Total unique entities: {len(all_entities)}")
+        logger.info(f"  - Total relationships: {len(all_relationships)}")
+        logger.info(f"  - Total chunks: {len(all_chunks)}")
+        logger.info("=" * 70)
+
+        # Return accumulated context
+        return GraphRAGContext(
+            entities=all_entities,
+            relationships=all_relationships,
+            chunks=all_chunks,
+            mode=QueryMode.HYBRID,  # Iterative mode uses all modes
+            enhanced_query=f"Iterative reasoning: {queries_made}",
+        )
+
+    def _format_knowledge_summary(self, retrieved_knowledge: List[Dict]) -> str:
+        """Format retrieved knowledge for LLM prompt."""
+        from .agent_prompts import KNOWLEDGE_FORMAT_TEMPLATE, NO_KNOWLEDGE_TEMPLATE
+
+        if not retrieved_knowledge:
+            return "No knowledge retrieved yet."
+
+        summaries = []
+        for i, knowledge in enumerate(retrieved_knowledge, 1):
+            entities = knowledge.get("entities", [])
+            relationships = knowledge.get("relationships", [])
+
+            if entities or relationships:
+                entities_str = self._format_entities_for_prompt(entities)
+                relationships_str = self._format_relationships_for_prompt(relationships)
+                summaries.append(
+                    KNOWLEDGE_FORMAT_TEMPLATE.format(
+                        step=i,
+                        entities=entities_str,
+                        relationships=relationships_str,
+                    )
+                )
+            else:
+                summaries.append(NO_KNOWLEDGE_TEMPLATE.format(step=i))
+
+        return "\n".join(summaries)
+
+    def _format_entities_for_prompt(self, entities: List[Dict]) -> str:
+        """Format entity list for LLM prompt."""
+        if not entities:
+            return "None"
+
+        lines = []
+        for e in entities[:10]:  # Limit to top 10
+            name = e.get("name", e.get("entity_name", "Unknown"))
+            entity_type = e.get("entity_type", "Unknown")
+            desc = e.get("description", "")[:200]
+            score = e.get("_score", 0)
+            lines.append(f"- **{name}** ({entity_type}): {desc} [score: {score:.2f}]")
+
+        if len(entities) > 10:
+            lines.append(f"... and {len(entities) - 10} more entities")
+
+        return "\n".join(lines) if lines else "None"
+
+    def _format_relationships_for_prompt(self, relationships: List[Dict]) -> str:
+        """Format relationship list for LLM prompt."""
+        if not relationships:
+            return "None"
+
+        lines = []
+        for r in relationships[:10]:  # Limit to top 10
+            src = r.get("src_name", r.get("src_entity_id", "?"))
+            tgt = r.get("tgt_name", r.get("tgt_entity_id", "?"))
+            desc = r.get("description", "")[:150]
+            keywords = r.get("keywords", "")
+            score = r.get("_score", 0)
+            lines.append(f"- **{src}** → **{tgt}**: {desc} [{keywords}] [score: {score:.2f}]")
+
+        if len(relationships) > 10:
+            lines.append(f"... and {len(relationships) - 10} more relationships")
+
+        return "\n".join(lines) if lines else "None"
 
     async def _local_retrieval(
         self, query: str, params: QueryParam
