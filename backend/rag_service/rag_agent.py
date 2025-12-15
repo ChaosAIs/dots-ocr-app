@@ -16,16 +16,14 @@ from langgraph.prebuilt import ToolNode
 from .vectorstore import (
     get_retriever,
     get_retriever_with_sources,
-    search_file_summaries,
-    search_file_summaries_with_scopes,
     get_chunks_by_ids,
 )
 from .llm_service import get_llm_service
-from .summarizer import FILE_SUMMARY_ENABLED
 
 # Import GraphRAG components
 try:
     from .graph_rag import GraphRAG, GRAPH_RAG_ENABLED
+    # If the graph_rag library is available, set the GRAPH_RAG_ENABLED flag = True
     GRAPHRAG_AVAILABLE = True
 except ImportError:
     GRAPHRAG_AVAILABLE = False
@@ -425,9 +423,22 @@ def _find_relevant_files(query: str, k: int = 5) -> List[str]:
         return []
 
 
+# GraphRAG query mode: "auto", "local", "global", "hybrid", "naive", or "agent"
+# "agent" enables Graph-R1 style iterative reasoning
+GRAPHRAG_QUERY_MODE = os.getenv("GRAPHRAG_QUERY_MODE", "auto").lower()
+
+
 def _get_graphrag_context(query: str) -> str:
     """
     Get additional context from GraphRAG if enabled.
+
+    Supports multiple query modes:
+    - auto: Let the system detect the best mode based on query
+    - local: Entity-focused retrieval
+    - global: Relationship-focused retrieval
+    - hybrid: Combined entity and relationship retrieval with graph expansion
+    - naive: Simple vector search fallback
+    - agent: Graph-R1 style iterative reasoning (multi-step agent loop)
 
     Args:
         query: The search query.
@@ -437,7 +448,7 @@ def _get_graphrag_context(query: str) -> str:
     """
     logger.debug(
         f"[GraphRAG Query] Starting - GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}, "
-        f"GRAPH_RAG_ENABLED={GRAPH_RAG_ENABLED}"
+        f"GRAPH_RAG_ENABLED={GRAPH_RAG_ENABLED}, mode={GRAPHRAG_QUERY_MODE}"
     )
 
     if not GRAPHRAG_AVAILABLE:
@@ -455,9 +466,12 @@ def _get_graphrag_context(query: str) -> str:
         logger.debug(f"[GraphRAG Query] Initializing GraphRAG for query: '{query[:100]}...'")
         graphrag = GraphRAG()
 
+        # Determine query mode
+        mode = GRAPHRAG_QUERY_MODE if GRAPHRAG_QUERY_MODE != "auto" else None
+
         # Helper function to run the async query
         async def _run_query():
-            return await graphrag.query(query)
+            return await graphrag.query(query, mode=mode)
 
         # Run async query in sync context - handle case when called from async context (FastAPI)
         try:
@@ -478,6 +492,17 @@ def _get_graphrag_context(query: str) -> str:
             f"entities={len(context.entities)}, relationships={len(context.relationships)}, "
             f"chunks={len(context.chunks)}, enhanced_query='{context.enhanced_query[:50]}...'"
         )
+
+        # For AGENT mode, the answer is in the chunks (as agent_chunk)
+        if context.mode.value == "agent" and context.chunks:
+            agent_chunk = context.chunks[0]
+            answer = agent_chunk.get("page_content", "")
+            if answer:
+                logger.info(
+                    f"[GraphRAG Query] Agent mode success - "
+                    f"steps={agent_chunk.get('metadata', {}).get('steps', 0)}"
+                )
+                return f"[Agent Reasoning Result]\n{answer}"
 
         if context.entities or context.relationships:
             formatted = graphrag.format_context(context)

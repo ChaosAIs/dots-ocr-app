@@ -17,6 +17,7 @@ class QueryMode(str, Enum):
     GLOBAL = "global"    # Relationship-focused queries
     HYBRID = "hybrid"    # Both entity and relationship queries
     NAIVE = "naive"      # Simple vector search (fallback)
+    AGENT = "agent"      # Graph-R1 style iterative agent reasoning
 
 
 @dataclass

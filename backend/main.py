@@ -24,6 +24,7 @@ if 'HF_HOME' not in os.environ:
     os.environ['HF_HOME'] = os.path.expanduser('~/huggingface_cache')
 
 import json
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,7 +56,7 @@ from rag_service.indexer import (
     reindex_document,
     index_document_now,
 )
-from rag_service.vectorstore import delete_documents_by_source, delete_file_summary_by_source, get_collection_info, clear_collection, is_document_indexed
+from rag_service.vectorstore import delete_documents_by_source, get_collection_info, clear_collection, is_document_indexed
 
 # Import GraphRAG for source-level deletion
 try:
@@ -77,11 +78,72 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Initialize FastAPI app
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    # ===== STARTUP =====
+    # Initialize database
+    try:
+        init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+        # Continue without database - will fall back to file-based status
+
+    # Set up the connection manager with the current event loop
+    loop = asyncio.get_event_loop()
+    connection_manager.set_event_loop(loop)
+    # Start the background broadcast worker
+    asyncio.create_task(connection_manager.start_broadcast_worker())
+    logger.info("WebSocket broadcast worker started")
+
+    # Initialize Neo4j indexes (including vector indexes) if GraphRAG is enabled
+    if GRAPH_RAG_ENABLED:
+        try:
+            from rag_service.storage import Neo4jStorage
+            neo4j_storage = Neo4jStorage()
+            await neo4j_storage.ensure_indexes()
+            logger.info("Neo4j indexes initialized (including vector indexes)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Neo4j indexes: {e}")
+
+    # Initialize services in background thread
+    def _init_services():
+        # Sync existing files to database
+        _sync_files_to_database()
+
+        # Initialize RAG service (controlled by AUTO_INDEX_ON_STARTUP env var)
+        auto_index = os.getenv("AUTO_INDEX_ON_STARTUP", "false").lower() in ("true", "1", "yes")
+        if auto_index:
+            try:
+                logger.info("Initializing RAG service in background...")
+                indexed_count = index_existing_documents(OUTPUT_DIR)
+                logger.info(f"RAG service: Indexed {indexed_count} document chunks on startup")
+                start_watching_output(OUTPUT_DIR)
+                logger.info("RAG service: File watcher started for output directory")
+            except Exception as e:
+                logger.error(f"Error initializing RAG service: {e}")
+        else:
+            logger.info("Auto-indexing disabled (set AUTO_INDEX_ON_STARTUP=true to enable)")
+
+    import threading
+    init_thread = threading.Thread(target=_init_services, daemon=True)
+    init_thread.start()
+    logger.info("Services initialization started in background thread")
+
+    yield  # Application runs here
+
+    # ===== SHUTDOWN =====
+    logger.info("Application shutting down...")
+
+
+# Initialize FastAPI app with lifespan handler
 app = FastAPI(
     title="Dots OCR API",
     description="API for document OCR parsing with layout detection",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -485,49 +547,6 @@ def _sync_files_to_database():
             logger.info(f"Database sync complete: {synced_count} new documents synced")
     except Exception as e:
         logger.error(f"Error syncing files to database: {e}")
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize async components on startup"""
-    # Initialize database
-    try:
-        init_db()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
-        # Continue without database - will fall back to file-based status
-
-    # Set up the connection manager with the current event loop
-    loop = asyncio.get_event_loop()
-    connection_manager.set_event_loop(loop)
-    # Start the background broadcast worker
-    asyncio.create_task(connection_manager.start_broadcast_worker())
-    logger.info("WebSocket broadcast worker started")
-
-    # Initialize services in background thread
-    def _init_services():
-        # Sync existing files to database
-        _sync_files_to_database()
-
-        # Initialize RAG service (controlled by AUTO_INDEX_ON_STARTUP env var)
-        auto_index = os.getenv("AUTO_INDEX_ON_STARTUP", "false").lower() in ("true", "1", "yes")
-        if auto_index:
-            try:
-                logger.info("Initializing RAG service in background...")
-                indexed_count = index_existing_documents(OUTPUT_DIR)
-                logger.info(f"RAG service: Indexed {indexed_count} document chunks on startup")
-                start_watching_output(OUTPUT_DIR)
-                logger.info("RAG service: File watcher started for output directory")
-            except Exception as e:
-                logger.error(f"Error initializing RAG service: {e}")
-        else:
-            logger.info("Auto-indexing disabled (set AUTO_INDEX_ON_STARTUP=true to enable)")
-
-    import threading
-    init_thread = threading.Thread(target=_init_services, daemon=True)
-    init_thread.start()
-    logger.info("Services initialization started in background thread")
 
 
 @app.get("/")
@@ -1675,7 +1694,6 @@ async def delete_document(filename: str):
         # Delete vector embeddings from Qdrant (all collections)
         try:
             delete_documents_by_source(file_name_without_ext)
-            delete_file_summary_by_source(file_name_without_ext)
             logger.info(f"Deleted vector embeddings for: {file_name_without_ext}")
         except Exception as e:
             error_msg = f"Failed to delete vector embeddings: {str(e)}"

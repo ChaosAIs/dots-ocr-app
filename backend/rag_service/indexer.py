@@ -37,11 +37,7 @@ from .vectorstore import (
     delete_documents_by_source,
     delete_documents_by_file_path,
     is_document_indexed,
-    add_file_summary,
-    add_file_summary_with_scopes,
-    delete_file_summary_by_source,
 )
-from .summarizer import generate_file_summary_with_scopes, FILE_SUMMARY_ENABLED
 
 # Import database utilities for checking index status
 # Note: These imports may fail if psycopg2 is not installed
@@ -201,29 +197,6 @@ class MarkdownFileHandler(FileSystemEventHandler):
                 vectorstore.add_documents(result.chunks)
                 logger.info(f"[Phase 1] Indexed {len(result.chunks)} chunks from {source_name} to Qdrant")
 
-                # Generate file summary with scopes
-                if FILE_SUMMARY_ENABLED:
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            full_content = f.read()
-                        file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
-                        add_file_summary_with_scopes(
-                            source_name=source_name,
-                            file_path=file_path,
-                            summary=file_summary_result.summary,
-                            scopes=file_summary_result.scopes,
-                            content_type=file_summary_result.content_type,
-                            complexity=file_summary_result.complexity,
-                        )
-                        logger.info(
-                            f"Added file summary with scopes for {source_name}: "
-                            f"{len(file_summary_result.scopes)} scopes, type={file_summary_result.content_type}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate file summary with scopes: {e}")
-                        if result.file_summary:
-                            add_file_summary(source_name, file_path, result.file_summary)
-
                 # Mark as indexed in tracking
                 with _index_lock:
                     _indexed_files.add(file_key)
@@ -321,25 +294,6 @@ def index_existing_documents(output_dir: str = None):
                     vectorstore.add_documents(result.chunks)
                     total_chunks += len(result.chunks)
                     total_files += 1
-
-                    # Generate file summary
-                    if FILE_SUMMARY_ENABLED:
-                        try:
-                            with open(file_path, 'r', encoding='utf-8') as f:
-                                full_content = f.read()
-                            file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
-                            add_file_summary_with_scopes(
-                                source_name=source_name,
-                                file_path=file_path,
-                                summary=file_summary_result.summary,
-                                scopes=file_summary_result.scopes,
-                                content_type=file_summary_result.content_type,
-                                complexity=file_summary_result.complexity,
-                            )
-                        except Exception as e:
-                            logger.warning(f"Failed to generate file summary: {e}")
-                            if result.file_summary:
-                                add_file_summary(source_name, file_path, result.file_summary)
 
                     # Collect chunks for Phase 2 (grouped by source)
                     if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
@@ -520,9 +474,7 @@ def reindex_document(source_name: str, output_dir: str = None) -> int:
             logger.info(f"Starting background re-indexing for: {source_name}")
             # First delete all existing embeddings for this source
             delete_documents_by_source(source_name)
-            # Also delete existing file summaries
-            delete_file_summary_by_source(source_name)
-            logger.info(f"Deleted existing embeddings and summaries for source: {source_name}")
+            logger.info(f"Deleted existing embeddings for source: {source_name}")
 
             # Now index the document
             chunks = index_document_now(source_name, output_dir)
@@ -636,9 +588,6 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
     indexed_files = []
     all_graphrag_chunks = []  # Collect all chunks for Phase 2
 
-    # Delete existing summaries for this source first
-    delete_file_summary_by_source(source_name)
-
     # Find all _nohf.md files in the document directory
     for filename in os.listdir(doc_dir):
         if not filename.endswith("_nohf.md"):
@@ -665,25 +614,6 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
                 vectorstore.add_documents(result.chunks)
                 total_chunks += len(result.chunks)
                 indexed_files.append(filename)
-
-                # Generate file summary with scopes (enhanced)
-                if FILE_SUMMARY_ENABLED:
-                    try:
-                        with open(file_path, 'r', encoding='utf-8') as f:
-                            full_content = f.read()
-                        file_summary_result = generate_file_summary_with_scopes(source_name, full_content)
-                        add_file_summary_with_scopes(
-                            source_name=source_name,
-                            file_path=file_path,
-                            summary=file_summary_result.summary,
-                            scopes=file_summary_result.scopes,
-                            content_type=file_summary_result.content_type,
-                            complexity=file_summary_result.complexity,
-                        )
-                    except Exception as e:
-                        logger.warning(f"Failed to generate file summary with scopes: {e}")
-                        if result.file_summary:
-                            add_file_summary(source_name, file_path, result.file_summary)
 
                 # Collect chunks for GraphRAG Phase 2
                 if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:

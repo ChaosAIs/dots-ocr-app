@@ -100,7 +100,15 @@ def parse_relationship_line(
         tgt_name = parts[2].strip()
         description = parts[3].strip()
         keywords = parts[4].strip()
-        weight = float(parts[5].strip()) if parts[5].strip() else 1.0
+
+        # Parse weight - handle malformed values (e.g., "uncertain, film, director" instead of float)
+        weight_str = parts[5].strip() if len(parts) > 5 else ""
+        try:
+            weight = float(weight_str) if weight_str else 1.0
+        except ValueError:
+            # If weight is not a valid float, default to 1.0
+            logger.debug(f"Invalid weight value '{weight_str}', using default 1.0")
+            weight = 1.0
 
         rel_id = generate_relationship_id(src_name, tgt_name)
         src_id = generate_entity_id(src_name, "unknown")

@@ -7,9 +7,6 @@ from .vectorstore import (
     get_retriever,
     get_retriever_with_sources,
     delete_documents_by_source,
-    search_file_summaries,
-    add_file_summary,
-    delete_file_summary_by_source,
     get_chunks_by_ids,
 )
 from .markdown_chunker import chunk_markdown_file, chunk_markdown_with_summaries
@@ -28,9 +25,6 @@ __all__ = [
     "get_retriever",
     "get_retriever_with_sources",
     "delete_documents_by_source",
-    "search_file_summaries",
-    "add_file_summary",
-    "delete_file_summary_by_source",
     "get_chunks_by_ids",
     "chunk_markdown_file",
     "chunk_markdown_with_summaries",
