@@ -65,6 +65,15 @@ class DocumentRepository:
         """Get all active documents."""
         return self.db.query(Document).filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
 
+    def get_all_with_metadata(self) -> List[Document]:
+        """Get all active documents that have metadata extracted."""
+        return self.db.query(Document).filter(
+            and_(
+                Document.deleted_at.is_(None),
+                Document.document_metadata.isnot(None)
+            )
+        ).order_by(Document.created_at.desc()).all()
+
     def update_convert_status(
         self,
         doc: Document,
@@ -105,6 +114,23 @@ class DocumentRepository:
         self.db.refresh(doc)
 
         self._log_status(doc.id, "index", old_status, status.value, message)
+        return doc
+
+    def update_document_metadata(
+        self,
+        doc: Document,
+        metadata: Dict[str, Any],
+        message: str = None,
+    ) -> Document:
+        """Update document metadata after extraction."""
+        doc.document_metadata = metadata
+        self.db.commit()
+        self.db.refresh(doc)
+
+        if message:
+            self._log_status(doc.id, "metadata", None, "extracted", message)
+
+        logger.info(f"Updated metadata for document: {doc.filename}")
         return doc
 
     def mark_page_indexed(self, doc: Document, page_num: int, chunks: int = 0) -> Document:

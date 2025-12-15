@@ -1,25 +1,34 @@
 """
-Document indexer with two-phase indexing and watchdog-based file watching.
+Document indexer with three-phase indexing and watchdog-based file watching.
 Monitors the output folder for new markdown files and indexes them.
 
-Two-Phase Indexing Architecture:
-================================
+Three-Phase Indexing Architecture:
+==================================
 Phase 1 (Synchronous/Background): Chunk embedding to Qdrant
     - Chunks markdown files and embeds them to Qdrant vector database
-    - Makes documents immediately queryable after completion
+    - Makes documents immediately queryable after completion (~5 seconds)
     - Runs in background thread to not block main application
+
+Phase 1.5 (Synchronous): Document metadata extraction
+    - Extracts document metadata using hierarchical summarization
+    - Identifies document type, subject, topics, and key entities
+    - Saves metadata to PostgreSQL for intelligent document routing
+    - Completes in ~30-60 seconds, making metadata available quickly
+    - Runs synchronously to ensure metadata is available before GraphRAG
 
 Phase 2 (Background/Async): GraphRAG entity extraction
     - Extracts entities and relationships using LLM
     - Stores to Neo4j graph database and Qdrant
-    - Starts automatically after Phase 1 completes
+    - Starts automatically after Phase 1.5 completes
     - Runs in separate background thread, non-blocking
     - Document remains queryable even if this phase fails
 
 Benefits:
-- Users can query documents immediately after Phase 1 completes
-- GraphRAG processing doesn't block user operations
-- Graceful degradation if GraphRAG fails
+- Users can query documents immediately after Phase 1 completes (~5s)
+- Metadata available for smart routing after Phase 1.5 (~60s)
+- GraphRAG processing doesn't block user operations (~10min background)
+- Graceful degradation if any phase fails
+- Progressive enhancement: queryable → routable → graph-enhanced
 """
 
 import os
@@ -425,24 +434,134 @@ def get_indexed_count() -> int:
         return len(_indexed_files)
 
 
-def index_document_now(source_name: str, output_dir: str = None, run_graphrag: bool = True) -> int:
+def index_document_now(source_name: str, output_dir: str = None, run_graphrag: bool = True, run_metadata: bool = True) -> int:
     """
     Index a specific document immediately with summarization.
     Deletes any existing embeddings for this source before re-indexing.
 
-    This function performs Phase 1 (Qdrant embedding) synchronously.
-    If run_graphrag=True, it also starts Phase 2 (GraphRAG) in background.
+    This function performs:
+    - Phase 1 (Qdrant embedding) synchronously
+    - Phase 1.5 (Metadata extraction) synchronously if run_metadata=True
+    - Phase 2 (GraphRAG) in background if run_graphrag=True
 
     Args:
         source_name: The document source name (folder name under output directory).
         output_dir: Optional output directory path.
         run_graphrag: Whether to run GraphRAG in background after Qdrant indexing (default: True)
+        run_metadata: Whether to extract metadata after Qdrant indexing (default: True)
 
     Returns:
         Number of chunks indexed to Qdrant.
     """
     # Use the shared Phase 1 function
     total_chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir)
+
+    # ========== PHASE 1.5: Metadata Extraction ==========
+    if run_metadata and graphrag_chunks:
+        try:
+            logger.info(f"[Phase 1.5] Starting metadata extraction for {source_name}")
+
+            # Import metadata extractor
+            from .graph_rag.metadata_extractor import HierarchicalMetadataExtractor
+
+            extractor = HierarchicalMetadataExtractor()
+
+            # Run extraction (handle both sync and async contexts)
+            import asyncio
+            try:
+                # Try to get the running event loop (if we're in an async context)
+                loop = asyncio.get_running_loop()
+                # We're in an async context, use create_task
+                task = loop.create_task(
+                    extractor.extract_metadata(
+                        chunks=graphrag_chunks,
+                        source_name=source_name,
+                        batch_size=10,
+                        progress_callback=None,
+                    )
+                )
+                # Wait for the task to complete
+                import concurrent.futures
+                import threading
+
+                # Run in a separate thread to avoid blocking
+                result_container = []
+                error_container = []
+
+                def run_async():
+                    try:
+                        # Create a new event loop for this thread
+                        new_loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(new_loop)
+                        try:
+                            result = new_loop.run_until_complete(
+                                extractor.extract_metadata(
+                                    chunks=graphrag_chunks,
+                                    source_name=source_name,
+                                    batch_size=10,
+                                    progress_callback=None,
+                                )
+                            )
+                            result_container.append(result)
+                        finally:
+                            new_loop.close()
+                    except Exception as e:
+                        error_container.append(e)
+
+                thread = threading.Thread(target=run_async)
+                thread.start()
+                thread.join()
+
+                if error_container:
+                    raise error_container[0]
+                metadata = result_container[0]
+
+            except RuntimeError:
+                # No running event loop, we're in a sync context
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    metadata = loop.run_until_complete(
+                        extractor.extract_metadata(
+                            chunks=graphrag_chunks,
+                            source_name=source_name,
+                            batch_size=10,
+                            progress_callback=None,
+                        )
+                    )
+                finally:
+                    loop.close()
+
+            # Save metadata to PostgreSQL
+            if DB_AVAILABLE:
+                try:
+                    # Try to find the document by source name
+                    filename = f"{source_name}.pdf"  # Assume PDF for now
+                    with get_db_session() as db:
+                        repo = DocumentRepository(db)
+                        doc = repo.get_by_filename(filename)
+                        if doc:
+                            repo.update_document_metadata(
+                                doc,
+                                metadata,
+                                message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
+                            )
+                            logger.info(
+                                f"[Phase 1.5] Metadata saved for {source_name}: "
+                                f"{metadata.get('document_type')} | "
+                                f"Subject: {metadata.get('subject_name')} | "
+                                f"Confidence: {metadata.get('confidence', 0):.2f}"
+                            )
+                        else:
+                            logger.warning(f"[Phase 1.5] Document not found in database: {filename}")
+                except Exception as e:
+                    logger.error(f"Failed to save metadata to database: {e}", exc_info=True)
+
+            logger.info(f"[Phase 1.5] Complete for {source_name}")
+
+        except Exception as e:
+            logger.error(f"[Phase 1.5] Metadata extraction failed for {source_name}: {e}", exc_info=True)
+            # Don't fail the entire indexing - metadata is optional
 
     # Start Phase 2 (GraphRAG) in background if enabled
     if run_graphrag and graphrag_chunks:
@@ -721,11 +840,126 @@ def trigger_embedding_for_document(
                 broadcast_callback(conversion_id, {
                     "status": "indexed",
                     "progress": 100,
-                    "message": f"Document indexed successfully ({chunks} chunks). Knowledge graph building in progress...",
+                    "message": f"Document indexed successfully ({chunks} chunks). Extracting metadata...",
                     "indexing_status": "completed",
                     "chunks_indexed": chunks,
                     "phase": 1,
                 })
+
+            # ========== PHASE 1.5: Metadata Extraction ==========
+            # Extract document metadata using hierarchical summarization
+            # This runs synchronously to make metadata available ASAP for document routing
+            if graphrag_chunks:
+                try:
+                    logger.info(f"[Phase 1.5] Starting metadata extraction for {source_name}")
+
+                    # Send WebSocket notification
+                    if broadcast_callback and conversion_id:
+                        broadcast_callback(conversion_id, {
+                            "status": "extracting_metadata",
+                            "progress": 100,
+                            "message": "Extracting document metadata...",
+                            "phase": 1.5,
+                        })
+
+                    # Import metadata extractor
+                    from .graph_rag.metadata_extractor import HierarchicalMetadataExtractor
+
+                    extractor = HierarchicalMetadataExtractor()
+
+                    # Create progress callback for WebSocket updates
+                    def metadata_progress(msg: str):
+                        if broadcast_callback and conversion_id:
+                            broadcast_callback(conversion_id, {
+                                "status": "extracting_metadata",
+                                "progress": 100,
+                                "message": f"Metadata: {msg}",
+                                "phase": 1.5,
+                            })
+
+                    # Run extraction (handle both sync and async contexts)
+                    import asyncio
+                    import threading
+
+                    # Run in a separate thread to avoid event loop conflicts
+                    result_container = []
+                    error_container = []
+
+                    def run_async():
+                        try:
+                            # Create a new event loop for this thread
+                            new_loop = asyncio.new_event_loop()
+                            asyncio.set_event_loop(new_loop)
+                            try:
+                                result = new_loop.run_until_complete(
+                                    extractor.extract_metadata(
+                                        chunks=graphrag_chunks,
+                                        source_name=source_name,
+                                        batch_size=10,
+                                        progress_callback=metadata_progress,
+                                    )
+                                )
+                                result_container.append(result)
+                            finally:
+                                new_loop.close()
+                        except Exception as e:
+                            error_container.append(e)
+
+                    thread = threading.Thread(target=run_async)
+                    thread.start()
+                    thread.join()
+
+                    if error_container:
+                        raise error_container[0]
+                    metadata = result_container[0]
+
+                    # Save metadata to PostgreSQL
+                    if DB_AVAILABLE and filename:
+                        try:
+                            with get_db_session() as db:
+                                repo = DocumentRepository(db)
+                                doc = repo.get_by_filename(filename)
+                                if doc:
+                                    repo.update_document_metadata(
+                                        doc,
+                                        metadata,
+                                        message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
+                                    )
+                                    logger.info(
+                                        f"[Phase 1.5] Metadata saved for {source_name}: "
+                                        f"{metadata.get('document_type')} | "
+                                        f"Subject: {metadata.get('subject_name')} | "
+                                        f"Confidence: {metadata.get('confidence', 0):.2f}"
+                                    )
+                        except Exception as e:
+                            logger.error(f"Failed to save metadata to database: {e}", exc_info=True)
+
+                    # Send WebSocket notification that metadata extraction completed
+                    if broadcast_callback and conversion_id:
+                        broadcast_callback(conversion_id, {
+                            "status": "metadata_extracted",
+                            "progress": 100,
+                            "message": f"Metadata extracted: {metadata.get('document_type', 'unknown')} document",
+                            "metadata": {
+                                "document_type": metadata.get("document_type"),
+                                "subject_name": metadata.get("subject_name"),
+                                "confidence": metadata.get("confidence"),
+                            },
+                            "phase": 1.5,
+                        })
+
+                    logger.info(f"[Phase 1.5] Complete for {source_name}")
+
+                except Exception as e:
+                    logger.error(f"[Phase 1.5] Metadata extraction failed for {source_name}: {e}", exc_info=True)
+                    # Don't fail the entire indexing - metadata is optional
+                    if broadcast_callback and conversion_id:
+                        broadcast_callback(conversion_id, {
+                            "status": "metadata_extraction_failed",
+                            "progress": 100,
+                            "message": "Metadata extraction failed (continuing with indexing)",
+                            "phase": 1.5,
+                        })
 
             # ========== PHASE 2: GraphRAG entity extraction (background) ==========
             # Start GraphRAG in a separate background thread

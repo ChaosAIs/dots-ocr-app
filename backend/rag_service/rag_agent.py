@@ -5,7 +5,8 @@ Supports multiple LLM backends: Ollama and vLLM.
 
 import os
 import logging
-from typing import Annotated, TypedDict, List
+import json
+from typing import Annotated, TypedDict, List, Dict, Any
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.tools import tool
@@ -13,7 +14,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .vectorstore import get_retriever
+from .vectorstore import get_retriever, get_retriever_with_sources
 from .llm_service import get_llm_service
 
 # Import GraphRAG components
@@ -84,52 +85,105 @@ Output ONLY the search query text, nothing else."""
 
 
 
-def _analyze_query_with_llm(query: str) -> str:
+def _analyze_query_with_llm(query: str) -> Dict[str, Any]:
     """
-    Use LLM to analyze the user's query and generate an enhanced search query.
+    Use LLM to analyze and enhance the user's query, extracting both enhanced query text
+    and structured metadata for document routing.
 
-    This function:
-    1. Sends the user query to LLM for analysis
-    2. LLM clarifies the query purpose and user intent
-    3. Extracts keywords, topics, and related concepts
-    4. Generates an enhanced query optimized for vector search
+    This function performs a SINGLE LLM call to:
+    1. Generate an enhanced query optimized for vector search
+    2. Extract structured metadata (entities, topics, document types, intent)
+    3. Enable intelligent document routing based on metadata matching
 
     Args:
         query: The original user query
 
     Returns:
-        Enhanced search query string optimized for embedding-based search
+        Dict with:
+        - enhanced_query: str - Enhanced query text for vector search
+        - metadata: dict - Structured metadata for document routing
+            - entities: List[str] - Named entities (people, orgs, products, tech)
+            - topics: List[str] - Subject areas and domains
+            - document_type_hints: List[str] - Likely document types
+            - intent: str - Brief description of user intent
     """
     try:
+        # Import the new combined prompt
+        from .graph_rag.prompts import QUERY_ENHANCEMENT_WITH_METADATA_PROMPT
+
         # Use smaller, faster model for query analysis
         llm_service = get_llm_service()
         llm = llm_service.get_query_model(
             temperature=0.1,  # Low temperature for consistent analysis
-            num_ctx=2048,
-            num_predict=256,  # Limit output tokens to prevent endless generation
+            num_ctx=4096,     # Increased context for JSON output
+            num_predict=512,  # Increased for structured output
         )
 
-        prompt = QUERY_ANALYSIS_PROMPT.format(query=query)
+        prompt = QUERY_ENHANCEMENT_WITH_METADATA_PROMPT.format(query=query)
         response = llm.invoke([HumanMessage(content=prompt)])
 
-        enhanced_query = response.content.strip()
+        response_text = response.content.strip()
 
         # Clean up any thinking tags if present
-        if "</think>" in enhanced_query:
-            enhanced_query = enhanced_query.split("</think>")[-1].strip()
+        if "</think>" in response_text:
+            response_text = response_text.split("</think>")[-1].strip()
 
-        # Truncate if still too long (safety measure)
-        if len(enhanced_query) > 500:
-            enhanced_query = enhanced_query[:500]
-            logger.warning("Query analysis output truncated to 500 chars")
+        # Remove markdown code blocks if present
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            # Remove first line (```json or ```) and last line (```)
+            if len(lines) > 2:
+                response_text = "\n".join(lines[1:-1])
 
-        logger.info(f"Query analysis: '{query[:50]}...' -> '{enhanced_query[:100]}...'")
+        # Parse JSON response
+        try:
+            result = json.loads(response_text)
 
-        return enhanced_query if enhanced_query else query
+            # Validate required fields
+            enhanced_query = result.get("enhanced_query", query)
+            metadata = {
+                "entities": result.get("entities", []),
+                "topics": result.get("topics", []),
+                "document_type_hints": result.get("document_type_hints", []),
+                "intent": result.get("intent", ""),
+            }
+
+            logger.info(f"[Query Analysis] Original: '{query[:50]}...'")
+            logger.info(f"[Query Analysis] Enhanced: '{enhanced_query[:100]}...'")
+            logger.info(f"[Query Analysis] Entities: {metadata['entities']}")
+            logger.info(f"[Query Analysis] Topics: {metadata['topics']}")
+
+            return {
+                "enhanced_query": enhanced_query,
+                "metadata": metadata,
+            }
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Failed to parse JSON response, using fallback: {e}")
+            logger.debug(f"Response text: {response_text[:200]}")
+            # Fallback: use response as enhanced query, empty metadata
+            return {
+                "enhanced_query": response_text[:500] if response_text else query,
+                "metadata": {
+                    "entities": [],
+                    "topics": [],
+                    "document_type_hints": [],
+                    "intent": "",
+                }
+            }
 
     except Exception as e:
         logger.warning(f"Query analysis failed, using original query: {e}")
-        return query
+        # Fallback: return original query with empty metadata
+        return {
+            "enhanced_query": query,
+            "metadata": {
+                "entities": [],
+                "topics": [],
+                "document_type_hints": [],
+                "intent": "",
+            }
+        }
 
 
 
@@ -230,12 +284,13 @@ def _get_graphrag_context(query: str) -> str:
 @tool
 def search_documents(query: str) -> str:
     """
-    Search the indexed documents for relevant information using enhanced retrieval.
+    Search the indexed documents for relevant information using intelligent routing.
 
     Retrieval strategy:
-    1. LLM analyzes and enhances the query for better vector search
-    2. Vector search on document chunks
-    3. GraphRAG context for entity/relationship enrichment
+    1. LLM analyzes query and extracts metadata (entities, topics, intent)
+    2. Route to relevant documents based on metadata matching
+    3. Vector search on filtered document chunks
+    4. GraphRAG context for entity/relationship enrichment
 
     Args:
         query: The search query to find relevant document chunks.
@@ -244,13 +299,32 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
-        # Step 1: Use LLM to enhance the query
-        enhanced_query = _analyze_query_with_llm(query)
+        # Step 1: Enhance query and extract metadata (SINGLE LLM CALL)
+        query_analysis = _analyze_query_with_llm(query)
+        enhanced_query = query_analysis["enhanced_query"]
+        query_metadata = query_analysis["metadata"]
 
-        # Step 2: Direct chunk search across all documents
-        retriever = get_retriever(k=15, fetch_k=50)
-        logger.info(f"Searching chunks with enhanced query: '{enhanced_query[:100]}...'")
+        logger.info(f"[Search] Original query: '{query[:50]}...'")
+        logger.info(f"[Search] Enhanced query: '{enhanced_query[:100]}...'")
+        logger.info(f"[Search] Extracted entities: {query_metadata.get('entities', [])}")
+        logger.info(f"[Search] Extracted topics: {query_metadata.get('topics', [])}")
 
+        # Step 2: Route to relevant documents based on metadata
+        from .document_router import DocumentRouter
+        router = DocumentRouter()
+        relevant_sources = router.route_query(query_metadata)
+
+        # Step 3: Create retriever with optional source filtering
+        if relevant_sources:
+            retriever = get_retriever_with_sources(
+                k=15,
+                fetch_k=50,
+                source_names=relevant_sources
+            )
+        else:
+            retriever = get_retriever(k=15, fetch_k=50)
+
+        # Step 4: Search with enhanced query
         docs = retriever.invoke(enhanced_query)
 
         if not docs:
@@ -260,7 +334,7 @@ def search_documents(query: str) -> str:
         results = []
         seen_sources = set()
 
-        # Step 3: Get GraphRAG context (entities and relationships)
+        # Step 5: Get GraphRAG context (entities and relationships)
         graphrag_context = _get_graphrag_context(enhanced_query)
         if graphrag_context:
             results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
@@ -279,9 +353,7 @@ def search_documents(query: str) -> str:
 
         # Log which sources were found
         logger.info(
-            f"Original query: '{query[:50]}...' | "
-            f"Enhanced query: '{enhanced_query[:50]}...' | "
-            f"Found {len(docs)} chunks from sources: {seen_sources} | "
+            f"[Search] Found {len(docs)} chunks from {len(seen_sources)} sources: {seen_sources} | "
             f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
         )
 

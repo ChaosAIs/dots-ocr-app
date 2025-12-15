@@ -52,6 +52,8 @@ class Document(Base):
     indexed_chunks = Column(Integer, default=0)
     # Page-level index tracking: {"indexed": [1,2,3], "pending": [4,5], "failed": []}
     indexed_pages_info = Column(JSONB, nullable=True, default=lambda: {"indexed": [], "pending": [], "failed": []})
+    # Document metadata from hierarchical summarization: type, subject, topics, entities, summary
+    document_metadata = Column(JSONB, nullable=True, default=None)
     # Use values_callable to ensure SQLAlchemy uses enum values (lowercase) not names (uppercase)
     upload_status = Column(Enum(UploadStatus, name="upload_status", values_callable=lambda x: [e.value for e in x]), default=UploadStatus.PENDING)
     convert_status = Column(Enum(ConvertStatus, name="convert_status", values_callable=lambda x: [e.value for e in x]), default=ConvertStatus.PENDING)
