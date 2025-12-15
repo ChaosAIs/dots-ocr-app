@@ -13,42 +13,42 @@ This module contains all prompts used for:
 # =============================================================================
 
 QUERY_MODE_DETECTION_PROMPT = """You are a query analyzer for a knowledge graph RAG system.
+Following the Graph-R1 paper design with 3 retrieval modes.
 
 Analyze the following user query and determine:
 1. The best retrieval mode
 2. An enhanced version of the query for better retrieval
 
-MODES:
-- LOCAL: Use ONLY for simple entity definition/identification queries
+MODES (from Graph-R1 paper):
+
+- LOCAL: Entity-focused retrieval
+  Use for: Simple entity definition/identification queries
   Examples: "Who is John Smith?", "What is machine learning?", "Tell me about Company X"
   Use when: Query asks "who/what IS something" (identity/definition only)
 
-- GLOBAL: Use when query asks about relationships BETWEEN two or more entities
+- GLOBAL: Relationship-focused retrieval
+  Use for: Queries about relationships BETWEEN two or more entities
   Examples: "How does X relate to Y?", "What is the connection between A and B?",
             "Compare X and Y", "What's the difference between A and B?"
   Use when: Query explicitly mentions two entities and asks about their relationship
 
-- HYBRID: Use for complex queries about how something WORKS, FUNCTIONS, or OPERATES
-  Examples: "How does X work?", "How does X function?", "Explain how X operates",
+- HYBRID: Combined entity and relationship retrieval (DEFAULT)
+  Use for: Complex queries about mechanisms, processes, or multi-faceted topics
+  Examples: "How does X work?", "Explain the authentication system",
             "What are the components of X?", "How is X implemented?",
-            "Explain the authentication system", "What does X do and how?"
-  Use when: Query asks about mechanisms, processes, implementation, or internal workings
-  IMPORTANT: "How does X work/function?" queries should ALWAYS use HYBRID, not LOCAL
-
-- NAIVE: Use for simple factual lookups where graph context isn't helpful
-  Examples: "What is the date of the meeting?", "List all files", "When was X created?"
-  Use when: Query asks for simple facts, dates, counts, or lists
+            "List all products", "When was X created?", "How many employees?"
+  Use when: Query asks about mechanisms, processes, lists, counts, or any complex topic
+  IMPORTANT: This is the DEFAULT mode - use when in doubt
 
 DECISION GUIDE:
-- "What IS X?" → LOCAL (definition)
-- "How does X WORK/FUNCTION?" → HYBRID (mechanism/process)
-- "How does X RELATE to Y?" → GLOBAL (cross-entity relationship)
-- "When/How many/List?" → NAIVE (simple facts)
+- "What IS X?" (simple definition) → LOCAL
+- "How does X RELATE to Y?" (cross-entity relationship) → GLOBAL
+- Everything else (mechanisms, lists, counts, explanations) → HYBRID
 
 USER QUERY: {query}
 
 Respond in JSON format:
-{{"mode": "LOCAL|GLOBAL|HYBRID|NAIVE", "enhanced_query": "improved query for retrieval"}}
+{{"mode": "LOCAL|GLOBAL|HYBRID", "enhanced_query": "improved query for retrieval"}}
 """
 
 # =============================================================================

@@ -3,6 +3,11 @@ Base classes and data structures for GraphRAG.
 
 This module defines the abstract base classes and common data structures
 used throughout the GraphRAG implementation.
+
+Following Graph-R1 paper design:
+- LOCAL: Entity-focused retrieval
+- GLOBAL: Relationship-focused retrieval
+- HYBRID: Combined entity and relationship retrieval (default)
 """
 
 from abc import ABC, abstractmethod
@@ -12,21 +17,32 @@ from typing import Literal, Optional, Any, List, Dict, Tuple
 
 
 class QueryMode(str, Enum):
-    """Query modes for GraphRAG retrieval."""
+    """Query modes for GraphRAG retrieval (from Graph-R1 paper)."""
     LOCAL = "local"      # Entity-focused queries
     GLOBAL = "global"    # Relationship-focused queries
-    HYBRID = "hybrid"    # Both entity and relationship queries
-    NAIVE = "naive"      # Simple vector search (fallback)
-    AGENT = "agent"      # Graph-R1 style iterative agent reasoning
+    HYBRID = "hybrid"    # Both entity and relationship queries (default)
 
 
 @dataclass
 class QueryParam:
-    """Query parameters for GraphRAG."""
+    """
+    Query parameters for GraphRAG (aligned with Graph-R1 paper).
+
+    Attributes:
+        mode: Query mode (local, global, or hybrid)
+        top_k: Number of top entities/relationships to retrieve
+        max_steps: Maximum iterations for think-query-retrieve-rethink cycle
+        only_need_context: Return only context without generating answer
+        response_type: Type of response to generate
+        max_token_for_text_unit: Max tokens for document chunks
+        max_token_for_global_context: Max tokens for relationship descriptions
+        max_token_for_local_context: Max tokens for entity descriptions
+    """
     mode: QueryMode = QueryMode.HYBRID
+    top_k: int = 60
+    max_steps: int = 5  # For iterative reasoning cycle (Graph-R1)
     only_need_context: bool = False
     response_type: str = "Multiple Paragraphs"
-    top_k: int = 60
     max_token_for_text_unit: int = 4000
     max_token_for_global_context: int = 4000
     max_token_for_local_context: int = 4000

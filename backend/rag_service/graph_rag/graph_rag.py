@@ -1,11 +1,12 @@
 """
 GraphRAG Orchestrator - Main entry point for graph-based retrieval.
 
-This module orchestrates the GraphRAG query pipeline:
-1. Query mode detection (LOCAL, GLOBAL, HYBRID, NAIVE)
+Following Graph-R1 paper design:
+1. Query mode detection (LOCAL, GLOBAL, HYBRID)
 2. Entity/relationship retrieval based on mode (using vector similarity)
-3. Context building from graph and vector stores
-4. Response generation with graph-enhanced context
+3. Iterative think-query-retrieve-rethink cycle (optional, controlled by max_steps)
+4. Context building from graph and vector stores
+5. Always combine graph results with Qdrant vector search results
 """
 
 import os
@@ -16,7 +17,6 @@ from dataclasses import dataclass
 from .base import QueryMode, QueryParam
 from .query_mode_detector import QueryModeDetector
 from .utils import extract_entity_names_from_query
-from .graph_rag_agent import GraphRAGAgent, AgentConfig
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +65,6 @@ class GraphRAG:
         self._graph_storage = None
         self._embedding_service = None
         self._llm_service = None
-        self._agent = None
         self._vector_search_enabled = GRAPH_RAG_VECTOR_SEARCH_ENABLED
 
     async def _init_storage(self):
@@ -100,52 +99,6 @@ class GraphRAG:
         except Exception as e:
             logger.warning(f"[GraphRAG Query] Failed to init embedding service: {e}")
             self._vector_search_enabled = False
-
-    async def _init_agent(self):
-        """Initialize the Graph-R1 style agent for iterative reasoning."""
-        if self._agent is not None:
-            return
-
-        await self._init_storage()
-
-        try:
-            from .llm_adapter import LLMAdapter
-
-            llm_adapter = LLMAdapter()
-
-            # Create retrieval callback that uses existing LOCAL/GLOBAL/HYBRID modes
-            async def retrieval_callback(
-                query: str, mode: str, params: QueryParam
-            ) -> GraphRAGContext:
-                """Delegate retrieval to existing modes."""
-                if mode == "local":
-                    return await self._local_retrieval(query, params)
-                elif mode == "global":
-                    return await self._global_retrieval(query, params)
-                elif mode == "hybrid":
-                    return await self._hybrid_retrieval(query, params)
-                else:
-                    # Default to hybrid for comprehensive retrieval
-                    return await self._hybrid_retrieval(query, params)
-
-            self._agent = GraphRAGAgent(
-                llm_service=llm_adapter,
-                retrieval_callback=retrieval_callback,
-                mode_detector=self.query_mode_detector,
-                config=AgentConfig(
-                    max_steps=5,
-                    min_entities_for_answer=3,
-                    min_score_threshold=0.5,
-                    top_k_per_step=30,
-                    default_retrieval_mode="hybrid",  # Use HYBRID by default for each step
-                ),
-            )
-            logger.info(
-                "[GraphRAG Query] Agent initialized - wraps LOCAL/GLOBAL/HYBRID modes"
-            )
-        except Exception as e:
-            logger.error(f"[GraphRAG Query] Failed to init agent: {e}")
-            raise
 
     async def _get_query_embedding(self, query: str) -> Optional[List[float]]:
         """
@@ -220,6 +173,69 @@ class GraphRAG:
             logger.warning(f"[GraphRAG Query] Error retrieving chunks: {e}")
             return []
 
+    async def _get_vector_search_chunks(self, query: str, top_k: int = 60) -> List[Dict[str, Any]]:
+        """
+        Perform direct Qdrant vector search for the query.
+
+        This ensures we always have vector search results even if graph knowledge
+        is not ready or incomplete.
+
+        Args:
+            query: User query string
+            top_k: Number of chunks to retrieve
+
+        Returns:
+            List of chunk dictionaries with page_content and metadata
+        """
+        if not GRAPH_RAG_VECTOR_SEARCH_ENABLED:
+            logger.debug("[GraphRAG] Qdrant vector search is disabled")
+            return []
+
+        try:
+            from ..vectorstore import search_documents
+
+            # Perform vector search
+            docs = search_documents(query, k=top_k)
+            chunks = [
+                {
+                    "page_content": doc.page_content,
+                    "metadata": doc.metadata,
+                    "chunk_id": doc.metadata.get("chunk_id", ""),
+                }
+                for doc in docs
+            ]
+            logger.debug(f"[GraphRAG] Qdrant vector search found {len(chunks)} chunks")
+            return chunks
+        except Exception as e:
+            logger.warning(f"[GraphRAG] Qdrant vector search failed: {e}")
+            return []
+
+    def _merge_chunks(self, *chunk_lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Merge multiple chunk lists and deduplicate by chunk_id.
+
+        Args:
+            *chunk_lists: Variable number of chunk lists to merge
+
+        Returns:
+            Deduplicated list of chunks
+        """
+        seen_ids = set()
+        merged = []
+
+        for chunk_list in chunk_lists:
+            for chunk in chunk_list:
+                chunk_id = chunk.get("chunk_id", "")
+                if chunk_id and chunk_id not in seen_ids:
+                    seen_ids.add(chunk_id)
+                    merged.append(chunk)
+                elif not chunk_id:
+                    # Include chunks without IDs (shouldn't happen, but be safe)
+                    merged.append(chunk)
+
+        logger.debug(f"[GraphRAG] Merged {sum(len(cl) for cl in chunk_lists)} chunks into {len(merged)} unique chunks")
+        return merged
+
     async def query(
         self,
         query: str,
@@ -229,21 +245,26 @@ class GraphRAG:
         """
         Process a query and retrieve graph-enhanced context.
 
+        Following Graph-R1 paper design:
+        - Supports LOCAL, GLOBAL, HYBRID modes
+        - Always combines graph results with Qdrant vector search
+        - Optional iterative reasoning (controlled by params.max_steps)
+
         Args:
             query: User query string
-            mode: Optional mode override ("local", "global", "hybrid", "naive", "auto")
+            mode: Optional mode override ("local", "global", "hybrid", "auto")
             params: Optional query parameters
 
         Returns:
             GraphRAGContext with entities, relationships, and chunks
         """
         if not GRAPH_RAG_ENABLED:
-            logger.debug("GraphRAG is disabled")
+            logger.debug("GraphRAG is disabled, returning empty context")
             return GraphRAGContext(
                 entities=[],
                 relationships=[],
                 chunks=[],
-                mode=QueryMode.NAIVE,
+                mode=QueryMode.HYBRID,
                 enhanced_query=query,
             )
 
@@ -258,26 +279,21 @@ class GraphRAG:
         else:
             query_mode, enhanced_query = await self.query_mode_detector.detect_mode(query)
 
-        logger.info(f"Processing query with mode: {query_mode.value}")
+        logger.info(f"[GraphRAG] Processing query with mode: {query_mode.value}")
 
-        # Retrieve based on mode
-        if query_mode == QueryMode.AGENT:
-            # Use Graph-R1 style iterative agent reasoning
-            return await self._agent_query(enhanced_query, params)
-        elif query_mode == QueryMode.LOCAL:
+        # Retrieve based on mode (all modes now include vector search)
+        if query_mode == QueryMode.LOCAL:
             context = await self._local_retrieval(enhanced_query, params)
         elif query_mode == QueryMode.GLOBAL:
             context = await self._global_retrieval(enhanced_query, params)
-        elif query_mode == QueryMode.HYBRID:
+        else:  # HYBRID (default)
             context = await self._hybrid_retrieval(enhanced_query, params)
-        else:  # NAIVE
-            context = await self._naive_retrieval(enhanced_query, params)
 
         context.mode = query_mode
         context.enhanced_query = enhanced_query
 
         logger.info(
-            f"Retrieved {len(context.entities)} entities, "
+            f"[GraphRAG] Retrieved {len(context.entities)} entities, "
             f"{len(context.relationships)} relationships, "
             f"{len(context.chunks)} chunks"
         )
@@ -288,14 +304,13 @@ class GraphRAG:
         self, query: str, params: QueryParam
     ) -> GraphRAGContext:
         """
-        LOCAL mode: Entity-focused retrieval from Neo4j.
+        LOCAL mode: Entity-focused retrieval from Neo4j + Qdrant vector search.
 
-        Uses vector similarity search when available, falls back to text matching.
-
-        1. Generate query embedding
-        2. Find semantically similar entities via vector search
-        3. Fall back to text matching if vector search unavailable
-        4. Retrieve source chunks for context
+        Following Graph-R1 paper design:
+        1. Find semantically similar entities via Neo4j vector search
+        2. Fall back to text matching if vector search unavailable
+        3. Retrieve source chunks for matched entities from Qdrant
+        4. ALWAYS include direct Qdrant vector search results for the query
         """
         entities = []
 
@@ -334,7 +349,13 @@ class GraphRAG:
         logger.debug(f"[GraphRAG Query] LOCAL mode - found {len(entities)} entities")
 
         # Retrieve source chunks for the found entities
-        chunks = self._get_chunks_for_entities(entities)
+        entity_chunks = self._get_chunks_for_entities(entities)
+
+        # ALWAYS include direct Qdrant vector search results
+        vector_chunks = await self._get_vector_search_chunks(query, params.top_k)
+
+        # Combine and deduplicate chunks
+        chunks = self._merge_chunks(entity_chunks, vector_chunks)
 
         return GraphRAGContext(
             entities=entities,
@@ -421,7 +442,13 @@ class GraphRAG:
         )
 
         # Retrieve source chunks for the found entities
-        chunks = self._get_chunks_for_entities(entities)
+        entity_chunks = self._get_chunks_for_entities(entities)
+
+        # ALWAYS include direct Qdrant vector search results
+        vector_chunks = await self._get_vector_search_chunks(query, params.top_k)
+
+        # Combine and deduplicate chunks
+        chunks = self._merge_chunks(entity_chunks, vector_chunks)
 
         return GraphRAGContext(
             entities=entities,
@@ -539,86 +566,19 @@ class GraphRAG:
         )
 
         # Retrieve source chunks for the found entities
-        chunks = self._get_chunks_for_entities(entities)
+        entity_chunks = self._get_chunks_for_entities(entities)
+
+        # ALWAYS include direct Qdrant vector search results
+        vector_chunks = await self._get_vector_search_chunks(query, params.top_k)
+
+        # Combine and deduplicate chunks
+        chunks = self._merge_chunks(entity_chunks, vector_chunks)
 
         return GraphRAGContext(
             entities=entities,
             relationships=relationships,
             chunks=chunks,
             mode=QueryMode.HYBRID,
-            enhanced_query=query,
-        )
-
-    async def _naive_retrieval(
-        self, query: str, params: QueryParam
-    ) -> GraphRAGContext:
-        """
-        NAIVE mode: Simple vector search without graph.
-
-        Falls back to basic vector similarity search.
-        """
-        # Just return empty graph context - let the regular RAG handle it
-        return GraphRAGContext(
-            entities=[],
-            relationships=[],
-            chunks=[],
-            mode=QueryMode.NAIVE,
-            enhanced_query=query,
-        )
-
-    async def _agent_query(
-        self, query: str, params: QueryParam
-    ) -> GraphRAGContext:
-        """
-        AGENT mode: Graph-R1 style iterative reasoning.
-
-        This is a WRAPPER on top of existing LOCAL/GLOBAL/HYBRID modes:
-        1. Agent handles multi-round conversation and termination logic
-        2. Each retrieval step uses LOCAL/GLOBAL/HYBRID for actual graph access
-        3. Original retrieval modes are preserved as building blocks
-
-        Agent reasoning loop:
-        1. Thinking: Agent decides whether to continue or terminate
-        2. Query Generation: Agent formulates retrieval queries
-        3. Graph Retrieval: Delegates to LOCAL/GLOBAL/HYBRID modes
-        4. Answering: Agent generates final response
-        """
-        await self._init_agent()
-
-        # Run the agent query
-        answer, metadata = await self._agent.query(query, params)
-
-        # Get accumulated entities and relationships from all retrieval steps
-        all_entities = metadata.get("all_entities", [])
-        all_relationships = metadata.get("all_relationships", [])
-        all_chunks = metadata.get("all_chunks", [])
-
-        logger.info(
-            f"[GraphRAG Query] AGENT mode completed - "
-            f"steps={metadata.get('steps', 0)}, "
-            f"entities={len(all_entities)}, "
-            f"relationships={len(all_relationships)}, "
-            f"retrieval_modes={metadata.get('modes_used', [])}"
-        )
-
-        # Create a context with the agent's answer as the first "chunk"
-        # Additional chunks from retrieval steps are also included
-        agent_chunk = {
-            "page_content": answer,
-            "metadata": {
-                "source": "graphrag_agent",
-                "mode": "agent_iterative",
-                "steps": metadata.get("steps", 0),
-                "queries_made": metadata.get("queries_made", []),
-                "modes_used": metadata.get("modes_used", []),
-            },
-        }
-
-        return GraphRAGContext(
-            entities=all_entities,
-            relationships=all_relationships,
-            chunks=[agent_chunk] + all_chunks,  # Agent answer first, then source chunks
-            mode=QueryMode.AGENT,
             enhanced_query=query,
         )
 

@@ -324,12 +324,8 @@ def _find_relevant_files_with_scopes(
     """
     Find relevant files using vector search + LLM scope matching.
 
-    This implements the enhanced retrieval strategy:
-    1. Vector search on file summaries to get candidates
-    2. LLM-based scope matching to filter candidates
-
-    Note: If FILE_SUMMARY_ENABLED is False, returns empty list to skip
-    file summary search and go directly to chunk search.
+    NOTE: File summary feature has been deprecated. This function now returns
+    an empty list to skip file-level filtering and go directly to chunk search.
 
     Args:
         enhanced_query: The enhanced search query.
@@ -337,94 +333,34 @@ def _find_relevant_files_with_scopes(
         k: Maximum number of relevant files to return.
 
     Returns:
-        List of source names that are relevant to the query.
+        Empty list (file summary feature deprecated).
     """
-    # Skip file summary search if disabled
-    if not FILE_SUMMARY_ENABLED:
-        logger.debug("File summary search disabled, skipping file-level filtering")
-        return []
-
-    try:
-        # Step 1: Get candidate documents via vector search
-        candidate_docs = search_file_summaries_with_scopes(enhanced_query, k=k * 2)
-
-        if not candidate_docs:
-            logger.info("No file summaries found, will search all chunks")
-            return []
-
-        # Step 2: If we have query scopes, use LLM to filter candidates
-        if query_scopes:
-            relevant_sources = _match_scopes_with_llm(query_scopes, candidate_docs)
-        else:
-            # No scopes, use all candidates
-            relevant_sources = [
-                doc.metadata.get("source", "")
-                for doc in candidate_docs
-                if doc.metadata.get("source")
-            ]
-
-        # Limit to k results
-        relevant_sources = relevant_sources[:k]
-
-        logger.info(f"Found {len(relevant_sources)} relevant files with scope matching: {relevant_sources}")
-        return relevant_sources
-
-    except Exception as e:
-        logger.warning(f"Error in find_relevant_files_with_scopes: {e}")
-        return []
+    # File summary feature deprecated - return empty list to search all chunks
+    logger.debug("File summary feature deprecated, skipping file-level filtering")
+    return []
 
 
 def _find_relevant_files(query: str, k: int = 5) -> List[str]:
     """
     Find relevant files by searching file summaries first.
 
-    This implements the two-phase retrieval strategy:
-    1. Search file summaries to identify relevant documents
-    2. Return list of source names that are relevant to the query
-
-    Note: If FILE_SUMMARY_ENABLED is False, returns empty list to skip
-    file summary search and go directly to chunk search.
+    NOTE: File summary feature has been deprecated. This function now returns
+    an empty list to skip file-level filtering and go directly to chunk search.
 
     Args:
         query: The search query.
         k: Maximum number of relevant files to return.
 
     Returns:
-        List of source names that are relevant to the query.
+        Empty list (file summary feature deprecated).
     """
-    # Skip file summary search if disabled
-    if not FILE_SUMMARY_ENABLED:
-        logger.debug("File summary search disabled, skipping file-level filtering")
-        return []
-
-    try:
-        # Search file summaries using the query
-        summary_docs = search_file_summaries(query, k=k)
-
-        if not summary_docs:
-            logger.info("No file summaries found, will search all chunks")
-            return []
-
-        # Extract unique source names from the summary results
-        relevant_sources = []
-        seen_sources = set()
-
-        for doc in summary_docs:
-            source = doc.metadata.get("source", "")
-            if source and source not in seen_sources:
-                relevant_sources.append(source)
-                seen_sources.add(source)
-
-        logger.info(f"Found {len(relevant_sources)} relevant files from summaries: {relevant_sources}")
-        return relevant_sources
-
-    except Exception as e:
-        logger.warning(f"Error searching file summaries: {e}")
-        return []
+    # File summary feature deprecated - return empty list to search all chunks
+    logger.debug("File summary feature deprecated, skipping file-level filtering")
+    return []
 
 
-# GraphRAG query mode: "auto", "local", "global", "hybrid", "naive", or "agent"
-# "agent" enables Graph-R1 style iterative reasoning
+# GraphRAG query mode: "auto", "local", "global", or "hybrid"
+# Following Graph-R1 paper design with iterative reasoning built-in
 GRAPHRAG_QUERY_MODE = os.getenv("GRAPHRAG_QUERY_MODE", "auto").lower()
 
 
@@ -432,19 +368,23 @@ def _get_graphrag_context(query: str) -> str:
     """
     Get additional context from GraphRAG if enabled.
 
-    Supports multiple query modes:
-    - auto: Let the system detect the best mode based on query
+    Following Graph-R1 paper design:
+    - Combines graph-based retrieval with Qdrant vector search
+    - Supports LOCAL, GLOBAL, HYBRID query modes
+    - Iterative reasoning controlled by max_steps parameter
+
+    Supported query modes:
+    - auto: Let the system detect the best mode based on query (recommended)
     - local: Entity-focused retrieval
     - global: Relationship-focused retrieval
-    - hybrid: Combined entity and relationship retrieval with graph expansion
-    - naive: Simple vector search fallback
-    - agent: Graph-R1 style iterative reasoning (multi-step agent loop)
+    - hybrid: Combined entity and relationship retrieval with graph expansion (default)
 
     Args:
         query: The search query.
 
     Returns:
-        Formatted GraphRAG context string, or empty string if disabled/unavailable.
+        Formatted GraphRAG context string combining graph and vector results,
+        or empty string if disabled/unavailable.
     """
     logger.debug(
         f"[GraphRAG Query] Starting - GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}, "
@@ -493,18 +433,8 @@ def _get_graphrag_context(query: str) -> str:
             f"chunks={len(context.chunks)}, enhanced_query='{context.enhanced_query[:50]}...'"
         )
 
-        # For AGENT mode, the answer is in the chunks (as agent_chunk)
-        if context.mode.value == "agent" and context.chunks:
-            agent_chunk = context.chunks[0]
-            answer = agent_chunk.get("page_content", "")
-            if answer:
-                logger.info(
-                    f"[GraphRAG Query] Agent mode success - "
-                    f"steps={agent_chunk.get('metadata', {}).get('steps', 0)}"
-                )
-                return f"[Agent Reasoning Result]\n{answer}"
-
-        if context.entities or context.relationships:
+        # Format context combining graph results and vector search results
+        if context.entities or context.relationships or context.chunks:
             formatted = graphrag.format_context(context)
             logger.info(
                 f"[GraphRAG Query] Success - mode={context.mode.value}, "

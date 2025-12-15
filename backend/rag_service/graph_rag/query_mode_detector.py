@@ -4,11 +4,10 @@ Query Mode Detector for GraphRAG.
 This module implements LLM-based query mode detection to determine
 the best retrieval strategy for a given query.
 
-Query Modes:
+Following Graph-R1 paper design:
 - LOCAL: Entity-focused queries (e.g., "Who is John Smith?")
 - GLOBAL: Relationship-focused queries (e.g., "How does X relate to Y?")
-- HYBRID: Both entity and relationship queries
-- NAIVE: Simple vector search (fallback)
+- HYBRID: Combined entity and relationship queries (default)
 """
 
 import json
@@ -90,7 +89,7 @@ class QueryModeDetector:
             return QueryMode.HYBRID, query
 
     def _parse_response(self, response: str, original_query: str) -> Tuple[QueryMode, str]:
-        """Parse the LLM response to extract mode and enhanced query."""
+        """Parse the LLM response to extract mode and enhanced query (Graph-R1 modes only)."""
         try:
             # Try to parse as JSON
             # Handle potential markdown code blocks
@@ -103,12 +102,11 @@ class QueryModeDetector:
             mode_str = data.get("mode", "HYBRID").upper()
             enhanced_query = data.get("enhanced_query", original_query)
 
-            # Map string to QueryMode enum
+            # Map string to QueryMode enum (Graph-R1 modes only)
             mode_map = {
                 "LOCAL": QueryMode.LOCAL,
                 "GLOBAL": QueryMode.GLOBAL,
                 "HYBRID": QueryMode.HYBRID,
-                "NAIVE": QueryMode.NAIVE,
             }
             mode = mode_map.get(mode_str, QueryMode.HYBRID)
 
@@ -122,9 +120,8 @@ class QueryModeDetector:
                 return QueryMode.LOCAL, original_query
             elif "GLOBAL" in response_upper:
                 return QueryMode.GLOBAL, original_query
-            elif "NAIVE" in response_upper:
-                return QueryMode.NAIVE, original_query
             else:
+                # Default to HYBRID for any unrecognized mode
                 return QueryMode.HYBRID, original_query
 
     def detect_mode_heuristic(self, query: str) -> Tuple[QueryMode, str]:
@@ -132,29 +129,16 @@ class QueryModeDetector:
         Heuristic-based query mode detection (fast fallback).
 
         Uses keyword patterns to determine query mode without LLM.
+        Following Graph-R1 paper design with 3 modes only.
 
-        Priority order (check HYBRID first since "how does X work" is common):
-        1. HYBRID - "how does X work/function" (mechanism/process queries)
-        2. GLOBAL - "how does X relate to Y" (cross-entity relationships)
-        3. NAIVE - simple facts (when, how many, list)
-        4. LOCAL - "what is X", "who is X" (entity definitions)
-        5. Default - HYBRID (safest for complex queries)
+        Priority order:
+        1. GLOBAL - Cross-entity relationships ("how does X relate to Y")
+        2. LOCAL - Single entity focus ("who is X", "what is X")
+        3. HYBRID - Default for complex queries (mechanism, explanation, comparison)
         """
         query_lower = query.lower()
 
-        # HYBRID patterns - check FIRST (how does X work/function)
-        # These should NOT be confused with LOCAL "what is X"
-        hybrid_patterns = [
-            r'\bhow does\b.*\b(work|function|operate)\b',
-            r'\bhow is\b.*\b(implemented|built|designed|structured)\b',
-            r'\bexplain how\b',
-            r'\bwhat are the (components|parts|steps|stages)\b',
-            r'\bhow (to|can)\b',
-            r'\bexplain the\b.*\b(process|system|mechanism|architecture)\b',
-            r'\bwhat does\b.*\bdo\b',
-        ]
-
-        # GLOBAL patterns - relationships BETWEEN entities
+        # GLOBAL patterns - cross-entity relationships (most specific, check first)
         global_patterns = [
             r'\bhow does\b.*\brelate\b',
             r'\bconnection between\b',
@@ -166,45 +150,26 @@ class QueryModeDetector:
             r'\bwhat links\b.*\bto\b',
         ]
 
-        # NAIVE patterns - simple facts
-        naive_patterns = [
-            r'\blist\b',
-            r'\bwhat date\b',
-            r'\bwhen (was|is|did)\b',
-            r'\bhow many\b',
-            r'\bcount\b',
-            r'\bwhat time\b',
-        ]
-
-        # LOCAL patterns - entity definitions ONLY
+        # LOCAL patterns - single entity definitions (specific entity queries)
         local_patterns = [
             r'\bwho is\b',
-            r'\bwhat is\b(?!.*\b(components|parts|steps|difference|connection)\b)',
-            r'\btell me about\b',
+            r'\bwhat is\b(?!.*\b(components|parts|steps|difference|connection|relationship)\b)',
+            r'\btell me about\b(?!.*\b(how|why|relationship)\b)',
             r'\bdefine\b',
             r'\bwhat does\b.*\bmean\b',
         ]
 
-        # Check HYBRID first (most common complex queries)
-        for pattern in hybrid_patterns:
-            if re.search(pattern, query_lower):
-                return QueryMode.HYBRID, query
-
-        # Check GLOBAL (cross-entity relationships)
+        # Check GLOBAL first (most specific)
         for pattern in global_patterns:
             if re.search(pattern, query_lower):
                 return QueryMode.GLOBAL, query
 
-        # Check NAIVE (simple facts)
-        for pattern in naive_patterns:
-            if re.search(pattern, query_lower):
-                return QueryMode.NAIVE, query
-
-        # Check LOCAL (entity definitions)
+        # Check LOCAL (single entity focus)
         for pattern in local_patterns:
             if re.search(pattern, query_lower):
                 return QueryMode.LOCAL, query
 
-        # Default to HYBRID (safest for complex/ambiguous queries)
+        # Default to HYBRID for all other queries
+        # This includes: explanations, comparisons, "how does X work", lists, counts, etc.
         return QueryMode.HYBRID, query
 

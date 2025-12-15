@@ -34,11 +34,10 @@ class TestQueryMode:
     """Tests for QueryMode enum."""
 
     def test_query_modes_exist(self):
-        """Test that all query modes are defined."""
+        """Test that all query modes are defined (following Graph-R1 paper)."""
         assert QueryMode.LOCAL.value == "local"
         assert QueryMode.GLOBAL.value == "global"
         assert QueryMode.HYBRID.value == "hybrid"
-        assert QueryMode.NAIVE.value == "naive"
 
 
 class TestQueryParam:
@@ -185,20 +184,6 @@ class TestQueryModeDetectorHeuristic:
         for query in global_queries:
             mode, _ = detector.detect_mode_heuristic(query)
             assert mode == QueryMode.GLOBAL, f"Expected GLOBAL for: {query}"
-
-    def test_naive_mode_detection(self):
-        """Test NAIVE mode detection for simple queries."""
-        detector = QueryModeDetector()
-
-        naive_queries = [
-            "List all products",
-            "When was the company founded?",
-            "How many employees?",
-        ]
-
-        for query in naive_queries:
-            mode, _ = detector.detect_mode_heuristic(query)
-            assert mode == QueryMode.NAIVE, f"Expected NAIVE for: {query}"
 
     def test_hybrid_mode_fallback(self):
         """Test HYBRID mode as fallback for ambiguous queries."""
