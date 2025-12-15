@@ -41,6 +41,7 @@ class EntityExtractor:
         llm_client=None,
         max_gleaning: int = None,
         cache_storage=None,
+        min_entity_score: int = None,
     ):
         """
         Initialize the entity extractor.
@@ -49,10 +50,14 @@ class EntityExtractor:
             llm_client: LLM client for extraction (uses configured RAG LLM backend)
             max_gleaning: Maximum gleaning iterations (default from env)
             cache_storage: Optional LLM cache storage
+            min_entity_score: Minimum importance score for entities (default from env)
         """
         self.llm_client = llm_client
         self.max_gleaning = max_gleaning or int(
-            os.getenv("GRAPH_RAG_MAX_GLEANING", "3")
+            os.getenv("GRAPH_RAG_MAX_GLEANING", "0")
+        )
+        self.min_entity_score = min_entity_score or int(
+            os.getenv("GRAPH_RAG_MIN_ENTITY_SCORE", "60")
         )
         self.cache_storage = cache_storage
         self._cached_llm_client = None
@@ -113,18 +118,31 @@ class EntityExtractor:
         self, text: str, chunk_id: str
     ) -> Tuple[List[Entity], List[Relationship], str]:
         """
-        Perform initial entity extraction.
+        Perform initial entity extraction with importance filtering.
 
         Returns:
-            Tuple of (entities, relationships, raw_response)
+            Tuple of (filtered_entities, relationships, raw_response)
         """
         prompt = ENTITY_EXTRACTION_PROMPT.format(text=text)
         response = await self._call_llm(prompt)
 
         entities, relationships = parse_extraction_output(response, chunk_id)
-        logger.info(
-            f"Initial extraction: {len(entities)} entities, {len(relationships)} relationships"
-        )
+
+        # Filter entities by importance score
+        original_count = len(entities)
+        entities = [e for e in entities if e.key_score >= self.min_entity_score]
+        filtered_count = original_count - len(entities)
+
+        if filtered_count > 0:
+            logger.info(
+                f"Initial extraction: {len(entities)} entities (filtered {filtered_count} "
+                f"low-importance entities with score < {self.min_entity_score}), "
+                f"{len(relationships)} relationships"
+            )
+        else:
+            logger.info(
+                f"Initial extraction: {len(entities)} entities, {len(relationships)} relationships"
+            )
 
         return entities, relationships, response
 
@@ -132,17 +150,29 @@ class EntityExtractor:
         self, history: List[Dict[str, str]], chunk_id: str
     ) -> Tuple[List[Entity], List[Relationship], str]:
         """
-        Continue extraction to find missed entities.
+        Continue extraction to find missed entities with importance filtering.
 
         Returns:
-            Tuple of (entities, relationships, raw_response)
+            Tuple of (filtered_entities, relationships, raw_response)
         """
         response = await self._call_llm(ENTITY_CONTINUE_EXTRACTION_PROMPT, history)
 
         entities, relationships = parse_extraction_output(response, chunk_id)
-        logger.info(
-            f"Continue extraction: {len(entities)} entities, {len(relationships)} relationships"
-        )
+
+        # Filter entities by importance score
+        original_count = len(entities)
+        entities = [e for e in entities if e.key_score >= self.min_entity_score]
+        filtered_count = original_count - len(entities)
+
+        if filtered_count > 0:
+            logger.info(
+                f"Continue extraction: {len(entities)} entities (filtered {filtered_count} "
+                f"low-importance), {len(relationships)} relationships"
+            )
+        else:
+            logger.info(
+                f"Continue extraction: {len(entities)} entities, {len(relationships)} relationships"
+            )
 
         return entities, relationships, response
 

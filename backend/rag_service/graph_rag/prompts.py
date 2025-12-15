@@ -55,9 +55,23 @@ Respond in JSON format:
 # Entity Extraction Prompts
 # =============================================================================
 
-ENTITY_EXTRACTION_PROMPT = """You are an expert at extracting entities and relationships from text.
+ENTITY_EXTRACTION_PROMPT = """You are an expert at extracting KEY entities and relationships from text for knowledge graph construction.
 
-Given the following text, extract all entities and relationships.
+IMPORTANT: Extract ONLY the most important and salient entities. Focus on quality over quantity.
+
+Extract entities that are:
+✓ Central to understanding the document's main topics
+✓ Proper nouns (people, organizations, locations, products, technologies, projects)
+✓ Key concepts that define the domain or subject matter
+✓ Referenced multiple times or in important contexts
+✓ Have significant relationships with other entities
+
+DO NOT extract:
+✗ Common nouns or generic terms (e.g., "system", "process", "method")
+✗ Entities mentioned only once in passing without context
+✗ Low-importance supporting details or examples
+✗ Adjectives or descriptive phrases
+✗ Pronouns or references without clear antecedents
 
 TEXT:
 {text}
@@ -68,27 +82,39 @@ For entities, use:
 (entity|<entity_type>|<entity_name>|<entity_description>|<importance_score>)
 
 Where:
-- entity_type: person, organization, location, concept, technology, event, etc.
-- entity_name: The name of the entity
-- entity_description: A brief description of the entity
-- importance_score: 1-100 indicating how important this entity is in the text
+- entity_type: person, organization, location, concept, technology, event, product, project, etc.
+- entity_name: The name of the entity (use proper capitalization)
+- entity_description: A concise description of the entity and its significance
+- importance_score: 1-100 indicating importance (be selective - use high scores for truly important entities)
+  * 80-100: Critical entities (main subjects, key people/organizations, core concepts)
+  * 60-79: Important entities (significant technologies, major concepts, notable relationships)
+  * 40-59: Moderate entities (supporting details with some significance)
+  * Below 40: Skip these - not important enough for the knowledge graph
 
 For relationships, use:
 (relationship|<source_entity>|<target_entity>|<relationship_description>|<keywords>|<weight>)
 
 Where:
-- source_entity: Name of the source entity
-- target_entity: Name of the target entity
-- relationship_description: Description of how they are related
-- keywords: Comma-separated keywords describing the relationship
-- weight: 1-10 indicating relationship strength
+- source_entity: Name of the source entity (must match an extracted entity name)
+- target_entity: Name of the target entity (must match an extracted entity name)
+- relationship_description: Clear description of how they are related
+- keywords: Comma-separated keywords describing the relationship type
+- weight: 1-10 indicating relationship strength and importance
+
+QUALITY GUIDELINES:
+- Aim for 5-15 high-quality entities per chunk (not 50+)
+- Only extract relationships between entities you've already extracted
+- Use high importance scores (60+) for entities worth storing
+- Be selective - a smaller, high-quality graph is better than a large, noisy one
 
 Example output:
-(entity|person|John Smith|CEO of Acme Corporation|90)
-(entity|organization|Acme Corporation|Technology company founded in 2010|85)
-(relationship|John Smith|Acme Corporation|John Smith is the CEO and founder|CEO, founder, leadership|9)
+(entity|person|John Smith|CEO and founder of Acme Corporation, leading AI innovation initiatives|90)
+(entity|organization|Acme Corporation|Technology company specializing in artificial intelligence and machine learning solutions|85)
+(entity|technology|Machine Learning|Core technology used by Acme Corporation for product development|75)
+(relationship|John Smith|Acme Corporation|John Smith founded and currently leads Acme Corporation as CEO|CEO, founder, leadership|9)
+(relationship|Acme Corporation|Machine Learning|Acme Corporation specializes in developing machine learning solutions|specialization, technology, development|8)
 
-Now extract all entities and relationships from the text above:
+Now extract ONLY the key entities and relationships from the text above:
 """
 
 ENTITY_CONTINUE_EXTRACTION_PROMPT = """MANY knowledge fragments with entities and relationships were missed in the last extraction.
