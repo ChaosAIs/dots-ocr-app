@@ -58,6 +58,10 @@ class DotsOCRParser:
         self.output_dir = output_dir or os.getenv('OUTPUT_DIR', './output')
         self.progress_callback = progress_callback
 
+        # Context for OCR status tracking
+        self.current_filename = None  # Original filename for database lookup
+        self.current_page_number = None  # Current page being processed
+
         # Handle None values for min_pixels and max_pixels
         min_pixels_env = os.getenv('MIN_PIXELS', 'None')
         max_pixels_env = os.getenv('MAX_PIXELS', 'None')
@@ -248,7 +252,14 @@ class DotsOCRParser:
         # Match markdown images with data URLs
         image_pattern = re.compile(r"!\[(.*?)\]\((data:image/[^)]+)\)")
 
+        # Track image position for status tracking
+        image_position = 0
+
         def _analyze_and_replace(match: re.Match) -> str:  # type: ignore[name-defined]
+            nonlocal image_position
+            current_image_position = image_position
+            image_position += 1
+
             alt_text = match.group(1)
             data_url = match.group(2)
 
@@ -269,6 +280,15 @@ class DotsOCRParser:
             base64_str = data_url
             if "base64," in data_url:
                 base64_str = data_url.split("base64,", 1)[1]
+
+            # Get image size for tracking
+            image_size_pixels = None
+            try:
+                if hasattr(converter, '_get_image_dimensions'):
+                    width, height = converter._get_image_dimensions(base64_str)
+                    image_size_pixels = width * height
+            except:
+                pass
 
             try:
                 # Let the converter choose the appropriate prompt based on image size
@@ -301,8 +321,44 @@ class DotsOCRParser:
                     base64_str,
                     prompt=prompt,
                 )
+
+                # Check if image was skipped (empty result means too small)
+                if not analysis_markdown or not analysis_markdown.strip():
+                    # Track skipped embedded image OCR
+                    if self.current_filename and self.current_page_number is not None:
+                        self._track_embedded_image_ocr_skipped(
+                            filename=self.current_filename,
+                            page_number=self.current_page_number,
+                            image_position=current_image_position,
+                            ocr_backend=backend_name,
+                            skip_reason="Image too small for OCR",
+                            image_size_pixels=image_size_pixels
+                        )
+                else:
+                    # Track successful embedded image OCR
+                    if self.current_filename and self.current_page_number is not None:
+                        self._track_embedded_image_ocr_success(
+                            filename=self.current_filename,
+                            page_number=self.current_page_number,
+                            image_position=current_image_position,
+                            ocr_backend=backend_name,
+                            image_size_pixels=image_size_pixels
+                        )
+
             except Exception as e:  # pragma: no cover - safety net
                 logger.error("Error during %s image analysis: %s", backend_name, e)
+
+                # Track failed embedded image OCR
+                if self.current_filename and self.current_page_number is not None:
+                    self._track_embedded_image_ocr_failure(
+                        filename=self.current_filename,
+                        page_number=self.current_page_number,
+                        image_position=current_image_position,
+                        ocr_backend=backend_name,
+                        error=str(e),
+                        image_size_pixels=image_size_pixels
+                    )
+
                 return match.group(0)
 
             if not analysis_markdown:
@@ -529,8 +585,21 @@ class DotsOCRParser:
                     md_content = layoutjson2md(origin_image, cells, text_key='text')
                     md_content_no_hf = layoutjson2md(origin_image, cells, text_key='text', no_page_hf=True)  # used for clean output or metric of omnidocbench、olmbench
 
+                    # Set context for embedded image OCR tracking
+                    # save_name format: "filename_page_0" for PDFs, "filename" for images
+                    if source == "pdf":
+                        self.current_filename = save_name.rsplit('_page_', 1)[0] if '_page_' in save_name else save_name
+                        self.current_page_number = page_idx
+                    else:
+                        self.current_filename = save_name
+                        self.current_page_number = 0
+
                     # Post-process the no-header/footer markdown to insert Gemma3 image analysis
                     md_content_no_hf = self._add_image_analysis_to_markdown(md_content_no_hf)
+
+                    # Clear context after processing
+                    self.current_filename = None
+                    self.current_page_number = None
 
                     md_file_path = os.path.join(save_dir, f"{save_name}.md")
                     with open(md_file_path, "w", encoding="utf-8") as md_file:
@@ -625,6 +694,9 @@ class DotsOCRParser:
         if self.progress_callback:
             self.progress_callback(progress=10, message=f"PDF loaded with {total_pages} pages")
 
+        # Initialize OCR tracking in database
+        self._init_ocr_tracking(filename, total_pages)
+
         # Check which pages already have markdown files (skip already converted pages)
         pages_to_skip = set()
         existing_results = []
@@ -712,7 +784,27 @@ class DotsOCRParser:
                 )
 
         def _execute_task(task_args):
-            return self._parse_single_image(**task_args)
+            page_idx = task_args.get('page_idx', 0)
+            try:
+                result = self._parse_single_image(**task_args)
+
+                # Track successful page OCR
+                self._track_page_ocr_success(
+                    filename=filename,
+                    page_number=page_idx,
+                    result=result,
+                    save_dir=save_dir
+                )
+
+                return result
+            except Exception as e:
+                # Track failed page OCR
+                self._track_page_ocr_failure(
+                    filename=filename,
+                    page_number=page_idx,
+                    error=str(e)
+                )
+                raise
 
         results = existing_results.copy()  # Start with existing results
 
@@ -790,6 +882,176 @@ class DotsOCRParser:
 
         return results
 
+    # ========== OCR Status Tracking Helper Methods ==========
+
+    def _init_ocr_tracking(self, filename: str, total_pages: int):
+        """Initialize OCR tracking in database for a document."""
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.init_ocr_details(doc)
+                    repo.set_total_pages_for_ocr(doc, total_pages)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Could not initialize OCR tracking for {filename}: {e}")
+
+    def _track_page_ocr_success(self, filename: str, page_number: int, result: dict, save_dir: str):
+        """Track successful page OCR in database."""
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            # Determine page file path
+            page_file_path = os.path.join(save_dir, f"{filename}_page_{page_number}_nohf.md")
+
+            # Count embedded images in the result
+            embedded_images_count = 0
+            if 'md_content' in result:
+                # Count markdown image tags in the content
+                import re
+                image_pattern = re.compile(r"!\[.*?\]\(data:image/[^)]+\)")
+                embedded_images_count = len(image_pattern.findall(result['md_content']))
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_page_ocr_status(
+                        doc,
+                        page_number=page_number,
+                        page_file_path=page_file_path,
+                        status="success",
+                        embedded_images_count=embedded_images_count
+                    )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Could not track page OCR success for {filename} page {page_number}: {e}")
+
+    def _track_page_ocr_failure(self, filename: str, page_number: int, error: str):
+        """Track failed page OCR in database."""
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_page_ocr_status(
+                        doc,
+                        page_number=page_number,
+                        page_file_path=None,
+                        status="failed",
+                        error=error
+                    )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Could not track page OCR failure for {filename} page {page_number}: {e}")
+
+    def _track_embedded_image_ocr_success(
+        self,
+        filename: str,
+        page_number: int,
+        image_position: int,
+        ocr_backend: str,
+        image_size_pixels: int = None
+    ):
+        """Track successful embedded image OCR in database."""
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_embedded_image_ocr_status(
+                        doc,
+                        page_number=page_number,
+                        image_position=image_position,
+                        status="success",
+                        ocr_backend=ocr_backend,
+                        image_size_pixels=image_size_pixels
+                    )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Could not track embedded image OCR success for {filename} "
+                f"page {page_number} image {image_position}: {e}"
+            )
+
+    def _track_embedded_image_ocr_failure(
+        self,
+        filename: str,
+        page_number: int,
+        image_position: int,
+        ocr_backend: str,
+        error: str,
+        image_size_pixels: int = None
+    ):
+        """Track failed embedded image OCR in database."""
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_embedded_image_ocr_status(
+                        doc,
+                        page_number=page_number,
+                        image_position=image_position,
+                        status="failed",
+                        ocr_backend=ocr_backend,
+                        error=error,
+                        image_size_pixels=image_size_pixels
+                    )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Could not track embedded image OCR failure for {filename} "
+                f"page {page_number} image {image_position}: {e}"
+            )
+
+    def _track_embedded_image_ocr_skipped(
+        self,
+        filename: str,
+        page_number: int,
+        image_position: int,
+        ocr_backend: str,
+        skip_reason: str,
+        image_size_pixels: int = None
+    ):
+        """Track skipped embedded image OCR in database."""
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    repo.update_embedded_image_ocr_status(
+                        doc,
+                        page_number=page_number,
+                        image_position=image_position,
+                        status="skipped",
+                        ocr_backend=ocr_backend,
+                        skip_reason=skip_reason,
+                        image_size_pixels=image_size_pixels
+                    )
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Could not track embedded image OCR skip for {filename} "
+                f"page {page_number} image {image_position}: {e}"
+            )
 
 
 def main():

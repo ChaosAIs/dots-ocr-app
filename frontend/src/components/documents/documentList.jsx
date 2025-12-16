@@ -129,6 +129,275 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
+  /**
+   * Unified Index handler - combines convert + index operations
+   * Handles first-time indexing and retry scenarios
+   */
+  const handleUnifiedIndex = async (document) => {
+    const { markdown_exists, indexing_details, convert_status } = document;
+
+    // Determine if this is a retry scenario
+    const needsConversion = !markdown_exists || convert_status === "failed" || convert_status === "partial";
+    const needsVectorIndex = !indexing_details ||
+                             indexing_details?.vector_indexing?.status === "failed" ||
+                             indexing_details?.vector_indexing?.status === "pending";
+    const needsMetadata = !indexing_details ||
+                          indexing_details?.metadata_extraction?.status === "failed" ||
+                          indexing_details?.metadata_extraction?.status === "pending";
+    const needsGraphRAG = !indexing_details ||
+                          indexing_details?.graphrag_indexing?.status === "failed" ||
+                          indexing_details?.graphrag_indexing?.status === "pending";
+
+    try {
+      setIndexing(document.filename);
+
+      // Step 1: Convert to markdown if needed
+      if (needsConversion) {
+        await handleConvertForUnifiedIndex(document);
+      }
+
+      // Step 2: Index document (vector + metadata + GraphRAG)
+      // The backend /index endpoint handles all three phases with WebSocket progress
+      if (needsVectorIndex || needsMetadata || needsGraphRAG) {
+        messageService.infoToast(t("DocumentList.StartingIndex"));
+        const response = await documentService.indexDocument(document.filename);
+
+        // Backend now returns conversion_id for WebSocket tracking
+        if (response.status === "accepted" && response.conversion_id) {
+          const conversionId = response.conversion_id;
+
+          // Connect to WebSocket for real-time indexing progress
+          const ws = documentService.connectToConversionProgress(
+            conversionId,
+            (progressData) => {
+              // Handle indexing status updates
+              if (progressData.status === "indexing") {
+                messageService.infoToast(progressData.message || t("DocumentList.IndexingDocument"));
+              }
+
+              if (progressData.status === "indexed") {
+                messageService.successToast(
+                  `${t("DocumentList.IndexSuccess")} (${progressData.chunks_indexed || 0} chunks)`
+                );
+                // Reload documents to update status
+                loadDocuments();
+              }
+
+              if (progressData.status === "extracting_metadata") {
+                messageService.infoToast(progressData.message || "Extracting metadata...");
+              }
+
+              if (progressData.status === "metadata_extracted") {
+                messageService.infoToast(
+                  progressData.message || "Metadata extracted successfully"
+                );
+                // Reload to show updated metadata
+                loadDocuments();
+              }
+
+              if (progressData.status === "graphrag_indexing") {
+                messageService.infoToast(progressData.message || "Building knowledge graph...");
+              }
+
+              if (progressData.status === "graphrag_indexed") {
+                messageService.successToast(
+                  progressData.message || "Knowledge graph built successfully"
+                );
+                // Final reload to show complete status
+                loadDocuments();
+                setIndexing(null);
+                // Close WebSocket after all phases complete
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.close();
+                }
+                // Remove from webSockets state
+                setWebSockets((prev) => {
+                  const updated = { ...prev };
+                  delete updated[conversionId];
+                  return updated;
+                });
+              }
+
+              if (progressData.status === "index_error") {
+                messageService.errorToast(progressData.message || t("DocumentList.IndexFailed"));
+                loadDocuments();
+                setIndexing(null);
+                // Close WebSocket on error
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                  ws.close();
+                }
+                setWebSockets((prev) => {
+                  const updated = { ...prev };
+                  delete updated[conversionId];
+                  return updated;
+                });
+              }
+            },
+            (error) => {
+              console.error("WebSocket error during indexing:", error);
+              messageService.errorToast(t("DocumentList.ConnectionError"));
+              setIndexing(null);
+            }
+          );
+
+          // Store WebSocket reference
+          setWebSockets((prev) => ({
+            ...prev,
+            [conversionId]: ws,
+          }));
+        } else if (response.status === "success") {
+          // Fallback for old synchronous response (backward compatibility)
+          messageService.successToast(
+            `${t("DocumentList.IndexSuccess")} (${response.chunks_indexed} chunks)`
+          );
+          loadDocuments();
+        } else {
+          messageService.warnToast(t("DocumentList.IndexWarning"));
+        }
+      }
+    } catch (error) {
+      messageService.errorToast(t("DocumentList.IndexFailed"));
+      console.error("Error in unified index:", error);
+    } finally {
+      setIndexing(null);
+    }
+  };
+
+  /**
+   * Helper function to handle conversion as part of unified index
+   * Returns a promise that resolves when conversion is complete
+   */
+  const handleConvertForUnifiedIndex = async (document) => {
+    const { total_pages = 0, converted_pages = 0 } = document;
+    const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
+
+    return new Promise(async (resolve, reject) => {
+      try {
+        setConverting(document.filename);
+
+        // Update document with conversion status
+        setDocuments((prev) =>
+          prev.map((doc) =>
+            doc.filename === document.filename
+              ? { ...doc, conversionProgress: 0, conversionStatus: "converting" }
+              : doc
+          )
+        );
+
+        // For partially converted documents, use direct reconversion
+        if (isPartiallyConverted) {
+          messageService.infoToast(t("DocumentList.ReconvertingUncompleted"));
+          const response = await documentService.reconvertUncompletedPages(document.filename);
+
+          if (response.status === "success" || response.status === "partial") {
+            setDocuments((prev) =>
+              prev.map((doc) =>
+                doc.filename === document.filename
+                  ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
+                  : doc
+              )
+            );
+            setConverting(null);
+            await loadDocuments();
+            resolve();
+          } else {
+            throw new Error(response.message || "Reconversion failed");
+          }
+          return;
+        }
+
+        // For fresh conversions, use the normal flow with WebSocket
+        messageService.infoToast(t("DocumentList.StartingConversion"));
+
+        const response = await documentService.convertDocument(
+          document.filename,
+          "prompt_layout_all_en",
+          "auto"
+        );
+
+        if (response.status === "accepted" && response.conversion_id) {
+          const conversionId = response.conversion_id;
+
+          // Connect to WebSocket for progress updates
+          const ws = documentService.connectToConversionProgress(
+            conversionId,
+            (progressData) => {
+              // Update progress
+              if (progressData.progress !== undefined) {
+                setDocuments((prev) =>
+                  prev.map((doc) =>
+                    doc.filename === document.filename
+                      ? { ...doc, conversionProgress: progressData.progress }
+                      : doc
+                  )
+                );
+              }
+
+              // Handle completion
+              if (progressData.status === "completed") {
+                messageService.successToast(t("DocumentList.ConversionSuccess"));
+                setDocuments((prev) =>
+                  prev.map((doc) =>
+                    doc.filename === document.filename
+                      ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
+                      : doc
+                  )
+                );
+                setConverting(null);
+                loadDocuments().then(resolve);
+              }
+
+              // Handle errors
+              if (progressData.status === "error" || progressData.status === "failed") {
+                messageService.errorToast(progressData.message || t("DocumentList.ConversionFailed"));
+                setDocuments((prev) =>
+                  prev.map((doc) =>
+                    doc.filename === document.filename
+                      ? { ...doc, conversionStatus: "error" }
+                      : doc
+                  )
+                );
+                setConverting(null);
+                reject(new Error(progressData.message || "Conversion failed"));
+              }
+            },
+            (error) => {
+              console.error("WebSocket error:", error);
+              messageService.errorToast(t("DocumentList.ConnectionError"));
+              setDocuments((prev) =>
+                prev.map((doc) =>
+                  doc.filename === document.filename
+                    ? { ...doc, conversionStatus: "error" }
+                    : doc
+                )
+              );
+              setConverting(null);
+              reject(error);
+            }
+          );
+
+          // Store WebSocket reference
+          setWebSockets((prev) => ({
+            ...prev,
+            [conversionId]: ws,
+          }));
+        }
+      } catch (error) {
+        messageService.errorToast(t("DocumentList.FailedToConvert"));
+        console.error("Error in conversion:", error);
+        setDocuments((prev) =>
+          prev.map((doc) =>
+            doc.filename === document.filename
+              ? { ...doc, conversionStatus: "error" }
+              : doc
+          )
+        );
+        setConverting(null);
+        reject(error);
+      }
+    });
+  };
+
   const handleIndex = async (document) => {
     try {
       setIndexing(document.filename);
@@ -467,49 +736,150 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
+  /**
+   * Determine the state of the unified Index button
+   */
+  const getUnifiedIndexButtonState = (rowData) => {
+    const {
+      markdown_exists,
+      convert_status,
+      indexing_details,
+      total_pages = 0,
+      converted_pages = 0
+    } = rowData;
+
+    // Check if currently processing
+    const isProcessing = converting === rowData.filename || indexing === rowData.filename;
+
+    // Check conversion status
+    const conversionFailed = convert_status === "failed";
+    // Partial means: started conversion (converted_pages > 0) but not finished (< total_pages)
+    // Don't treat fresh uploads (converted_pages = 0) as partial
+    const conversionPartial = convert_status === "partial" ||
+                              (total_pages > 0 && converted_pages > 0 && converted_pages < total_pages);
+    const conversionComplete = markdown_exists && !conversionFailed && !conversionPartial;
+
+    // Check indexing status
+    const vectorStatus = indexing_details?.vector_indexing?.status;
+    const metadataStatus = indexing_details?.metadata_extraction?.status;
+    const graphragStatus = indexing_details?.graphrag_indexing?.status;
+
+    const vectorComplete = vectorStatus === "completed";
+    const metadataComplete = metadataStatus === "completed";
+    const graphragComplete = graphragStatus === "completed";
+    const graphragProcessing = graphragStatus === "processing";
+
+    const vectorFailed = vectorStatus === "failed";
+    const metadataFailed = metadataStatus === "failed";
+    const graphragFailed = graphragStatus === "failed";
+
+    const anyIndexingFailed = vectorFailed || metadataFailed || graphragFailed;
+    const anyIndexingProcessing = vectorStatus === "processing" || metadataStatus === "processing" || graphragProcessing;
+
+    // Determine button state
+    if (isProcessing || anyIndexingProcessing) {
+      return {
+        type: "indexing",
+        icon: "pi pi-spin pi-spinner",
+        className: "p-button-rounded p-button-primary",
+        tooltip: t("DocumentList.Indexing"),
+        disabled: true,
+        loading: true
+      };
+    }
+
+    // All complete (including GraphRAG)
+    if (conversionComplete && vectorComplete && metadataComplete && graphragComplete) {
+      return {
+        type: "complete",
+        icon: "pi pi-check",
+        className: "p-button-rounded p-button-success",
+        tooltip: t("DocumentList.AllIndexingComplete"),
+        disabled: true,
+        loading: false
+      };
+    }
+
+    // Conversion + Vector + Metadata complete, GraphRAG still pending/processing
+    if (conversionComplete && vectorComplete && metadataComplete && !graphragComplete && !graphragFailed) {
+      return {
+        type: "partial_complete",
+        icon: "pi pi-clock",
+        className: "p-button-rounded p-button-secondary",
+        tooltip: t("DocumentList.GraphRAGPending"),
+        disabled: true,
+        loading: false
+      };
+    }
+
+    // Any failures - show retry
+    if (conversionFailed || conversionPartial || anyIndexingFailed) {
+      return {
+        type: "retry",
+        icon: "pi pi-refresh",
+        className: "p-button-rounded p-button-warning",
+        tooltip: t("DocumentList.RetryIndex"),
+        disabled: false,
+        loading: false
+      };
+    }
+
+    // First time - show index
+    return {
+      type: "index",
+      icon: "pi pi-database",
+      className: "p-button-rounded p-button-primary",
+      tooltip: t("DocumentList.IndexDocument"),
+      disabled: false,
+      loading: false
+    };
+  };
+
   const actionBodyTemplate = (rowData) => {
-    const { markdown_exists, total_pages = 0, converted_pages = 0 } = rowData;
-    const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
+    const {
+      markdown_exists,
+      convert_status,
+      total_pages = 0,
+      converted_pages = 0
+    } = rowData;
+    const buttonState = getUnifiedIndexButtonState(rowData);
+
+    // Check if conversion is fully completed with no errors
+    const conversionFailed = convert_status === "failed";
+    const conversionPartial = convert_status === "partial" ||
+                              (total_pages > 0 && converted_pages > 0 && converted_pages < total_pages);
+    const conversionConverting = convert_status === "converting";
+    const conversionFullyCompleted = markdown_exists && !conversionFailed && !conversionPartial && !conversionConverting;
 
     return (
       <div className="action-buttons">
-        {/* Always show convert button */}
+        {/* Unified Index button */}
         <Button
-          icon="pi pi-refresh"
-          className={`p-button-rounded ${isPartiallyConverted ? "p-button-info" : "p-button-warning"}`}
-          onClick={() => handleConvert(rowData)}
-          loading={converting === rowData.filename}
-          disabled={converting !== null}
-          tooltip={
-            isPartiallyConverted
-              ? t("DocumentList.ResumeConversion")
-              : markdown_exists
-                ? t("DocumentList.ReconvertDocument")
-                : t("DocumentList.ConvertToMarkdown")
-          }
+          icon={buttonState.icon}
+          className={buttonState.className}
+          onClick={() => handleUnifiedIndex(rowData)}
+          loading={buttonState.loading}
+          disabled={buttonState.disabled || batchIndexStatus?.status === "running"}
+          tooltip={buttonState.tooltip}
           tooltipPosition="top"
         />
 
-        {/* Show view button only if markdown exists */}
+        {/* Show view button only if conversion is fully completed with no errors */}
         {markdown_exists && (
           <Button
             icon="pi pi-eye"
             className="p-button-rounded p-button-success"
             onClick={() => handleViewMarkdown(rowData)}
-            tooltip={t("DocumentList.ViewMarkdown")}
-            tooltipPosition="top"
-          />
-        )}
-
-        {/* Show index button only if markdown exists */}
-        {markdown_exists && (
-          <Button
-            icon="pi pi-database"
-            className="p-button-rounded p-button-help"
-            onClick={() => handleIndex(rowData)}
-            loading={indexing === rowData.filename}
-            disabled={indexing !== null || batchIndexStatus?.status === "running"}
-            tooltip={t("DocumentList.IndexDocument")}
+            disabled={!conversionFullyCompleted}
+            tooltip={
+              conversionFullyCompleted
+                ? t("DocumentList.ViewMarkdown")
+                : conversionFailed
+                  ? t("DocumentList.ConversionFailedCannotView")
+                  : conversionPartial
+                    ? t("DocumentList.PartialConversionCannotView")
+                    : t("DocumentList.ConversionInProgressCannotView")
+            }
             tooltipPosition="top"
           />
         )}
@@ -546,27 +916,90 @@ export const DocumentList = ({ refreshTrigger }) => {
 
   const statusBodyTemplate = (rowData) => {
     // Force re-render when language changes by using i18n.language
-    const { markdown_exists, total_pages = 0, converted_pages = 0, indexed } = rowData;
+    const {
+      markdown_exists,
+      total_pages = 0,
+      converted_pages = 0,
+      convert_status,
+      indexing_details
+    } = rowData;
 
-    // Determine status based on page counts and indexing
+    // Check indexing phases
+    const vectorStatus = indexing_details?.vector_indexing?.status;
+    const metadataStatus = indexing_details?.metadata_extraction?.status;
+    const graphragStatus = indexing_details?.graphrag_indexing?.status;
+
+    const vectorComplete = vectorStatus === "completed";
+    const metadataComplete = metadataStatus === "completed";
+    const graphragComplete = graphragStatus === "completed";
+
+    const vectorProcessing = vectorStatus === "processing";
+    const metadataProcessing = metadataStatus === "processing";
+    const graphragProcessing = graphragStatus === "processing";
+
+    const vectorPending = vectorStatus === "pending" || !vectorStatus;
+    const metadataPending = metadataStatus === "pending" || !metadataStatus;
+    const graphragPending = graphragStatus === "pending" || !graphragStatus;
+
+    const vectorFailed = vectorStatus === "failed";
+    const metadataFailed = metadataStatus === "failed";
+    const graphragFailed = graphragStatus === "failed";
+
+    const anyIndexingProcessing = vectorProcessing || metadataProcessing || graphragProcessing;
+    const anyIndexingPending = (vectorPending || metadataPending || graphragPending) && markdown_exists;
+
+    // Determine status based on all phases
     let statusText, statusClass;
 
-    if (!markdown_exists) {
-      // No conversion done yet
-      statusText = t("DocumentList.Pending");
-      statusClass = "pending";
-    } else if (total_pages > 0 && converted_pages < total_pages) {
-      // Partial conversion (some pages converted but not all)
+    // Check conversion status first
+    if (!markdown_exists && convert_status === "converting") {
+      // OCR conversion in progress
+      statusText = t("DocumentList.Indexing");
+      statusClass = "indexing";
+    } else if (!markdown_exists) {
+      // Just uploaded, not converted yet
+      statusText = t("DocumentList.NoIndex");
+      statusClass = "no-index";
+    } else if (convert_status === "failed") {
+      statusText = t("DocumentList.ConversionFailed");
+      statusClass = "failed";
+    } else if (total_pages > 0 && converted_pages > 0 && converted_pages < total_pages) {
+      // Only show partial if conversion was started (converted_pages > 0)
       statusText = `${t("DocumentList.Partial")} (${converted_pages}/${total_pages})`;
       statusClass = "partial";
-    } else if (indexed) {
-      // Fully converted and indexed
-      statusText = t("DocumentList.Indexed");
+    } else if (vectorFailed || metadataFailed || graphragFailed) {
+      // Any indexing phase failed
+      statusText = t("DocumentList.IndexingFailed");
+      statusClass = "failed";
+    } else if (vectorComplete && metadataComplete && graphragComplete) {
+      // All phases complete
+      statusText = t("DocumentList.FullyIndexed");
       statusClass = "indexed";
-    } else {
-      // Fully converted but not indexed
+    } else if (anyIndexingProcessing) {
+      // Any indexing phase is currently processing
+      if (graphragProcessing) {
+        statusText = t("DocumentList.IndexingGraphRAG");
+      } else if (metadataProcessing) {
+        statusText = t("DocumentList.IndexingMetadata");
+      } else {
+        statusText = t("DocumentList.Indexing");
+      }
+      statusClass = "indexing";
+    } else if (vectorComplete && metadataComplete && graphragPending) {
+      // Vector + Metadata done, GraphRAG pending
+      statusText = t("DocumentList.PartiallyIndexed");
+      statusClass = "partial-indexed";
+    } else if (anyIndexingPending) {
+      // Converted but indexing not started or pending
+      statusText = t("DocumentList.Indexing");
+      statusClass = "indexing";
+    } else if (markdown_exists) {
+      // Converted but not indexed yet (fallback - shouldn't normally reach here)
       statusText = t("DocumentList.Converted");
       statusClass = "converted";
+    } else {
+      statusText = t("DocumentList.NoIndex");
+      statusClass = "no-index";
     }
 
     return (
@@ -577,26 +1010,60 @@ export const DocumentList = ({ refreshTrigger }) => {
   };
 
   const progressBodyTemplate = (rowData) => {
-    // Get the conversion status from rowData (same as Status column uses rowData.markdown_exists)
-    const status = rowData.conversionStatus;
+    const { indexing_details } = rowData;
 
-    // If not converting, return null
-    if (status !== "converting") {
-      return null;
+    // Check if conversion is in progress
+    const conversionStatus = rowData.conversionStatus;
+    if (conversionStatus === "converting") {
+      const progress = rowData.conversionProgress || 0;
+      return (
+        <div className="progress-container">
+          <ProgressBar
+            value={progress}
+            showValue={true}
+            displayValueTemplate={() => `${Math.round(progress)}%`}
+          />
+        </div>
+      );
     }
 
-    // Get the progress from rowData
-    const progress = rowData.conversionProgress || 0;
+    // Check if GraphRAG indexing is in progress
+    const graphragStatus = indexing_details?.graphrag_indexing?.status;
+    const graphragProcessing = graphragStatus === "processing";
 
-    return (
-      <div className="progress-container">
-        <ProgressBar
-          value={progress}
-          showValue={true}
-          displayValueTemplate={() => `${Math.round(progress)}%`}
-        />
-      </div>
-    );
+    if (graphragProcessing) {
+      const totalChunks = indexing_details?.graphrag_indexing?.total_chunks || 0;
+      const processedChunks = indexing_details?.graphrag_indexing?.processed_chunks || 0;
+      const progress = totalChunks > 0 ? Math.round((processedChunks / totalChunks) * 100) : 0;
+
+      return (
+        <div className="progress-container">
+          <ProgressBar
+            value={progress}
+            showValue={true}
+            displayValueTemplate={() => `GraphRAG: ${Math.round(progress)}%`}
+            className="graphrag-progress"
+          />
+        </div>
+      );
+    }
+
+    // Check if vector or metadata indexing is in progress
+    const vectorStatus = indexing_details?.vector_indexing?.status;
+    const metadataStatus = indexing_details?.metadata_extraction?.status;
+
+    if (vectorStatus === "processing" || metadataStatus === "processing") {
+      return (
+        <div className="progress-container">
+          <ProgressSpinner style={{ width: '30px', height: '30px' }} strokeWidth="4" />
+          <span style={{ marginLeft: '8px' }}>
+            {vectorStatus === "processing" ? "Indexing..." : "Extracting metadata..."}
+          </span>
+        </div>
+      );
+    }
+
+    return null;
   };
 
   // Show loading spinner while translations are loading or documents are loading
@@ -722,7 +1189,7 @@ export const DocumentList = ({ refreshTrigger }) => {
             field="markdown_exists"
             header={t("DocumentList.Status")}
             body={statusBodyTemplate}
-            style={{ width: "15%" }}
+            style={{ width: "18%" }}
           />
           <Column
             header={t("DocumentList.Progress")}

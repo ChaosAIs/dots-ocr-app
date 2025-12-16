@@ -94,15 +94,33 @@
       width: 40px;
       height: 40px;
       padding: 0;
+
+      // Style for disabled view button
+      &.p-button-success:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+        background-color: #c8e6c9;
+        border-color: #c8e6c9;
+
+        &:hover {
+          background-color: #c8e6c9;
+          border-color: #c8e6c9;
+        }
+      }
     }
   }
 
   .status-badge {
-    padding: 6px 12px;
+    padding: 8px 14px;
     border-radius: 20px;
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
+    white-space: nowrap;
+    display: inline-block;
+    line-height: 1.2;
+    min-width: 120px;
+    text-align: center;
 
     &.converted {
       background-color: #d4edda;
@@ -114,6 +132,11 @@
       color: #856404;
     }
 
+    &.no-index {
+      background-color: #e9ecef;
+      color: #495057;
+    }
+
     &.partial {
       background-color: #d1ecf1;
       color: #0c5460;
@@ -123,17 +146,36 @@
       background-color: #e8d4f0;
       color: #6a1b9a;
     }
+
+    &.failed {
+      background-color: #f8d7da;
+      color: #721c24;
+    }
+
+    &.indexing {
+      background-color: #cce5ff;
+      color: #004085;
+    }
+
+    &.partial-indexed {
+      background-color: #e2e3e5;
+      color: #383d41;
+    }
   }
 
   .progress-container {
     width: 100%;
     min-width: 150px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
 
     :deep(.p-progressbar) {
       height: 24px;
       background-color: #e9ecef;
       border-radius: 4px;
       overflow: hidden;
+      flex: 1;
 
       .p-progressbar-value {
         background: linear-gradient(90deg, #4caf50, #45a049);
@@ -147,6 +189,14 @@
         font-weight: 600;
         color: #333;
         text-shadow: 0 1px 2px rgba(255, 255, 255, 0.8);
+      }
+    }
+
+    // GraphRAG progress bar styling
+    :deep(.graphrag-progress) {
+      .p-progressbar-value {
+        background: linear-gradient(90deg, #9c27b0, #7b1fa2);
+        box-shadow: 0 0 10px rgba(156, 39, 176, 0.5);
       }
     }
   }

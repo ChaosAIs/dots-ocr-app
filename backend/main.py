@@ -34,7 +34,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import asyncio
 import threading
-from typing import Dict, Set
+from typing import Dict, Set, Optional
 import uuid
 import logging
 
@@ -112,6 +112,28 @@ async def lifespan(app: FastAPI):
     def _init_services():
         # Sync existing files to database
         _sync_files_to_database()
+
+        # Resume incomplete OCR conversion for documents with pending/converting/partial/failed status
+        auto_resume_ocr = os.getenv("AUTO_RESUME_OCR", "true").lower() in ("true", "1", "yes")
+        if auto_resume_ocr:
+            try:
+                logger.info("Checking for incomplete OCR conversion tasks...")
+                _resume_incomplete_ocr()
+            except Exception as e:
+                logger.error(f"Error resuming incomplete OCR conversion: {e}")
+        else:
+            logger.info("Auto-resume OCR disabled (set AUTO_RESUME_OCR=true to enable)")
+
+        # Resume incomplete indexing for documents with pending/failed status
+        auto_resume_indexing = os.getenv("AUTO_RESUME_INDEXING", "true").lower() in ("true", "1", "yes")
+        if auto_resume_indexing:
+            try:
+                logger.info("Checking for incomplete indexing tasks...")
+                _resume_incomplete_indexing()
+            except Exception as e:
+                logger.error(f"Error resuming incomplete indexing: {e}")
+        else:
+            logger.info("Auto-resume indexing disabled (set AUTO_RESUME_INDEXING=true to enable)")
 
         # Initialize RAG service (controlled by AUTO_INDEX_ON_STARTUP env var)
         auto_index = os.getenv("AUTO_INDEX_ON_STARTUP", "false").lower() in ("true", "1", "yes")
@@ -549,6 +571,196 @@ def _sync_files_to_database():
         logger.error(f"Error syncing files to database: {e}")
 
 
+def _resume_incomplete_ocr():
+    """
+    Resume incomplete OCR conversion tasks on startup.
+    Finds documents with pending, converting, partial, or failed OCR status and triggers conversion in background.
+    """
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+
+            # Find all documents that need OCR conversion
+            docs_to_convert = []
+
+            for doc in repo.get_all():
+                # Skip deleted documents
+                if doc.deleted_at:
+                    continue
+
+                # Check if document needs OCR conversion
+                needs_conversion = False
+
+                # Check convert_status
+                if doc.convert_status in [ConvertStatus.PENDING, ConvertStatus.CONVERTING, ConvertStatus.PARTIAL, ConvertStatus.FAILED]:
+                    # For PARTIAL: check if there are unconverted pages
+                    if doc.convert_status == ConvertStatus.PARTIAL:
+                        if doc.total_pages > 0 and doc.converted_pages < doc.total_pages:
+                            needs_conversion = True
+                            logger.info(f"Document {doc.filename} has partial conversion ({doc.converted_pages}/{doc.total_pages} pages)")
+                    else:
+                        needs_conversion = True
+                        logger.info(f"Document {doc.filename} needs conversion (status: {doc.convert_status.value})")
+
+                if needs_conversion:
+                    docs_to_convert.append(doc)
+
+            if not docs_to_convert:
+                logger.info("No incomplete OCR conversion tasks found")
+                return
+
+            logger.info(f"Found {len(docs_to_convert)} documents with incomplete OCR conversion")
+
+            # Trigger conversion for each document in background
+            for doc in docs_to_convert:
+                try:
+                    # Create conversion task and get conversion_id
+                    conversion_id = conversion_manager.create_conversion(doc.filename)
+
+                    logger.info(f"Resuming OCR conversion for: {doc.filename} (conversion_id: {conversion_id})")
+
+                    # Update status to processing
+                    conversion_manager.update_conversion(
+                        conversion_id,
+                        status="processing",
+                        progress=0,
+                        message="Resuming OCR conversion from startup...",
+                        started_at=datetime.now().isoformat()
+                    )
+
+                    # Update database status to CONVERTING
+                    repo.update_convert_status(doc, ConvertStatus.CONVERTING, message="Resuming conversion from startup")
+
+                    # Create progress callback for this conversion
+                    progress_callback = _create_parser_progress_callback(conversion_id)
+
+                    # Submit task to worker pool using the standard conversion function
+                    success = worker_pool.submit_task(
+                        conversion_id=conversion_id,
+                        func=_convert_document_background,
+                        args=(doc.filename, "prompt_layout_all_en"),
+                        kwargs={
+                            "conversion_id": conversion_id,
+                            "progress_callback": progress_callback,
+                        }
+                    )
+
+                    if success:
+                        logger.info(f"Triggered background OCR conversion for: {doc.filename}")
+                    else:
+                        logger.warning(f"Failed to submit OCR conversion task for {doc.filename} - already in progress or queue full")
+                        conversion_manager.update_conversion(
+                            conversion_id,
+                            status="failed",
+                            message="Failed to submit task - already in progress or queue full"
+                        )
+
+                except Exception as e:
+                    logger.error(f"Error resuming OCR conversion for {doc.filename}: {e}")
+
+            logger.info(f"Resume OCR conversion complete: {len(docs_to_convert)} documents queued for background conversion")
+
+    except Exception as e:
+        logger.error(f"Error in _resume_incomplete_ocr: {e}")
+
+
+def _resume_incomplete_indexing():
+    """
+    Resume incomplete indexing tasks on startup.
+    Finds documents with pending or failed indexing status and triggers indexing in background.
+    """
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+
+            # Find all documents that need indexing
+            docs_to_index = []
+
+            for doc in repo.get_all():
+                # Skip deleted documents
+                if doc.deleted_at:
+                    continue
+
+                # Skip documents that haven't been converted yet
+                if not doc.convert_status or doc.convert_status == ConvertStatus.PENDING:
+                    continue
+
+                # Check if document needs any indexing phase
+                needs_indexing = False
+                indexing_details = doc.indexing_details or {}
+
+                # Check vector indexing status
+                vector_status = indexing_details.get("vector_indexing", {}).get("status")
+                if vector_status in ["pending", "failed", "partial", "processing"]:
+                    needs_indexing = True
+                    logger.info(f"Document {doc.filename} needs vector indexing (status: {vector_status})")
+
+                # Check metadata extraction status
+                metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
+                if metadata_status in ["pending", "failed"]:
+                    needs_indexing = True
+                    logger.info(f"Document {doc.filename} needs metadata extraction (status: {metadata_status})")
+
+                # Check GraphRAG indexing status
+                graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
+                if graphrag_status in ["pending", "failed", "partial", "processing"]:
+                    needs_indexing = True
+                    logger.info(f"Document {doc.filename} needs GraphRAG indexing (status: {graphrag_status})")
+
+                # If no indexing_details at all, check overall index_status
+                if not indexing_details and doc.index_status != IndexStatus.INDEXED:
+                    needs_indexing = True
+                    logger.info(f"Document {doc.filename} has no indexing details (overall status: {doc.index_status})")
+
+                if needs_indexing:
+                    docs_to_index.append(doc)
+
+            if not docs_to_index:
+                logger.info("No incomplete indexing tasks found")
+                return
+
+            logger.info(f"Found {len(docs_to_index)} documents with incomplete indexing")
+
+            # Trigger indexing for each document in background
+            for doc in docs_to_index:
+                try:
+                    file_name_without_ext = os.path.splitext(doc.filename)[0]
+
+                    # Create conversion task and get conversion_id
+                    conversion_id = conversion_manager.create_conversion(doc.filename)
+
+                    logger.info(f"Resuming indexing for: {doc.filename} (conversion_id: {conversion_id})")
+
+                    # Update status to indexing
+                    conversion_manager.update_conversion(
+                        conversion_id,
+                        status="indexing",
+                        progress=0,
+                        message="Resuming indexing from startup...",
+                        started_at=datetime.now().isoformat()
+                    )
+
+                    # Trigger indexing in background (non-blocking)
+                    # This will handle all three phases: vector, metadata, GraphRAG
+                    trigger_embedding_for_document(
+                        source_name=file_name_without_ext,
+                        output_dir=OUTPUT_DIR,
+                        filename=doc.filename,
+                        conversion_id=conversion_id,
+                        broadcast_callback=connection_manager.broadcast_from_thread
+                    )
+
+                    logger.info(f"Triggered background indexing for: {doc.filename}")
+
+                except Exception as e:
+                    logger.error(f"Error resuming indexing for {doc.filename}: {e}")
+
+            logger.info(f"Resume indexing complete: {len(docs_to_index)} documents queued for background indexing")
+
+    except Exception as e:
+        logger.error(f"Error in _resume_incomplete_indexing: {e}")
+
+
 @app.get("/")
 async def root():
     """Root endpoint - API information"""
@@ -941,6 +1153,8 @@ async def list_documents():
                     "convert_status": db_info.get("convert_status", "converted" if markdown_exists else "pending"),
                     "index_status": db_info.get("index_status", "indexed" if indexed else "pending"),
                     "indexed_chunks": db_info.get("indexed_chunks", 0),
+                    "indexing_details": db_info.get("indexing_details"),  # Include granular indexing status
+                    "ocr_details": db_info.get("ocr_details"),  # Include granular OCR status
                 })
 
         return JSONResponse(content={
@@ -1346,6 +1560,128 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
     except Exception as e:
         logger.error(f"Error starting conversion: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
+
+
+@app.post("/retry-ocr")
+async def retry_failed_ocr(
+    filename: str = Form(...),
+    retry_type: str = Form("all"),  # "all", "pages", "images"
+    page_numbers: Optional[str] = Form(None)  # Comma-separated page numbers
+):
+    """
+    Retry OCR for failed pages or embedded images only.
+
+    This endpoint allows selective re-processing of only the failed components
+    without redoing the entire document conversion.
+
+    Parameters:
+    - filename: Document filename
+    - retry_type: Type of retry - "all" (retry all failures), "pages" (retry failed pages only),
+                  "images" (retry failed embedded images only)
+    - page_numbers: Optional comma-separated list of specific page numbers to retry (e.g., "0,5,10")
+
+    Returns:
+    - JSON with OCR summary and retry plan
+    """
+    try:
+        # Parse page numbers if provided
+        specific_pages = None
+        if page_numbers:
+            try:
+                specific_pages = [int(p.strip()) for p in page_numbers.split(",")]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid page_numbers format. Use comma-separated integers.")
+
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+
+            # Get OCR summary
+            ocr_summary = repo.get_ocr_summary(doc)
+
+            # Determine what needs to be retried
+            retry_plan = {
+                "filename": filename,
+                "retry_type": retry_type,
+                "ocr_summary": ocr_summary,
+                "pages_to_retry": [],
+                "images_to_retry": {}
+            }
+
+            if retry_type in ["pages", "all"]:
+                failed_pages = repo.get_failed_pages(doc)
+                if specific_pages:
+                    failed_pages = [p for p in failed_pages if p in specific_pages]
+                retry_plan["pages_to_retry"] = failed_pages
+
+            if retry_type in ["images", "all"]:
+                failed_images = repo.get_pages_with_failed_embedded_images(doc)
+                if specific_pages:
+                    failed_images = {p: imgs for p, imgs in failed_images.items() if p in specific_pages}
+                retry_plan["images_to_retry"] = failed_images
+
+            # Check if there's anything to retry
+            if not retry_plan["pages_to_retry"] and not retry_plan["images_to_retry"]:
+                return JSONResponse(content={
+                    "status": "nothing_to_retry",
+                    "message": "No failed pages or images found to retry",
+                    "retry_plan": retry_plan
+                })
+
+            # TODO: Implement actual retry logic
+            # For now, just return the retry plan
+            return JSONResponse(content={
+                "status": "retry_planned",
+                "message": f"Retry plan created. Found {len(retry_plan['pages_to_retry'])} failed pages and "
+                          f"{sum(len(imgs) for imgs in retry_plan['images_to_retry'].values())} failed images.",
+                "retry_plan": retry_plan,
+                "note": "Actual retry implementation is pending. This endpoint currently only analyzes what needs to be retried."
+            })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in retry-ocr endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing retry request: {str(e)}")
+
+
+@app.get("/ocr-status/{filename}")
+async def get_ocr_status(filename: str):
+    """
+    Get detailed OCR status for a document.
+
+    Returns granular OCR status including page-level and embedded image-level tracking.
+
+    Parameters:
+    - filename: Document filename
+
+    Returns:
+    - JSON with detailed OCR status
+    """
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+
+            ocr_summary = repo.get_ocr_summary(doc)
+
+            return JSONResponse(content={
+                "filename": filename,
+                "ocr_summary": ocr_summary,
+                "ocr_details": doc.ocr_details
+            })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in ocr-status endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting OCR status: {str(e)}")
 
 
 @app.get("/conversion-status/{conversion_id}")
@@ -1769,11 +2105,13 @@ async def index_single_document(filename: str):
     Index a single document's markdown files into the vector database.
     Re-indexes if already indexed.
 
+    Now supports WebSocket progress updates for real-time status tracking.
+
     Parameters:
     - filename: The name of the file to index (with extension)
 
     Returns:
-    - Success status with number of chunks indexed
+    - Accepted status with conversion_id for WebSocket tracking
     """
     try:
         if not filename:
@@ -1793,6 +2131,18 @@ async def index_single_document(filename: str):
                 detail=f"Document output folder not found: {file_name_without_ext}"
             )
 
+        # Generate a conversion_id for WebSocket tracking
+        conversion_id = str(uuid.uuid4())
+
+        # Register the indexing task in conversion manager
+        conversion_manager.create_conversion(
+            conversion_id=conversion_id,
+            filename=filename,
+            status="indexing",
+            progress=0,
+            message="Starting indexing process..."
+        )
+
         # Delete existing embeddings and re-index
         try:
             delete_documents_by_source(file_name_without_ext)
@@ -1800,47 +2150,36 @@ async def index_single_document(filename: str):
         except Exception as e:
             logger.warning(f"Error deleting existing embeddings (may not exist): {e}")
 
-        # Index the document (pass filename for granular tracking)
-        chunks = index_document_now(file_name_without_ext, OUTPUT_DIR, filename=filename)
+        # Broadcast initial status
+        await connection_manager.broadcast(conversion_id, {
+            "status": "indexing",
+            "progress": 10,
+            "message": "Preparing to index document...",
+        })
 
-        # Update database status
-        try:
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
-                    repo.update_index_status(
-                        doc, IndexStatus.INDEXED, chunks,
-                        message=f"Indexed {chunks} chunks"
-                    )
-        except Exception as e:
-            logger.warning(f"Could not update database index status: {e}")
+        # Trigger two-phase indexing with WebSocket support
+        # This runs in background and sends progress updates via WebSocket
+        trigger_embedding_for_document(
+            source_name=file_name_without_ext,
+            output_dir=OUTPUT_DIR,
+            filename=filename,
+            conversion_id=conversion_id,
+            broadcast_callback=connection_manager.broadcast_from_thread
+        )
 
         return JSONResponse(content={
-            "status": "success",
+            "status": "accepted",
+            "conversion_id": conversion_id,
             "filename": filename,
             "source_name": file_name_without_ext,
-            "chunks_indexed": chunks,
-            "message": f"Indexed {chunks} chunks from {file_name_without_ext}",
+            "message": "Indexing started in background. Connect to WebSocket for progress updates.",
         })
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error indexing document: {str(e)}")
-        # Update database status for error
-        try:
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
-                    repo.update_index_status(
-                        doc, IndexStatus.FAILED, 0,
-                        message=f"Indexing failed: {str(e)}"
-                    )
-        except Exception as db_e:
-            logger.warning(f"Could not update database index status: {db_e}")
-        raise HTTPException(status_code=500, detail=f"Error indexing document: {str(e)}")
+        logger.error(f"Error starting indexing: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting indexing: {str(e)}")
 
 
 @app.get("/documents/{filename}/status-logs")

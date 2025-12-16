@@ -683,3 +683,275 @@ class DocumentRepository:
         self.db.add(log)
         self.db.commit()
 
+    # ========== OCR Status Tracking Methods ==========
+
+    def init_ocr_details(self, doc: Document) -> Document:
+        """Initialize ocr_details structure for a new document."""
+        if not doc.ocr_details:
+            doc.ocr_details = {
+                "version": "1.0",
+                "page_ocr": {
+                    "status": "pending",
+                    "total_pages": 0,
+                    "converted_pages": 0,
+                    "failed_pages": 0,
+                    "pages": {}
+                }
+            }
+            flag_modified(doc, "ocr_details")
+            self.db.commit()
+            self.db.refresh(doc)
+        return doc
+
+    def set_total_pages_for_ocr(self, doc: Document, total_pages: int) -> Document:
+        """Set total pages count for OCR tracking."""
+        if not doc.ocr_details:
+            self.init_ocr_details(doc)
+
+        doc.ocr_details["page_ocr"]["total_pages"] = total_pages
+        doc.ocr_details["page_ocr"]["started_at"] = datetime.utcnow().isoformat()
+        flag_modified(doc, "ocr_details")
+        self.db.commit()
+        self.db.refresh(doc)
+        return doc
+
+    def update_page_ocr_status(
+        self,
+        doc: Document,
+        page_number: int,
+        page_file_path: str,
+        status: str,  # "success" or "failed"
+        error: str = None,
+        embedded_images_count: int = 0,
+    ) -> Document:
+        """
+        Update OCR status for a single page.
+
+        Args:
+            doc: Document instance
+            page_number: Page number (0-indexed)
+            page_file_path: Path to the _nohf.md file
+            status: "success" or "failed"
+            error: Error message if failed
+            embedded_images_count: Number of embedded images in this page
+        """
+        if not doc.ocr_details:
+            self.init_ocr_details(doc)
+
+        details = doc.ocr_details
+        page_ocr = details["page_ocr"]
+
+        # Create page key
+        page_key = f"page_{page_number}"
+
+        # Initialize page entry if not exists
+        if page_key not in page_ocr["pages"]:
+            page_ocr["pages"][page_key] = {}
+
+        page_info = page_ocr["pages"][page_key]
+
+        # Track if this is a new success or new failure
+        was_previously_failed = page_info.get("status") == "failed"
+        was_previously_success = page_info.get("status") == "success"
+
+        page_info["status"] = status
+        page_info["page_number"] = page_number
+        page_info["file_path"] = page_file_path
+        page_info["embedded_images_count"] = embedded_images_count
+
+        if status == "success":
+            page_info["converted_at"] = datetime.utcnow().isoformat()
+            page_info["error"] = None
+
+            # Only increment if not previously successful
+            if not was_previously_success:
+                page_ocr["converted_pages"] = page_ocr.get("converted_pages", 0) + 1
+
+            # Decrement failed count if this was previously failed
+            if was_previously_failed:
+                page_ocr["failed_pages"] = max(0, page_ocr.get("failed_pages", 0) - 1)
+        else:
+            page_info["failed_at"] = datetime.utcnow().isoformat()
+            page_info["error"] = error
+            page_info["retry_count"] = page_info.get("retry_count", 0) + 1
+
+            # Only increment if not previously failed
+            if not was_previously_failed:
+                page_ocr["failed_pages"] = page_ocr.get("failed_pages", 0) + 1
+
+            # Decrement success count if this was previously successful
+            if was_previously_success:
+                page_ocr["converted_pages"] = max(0, page_ocr.get("converted_pages", 0) - 1)
+
+        # Update overall status
+        total_pages = page_ocr.get("total_pages", 0)
+        converted_pages = page_ocr.get("converted_pages", 0)
+        failed_pages = page_ocr.get("failed_pages", 0)
+
+        if failed_pages > 0 and converted_pages > 0:
+            page_ocr["status"] = "partial"
+        elif failed_pages > 0 and converted_pages == 0:
+            page_ocr["status"] = "failed"
+        elif converted_pages >= total_pages and total_pages > 0:
+            page_ocr["status"] = "completed"
+            page_ocr["completed_at"] = datetime.utcnow().isoformat()
+        elif converted_pages > 0:
+            page_ocr["status"] = "processing"
+
+        doc.ocr_details = details
+        flag_modified(doc, "ocr_details")
+        self.db.commit()
+        self.db.refresh(doc)
+
+        return doc
+
+    def update_embedded_image_ocr_status(
+        self,
+        doc: Document,
+        page_number: int,
+        image_position: int,
+        status: str,  # "success", "failed", "skipped"
+        ocr_backend: str = None,  # "gemma3" or "qwen3"
+        error: str = None,
+        image_size_pixels: int = None,
+        skip_reason: str = None,
+    ) -> Document:
+        """
+        Update OCR status for an embedded image within a page.
+
+        Args:
+            doc: Document instance
+            page_number: Page number containing the image
+            image_position: Position of image within the page (0-indexed)
+            status: "success", "failed", or "skipped"
+            ocr_backend: Backend used (gemma3/qwen3)
+            error: Error message if failed
+            image_size_pixels: Image size in pixels
+            skip_reason: Reason if skipped (e.g., "Image too small")
+        """
+        if not doc.ocr_details:
+            self.init_ocr_details(doc)
+
+        details = doc.ocr_details
+        page_key = f"page_{page_number}"
+
+        # Ensure page exists
+        if page_key not in details["page_ocr"]["pages"]:
+            details["page_ocr"]["pages"][page_key] = {
+                "page_number": page_number,
+                "embedded_images": {}
+            }
+
+        page_info = details["page_ocr"]["pages"][page_key]
+
+        # Initialize embedded_images dict if not exists
+        if "embedded_images" not in page_info:
+            page_info["embedded_images"] = {}
+
+        # Create image key
+        image_key = f"image_{image_position}"
+
+        # Initialize image entry
+        if image_key not in page_info["embedded_images"]:
+            page_info["embedded_images"][image_key] = {}
+
+        image_info = page_info["embedded_images"][image_key]
+        image_info["status"] = status
+        image_info["image_position"] = image_position
+
+        if ocr_backend:
+            image_info["ocr_backend"] = ocr_backend
+
+        if image_size_pixels is not None:
+            image_info["image_size_pixels"] = image_size_pixels
+
+        if status == "success":
+            image_info["converted_at"] = datetime.utcnow().isoformat()
+            image_info["error"] = None
+        elif status == "failed":
+            image_info["failed_at"] = datetime.utcnow().isoformat()
+            image_info["error"] = error
+            image_info["retry_count"] = image_info.get("retry_count", 0) + 1
+        elif status == "skipped":
+            image_info["skipped_at"] = datetime.utcnow().isoformat()
+            image_info["was_skipped"] = True
+            image_info["skip_reason"] = skip_reason
+
+        doc.ocr_details = details
+        flag_modified(doc, "ocr_details")
+        self.db.commit()
+        self.db.refresh(doc)
+
+        return doc
+
+    def get_failed_pages(self, doc: Document) -> List[int]:
+        """Get list of page numbers that failed OCR."""
+        if not doc.ocr_details:
+            return []
+
+        pages = doc.ocr_details.get("page_ocr", {}).get("pages", {})
+        failed_pages = []
+
+        for page_key, page_info in pages.items():
+            if page_info.get("status") == "failed":
+                failed_pages.append(page_info.get("page_number"))
+
+        return sorted(failed_pages)
+
+    def get_pages_with_failed_embedded_images(self, doc: Document) -> Dict[int, List[int]]:
+        """
+        Get pages that have failed embedded image OCR.
+
+        Returns:
+            Dict mapping page_number -> list of failed image positions
+        """
+        if not doc.ocr_details:
+            return {}
+
+        pages = doc.ocr_details.get("page_ocr", {}).get("pages", {})
+        failed_images_by_page = {}
+
+        for page_key, page_info in pages.items():
+            page_number = page_info.get("page_number")
+            embedded_images = page_info.get("embedded_images", {})
+
+            failed_images = []
+            for image_key, image_info in embedded_images.items():
+                if image_info.get("status") == "failed":
+                    failed_images.append(image_info.get("image_position"))
+
+            if failed_images:
+                failed_images_by_page[page_number] = sorted(failed_images)
+
+        return failed_images_by_page
+
+    def get_ocr_summary(self, doc: Document) -> Dict[str, Any]:
+        """
+        Get a summary of OCR status for a document.
+
+        Returns:
+            Dict with overall status, page counts, and failure details
+        """
+        if not doc.ocr_details:
+            return {
+                "status": "not_started",
+                "total_pages": 0,
+                "converted_pages": 0,
+                "failed_pages": 0,
+                "failed_page_numbers": [],
+                "pages_with_failed_images": {}
+            }
+
+        page_ocr = doc.ocr_details.get("page_ocr", {})
+
+        return {
+            "status": page_ocr.get("status", "unknown"),
+            "total_pages": page_ocr.get("total_pages", 0),
+            "converted_pages": page_ocr.get("converted_pages", 0),
+            "failed_pages": page_ocr.get("failed_pages", 0),
+            "failed_page_numbers": self.get_failed_pages(doc),
+            "pages_with_failed_images": self.get_pages_with_failed_embedded_images(doc),
+            "started_at": page_ocr.get("started_at"),
+            "completed_at": page_ocr.get("completed_at")
+        }
+
