@@ -54,6 +54,8 @@ class Document(Base):
     indexed_pages_info = Column(JSONB, nullable=True, default=lambda: {"indexed": [], "pending": [], "failed": []})
     # Document metadata from hierarchical summarization: type, subject, topics, entities, summary
     document_metadata = Column(JSONB, nullable=True, default=None)
+    # Granular indexing status tracking for selective re-indexing (vector, metadata, GraphRAG)
+    indexing_details = Column(JSONB, nullable=True, default=None)
     # Use values_callable to ensure SQLAlchemy uses enum values (lowercase) not names (uppercase)
     upload_status = Column(Enum(UploadStatus, name="upload_status", values_callable=lambda x: [e.value for e in x]), default=UploadStatus.PENDING)
     convert_status = Column(Enum(ConvertStatus, name="convert_status", values_callable=lambda x: [e.value for e in x]), default=ConvertStatus.PENDING)
@@ -79,11 +81,55 @@ class Document(Base):
             "converted_pages": self.converted_pages,
             "indexed_chunks": self.indexed_chunks,
             "indexed_pages_info": self.indexed_pages_info,
+            "document_metadata": self.document_metadata,
+            "indexing_details": self.indexing_details,
             "upload_status": self.upload_status.value if self.upload_status else None,
             "convert_status": self.convert_status.value if self.convert_status else None,
             "index_status": self.index_status.value if self.index_status else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def get_indexing_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of indexing progress across all phases.
+
+        Returns:
+            Dictionary with progress percentages and status for each phase
+        """
+        if not self.indexing_details:
+            return {
+                "vector_progress": 0,
+                "metadata_progress": 0,
+                "graphrag_progress": 0,
+                "overall_status": self.index_status.value if self.index_status else "pending"
+            }
+
+        vector = self.indexing_details.get("vector_indexing", {})
+        metadata = self.indexing_details.get("metadata_extraction", {})
+        graphrag = self.indexing_details.get("graphrag_indexing", {})
+
+        # Calculate vector progress
+        vector_total = vector.get("total_chunks", 0)
+        vector_indexed = vector.get("indexed_chunks", 0)
+        vector_progress = int((vector_indexed / vector_total * 100)) if vector_total > 0 else 0
+
+        # Metadata is binary (done or not)
+        metadata_progress = 100 if metadata.get("status") == "completed" else 0
+
+        # Calculate GraphRAG progress
+        graphrag_total = graphrag.get("total_chunks", 0)
+        graphrag_processed = graphrag.get("processed_chunks", 0)
+        graphrag_progress = int((graphrag_processed / graphrag_total * 100)) if graphrag_total > 0 else 0
+
+        return {
+            "vector_progress": vector_progress,
+            "vector_status": vector.get("status", "pending"),
+            "metadata_progress": metadata_progress,
+            "metadata_status": metadata.get("status", "pending"),
+            "graphrag_progress": graphrag_progress,
+            "graphrag_status": graphrag.get("status", "pending"),
+            "overall_status": self.index_status.value if self.index_status else "pending"
         }
 
 

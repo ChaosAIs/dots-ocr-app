@@ -182,6 +182,7 @@ class GraphRAGIndexer:
         chunks: List[Dict[str, Any]],
         source_name: str,
         use_gleaning: bool = True,
+        filename_with_ext: str = None,
     ) -> Tuple[int, int]:
         """
         Extract entities from chunks and store in Neo4j graph.
@@ -196,6 +197,7 @@ class GraphRAGIndexer:
             chunks: List of chunk dicts with 'id', 'page_content', 'metadata'
             source_name: Source document name (used for deduplication)
             use_gleaning: Whether to use gleaning loop for extraction
+            filename_with_ext: Original filename with extension for database tracking (optional)
 
         Returns:
             Tuple of (num_entities, num_relationships)
@@ -207,6 +209,25 @@ class GraphRAGIndexer:
         await self._init_storage()
 
         logger.info(f"[GraphRAG] Starting indexing for {source_name}: {len(chunks)} chunks")
+
+        # Get document from database for granular status tracking
+        doc = None
+        repo = None
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            if filename_with_ext:
+                with get_db_session() as db:
+                    repo = DocumentRepository(db)
+                    doc = repo.get_by_filename(filename_with_ext)
+                    if doc:
+                        logger.info(f"[GraphRAG] Tracking granular status for: {filename_with_ext}")
+                        # Initialize GraphRAG with total chunk count before processing
+                        repo.init_graphrag_total_chunks(doc, len(chunks))
+                        logger.info(f"[GraphRAG] Initialized tracking with {len(chunks)} total chunks")
+        except Exception as e:
+            logger.warning(f"[GraphRAG] Could not get document from database: {e}")
 
         total_entities = 0
         total_relationships = 0
@@ -225,10 +246,29 @@ class GraphRAGIndexer:
             chunk_id = chunk.get("id", f"chunk_{i}")
             content = chunk.get("page_content", "")
 
+            # Extract page number from metadata
+            page_number = chunk.get("metadata", {}).get("page")
+
             # Filter 1: Skip empty chunks
             if not content.strip():
                 logger.debug(f"[GraphRAG] Skipping empty chunk {chunk_id}")
                 skipped_empty += 1
+
+                # Update status: chunk skipped
+                if filename_with_ext:
+                    try:
+                        from db.database import get_db_session
+                        from db.document_repository import DocumentRepository
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename_with_ext)
+                            if doc:
+                                repo.update_graphrag_chunk_status(
+                                    doc, chunk_id, "skipped", page_number=page_number
+                                )
+                    except Exception as e:
+                        logger.debug(f"Could not update skipped status: {e}")
+
                 continue
 
             # Filter 2: Skip very short chunks (likely headers, footers, page numbers)
@@ -238,12 +278,44 @@ class GraphRAGIndexer:
                     f"({len(content)} chars < {GRAPH_RAG_MIN_CHUNK_LENGTH})"
                 )
                 skipped_short += 1
+
+                # Update status: chunk skipped
+                if filename_with_ext:
+                    try:
+                        from db.database import get_db_session
+                        from db.document_repository import DocumentRepository
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename_with_ext)
+                            if doc:
+                                repo.update_graphrag_chunk_status(
+                                    doc, chunk_id, "skipped", page_number=page_number
+                                )
+                    except Exception as e:
+                        logger.debug(f"Could not update skipped status: {e}")
+
                 continue
 
             # Filter 3: Skip low-information chunks (tables, repetitive content)
             if GRAPH_RAG_ENABLE_CHUNK_FILTERING and _is_low_information_chunk(content):
                 logger.debug(f"[GraphRAG] Skipping low-information chunk {chunk_id}")
                 skipped_low_info += 1
+
+                # Update status: chunk skipped
+                if filename_with_ext:
+                    try:
+                        from db.database import get_db_session
+                        from db.document_repository import DocumentRepository
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename_with_ext)
+                            if doc:
+                                repo.update_graphrag_chunk_status(
+                                    doc, chunk_id, "skipped", page_number=page_number
+                                )
+                    except Exception as e:
+                        logger.debug(f"Could not update skipped status: {e}")
+
                 continue
 
             logger.info(f"[GraphRAG] Processing chunk {i + 1}/{len(chunks)}: {chunk_id}")
@@ -332,8 +404,51 @@ class GraphRAGIndexer:
                     f"{len(relationships)} relationships to Neo4j"
                 )
 
+                # Update status: chunk succeeded
+                if filename_with_ext:
+                    try:
+                        from db.database import get_db_session
+                        from db.document_repository import DocumentRepository
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename_with_ext)
+                            if doc:
+                                repo.update_graphrag_chunk_status(
+                                    doc,
+                                    chunk_id,
+                                    "success",
+                                    entities=len(entities),
+                                    relationships=len(relationships),
+                                    page_number=page_number
+                                )
+                                logger.info(f"[GraphRAG] Updated chunk {chunk_id} status: success ({len(entities)} entities, {len(relationships)} relationships)")
+                            else:
+                                logger.error(f"[GraphRAG] Could not find document: {filename_with_ext}")
+                    except Exception as e:
+                        logger.error(f"Could not update GraphRAG success status: {e}", exc_info=True)
+
             except Exception as e:
                 logger.error(f"[GraphRAG] Failed to process chunk {chunk_id}: {e}", exc_info=True)
+
+                # Update status: chunk failed
+                if filename_with_ext:
+                    try:
+                        from db.database import get_db_session
+                        from db.document_repository import DocumentRepository
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename_with_ext)
+                            if doc:
+                                repo.update_graphrag_chunk_status(
+                                    doc,
+                                    chunk_id,
+                                    "failed",
+                                    error=str(e),
+                                    page_number=page_number
+                                )
+                    except Exception as db_error:
+                        logger.warning(f"Could not update GraphRAG failed status: {db_error}")
+
                 continue
 
         # Log summary with filtering statistics
@@ -388,6 +503,7 @@ def index_chunks_sync(
     source_name: str,
     workspace_id: str = "default",
     use_gleaning: bool = True,
+    filename_with_ext: str = None,
 ) -> Tuple[int, int]:
     """
     Synchronous wrapper for GraphRAG chunk indexing.
@@ -399,6 +515,7 @@ def index_chunks_sync(
         source_name: Source document name
         workspace_id: Workspace ID
         use_gleaning: Whether to use gleaning loop
+        filename_with_ext: Original filename with extension for database tracking (optional)
 
     Returns:
         Tuple of (num_entities, num_relationships)
@@ -416,7 +533,7 @@ def index_chunks_sync(
         asyncio.set_event_loop(loop)
 
     return loop.run_until_complete(
-        indexer.index_chunks(chunks, source_name, use_gleaning)
+        indexer.index_chunks(chunks, source_name, use_gleaning, filename_with_ext)
     )
 
 

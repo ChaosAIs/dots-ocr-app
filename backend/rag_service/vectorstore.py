@@ -164,6 +164,54 @@ def get_chunks_by_ids(chunk_ids: List[str], source_names: List[str] = None) -> L
         return []
 
 
+def get_all_chunks_for_source(source_name: str) -> List[Document]:
+    """
+    Get all chunks for a specific source document from Qdrant.
+
+    Used for metadata extraction re-indexing when vector indexing succeeded.
+
+    Args:
+        source_name: Source document name
+
+    Returns:
+        List of Document objects with all chunks from the source
+    """
+    client = get_qdrant_client()
+    try:
+        # Build filter for source
+        filter_condition = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="metadata.source",
+                    match=models.MatchValue(value=source_name),
+                )
+            ]
+        )
+
+        # Scroll through all chunks for this source
+        result, _ = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=filter_condition,
+            with_payload=True,
+            limit=10000,  # Large limit to get all chunks
+        )
+
+        # Convert to Document objects
+        docs = []
+        for point in result:
+            payload = point.payload or {}
+            metadata = payload.get("metadata", {})
+            page_content = payload.get("page_content", "")
+            docs.append(Document(page_content=page_content, metadata=metadata))
+
+        logger.info(f"Retrieved {len(docs)} chunks for source: {source_name}")
+        return docs
+
+    except Exception as e:
+        logger.error(f"Error getting all chunks for source {source_name}: {e}")
+        return []
+
+
 def get_retriever_with_sources(
     k: int = 8,
     fetch_k: int = 30,

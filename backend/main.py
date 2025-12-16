@@ -25,7 +25,7 @@ if 'HF_HOME' not in os.environ:
 
 import json
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
@@ -1800,8 +1800,8 @@ async def index_single_document(filename: str):
         except Exception as e:
             logger.warning(f"Error deleting existing embeddings (may not exist): {e}")
 
-        # Index the document
-        chunks = index_document_now(file_name_without_ext, OUTPUT_DIR)
+        # Index the document (pass filename for granular tracking)
+        chunks = index_document_now(file_name_without_ext, OUTPUT_DIR, filename=filename)
 
         # Update database status
         try:
@@ -1878,6 +1878,134 @@ async def get_document_status_logs(filename: str):
     except Exception as e:
         logger.error(f"Error getting status logs: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error getting status logs: {str(e)}")
+
+
+@app.get("/documents/{filename}/indexing-status")
+async def get_document_indexing_status(filename: str):
+    """
+    Get detailed indexing status for all phases (vector, metadata, GraphRAG).
+
+    Parameters:
+    - filename: The name of the file
+
+    Returns:
+    - Detailed indexing progress and status for each phase
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+
+            # Get indexing progress
+            progress = repo.get_indexing_progress(doc)
+
+            return JSONResponse(content={
+                "status": "success",
+                "filename": filename,
+                "document_id": str(doc.id),
+                "overall_status": doc.index_status.value if doc.index_status else "pending",
+                "indexing_progress": progress,
+                "indexing_details": doc.indexing_details,
+            })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting indexing status: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting indexing status: {str(e)}")
+
+
+@app.post("/documents/{filename}/reindex-failed")
+async def reindex_failed_chunks(
+    filename: str,
+    phases: str = Query("vector,graphrag,metadata", description="Comma-separated phases to reindex")
+):
+    """
+    Re-index only failed chunks/pages for specified phases.
+
+    This endpoint implements selective re-indexing:
+    - Vector failures: Re-index failed pages (re-read from markdown)
+    - GraphRAG failures: Re-index failed chunks (retrieve from Qdrant)
+    - Metadata failures: Re-extract metadata (use all chunks)
+
+    Parameters:
+    - filename: The name of the file
+    - phases: Comma-separated list of phases (vector, graphrag, metadata)
+
+    Returns:
+    - Re-indexing results for each phase
+    """
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        # Validate filename
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+            if not doc:
+                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+
+        file_name_without_ext = os.path.splitext(filename)[0]
+        phases_list = [p.strip() for p in phases.split(",")]
+
+        results = {}
+
+        # Import selective re-indexing functions
+        from rag_service.selective_reindexer import (
+            reindex_failed_vector_pages,
+            reindex_failed_graphrag_chunks,
+            reindex_metadata
+        )
+
+        # Re-index vector failures (page-level)
+        if "vector" in phases_list:
+            logger.info(f"[Selective Re-index] Starting vector re-indexing for {filename}")
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    results["vector"] = reindex_failed_vector_pages(doc, file_name_without_ext, OUTPUT_DIR)
+
+        # Re-index GraphRAG failures (chunk-level)
+        if "graphrag" in phases_list:
+            logger.info(f"[Selective Re-index] Starting GraphRAG re-indexing for {filename}")
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    results["graphrag"] = reindex_failed_graphrag_chunks(doc, file_name_without_ext, OUTPUT_DIR)
+
+        # Re-extract metadata
+        if "metadata" in phases_list:
+            logger.info(f"[Selective Re-index] Starting metadata re-extraction for {filename}")
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    results["metadata"] = reindex_metadata(doc, file_name_without_ext, OUTPUT_DIR)
+
+        return JSONResponse(content={
+            "status": "success",
+            "message": "Selective re-indexing completed",
+            "filename": filename,
+            "phases": phases_list,
+            "results": results
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error in selective re-indexing: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error in selective re-indexing: {str(e)}")
 
 
 @app.post("/documents/index-all")

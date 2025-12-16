@@ -434,7 +434,7 @@ def get_indexed_count() -> int:
         return len(_indexed_files)
 
 
-def index_document_now(source_name: str, output_dir: str = None, run_graphrag: bool = True, run_metadata: bool = True) -> int:
+def index_document_now(source_name: str, output_dir: str = None, run_graphrag: bool = True, run_metadata: bool = True, filename: str = None) -> int:
     """
     Index a specific document immediately with summarization.
     Deletes any existing embeddings for this source before re-indexing.
@@ -449,12 +449,13 @@ def index_document_now(source_name: str, output_dir: str = None, run_graphrag: b
         output_dir: Optional output directory path.
         run_graphrag: Whether to run GraphRAG in background after Qdrant indexing (default: True)
         run_metadata: Whether to extract metadata after Qdrant indexing (default: True)
+        filename: Original filename with extension for database tracking (optional)
 
     Returns:
         Number of chunks indexed to Qdrant.
     """
     # Use the shared Phase 1 function
-    total_chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir)
+    total_chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir, filename)
 
     # ========== PHASE 1.5: Metadata Extraction ==========
     if run_metadata and graphrag_chunks:
@@ -535,17 +536,19 @@ def index_document_now(source_name: str, output_dir: str = None, run_graphrag: b
             # Save metadata to PostgreSQL
             if DB_AVAILABLE:
                 try:
-                    # Try to find the document by source name
-                    filename = f"{source_name}.pdf"  # Assume PDF for now
+                    # Try to find the document by source name (use filename param if available)
+                    lookup_filename = filename if filename else f"{source_name}.pdf"
                     with get_db_session() as db:
                         repo = DocumentRepository(db)
-                        doc = repo.get_by_filename(filename)
+                        doc = repo.get_by_filename(lookup_filename)
                         if doc:
                             repo.update_document_metadata(
                                 doc,
                                 metadata,
                                 message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
                             )
+                            # Update granular status: metadata extraction succeeded
+                            repo.update_metadata_extraction_status(doc, "completed")
                             logger.info(
                                 f"[Phase 1.5] Metadata saved for {source_name}: "
                                 f"{metadata.get('document_type')} | "
@@ -553,7 +556,7 @@ def index_document_now(source_name: str, output_dir: str = None, run_graphrag: b
                                 f"Confidence: {metadata.get('confidence', 0):.2f}"
                             )
                         else:
-                            logger.warning(f"[Phase 1.5] Document not found in database: {filename}")
+                            logger.warning(f"[Phase 1.5] Document not found in database: {lookup_filename}")
                 except Exception as e:
                     logger.error(f"Failed to save metadata to database: {e}", exc_info=True)
 
@@ -561,6 +564,18 @@ def index_document_now(source_name: str, output_dir: str = None, run_graphrag: b
 
         except Exception as e:
             logger.error(f"[Phase 1.5] Metadata extraction failed for {source_name}: {e}", exc_info=True)
+
+            # Update granular status: metadata extraction failed
+            if DB_AVAILABLE:
+                try:
+                    lookup_filename = filename if filename else f"{source_name}.pdf"
+                    with get_db_session() as db:
+                        repo = DocumentRepository(db)
+                        doc = repo.get_by_filename(lookup_filename)
+                        if doc:
+                            repo.update_metadata_extraction_status(doc, "failed", error=str(e))
+                except Exception as db_error:
+                    logger.warning(f"Could not update metadata extraction failed status: {db_error}")
             # Don't fail the entire indexing - metadata is optional
 
     # Start Phase 2 (GraphRAG) in background if enabled
@@ -568,6 +583,7 @@ def index_document_now(source_name: str, output_dir: str = None, run_graphrag: b
         _run_graphrag_background(
             chunks_data=graphrag_chunks,
             source_name=source_name,
+            filename=filename,
         )
 
     logger.info(f"Document indexing complete for {source_name}: {total_chunks} chunks")
@@ -644,7 +660,7 @@ def _run_graphrag_background(
                 })
 
             # Perform GraphRAG indexing
-            num_entities, num_rels = index_chunks_sync(chunks_data, source_name)
+            num_entities, num_rels = index_chunks_sync(chunks_data, source_name, filename_with_ext=filename)
 
             logger.info(
                 f"[GraphRAG Phase 2] Complete for {source_name}: "
@@ -680,14 +696,17 @@ def _run_graphrag_background(
     logger.info(f"[GraphRAG Phase 2] Started background thread for: {source_name}")
 
 
-def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
+def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_with_ext: str = None) -> tuple:
     """
     Phase 1: Index all chunks to Qdrant vector database.
     This makes the document queryable immediately.
 
+    Now tracks granular indexing status at page and chunk level for selective re-indexing.
+
     Args:
         source_name: The document source name
         output_dir: Optional output directory path
+        filename_with_ext: Original filename with extension for database lookup
 
     Returns:
         Tuple of (total_chunks, all_graphrag_chunks) where all_graphrag_chunks
@@ -703,6 +722,21 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
         logger.warning(f"Document directory does not exist: {doc_dir}")
         return 0, []
 
+    # Get document from database for granular status tracking
+    doc = None
+    repo = None
+    if DB_AVAILABLE and filename_with_ext:
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename_with_ext)
+                if doc:
+                    # Initialize indexing_details structure
+                    repo.init_indexing_details(doc)
+                    logger.info(f"[Phase 1] Tracking granular status for: {filename_with_ext}")
+        except Exception as e:
+            logger.warning(f"Could not get document from database: {e}")
+
     total_chunks = 0
     indexed_files = []
     all_graphrag_chunks = []  # Collect all chunks for Phase 2
@@ -713,6 +747,15 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
             continue
 
         file_path = str(doc_dir / filename)
+
+        # Extract page number from filename (e.g., "doc_page_5_nohf.md" -> 5)
+        page_number = None
+        try:
+            if "_page_" in filename:
+                page_str = filename.split("_page_")[1].split("_")[0]
+                page_number = int(page_str)
+        except (IndexError, ValueError):
+            pass
 
         try:
             # Delete existing embeddings for this file
@@ -728,11 +771,31 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
             result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
             if result.chunks:
+                # Extract chunk IDs for status tracking
+                chunk_ids = [chunk.metadata.get("chunk_id", f"{source_name}_{i}") for i, chunk in enumerate(result.chunks)]
+
                 # Phase 1: Add chunks to Qdrant vectorstore
                 vectorstore = get_vectorstore()
                 vectorstore.add_documents(result.chunks)
                 total_chunks += len(result.chunks)
                 indexed_files.append(filename)
+
+                # Update granular status: page and chunks succeeded
+                if DB_AVAILABLE and filename_with_ext:
+                    try:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename_with_ext)
+                            if doc:
+                                repo.update_vector_indexing_status(
+                                    doc,
+                                    page_file_path=file_path,
+                                    chunk_ids=chunk_ids,
+                                    status="success",
+                                    page_number=page_number
+                                )
+                    except Exception as e:
+                        logger.warning(f"Could not update vector indexing status: {e}")
 
                 # Collect chunks for GraphRAG Phase 2
                 if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
@@ -753,6 +816,29 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None) -> tuple:
 
         except Exception as e:
             logger.error(f"Error indexing {file_path}: {e}")
+
+            # Update granular status: page and chunks failed
+            if DB_AVAILABLE and filename_with_ext:
+                try:
+                    # Get chunk IDs even if indexing failed (from chunking result)
+                    chunk_ids = []
+                    if result and result.chunks:
+                        chunk_ids = [chunk.metadata.get("chunk_id", f"{source_name}_{i}") for i, chunk in enumerate(result.chunks)]
+
+                    with get_db_session() as db:
+                        repo = DocumentRepository(db)
+                        doc = repo.get_by_filename(filename_with_ext)
+                        if doc:
+                            repo.update_vector_indexing_status(
+                                doc,
+                                page_file_path=file_path,
+                                chunk_ids=chunk_ids,
+                                status="failed",
+                                error=str(e),
+                                page_number=page_number
+                            )
+                except Exception as db_error:
+                    logger.warning(f"Could not update failed vector indexing status: {db_error}")
 
     logger.info(f"[Phase 1] Complete for {source_name}: {len(indexed_files)} files, {total_chunks} chunks in Qdrant")
     return total_chunks, all_graphrag_chunks
@@ -818,7 +904,7 @@ def trigger_embedding_for_document(
                 })
 
             # ========== PHASE 1: Chunk embedding to Qdrant ==========
-            chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir)
+            chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir, filename)
             logger.info(f"[Phase 1] Complete for {source_name}: {chunks} chunks indexed to Qdrant")
 
             # Update database status to INDEXED (document is now queryable)
