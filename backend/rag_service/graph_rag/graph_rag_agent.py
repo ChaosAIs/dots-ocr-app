@@ -36,6 +36,8 @@ class AgentState:
     queries_made: List[str] = field(default_factory=list)
     is_complete: bool = False
     final_answer: Optional[str] = None
+    # Reward tracking for Graph-R1 alignment
+    reward_history: List[Dict[str, Any]] = field(default_factory=list)
     
     def get_knowledge_summary(self) -> str:
         """Format all retrieved knowledge for the prompt."""
@@ -111,6 +113,12 @@ class AgentConfig:
     # Default retrieval mode for each step (auto = auto-detect per step)
     default_retrieval_mode: str = "auto"
 
+    # Graph-R1 reward-based termination settings
+    enable_reward_based_termination: bool = True
+    format_reward_high_threshold: float = 0.8  # High confidence to terminate
+    format_reward_low_threshold: float = 0.3   # Low quality, likely hallucination
+    answer_reward_threshold: float = 0.6       # Minimum answer quality
+
 
 # Type for retrieval callback function
 from typing import Callable, Awaitable
@@ -151,9 +159,14 @@ class GraphRAGAgent:
         self.mode_detector = mode_detector
         self.config = config or AgentConfig()
 
+        # Initialize reward scorer for Graph-R1 alignment
+        from .reward_scorer import RewardScorer
+        self.reward_scorer = RewardScorer()
+
         logger.info(
             f"[GraphRAG Agent] Initialized with max_steps={self.config.max_steps}, "
-            f"default_retrieval_mode={self.config.default_retrieval_mode}"
+            f"default_retrieval_mode={self.config.default_retrieval_mode}, "
+            f"reward_based_termination={self.config.enable_reward_based_termination}"
         )
 
     async def query(
@@ -243,32 +256,99 @@ class GraphRAGAgent:
             logger.info(f"  - Found <answer> tag: {answer is not None}")
             logger.info(f"  - Found <query> tag: {next_query is not None}")
 
-            if answer:
-                state.is_complete = True
-                state.final_answer = answer
-                logger.info(f"[GraphRAG Agent] ✅ DECISION: TERMINATE - Answer found")
-                logger.info(f"[GraphRAG Agent] Termination reason: LLM provided <answer> tag")
-                answer_preview = answer[:200] + "..." if len(answer) > 200 else answer
-                logger.info(f"[GraphRAG Agent] Answer preview: {answer_preview}")
-            elif next_query:
-                if next_query not in state.queries_made:
-                    state.queries_made.append(next_query)
-                    logger.info(f"[GraphRAG Agent] 🔄 DECISION: CONTINUE - New query generated")
-                    logger.info(f"[GraphRAG Agent] Next query: '{next_query}'")
-                else:
-                    # Duplicate query, terminate
+            # Reward-based termination logic (Graph-R1 alignment)
+            if self.config.enable_reward_based_termination and state.reward_history:
+                format_score = state.reward_history[-1]['format_score']
+
+                # Decision 1: High format score + answer found = TERMINATE
+                if format_score >= self.config.format_reward_high_threshold and answer:
                     state.is_complete = True
-                    logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE - Duplicate query")
-                    logger.info(f"[GraphRAG Agent] Termination reason: Query '{next_query}' already used")
+                    state.final_answer = answer
+                    logger.info(f"[GraphRAG Agent] ✅ DECISION: TERMINATE")
+                    logger.info(f"[GraphRAG Agent] Reason: High format score ({format_score:.2f}) + answer found")
+
+                    # Compute answer quality
+                    answer_score, answer_details = self.reward_scorer.compute_answer_reward_heuristic(
+                        answer, state.question
+                    )
+                    logger.info(f"[GraphRAG Agent] Answer Quality Score: {answer_score:.2f}")
+                    state.reward_history[-1]['answer_score'] = answer_score
+                    state.reward_history[-1]['answer_details'] = answer_details
+
+                    answer_preview = answer[:200] + "..." if len(answer) > 200 else answer
+                    logger.info(f"[GraphRAG Agent] Answer preview: {answer_preview}")
+
+                # Decision 2: Low format score = TERMINATE (hallucination)
+                elif format_score < self.config.format_reward_low_threshold:
+                    state.is_complete = True
+                    logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE")
+                    logger.info(f"[GraphRAG Agent] Reason: Low format score ({format_score:.2f}) - likely hallucination")
                     logger.info(f"[GraphRAG Agent] Generating final answer from accumulated knowledge...")
                     state.final_answer = await self._generate_final_answer(state)
+
+                # Decision 3: Medium format score + answer = Check quality
+                elif answer and format_score >= 0.5:
+                    answer_score, answer_details = self.reward_scorer.compute_answer_reward_heuristic(
+                        answer, state.question
+                    )
+                    logger.info(f"[GraphRAG Agent] Answer Quality Score: {answer_score:.2f}")
+
+                    state.reward_history[-1]['answer_score'] = answer_score
+                    state.reward_history[-1]['answer_details'] = answer_details
+
+                    if answer_score >= self.config.answer_reward_threshold:
+                        state.is_complete = True
+                        state.final_answer = answer
+                        logger.info(f"[GraphRAG Agent] ✅ DECISION: TERMINATE")
+                        logger.info(f"[GraphRAG Agent] Reason: Acceptable format ({format_score:.2f}) + good answer ({answer_score:.2f})")
+                    else:
+                        logger.info(f"[GraphRAG Agent] 🔄 DECISION: CONTINUE")
+                        logger.info(f"[GraphRAG Agent] Reason: Answer quality too low ({answer_score:.2f})")
+                        # Continue to next iteration
+
+                # Decision 4: Has next query = CONTINUE
+                elif next_query:
+                    if next_query not in state.queries_made:
+                        state.queries_made.append(next_query)
+                        logger.info(f"[GraphRAG Agent] 🔄 DECISION: CONTINUE")
+                        logger.info(f"[GraphRAG Agent] Next query: '{next_query}'")
+                    else:
+                        # Duplicate query, terminate
+                        state.is_complete = True
+                        logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE")
+                        logger.info(f"[GraphRAG Agent] Reason: Duplicate query detected")
+                        state.final_answer = await self._generate_final_answer(state)
+
+                # Decision 5: No valid tags = TERMINATE
+                else:
+                    state.is_complete = True
+                    logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE")
+                    logger.info(f"[GraphRAG Agent] Reason: No valid tags found")
+                    state.final_answer = await self._generate_final_answer(state)
+
             else:
-                # No valid tags, terminate
-                state.is_complete = True
-                logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE - No valid tags found")
-                logger.info(f"[GraphRAG Agent] Termination reason: LLM response missing <answer> or <query> tags")
-                logger.info(f"[GraphRAG Agent] Generating final answer from accumulated knowledge...")
-                state.final_answer = await self._generate_final_answer(state)
+                # Fallback to original rule-based logic
+                if answer:
+                    state.is_complete = True
+                    state.final_answer = answer
+                    logger.info(f"[GraphRAG Agent] ✅ DECISION: TERMINATE - Answer found")
+                    answer_preview = answer[:200] + "..." if len(answer) > 200 else answer
+                    logger.info(f"[GraphRAG Agent] Answer preview: {answer_preview}")
+                elif next_query:
+                    if next_query not in state.queries_made:
+                        state.queries_made.append(next_query)
+                        logger.info(f"[GraphRAG Agent] 🔄 DECISION: CONTINUE - New query generated")
+                        logger.info(f"[GraphRAG Agent] Next query: '{next_query}'")
+                    else:
+                        # Duplicate query, terminate
+                        state.is_complete = True
+                        logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE - Duplicate query")
+                        state.final_answer = await self._generate_final_answer(state)
+                else:
+                    # No valid tags, terminate
+                    state.is_complete = True
+                    logger.info(f"[GraphRAG Agent] ⚠️ DECISION: TERMINATE - No valid tags found")
+                    state.final_answer = await self._generate_final_answer(state)
 
         # Check if max steps reached
         if state.step >= state.max_steps and not state.is_complete:
@@ -319,7 +399,21 @@ class GraphRAGAgent:
             "all_entities": all_entities,
             "all_relationships": all_relationships,
             "all_chunks": all_chunks,
+            # Graph-R1 reward history
+            "reward_history": state.reward_history,
         }
+
+        # Log reward summary if available
+        if state.reward_history:
+            logger.info("=" * 70)
+            logger.info("[GraphRAG Agent] 📊 REWARD SUMMARY")
+            logger.info("=" * 70)
+            for i, reward_data in enumerate(state.reward_history, 1):
+                logger.info(f"Step {i}:")
+                logger.info(f"  Format Score: {reward_data.get('format_score', 'N/A'):.2f}")
+                if 'answer_score' in reward_data:
+                    logger.info(f"  Answer Score: {reward_data['answer_score']:.2f}")
+            logger.info("=" * 70)
 
         # Final summary log
         logger.info("=" * 70)
@@ -430,6 +524,23 @@ class GraphRAGAgent:
         )
 
         logger.info(f"[GraphRAG Agent] LLM response received: {len(response)} chars")
+
+        # Compute reward scores for Graph-R1 alignment
+        if self.config.enable_reward_based_termination:
+            format_score, format_details = self.reward_scorer.compute_format_reward(response)
+
+            logger.info("=" * 50)
+            logger.info("[GraphRAG Agent] 📊 REWARD SCORING")
+            logger.info("=" * 50)
+            logger.info(f"[GraphRAG Agent] Format Reward: {format_score:.2f}")
+            logger.info(f"[GraphRAG Agent] Format Details: {format_details['breakdown']}")
+
+            # Store in state for later analysis
+            state.reward_history.append({
+                'step': state.step,
+                'format_score': format_score,
+                'format_details': format_details,
+            })
 
         return response
 

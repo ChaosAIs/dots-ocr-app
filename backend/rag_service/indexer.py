@@ -91,14 +91,19 @@ def get_output_dir() -> str:
 
 def _is_document_fully_indexed_in_db(source_name: str) -> bool:
     """
-    Check if a document is FULLY indexed in the database.
+    Check if a document is FULLY indexed in the database with granular status checking.
     Falls back to Qdrant check if database is not available.
+
+    This function checks:
+    1. Document-level index_status
+    2. Granular indexing_details.vector_indexing status
+    3. Individual page statuses to ensure no failed pages exist
 
     Args:
         source_name: The source/document name (filename without extension)
 
     Returns:
-        True if the document is marked as fully indexed in the database
+        True if the document is marked as fully indexed AND has no failed pages/chunks
     """
     if DB_AVAILABLE:
         try:
@@ -106,9 +111,41 @@ def _is_document_fully_indexed_in_db(source_name: str) -> bool:
                 repo = DocumentRepository(db)
                 # Check if document exists and is fully indexed
                 doc = _get_document_by_source(db, source_name)
-                if doc:
-                    return repo.is_fully_indexed(doc)
-                return False
+                if not doc:
+                    return False
+
+                # First check document-level status
+                if not repo.is_fully_indexed(doc):
+                    return False
+
+                # Check granular indexing_details for failed pages/chunks
+                indexing_details = doc.indexing_details or {}
+                vector_indexing = indexing_details.get("vector_indexing", {})
+
+                # Check vector indexing status
+                vector_status = vector_indexing.get("status")
+                if vector_status not in ["completed", None]:
+                    # If status is pending, failed, partial, or processing, not fully indexed
+                    if vector_status in ["pending", "failed", "partial", "processing"]:
+                        logger.debug(f"Document '{source_name}' has vector_status={vector_status}, not fully indexed")
+                        return False
+
+                # Check for any failed pages in granular tracking
+                pages = vector_indexing.get("pages", {})
+                for page_key, page_info in pages.items():
+                    if page_info.get("status") == "failed":
+                        logger.debug(f"Document '{source_name}' has failed page: {page_key}")
+                        return False
+
+                # Check GraphRAG status (optional, but good to verify)
+                graphrag_indexing = indexing_details.get("graphrag_indexing", {})
+                graphrag_status = graphrag_indexing.get("status")
+                if graphrag_status in ["failed", "partial"]:
+                    # Note: We don't block on GraphRAG failures for "fully indexed" check
+                    # because vector indexing is the primary requirement
+                    logger.debug(f"Document '{source_name}' has graphrag_status={graphrag_status} (not blocking)")
+
+                return True
         except Exception as e:
             logger.warning(f"Database check failed for '{source_name}', falling back to Qdrant: {e}")
 
@@ -147,6 +184,84 @@ def _get_pending_pages_for_source(source_name: str) -> list:
         logger.warning(f"Could not get pending pages for '{source_name}': {e}")
 
     return []
+
+
+def _get_successfully_indexed_page_files(source_name: str) -> Set[str]:
+    """
+    Get set of page file paths that have been successfully indexed.
+    This is used to skip re-indexing of already successful pages.
+
+    Args:
+        source_name: The source/document name (filename without extension)
+
+    Returns:
+        Set of file paths (relative to doc directory) that are successfully indexed
+    """
+    if not DB_AVAILABLE:
+        return set()
+
+    try:
+        with get_db_session() as db:
+            doc = _get_document_by_source(db, source_name)
+            if not doc:
+                return set()
+
+            indexing_details = doc.indexing_details or {}
+            vector_indexing = indexing_details.get("vector_indexing", {})
+            pages = vector_indexing.get("pages", {})
+
+            successful_files = set()
+            for page_key, page_info in pages.items():
+                if page_info.get("status") == "success":
+                    # Extract file path from page info
+                    file_path = page_info.get("file_path")
+                    if file_path:
+                        successful_files.add(file_path)
+
+            logger.debug(f"Found {len(successful_files)} successfully indexed pages for '{source_name}'")
+            return successful_files
+    except Exception as e:
+        logger.warning(f"Could not get successfully indexed pages for '{source_name}': {e}")
+        return set()
+
+
+def _get_failed_page_files(source_name: str) -> Set[str]:
+    """
+    Get set of page file paths that have failed indexing.
+    These pages need to be re-indexed.
+
+    Args:
+        source_name: The source/document name (filename without extension)
+
+    Returns:
+        Set of file paths (relative to doc directory) that failed indexing
+    """
+    if not DB_AVAILABLE:
+        return set()
+
+    try:
+        with get_db_session() as db:
+            doc = _get_document_by_source(db, source_name)
+            if not doc:
+                return set()
+
+            indexing_details = doc.indexing_details or {}
+            vector_indexing = indexing_details.get("vector_indexing", {})
+            pages = vector_indexing.get("pages", {})
+
+            failed_files = set()
+            for page_key, page_info in pages.items():
+                if page_info.get("status") == "failed":
+                    # Extract file path from page info
+                    file_path = page_info.get("file_path")
+                    if file_path:
+                        failed_files.add(file_path)
+
+            logger.debug(f"Found {len(failed_files)} failed pages for '{source_name}'")
+            return failed_files
+    except Exception as e:
+        logger.warning(f"Could not get failed pages for '{source_name}': {e}")
+        return set()
 
 
 # Track indexed files to avoid duplicates
@@ -269,6 +384,9 @@ def index_existing_documents(output_dir: str = None):
     # ========== PHASE 1: Index all chunks to Qdrant ==========
     logger.info("[Phase 1] Starting chunk embedding to Qdrant...")
 
+    # Track successfully indexed pages per source to avoid re-indexing
+    source_successful_pages: dict = {}
+
     for root, _, files in os.walk(output_path):
         for filename in files:
             if not filename.endswith("_nohf.md"):
@@ -285,17 +403,45 @@ def index_existing_documents(output_dir: str = None):
                     if file_key in _indexed_files:
                         continue
 
-                # Check if already fully indexed
+                # Load successfully indexed pages for this source (once per source)
                 if source_name not in checked_sources:
                     checked_sources.add(source_name)
+
+                    # Check if document is fully indexed (with granular status check)
                     if _is_document_fully_indexed_in_db(source_name):
-                        logger.info(f"[Phase 1] Source '{source_name}' already fully indexed, skipping")
+                        logger.info(f"[Phase 1] Source '{source_name}' already fully indexed, skipping all pages")
+                        # Mark all files for this source as indexed
+                        source_successful_pages[source_name] = "ALL"
                         with _index_lock:
                             _indexed_files.add(file_key)
                         skipped_files += 1
                         continue
 
-                # Chunk and index to Qdrant
+                    # Document not fully indexed - get list of successfully indexed pages
+                    successful_pages = _get_successfully_indexed_page_files(source_name)
+                    source_successful_pages[source_name] = successful_pages
+
+                    if successful_pages:
+                        logger.info(f"[Phase 1] Source '{source_name}' has {len(successful_pages)} successfully indexed pages, will skip them")
+
+                # Skip this file if it's already successfully indexed
+                if source_name in source_successful_pages:
+                    if source_successful_pages[source_name] == "ALL":
+                        # All pages are indexed, skip
+                        with _index_lock:
+                            _indexed_files.add(file_key)
+                        skipped_files += 1
+                        continue
+                    elif file_path in source_successful_pages[source_name]:
+                        # This specific page is already successfully indexed, skip it
+                        logger.debug(f"[Phase 1] Skipping already indexed page: {file_path}")
+                        with _index_lock:
+                            _indexed_files.add(file_key)
+                        skipped_files += 1
+                        continue
+
+                # This page needs indexing - chunk and index to Qdrant
+                logger.info(f"[Phase 1] Indexing page: {file_path}")
                 result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
                 if result.chunks:
@@ -696,7 +842,7 @@ def _run_graphrag_background(
     logger.info(f"[GraphRAG Phase 2] Started background thread for: {source_name}")
 
 
-def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_with_ext: str = None) -> tuple:
+def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_with_ext: str = None, skip_successful_pages: bool = False) -> tuple:
     """
     Phase 1: Index all chunks to Qdrant vector database.
     This makes the document queryable immediately.
@@ -707,6 +853,7 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
         source_name: The document source name
         output_dir: Optional output directory path
         filename_with_ext: Original filename with extension for database lookup
+        skip_successful_pages: If True, skip pages that are already successfully indexed
 
     Returns:
         Tuple of (total_chunks, all_graphrag_chunks) where all_graphrag_chunks
@@ -737,8 +884,16 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
         except Exception as e:
             logger.warning(f"Could not get document from database: {e}")
 
+    # Get list of successfully indexed pages to skip (if requested)
+    successful_pages = set()
+    if skip_successful_pages:
+        successful_pages = _get_successfully_indexed_page_files(source_name)
+        if successful_pages:
+            logger.info(f"[Phase 1] Will skip {len(successful_pages)} successfully indexed pages for '{source_name}'")
+
     total_chunks = 0
     indexed_files = []
+    skipped_files = []
     all_graphrag_chunks = []  # Collect all chunks for Phase 2
 
     # Find all _nohf.md files in the document directory
@@ -747,6 +902,12 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
             continue
 
         file_path = str(doc_dir / filename)
+
+        # Skip this page if it's already successfully indexed
+        if skip_successful_pages and file_path in successful_pages:
+            logger.debug(f"[Phase 1] Skipping successfully indexed page: {file_path}")
+            skipped_files.append(filename)
+            continue
 
         # Extract page number from filename (e.g., "doc_page_5_nohf.md" -> 5)
         page_number = None
@@ -840,7 +1001,10 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
                 except Exception as db_error:
                     logger.warning(f"Could not update failed vector indexing status: {db_error}")
 
-    logger.info(f"[Phase 1] Complete for {source_name}: {len(indexed_files)} files, {total_chunks} chunks in Qdrant")
+    if skipped_files:
+        logger.info(f"[Phase 1] Complete for {source_name}: {len(indexed_files)} files indexed, {len(skipped_files)} files skipped, {total_chunks} chunks in Qdrant")
+    else:
+        logger.info(f"[Phase 1] Complete for {source_name}: {len(indexed_files)} files, {total_chunks} chunks in Qdrant")
     return total_chunks, all_graphrag_chunks
 
 
