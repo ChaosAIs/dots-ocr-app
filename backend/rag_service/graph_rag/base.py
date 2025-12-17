@@ -33,8 +33,11 @@ class QueryParam:
         mode: Query mode (local, global, or hybrid)
         top_k: Number of top entities/relationships to retrieve
         max_steps: Maximum iterations for think-query-retrieve-rethink cycle
-                   Set to 1 for single-step retrieval (default)
-                   Set to 3-5 for iterative reasoning (Graph-R1 paper)
+                   Default value from GRAPH_RAG_MAX_STEPS env variable (default: 1)
+                   When using LLM-based complexity analysis, this serves as the upper limit
+                   and the LLM determines actual steps needed (1 to max_steps)
+                   Set to 1 for single-step retrieval only
+                   Set to 3-5 for allowing iterative reasoning (Graph-R1 paper)
         only_need_context: Return only context without generating answer
         response_type: Type of response to generate
         max_token_for_text_unit: Max tokens for document chunks

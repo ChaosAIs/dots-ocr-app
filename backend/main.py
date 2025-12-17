@@ -54,8 +54,6 @@ import base64
 # Import RAG service for chatbot functionality
 from rag_service.chat_api import router as chat_router
 from rag_service.indexer import (
-    index_existing_documents,
-    start_watching_output,
     trigger_embedding_for_document,
     reindex_document,
     index_document_now,
@@ -141,20 +139,6 @@ async def lifespan(app: FastAPI):
                 logger.error(f"Error resuming incomplete indexing: {e}")
         else:
             logger.info("Auto-resume indexing disabled (set AUTO_RESUME_INDEXING=true to enable)")
-
-        # Initialize RAG service (controlled by AUTO_INDEX_ON_STARTUP env var)
-        auto_index = os.getenv("AUTO_INDEX_ON_STARTUP", "false").lower() in ("true", "1", "yes")
-        if auto_index:
-            try:
-                logger.info("Initializing RAG service in background...")
-                indexed_count = index_existing_documents(OUTPUT_DIR)
-                logger.info(f"RAG service: Indexed {indexed_count} document chunks on startup")
-                start_watching_output(OUTPUT_DIR)
-                logger.info("RAG service: File watcher started for output directory")
-            except Exception as e:
-                logger.error(f"Error initializing RAG service: {e}")
-        else:
-            logger.info("Auto-indexing disabled (set AUTO_INDEX_ON_STARTUP=true to enable)")
 
     import threading
     init_thread = threading.Thread(target=_init_services, daemon=True)
@@ -677,6 +661,11 @@ def _resume_incomplete_indexing():
     """
     Resume incomplete indexing tasks on startup.
     Finds documents with pending or failed indexing status and triggers indexing in background.
+
+    Only resumes indexing for documents that:
+    1. Have been successfully converted (convert_status = CONVERTED)
+    2. Have incomplete indexing phases (vector/metadata/graphrag)
+    3. Are not already fully indexed (index_status != INDEXED)
     """
     try:
         with get_db_session() as db:
@@ -694,30 +683,54 @@ def _resume_incomplete_indexing():
                 if not doc.convert_status or doc.convert_status == ConvertStatus.PENDING:
                     continue
 
+                # IMPORTANT: Skip documents that are already fully indexed
+                # This prevents duplicate indexing on every startup
+                if doc.index_status == IndexStatus.INDEXED:
+                    # Check if all phases are complete
+                    indexing_details = doc.indexing_details or {}
+                    vector_status = indexing_details.get("vector_indexing", {}).get("status")
+                    metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
+                    graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
+
+                    # If all phases are complete, skip this document
+                    # Valid completed statuses: "completed", "success", or None (for legacy/optional phases)
+                    all_complete = (
+                        vector_status in ["completed", "success", None] and
+                        metadata_status in ["completed", "success", None] and
+                        graphrag_status in ["completed", "success", None]
+                    )
+
+                    if all_complete:
+                        logger.debug(f"Document {doc.filename} is already fully indexed, skipping")
+                        continue
+                    else:
+                        logger.debug(f"Document {doc.filename} has index_status=INDEXED but incomplete phases: vector={vector_status}, metadata={metadata_status}, graphrag={graphrag_status}")
+
                 # Check if document needs any indexing phase
                 needs_indexing = False
                 indexing_details = doc.indexing_details or {}
 
-                # Check vector indexing status
+                # Check vector indexing status (only if failed or explicitly pending)
                 vector_status = indexing_details.get("vector_indexing", {}).get("status")
-                if vector_status in ["pending", "failed", "partial", "processing"]:
+                if vector_status in ["pending", "failed"]:
                     needs_indexing = True
                     logger.info(f"Document {doc.filename} needs vector indexing (status: {vector_status})")
 
-                # Check metadata extraction status
+                # Check metadata extraction status (only if failed or explicitly pending)
                 metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
                 if metadata_status in ["pending", "failed"]:
                     needs_indexing = True
                     logger.info(f"Document {doc.filename} needs metadata extraction (status: {metadata_status})")
 
-                # Check GraphRAG indexing status
+                # Check GraphRAG indexing status (only if failed or explicitly pending)
                 graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
-                if graphrag_status in ["pending", "failed", "partial", "processing"]:
+                if graphrag_status in ["pending", "failed"]:
                     needs_indexing = True
                     logger.info(f"Document {doc.filename} needs GraphRAG indexing (status: {graphrag_status})")
 
                 # If no indexing_details at all, check overall index_status
-                if not indexing_details and doc.index_status != IndexStatus.INDEXED:
+                # Only resume if status is PENDING or FAILED (not PARTIAL or INDEXING)
+                if not indexing_details and doc.index_status in [IndexStatus.PENDING, IndexStatus.FAILED]:
                     needs_indexing = True
                     logger.info(f"Document {doc.filename} has no indexing details (overall status: {doc.index_status})")
 

@@ -123,8 +123,9 @@ def _is_document_fully_indexed_in_db(source_name: str) -> bool:
                 vector_indexing = indexing_details.get("vector_indexing", {})
 
                 # Check vector indexing status
+                # Valid completed statuses: "completed", "success", or None (legacy documents)
                 vector_status = vector_indexing.get("status")
-                if vector_status not in ["completed", None]:
+                if vector_status not in ["completed", "success", None]:
                     # If status is pending, failed, partial, or processing, not fully indexed
                     if vector_status in ["pending", "failed", "partial", "processing"]:
                         logger.debug(f"Document '{source_name}' has vector_status={vector_status}, not fully indexed")
@@ -145,6 +146,7 @@ def _is_document_fully_indexed_in_db(source_name: str) -> bool:
                     # because vector indexing is the primary requirement
                     logger.debug(f"Document '{source_name}' has graphrag_status={graphrag_status} (not blocking)")
 
+                logger.debug(f"Document '{source_name}' is fully indexed (vector_status={vector_status})")
                 return True
         except Exception as e:
             logger.warning(f"Database check failed for '{source_name}', falling back to Qdrant: {e}")
@@ -1043,63 +1045,125 @@ def trigger_embedding_for_document(
         try:
             logger.info(f"[Two-Phase Indexing] Starting for: {source_name}")
 
-            # Update database status to INDEXING
-            if DB_AVAILABLE and filename and IndexStatus:
+            # Check which phases are already complete to avoid duplicate work
+            vector_complete = False
+            metadata_complete = False
+            graphrag_complete = False
+
+            if DB_AVAILABLE and filename:
                 try:
                     with get_db_session() as db:
                         repo = DocumentRepository(db)
                         doc = repo.get_by_filename(filename)
-                        if doc:
-                            repo.update_index_status(
-                                doc, IndexStatus.INDEXING, 0,
-                                message="Phase 1: Indexing chunks to vector database..."
-                            )
-                except Exception as e:
-                    logger.warning(f"Could not update database to INDEXING status: {e}")
+                        if doc and doc.indexing_details:
+                            indexing_details = doc.indexing_details
+                            vector_status = indexing_details.get("vector_indexing", {}).get("status")
+                            metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
+                            graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
 
-            # Send WebSocket notification that Phase 1 started
-            if broadcast_callback and conversion_id:
-                broadcast_callback(conversion_id, {
-                    "status": "indexing",
-                    "progress": 100,
-                    "message": "Phase 1: Indexing document for search...",
-                    "indexing_status": "started",
-                    "phase": 1,
-                })
+                            vector_complete = vector_status in ["completed", "success"]
+                            metadata_complete = metadata_status in ["completed", "success"]
+                            graphrag_complete = graphrag_status in ["completed", "success"]
+
+                            logger.info(f"[Two-Phase Indexing] Status check for {source_name}: vector={vector_complete}, metadata={metadata_complete}, graphrag={graphrag_complete}")
+                except Exception as e:
+                    logger.warning(f"Could not check indexing status: {e}")
+
+            # Update database status to INDEXING (only if not all phases complete)
+            if not (vector_complete and metadata_complete and graphrag_complete):
+                if DB_AVAILABLE and filename and IndexStatus:
+                    try:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename)
+                            if doc:
+                                repo.update_index_status(
+                                    doc, IndexStatus.INDEXING, 0,
+                                    message="Resuming indexing..."
+                                )
+                    except Exception as e:
+                        logger.warning(f"Could not update database to INDEXING status: {e}")
 
             # ========== PHASE 1: Chunk embedding to Qdrant ==========
-            chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir, filename)
-            logger.info(f"[Phase 1] Complete for {source_name}: {chunks} chunks indexed to Qdrant")
+            if vector_complete:
+                logger.info(f"[Phase 1] Skipping for {source_name}: already completed")
+                # Get chunk count from database
+                chunks = 0
+                graphrag_chunks = []
+                if DB_AVAILABLE and filename:
+                    try:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename)
+                            if doc:
+                                chunks = doc.indexed_chunks or 0
+                    except Exception as e:
+                        logger.warning(f"Could not get chunk count: {e}")
 
-            # Update database status to INDEXED (document is now queryable)
-            if DB_AVAILABLE and filename and IndexStatus:
-                try:
-                    with get_db_session() as db:
-                        repo = DocumentRepository(db)
-                        doc = repo.get_by_filename(filename)
-                        if doc:
-                            repo.update_index_status(
-                                doc, IndexStatus.INDEXED, chunks,
-                                message=f"Indexed {chunks} chunks (GraphRAG processing in background)"
-                            )
-                except Exception as e:
-                    logger.warning(f"Could not update database to INDEXED status: {e}")
+                # We still need graphrag_chunks for Phase 2 if not complete
+                # Get them from Qdrant if needed
+                if not metadata_complete or not graphrag_complete:
+                    try:
+                        from .vectorstore import get_all_chunks_for_source
+                        qdrant_docs = get_all_chunks_for_source(source_name)
+                        # Convert to graphrag format (same format as used in _index_chunks_to_qdrant)
+                        graphrag_chunks = []
+                        for doc in qdrant_docs:
+                            chunk_dict = {
+                                "page_content": doc.page_content,
+                                "metadata": doc.metadata,
+                            }
+                            graphrag_chunks.append(chunk_dict)
+                        logger.info(f"Retrieved {len(graphrag_chunks)} chunks from Qdrant for {source_name}")
+                    except Exception as e:
+                        logger.warning(f"Could not get chunks from Qdrant: {e}")
+                        logger.exception(e)
+            else:
+                # Send WebSocket notification that Phase 1 started
+                if broadcast_callback and conversion_id:
+                    broadcast_callback(conversion_id, {
+                        "status": "indexing",
+                        "progress": 100,
+                        "message": "Phase 1: Indexing document for search...",
+                        "indexing_status": "started",
+                        "phase": 1,
+                    })
 
-            # Send WebSocket notification that Phase 1 completed
-            if broadcast_callback and conversion_id:
-                broadcast_callback(conversion_id, {
-                    "status": "indexed",
-                    "progress": 100,
-                    "message": f"Document indexed successfully ({chunks} chunks). Extracting metadata...",
-                    "indexing_status": "completed",
-                    "chunks_indexed": chunks,
-                    "phase": 1,
-                })
+                chunks, graphrag_chunks = _index_chunks_to_qdrant(source_name, output_dir, filename, skip_successful_pages=True)
+            if not vector_complete:
+                logger.info(f"[Phase 1] Complete for {source_name}: {chunks} chunks indexed to Qdrant")
+
+                # Update database status to INDEXED (document is now queryable)
+                if DB_AVAILABLE and filename and IndexStatus:
+                    try:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_filename(filename)
+                            if doc:
+                                repo.update_index_status(
+                                    doc, IndexStatus.INDEXED, chunks,
+                                    message=f"Indexed {chunks} chunks (GraphRAG processing in background)"
+                                )
+                    except Exception as e:
+                        logger.warning(f"Could not update database to INDEXED status: {e}")
+
+                # Send WebSocket notification that Phase 1 completed
+                if broadcast_callback and conversion_id:
+                    broadcast_callback(conversion_id, {
+                        "status": "indexed",
+                        "progress": 100,
+                        "message": f"Document indexed successfully ({chunks} chunks). Extracting metadata...",
+                        "indexing_status": "completed",
+                        "chunks_indexed": chunks,
+                        "phase": 1,
+                    })
 
             # ========== PHASE 1.5: Metadata Extraction ==========
             # Extract document metadata using hierarchical summarization
             # This runs synchronously to make metadata available ASAP for document routing
-            if graphrag_chunks:
+            if metadata_complete:
+                logger.info(f"[Phase 1.5] Skipping for {source_name}: already completed")
+            elif graphrag_chunks:
                 try:
                     logger.info(f"[Phase 1.5] Starting metadata extraction for {source_name}")
 
@@ -1175,6 +1239,8 @@ def trigger_embedding_for_document(
                                         metadata,
                                         message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
                                     )
+                                    # Update granular status: metadata extraction succeeded
+                                    repo.update_metadata_extraction_status(doc, "completed")
                                     logger.info(
                                         f"[Phase 1.5] Metadata saved for {source_name}: "
                                         f"{metadata.get('document_type')} | "
@@ -1202,6 +1268,18 @@ def trigger_embedding_for_document(
 
                 except Exception as e:
                     logger.error(f"[Phase 1.5] Metadata extraction failed for {source_name}: {e}", exc_info=True)
+
+                    # Update granular status: metadata extraction failed
+                    if DB_AVAILABLE and filename:
+                        try:
+                            with get_db_session() as db:
+                                repo = DocumentRepository(db)
+                                doc = repo.get_by_filename(filename)
+                                if doc:
+                                    repo.update_metadata_extraction_status(doc, "failed", error=str(e))
+                        except Exception as db_error:
+                            logger.warning(f"Could not update metadata extraction failed status: {db_error}")
+
                     # Don't fail the entire indexing - metadata is optional
                     if broadcast_callback and conversion_id:
                         broadcast_callback(conversion_id, {
@@ -1214,7 +1292,9 @@ def trigger_embedding_for_document(
             # ========== PHASE 2: GraphRAG entity extraction (background) ==========
             # Start GraphRAG in a separate background thread
             # This does NOT block - user can query the document immediately
-            if graphrag_chunks:
+            if graphrag_complete:
+                logger.info(f"[Phase 2] Skipping for {source_name}: already completed")
+            elif graphrag_chunks:
                 _run_graphrag_background(
                     chunks_data=graphrag_chunks,
                     source_name=source_name,
