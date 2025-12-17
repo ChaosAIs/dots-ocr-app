@@ -29,3 +29,5 @@ backend/db/__pycache__/
 backend/rag_service/storage/__pycache__/
 backend/test/__pycache__/
 backend/rag_service/graph_rag/__pycache__/
+backend/auth/__pycache__/
+backend/chat_service/__pycache__/

@@ -52,11 +52,12 @@ SYSTEM_PROMPT = """You are a helpful assistant that answers questions about docu
 You have access to a search tool that can retrieve relevant information from indexed documents.
 
 When answering questions:
-1. Use the search_documents tool to find relevant information from the documents
-2. Base your answers on the retrieved context
-3. If you can't find relevant information, say so honestly
-4. Cite the source document when possible
-5. Provide clear, concise answers
+1. For greetings, casual conversation, or general questions that don't require document knowledge, respond directly without searching
+2. For questions about specific documents, topics, or information that might be in the indexed documents, use the search_documents tool first
+3. Base your answers on the retrieved context when available
+4. If you can't find relevant information, say so honestly
+5. Cite the source document when possible
+6. Provide clear, concise answers
 
 IMPORTANT INSTRUCTIONS:
 - Provide ONLY your final answer to the user's question
@@ -66,7 +67,16 @@ IMPORTANT INSTRUCTIONS:
 - Do NOT include any metadata or processing information
 - Provide a direct, natural language answer only
 
-Always search for relevant information before answering questions about the documents."""
+Examples of queries that DON'T need document search:
+- Greetings: "hi", "hello", "hey", "good morning"
+- Casual conversation: "how are you?", "what's up?", "thanks", "thank you"
+- General questions about your capabilities: "what can you do?", "how do you work?"
+
+Examples of queries that DO need document search:
+- Specific questions: "what is the definition of X?", "explain Y", "how does Z work?"
+- Document-specific queries: "what does the document say about...", "find information on..."
+- Topic-based questions: "tell me about microservices", "what are the benefits of..."
+"""
 
 
 # Prompt for query analysis - concise output to avoid repetition
@@ -82,7 +92,85 @@ Create a concise, focused search query (50-100 words max) that:
 Output ONLY the search query text, nothing else."""
 
 
+# Prompt for query classification - determine if document search is needed
+QUERY_CLASSIFICATION_PROMPT = """Classify if the following user message requires searching through documents or can be answered directly.
 
+User Message: {query}
+
+Respond with ONLY one word:
+- "SEARCH" if the message asks about specific information, topics, or content that might be in documents
+- "DIRECT" if the message is a greeting, casual conversation, or general question that doesn't need document knowledge
+
+Examples:
+- "hi" -> DIRECT
+- "hello" -> DIRECT
+- "how are you?" -> DIRECT
+- "thanks" -> DIRECT
+- "what can you do?" -> DIRECT
+- "what is microservices?" -> SEARCH
+- "explain the architecture" -> SEARCH
+- "tell me about the document" -> SEARCH
+- "what does it say about X?" -> SEARCH
+
+Classification:"""
+
+
+
+
+
+def _classify_query_intent(query: str) -> str:
+    """
+    Classify if a query requires document search or can be answered directly.
+
+    Args:
+        query: The user's message
+
+    Returns:
+        "SEARCH" if document search is needed, "DIRECT" if it can be answered directly
+    """
+    # Quick pattern matching for common greetings and casual messages
+    query_lower = query.lower().strip()
+
+    # Common greetings and casual phrases that don't need search
+    direct_patterns = [
+        "hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening",
+        "how are you", "what's up", "wassup", "sup",
+        "thanks", "thank you", "thx", "ty",
+        "bye", "goodbye", "see you", "later",
+        "ok", "okay", "sure", "yes", "no", "yep", "nope",
+    ]
+
+    # Check if the query matches any direct patterns
+    for pattern in direct_patterns:
+        if query_lower == pattern or query_lower.startswith(pattern + " ") or query_lower.endswith(" " + pattern):
+            logger.info(f"[Query Classification] '{query}' classified as DIRECT (pattern match)")
+            return "DIRECT"
+
+    # For very short queries (1-2 words), likely greetings
+    if len(query.split()) <= 2 and len(query) < 20:
+        # Use LLM for classification
+        try:
+            llm_service = get_llm_service()
+            llm = llm_service.get_query_model(temperature=0.0, num_predict=10)
+
+            from langchain_core.messages import HumanMessage
+            prompt = QUERY_CLASSIFICATION_PROMPT.format(query=query)
+            response = llm.invoke([HumanMessage(content=prompt)])
+
+            classification = response.content.strip().upper()
+            if "DIRECT" in classification:
+                logger.info(f"[Query Classification] '{query}' classified as DIRECT (LLM)")
+                return "DIRECT"
+            elif "SEARCH" in classification:
+                logger.info(f"[Query Classification] '{query}' classified as SEARCH (LLM)")
+                return "SEARCH"
+        except Exception as e:
+            logger.warning(f"[Query Classification] LLM classification failed: {e}, defaulting to SEARCH")
+            return "SEARCH"
+
+    # Default to SEARCH for longer queries or questions
+    logger.info(f"[Query Classification] '{query}' classified as SEARCH (default)")
+    return "SEARCH"
 
 
 def _analyze_query_with_llm(query: str) -> Dict[str, Any]:
@@ -194,7 +282,7 @@ def _analyze_query_with_llm(query: str) -> Dict[str, Any]:
 GRAPHRAG_QUERY_MODE = os.getenv("GRAPHRAG_QUERY_MODE", "auto").lower()
 
 
-def _get_graphrag_context(query: str) -> str:
+def _get_graphrag_context(query: str, max_steps: int = None) -> str:
     """
     Get additional context from GraphRAG if enabled.
 
@@ -211,6 +299,7 @@ def _get_graphrag_context(query: str) -> str:
 
     Args:
         query: The search query.
+        max_steps: Optional override for max iterative reasoning steps (uses LLM-determined value if provided)
 
     Returns:
         Formatted GraphRAG context string combining graph and vector results,
@@ -232,6 +321,7 @@ def _get_graphrag_context(query: str) -> str:
     try:
         import asyncio
         import concurrent.futures
+        from .graph_rag.base import QueryParam
 
         logger.debug(f"[GraphRAG Query] Initializing GraphRAG for query: '{query[:100]}...'")
         graphrag = GraphRAG()
@@ -239,9 +329,15 @@ def _get_graphrag_context(query: str) -> str:
         # Determine query mode
         mode = GRAPHRAG_QUERY_MODE if GRAPHRAG_QUERY_MODE != "auto" else None
 
+        # Create QueryParam with dynamic max_steps if provided
+        params = QueryParam()
+        if max_steps is not None:
+            params.max_steps = max_steps
+            logger.info(f"[GraphRAG Query] Using LLM-determined max_steps={max_steps} for query complexity")
+
         # Helper function to run the async query
         async def _run_query():
-            return await graphrag.query(query, mode=mode)
+            return await graphrag.query(query, mode=mode, params=params)
 
         # Run async query in sync context - handle case when called from async context (FastAPI)
         try:
@@ -287,10 +383,11 @@ def search_documents(query: str) -> str:
     Search the indexed documents for relevant information using intelligent routing.
 
     Retrieval strategy:
-    1. LLM analyzes query and extracts metadata (entities, topics, intent)
-    2. Route to relevant documents based on metadata matching
-    3. Vector search on filtered document chunks
-    4. GraphRAG context for entity/relationship enrichment
+    1. LLM analyzes query complexity and determines optimal max_steps for Graph-RAG
+    2. LLM extracts metadata (entities, topics, intent) for document routing
+    3. Route to relevant documents based on metadata matching
+    4. Vector search on filtered document chunks
+    5. GraphRAG context with dynamic max_steps for entity/relationship enrichment
 
     Args:
         query: The search query to find relevant document chunks.
@@ -299,6 +396,14 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
+        # Step 0: Analyze query complexity and determine max_steps (COMBINED LLM CALL)
+        from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
+        complexity_analysis = analyze_complexity(query)
+        max_steps = complexity_analysis.max_steps
+
+        logger.info(f"[Search] Query complexity analysis: max_steps={max_steps}, "
+                   f"reasoning='{complexity_analysis.reasoning}'")
+
         # Step 1: Enhance query and extract metadata (SINGLE LLM CALL)
         query_analysis = _analyze_query_with_llm(query)
         enhanced_query = query_analysis["enhanced_query"]
@@ -334,8 +439,8 @@ def search_documents(query: str) -> str:
         results = []
         seen_sources = set()
 
-        # Step 5: Get GraphRAG context (entities and relationships)
-        graphrag_context = _get_graphrag_context(enhanced_query)
+        # Step 5: Get GraphRAG context with dynamic max_steps (entities and relationships)
+        graphrag_context = _get_graphrag_context(enhanced_query, max_steps=max_steps)
         if graphrag_context:
             results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
 
@@ -449,23 +554,34 @@ def call_model(state: AgentState) -> AgentState:
                 break
 
         if user_query:
-            # Always search for context first
-            context = search_documents.invoke({"query": user_query})
+            # Classify if the query needs document search
+            logger.info(f"[vLLM] Classifying query: '{user_query}'")
+            intent = _classify_query_intent(user_query)
+            logger.info(f"[vLLM] Classification result: {intent}")
 
-            # Add context to the system message
-            context_message = f"\n\nRelevant document context:\n{context}"
-            augmented_messages = list(messages)
-            if isinstance(augmented_messages[0], SystemMessage):
-                augmented_messages[0] = SystemMessage(
-                    content=augmented_messages[0].content + context_message
-                )
+            if intent == "SEARCH":
+                # Search for context first
+                logger.info(f"[vLLM] Searching documents for query: {user_query[:50]}...")
+                context = search_documents.invoke({"query": user_query})
 
-            response = llm.invoke(augmented_messages)
+                # Add context to the system message
+                context_message = f"\n\nRelevant document context:\n{context}"
+                augmented_messages = list(messages)
+                if isinstance(augmented_messages[0], SystemMessage):
+                    augmented_messages[0] = SystemMessage(
+                        content=augmented_messages[0].content + context_message
+                    )
 
-            # Clean up the response to remove any artifacts
-            if hasattr(response, 'content'):
-                cleaned_content = _clean_llm_response(response.content)
-                response.content = cleaned_content
+                response = llm.invoke(augmented_messages)
+
+                # Clean up the response to remove any artifacts
+                if hasattr(response, 'content'):
+                    cleaned_content = _clean_llm_response(response.content)
+                    response.content = cleaned_content
+            else:
+                # Direct response without search
+                logger.info(f"[vLLM] Responding directly without search for: {user_query[:50]}...")
+                response = llm.invoke(messages)
         else:
             response = llm.invoke(messages)
     else:

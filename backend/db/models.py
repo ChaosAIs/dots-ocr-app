@@ -1,18 +1,33 @@
 """
-SQLAlchemy models for document management.
+SQLAlchemy models for document management, user management, and chat sessions.
 """
 import enum
 from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
 
-from sqlalchemy import Column, String, Integer, BigInteger, DateTime, Text, ForeignKey, Enum
+from sqlalchemy import Column, String, Integer, BigInteger, DateTime, Text, ForeignKey, Enum, Boolean
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
 
 Base = declarative_base()
 
+
+# ===== User Management Enums =====
+
+class UserRole(str, enum.Enum):
+    ADMIN = "admin"
+    USER = "user"
+
+
+class UserStatus(str, enum.Enum):
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    SUSPENDED = "suspended"
+
+
+# ===== Document Management Enums =====
 
 class UploadStatus(str, enum.Enum):
     PENDING = "pending"
@@ -34,6 +49,175 @@ class IndexStatus(str, enum.Enum):
     INDEXED = "indexed"
     PARTIAL = "partial"  # Some pages indexed, some pending
     FAILED = "failed"
+
+
+# ===== User Management Models =====
+
+class User(Base):
+    """User model for authentication and authorization."""
+    __tablename__ = "users"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    username = Column(String(100), nullable=False, unique=True, index=True)
+    email = Column(String(255), nullable=False, unique=True, index=True)
+    password_hash = Column(String(255), nullable=False)
+    full_name = Column(String(255))
+    role = Column(Enum(UserRole, values_callable=lambda x: [e.value for e in x]),
+                  nullable=False, server_default='user')
+    status = Column(Enum(UserStatus, values_callable=lambda x: [e.value for e in x]),
+                    nullable=False, server_default='active')
+
+    # Profile information
+    profile_data = Column(JSONB, default=dict)
+
+    # Authentication tracking
+    last_login_at = Column(DateTime(timezone=True))
+    last_login_ip = Column(String(45))
+    failed_login_attempts = Column(Integer, default=0)
+    locked_until = Column(DateTime(timezone=True))
+
+    # Password management
+    password_changed_at = Column(DateTime(timezone=True), server_default=func.now())
+    password_reset_token = Column(String(255))
+    password_reset_expires = Column(DateTime(timezone=True))
+
+    # Email verification
+    email_verified = Column(Boolean, default=False)
+    email_verification_token = Column(String(255))
+    email_verification_expires = Column(DateTime(timezone=True))
+
+    # Audit fields
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    created_by = Column(PGUUID(as_uuid=True), ForeignKey("users.id"))
+    updated_by = Column(PGUUID(as_uuid=True), ForeignKey("users.id"))
+    deleted_at = Column(DateTime(timezone=True))
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary (exclude password_hash)."""
+        return {
+            "id": str(self.id),
+            "username": self.username,
+            "email": self.email,
+            "full_name": self.full_name,
+            "role": self.role.value if self.role else None,
+            "status": self.status.value if self.status else None,
+            "profile_data": self.profile_data,
+            "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
+            "email_verified": self.email_verified,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class RefreshToken(Base):
+    """Refresh token model for JWT authentication."""
+    __tablename__ = "refresh_tokens"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    token = Column(String(500), nullable=False, unique=True, index=True)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    revoked_at = Column(DateTime(timezone=True))
+    replaced_by_token = Column(String(500))
+    user_agent = Column(Text)
+    ip_address = Column(String(45))
+
+
+# ===== Chat Session Models =====
+
+class ChatSession(Base):
+    """Chat session model for conversation history."""
+    __tablename__ = "chat_sessions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    session_name = Column(String(500))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    last_message_at = Column(DateTime(timezone=True))
+    message_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    session_metadata = Column(JSONB, default=dict)
+    deleted_at = Column(DateTime(timezone=True))
+
+    # Relationships
+    messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
+    summaries = relationship("ChatSessionSummary", back_populates="session", cascade="all, delete-orphan")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "session_name": self.session_name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "last_message_at": self.last_message_at.isoformat() if self.last_message_at else None,
+            "message_count": self.message_count,
+            "is_active": self.is_active,
+            "session_metadata": self.session_metadata,
+        }
+
+
+class ChatMessage(Base):
+    """Chat message model for individual messages within sessions."""
+    __tablename__ = "chat_messages"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    session_id = Column(PGUUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
+    role = Column(String(50), nullable=False)
+    content = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    message_metadata = Column(JSONB, default=dict)
+
+    # Relationships
+    session = relationship("ChatSession", back_populates="messages")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "session_id": str(self.session_id),
+            "role": self.role,
+            "content": self.content,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "message_metadata": self.message_metadata,
+        }
+
+
+class ChatSessionSummary(Base):
+    """Chat session summary model for hierarchical summaries."""
+    __tablename__ = "chat_session_summaries"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    session_id = Column(PGUUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
+    summary_type = Column(String(50), nullable=False)
+    summary_content = Column(Text, nullable=False)
+    message_range_start = Column(PGUUID(as_uuid=True))
+    message_range_end = Column(PGUUID(as_uuid=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    summary_metadata = Column(JSONB, default=dict)
+
+    # Relationships
+    session = relationship("ChatSession", back_populates="summaries")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "session_id": str(self.session_id),
+            "summary_type": self.summary_type,
+            "summary_content": self.summary_content,
+            "message_range_start": str(self.message_range_start) if self.message_range_start else None,
+            "message_range_end": str(self.message_range_end) if self.message_range_end else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "summary_metadata": self.summary_metadata,
+        }
+
+
+# ===== Document Management Models =====
 
 
 class Document(Base):
@@ -63,6 +247,10 @@ class Document(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Audit fields
+    created_by = Column(PGUUID(as_uuid=True), ForeignKey("users.id"))
+    updated_by = Column(PGUUID(as_uuid=True), ForeignKey("users.id"))
 
     # Relationship to status logs
     status_logs = relationship("DocumentStatusLog", back_populates="document", cascade="all, delete-orphan")

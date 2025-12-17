@@ -23,16 +23,24 @@ const http = axios.create({
 
 /**
  * Corporate with http const to inject access_token to http request header.
- * Work for temporary authentication.
+ * Checks for real authentication token first (localStorage), then falls back to temporary auth (sessionStorage).
  * @returns Bearer token header string.
  */
 const getAccessTokenHeader = () => {
-  // Using temporary auth service
+  // First, check for real authentication token in localStorage
+  // Note: authService.js stores the token with key 'access_token'
+  const realToken = localStorage.getItem('access_token');
+  if (realToken) {
+    return `Bearer ${realToken}`;
+  }
+
+  // Fall back to temporary auth service
   const tempAuthService = new TempAuthService();
   const user = tempAuthService.getUser();
   if (user && user.accessToken) {
     return `Bearer ${user.accessToken}`;
   }
+
   return "";
 };
 

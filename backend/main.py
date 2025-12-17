@@ -2,6 +2,11 @@
 # This must happen before qwen3_ocr_converter.py imports the transformers library
 import os
 
+# CRITICAL: Load .env file FIRST before any other imports
+# This ensures JWT_SECRET_KEY and other env vars are available when modules are imported
+from dotenv import load_dotenv
+load_dotenv()
+
 # Load .env file manually to get HF_HOME before other imports
 # We can't use load_dotenv() yet because it would be too late
 _env_path = os.path.join(os.path.dirname(__file__), '.env')
@@ -30,7 +35,6 @@ from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
 import shutil
-from dotenv import load_dotenv
 from datetime import datetime
 import asyncio
 import threading
@@ -71,12 +75,15 @@ from db.database import init_db, get_db_session
 from db.document_repository import DocumentRepository
 from db.models import Document, UploadStatus, ConvertStatus, IndexStatus
 
+# Import authentication
+from auth.auth_api import router as auth_router
+
+# Import chat session management
+from chat_service.chat_session_api import router as chat_session_router
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Load environment variables
-load_dotenv()
 
 
 @asynccontextmanager
@@ -177,8 +184,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include chat router for RAG chatbot
-app.include_router(chat_router)
+# Include routers
+app.include_router(auth_router)  # Authentication endpoints
+app.include_router(chat_session_router)  # Chat session management endpoints
+app.include_router(chat_router)  # RAG chatbot endpoints
 
 # Initialize parser
 parser = DotsOCRParser()
@@ -3045,6 +3054,82 @@ async def reconvert_all_uncompleted(
         raise HTTPException(
             status_code=500,
             detail=f"Error re-converting uncompleted pages: {str(e)}"
+        )
+
+
+@app.post("/admin/update-document-owners")
+async def update_document_owners(username: str):
+    """
+    Admin endpoint to update all documents with a specific user as creator/updater.
+    This is useful for assigning ownership to existing documents.
+    NOTE: This endpoint is temporarily unprotected for migration purposes.
+    """
+    try:
+        from db.user_repository import UserRepository
+        from sqlalchemy import text
+
+        with get_db_session() as db:
+            user_repo = UserRepository(db)
+
+            # Find the target user
+            user = user_repo.get_user_by_username(username)
+            if not user:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"User '{username}' not found"
+                )
+
+            # Count documents that need updating
+            count_query = db.execute(
+                text('''
+                    SELECT COUNT(*)
+                    FROM documents
+                    WHERE created_by IS NULL OR updated_by IS NULL
+                ''')
+            )
+            count = count_query.scalar()
+
+            if count == 0:
+                return {
+                    "status": "success",
+                    "message": "No documents need updating",
+                    "updated_count": 0,
+                    "user": {
+                        "username": user.username,
+                        "id": str(user.id)
+                    }
+                }
+
+            # Update all documents that don't have created_by or updated_by set
+            result = db.execute(
+                text('''
+                    UPDATE documents
+                    SET created_by = :user_id, updated_by = :user_id
+                    WHERE created_by IS NULL OR updated_by IS NULL
+                '''),
+                {'user_id': user.id}
+            )
+
+            logger.info(f"Updated {result.rowcount} documents with user '{username}' (ID: {user.id})")
+
+            return {
+                "status": "success",
+                "message": f"Successfully updated {result.rowcount} documents",
+                "updated_count": result.rowcount,
+                "user": {
+                    "username": user.username,
+                    "id": str(user.id),
+                    "full_name": user.full_name
+                }
+            }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating document owners: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error updating document owners: {str(e)}"
         )
 
 

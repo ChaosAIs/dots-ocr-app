@@ -122,8 +122,19 @@ export default class TempAuthService {
    * Sign out
    */
   signout() {
+    // Clear temporary auth tokens
     sessionStorage.removeItem(this.TEMP_USER_KEY);
     sessionStorage.removeItem(this.TEMP_TOKEN_KEY);
+
+    // Clear real auth tokens (from authService)
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    localStorage.removeItem('user_data');
+
+    // Clear any other auth-related items
+    localStorage.removeItem('redirectUri');
+
+    console.log('All authentication data cleared (temp and real auth)');
     window.location.replace("/");
   }
 
@@ -152,8 +163,16 @@ export default class TempAuthService {
    * Clear auth state
    */
   clearAuthState() {
+    // Clear temporary auth tokens
     sessionStorage.removeItem(this.TEMP_USER_KEY);
     sessionStorage.removeItem(this.TEMP_TOKEN_KEY);
+
+    // Clear real auth tokens (from authService)
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    localStorage.removeItem('user_data');
+
+    console.log('Auth state cleared');
   }
 
   /**

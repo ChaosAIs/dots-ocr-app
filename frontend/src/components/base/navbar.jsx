@@ -10,6 +10,7 @@ import { useSelector, useDispatch } from "react-redux";
 import { bindActionCreators } from "redux";
 import { actionCreators } from "../../redux/actionCreatorsExport";
 import { Role } from "../../core/enumertions/role";
+import { useNavigate } from "react-router-dom";
 
 export const NavBar = () => {
   //
@@ -17,6 +18,7 @@ export const NavBar = () => {
   //
   const language = useSelector((state) => state.language);
   const dispatch = useDispatch();
+  const navigate = useNavigate();
   //
   // Binding Redux custom action creators.
   // Work for update selected language code.
@@ -70,11 +72,19 @@ export const NavBar = () => {
     { label: "Français", value: "fr" },
   ];
 
-  const logout = () => {
+  const logout = async () => {
     // Show progress spinner.
     loadingService.httpRequestSent();
-    if (authService && typeof authService.signout === 'function') {
-      authService.signout();
+    try {
+      if (authService && typeof authService.logout === 'function') {
+        await authService.logout();
+        // Redirect to login page after logout
+        navigate('/login');
+      }
+      loadingService.httpResponseReceived();
+    } catch (error) {
+      console.error('Logout error:', error);
+      loadingService.error();
     }
   };
 
@@ -99,13 +109,25 @@ export const NavBar = () => {
   );
   const end = (
     <>
-      {isAuthorized && <span className="p-2">{user?.displayName || "User"}</span>}
+      {isAuthorized && <span className="p-2">{user?.full_name || user?.username || "User"}</span>}
       {languageDropdown}
-      {/* Always show logout button since we're using temporary auth */}
-      {/* <Button label={t("Nav.Logout")} rounded className="p-button-gray p-button-rounded"
-        title={t("Nav.Logout")}
-        onClick={logout}
-      ></Button> */}
+      {isAuthorized ? (
+        <Button
+          label={t("Nav.Logout")}
+          rounded
+          className="p-button-gray p-button-rounded"
+          title={t("Nav.Logout")}
+          onClick={logout}
+        />
+      ) : (
+        <Button
+          label="Login"
+          rounded
+          className="p-button-primary p-button-rounded"
+          title="Login"
+          onClick={() => navigate('/login')}
+        />
+      )}
     </>
   );
 

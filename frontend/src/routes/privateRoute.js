@@ -1,4 +1,5 @@
 import React, { useContext } from "react";
+import { Navigate } from "react-router-dom";
 import { AuthContext } from "../core/auth/components/authProvider";
 import { messageService } from "../core/message/messageService";
 
@@ -77,10 +78,9 @@ export const PrivateRoute = ({ component: Component, roles, ...rest }) => {
     }
   } else {
     //
-    // As for unauthorized access.
-    // For temporary auth, just allow access (no redirect needed)
+    // User not authenticated - redirect to login page
     //
-    console.warn("User not authenticated, but allowing access for temporary auth");
-    return <Component {...rest} />;
+    console.warn("User not authenticated, redirecting to login");
+    return <Navigate to="/login" replace />;
   }
 };

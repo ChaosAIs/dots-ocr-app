@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 // import AuthService from "../authService"; // Temporarily disabled IAM SSO
-import TempAuthService from "../tempAuthService"; // Using temporary auth service
+// import TempAuthService from "../tempAuthService"; // Using temporary auth service
+import authService from "../../../services/authService"; // Using real auth service
 
 /**
  * Declare a Authentication context.
@@ -30,8 +31,50 @@ export const AuthConsumer = AuthContext.Consumer;
  * Reference: https://stackoverflow.com/questions/58197800/set-the-data-in-react-context-from-asynchronous-api-call
  */
 export const AuthProvider = ({ children }) => {
-  // Using temporary auth service instead of IAM SSO
-  const authService = new TempAuthService();
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    // Check if user is already authenticated on mount
+    const currentUser = authService.getUser();
+    if (currentUser) {
+      setUser(currentUser);
+    }
+    setLoading(false);
+  }, []);
+
+  const login = async (username, password) => {
+    const result = await authService.login(username, password);
+    if (result.success) {
+      setUser(result.user);
+    }
+    return result;
+  };
+
+  const logout = async () => {
+    await authService.logout();
+    setUser(null);
+  };
+
+  const register = async (username, email, password, fullName) => {
+    const result = await authService.register(username, email, password, fullName);
+    if (result.success) {
+      setUser(result.user);
+    }
+    return result;
+  };
+
+  const contextValue = {
+    user,
+    loading,
+    isAuthenticated: () => authService.isAuthenticated(),
+    isAdmin: () => authService.isAdmin(),
+    getUser: () => authService.getUser(),
+    login,
+    logout,
+    register,
+    getAuthHeaders: () => authService.getAuthHeaders(),
+  };
 
   // The Provider component accepts a value prop to be passed to consuming components
   // that are descendants of this Provider.
@@ -40,13 +83,9 @@ export const AuthProvider = ({ children }) => {
   // All consumers that are descendants of a Provider will re-render
   // whenever the Provider’s value prop changes.
   return (
-    <AuthContext.Provider
-      value={{
-        ...authService,
-      }}
-    >
+    <AuthContext.Provider value={contextValue}>
       {/* "children" represents all nested children components. */}
-      {children}
+      {!loading && children}
     </AuthContext.Provider>
   );
 };

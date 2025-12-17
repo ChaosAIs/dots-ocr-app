@@ -11,6 +11,8 @@ import { UserManagement } from "../pages/usermanagement";
 import { NotFound } from "../pages/notfound";
 import { Home } from "../pages/home";
 import { Chat } from "../pages/chat";
+import { Login } from "../components/auth/Login";
+import { Register } from "../components/auth/Register";
 
 /** Global routes definition.
  *  Link specified url to specified component.
@@ -24,11 +26,15 @@ export const AppRoutes = () => (
     <Route path="/logout/callback" element={<LogoutCallback />} />
     <Route path="/userprofile" element={<PrivateRoute component={UserProfile} />} />
     <Route path="/usermanagement" element={<PrivateRoute component={UserManagement} roles={[Role.PPAdministrator]} />} />
-    
-    {/* Public routes */}
-    <Route path="/home" element={<Home />} />
-    <Route path="/chat" element={<Chat />} />
-    <Route path="/" element={<Home />} />
+
+    {/* Authentication routes */}
+    <Route path="/login" element={<Login />} />
+    <Route path="/register" element={<Register />} />
+
+    {/* Protected routes - require authentication */}
+    <Route path="/home" element={<PrivateRoute component={Home} />} />
+    <Route path="/chat" element={<PrivateRoute component={Chat} />} />
+    <Route path="/" element={<PrivateRoute component={Home} />} />
     {/* <Route path="/sample" element={<Sample />} /> */}
     <Route path="*" element={<NotFound />} />
   </Routes>

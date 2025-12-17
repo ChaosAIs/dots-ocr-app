@@ -25,7 +25,12 @@ import "./core/auth/debugAuth";
 
 // Component to conditionally render navbar based on current route
 const ConditionalNavBar = () => {
-  return <NavBar />;
+  const location = useLocation();
+  // Check if current path is login or register (without basePath prefix since BrowserRouter handles it)
+  const hideNavbarRoutes = ['/login', '/register'];
+  const shouldHideNavbar = hideNavbarRoutes.some(route => location.pathname === route || location.pathname.endsWith(route));
+
+  return shouldHideNavbar ? null : <NavBar />;
 };
 
 function App() {
