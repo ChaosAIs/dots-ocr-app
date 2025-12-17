@@ -189,11 +189,11 @@ class ConversationManager:
         # Get fresh session data to check message count
         session = self.get_session(session_id)
 
-        # Auto-generate title after first assistant response
-        if session and session.message_count == 2 and role == "assistant":
-            # This is the first assistant response, generate a title
-            logger.info(f"Triggering title generation for session {session_id}, message_count={session.message_count}")
-            self._auto_generate_title(session_id, content)
+        # Auto-generate or regenerate title after each assistant response
+        if session and role == "assistant":
+            # Trigger title generation/regeneration check on every assistant response
+            logger.info(f"Triggering title check for session {session_id}, message_count={session.message_count}")
+            self._auto_generate_or_update_title(session_id, content)
 
         # Check if we need to create a summary
         if session and session.message_count >= self.SUMMARY_THRESHOLD:
@@ -201,39 +201,81 @@ class ConversationManager:
 
         return message
 
-    def _auto_generate_title(self, session_id: UUID, assistant_response: str):
+    def _auto_generate_or_update_title(self, session_id: UUID, assistant_response: str):
         """
-        Automatically generate and set a title for the chat session
-        based on the first user message and assistant response.
-        Uses LLM to generate a meaningful title.
+        Automatically generate or update the title for the chat session.
+        Uses LLM to generate a meaningful title based on the conversation.
+
+        This is triggered on every assistant response to check if title needs generation/regeneration.
 
         Smart title generation:
-        - Skips title generation for greeting conversations
+        - For first response: checks if it's a greeting, skips if so
+        - For subsequent responses: uses latest user message if title is still generic
         - Only generates titles for substantive conversations
+        - Checks if current title is generic and needs regeneration
         """
         try:
-            # Get the first two messages (user + assistant)
-            messages = self.chat_repo.get_session_messages(session_id, limit=2)
-            if len(messages) >= 2:
-                user_message = messages[0].content
+            # Get the session to check current title and message count
+            session = self.get_session(session_id)
+            if not session:
+                return
+
+            # Check if title needs generation/regeneration
+            needs_title_update = (
+                not session.session_name or
+                session.session_name.strip() == "" or
+                session.session_name == "New Chat" or
+                session.session_name.startswith("Chat ")  # Default pattern like "Chat 2024-01-01"
+            )
+
+            if not needs_title_update:
+                # Title already exists and is not generic, skip
+                return
+
+            # Get all messages to find the right pair to use for title generation
+            all_messages = self.chat_repo.get_session_messages(session_id)
+            if len(all_messages) < 2:
+                # Not enough messages yet
+                return
+
+            # Determine which user message to use for title generation
+            if session.message_count == 2:
+                # First response - use first user message and check for greeting
+                user_message = all_messages[0].content
 
                 # Check if this is just a greeting conversation
                 if is_greeting_conversation(user_message, assistant_response):
                     logger.info(f"Skipping title generation for greeting conversation in session {session_id}")
                     # Keep the default "New Chat" or timestamp-based title
                     return
+            else:
+                # Subsequent responses - find the most recent substantive user message
+                # Skip the first exchange if it was a greeting
+                first_user_msg = all_messages[0].content
+                first_assistant_msg = all_messages[1].content if len(all_messages) > 1 else ""
 
-                # Use LLM to generate a meaningful title
-                title = generate_chat_title_with_llm(user_message, assistant_response)
+                # Check if first exchange was a greeting
+                first_was_greeting = is_greeting_conversation(first_user_msg, first_assistant_msg)
 
-                # Update session name
-                self.chat_repo.update_session(
-                    session_id=session_id,
-                    session_name=title
-                )
-                logger.info(f"Auto-generated title for session {session_id}: {title}")
+                if first_was_greeting and len(all_messages) >= 4:
+                    # Use the second user message (index 2) for title generation
+                    user_message = all_messages[2].content
+                    logger.info(f"First exchange was greeting, using second user message for title: '{user_message[:50]}...'")
+                else:
+                    # Use the first user message
+                    user_message = first_user_msg
+
+            # Use LLM to generate a meaningful title
+            title = generate_chat_title_with_llm(user_message, assistant_response)
+
+            # Update session name
+            self.chat_repo.update_session(
+                session_id=session_id,
+                session_name=title
+            )
+            logger.info(f"Auto-generated/updated title for session {session_id}: {title}")
         except Exception as e:
-            logger.error(f"Error auto-generating title: {e}")
+            logger.error(f"Error auto-generating/updating title: {e}")
 
     def regenerate_title_if_needed(self, session_id: UUID) -> Optional[str]:
         """

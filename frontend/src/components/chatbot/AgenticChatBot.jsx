@@ -126,8 +126,9 @@ export const AgenticChatBot = () => {
           // Increment message count
           messageCountRef.current += 2; // user + assistant
 
-          // Refresh chat history after first assistant response (to show auto-generated title)
-          if (messageCountRef.current === 2 && chatHistoryRef.current?.loadSessions) {
+          // Refresh chat history after each assistant response (to show auto-generated/updated title)
+          // Backend now checks and updates title on every response if needed
+          if (chatHistoryRef.current?.loadSessions) {
             setTimeout(() => {
               chatHistoryRef.current.loadSessions();
             }, 500); // Small delay to ensure backend has updated the title
