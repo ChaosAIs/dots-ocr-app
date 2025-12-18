@@ -315,114 +315,25 @@ RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
 # Query Enhancement with Metadata Extraction (for Document Routing)
 # =============================================================================
 
-QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are a search query analyzer. Your task is to:
-1. Enhance the user's query with more context and details for better vector search
-2. Extract structured metadata for intelligent document routing
+QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are a search query analyzer. Enhance the user's query and extract metadata.
 
 User Query: {query}
 
-Analyze the query and return JSON with two parts:
-
-**Part 1: Enhanced Query**
-- Expand abbreviations and implicit concepts
-- Add related terms and synonyms
-- Make implicit entities explicit (e.g., "Felix" → "Felix Yang")
-- Add context that would help find relevant information
-- Keep it natural and readable
-- **CRITICAL FOR DATES - ALWAYS NORMALIZE**: When the query mentions dates or months:
-  - ALWAYS expand abbreviated month names to full names (Oct → October)
-  - ALWAYS add the ISO year-month format in parentheses
-  - ALWAYS include multiple date format variations
-  - Examples:
-    * "2025 Oct" → "October 2025 (2025-10, 10/2025)"
-    * "Oct 2025" → "October 2025 (2025-10, 10/2025)"
-    * "meals in Oct" → "meals in October (month 10)"
-    * "do we have meal in 2025 oct?" → "Do we have any meals or receipts from October 2025 (2025-10, 10/2025, month 10)?"
-  - This is CRITICAL because documents contain dates in various formats (10/14/2025, 2025-10-14, October 2025)
-  - The enhanced query MUST include all these format variations to ensure matching
-
-**Part 2: Metadata for Document Routing**
-- **entities**: Specific named entities (people, organizations, products, technologies)
-  - Use full names when possible
-  - Include both explicit and implicit entities
-  - Examples: "Felix Yang", "AWS", "Microsoft Azure", "Docker", "BDO"
-
-- **topics**: Subject areas and domains
-  - Be specific and granular
-  - Include both broad and narrow topics
-  - Examples: "cloud computing", "microservices architecture", "resume experience", "work history"
-
-- **document_type_hints**: Types of documents likely to contain this information
-  - Options: "resume", "manual", "report", "article", "technical_doc", "book", "other"
-  - Can include multiple types
-
-- **intent**: Brief description of what the user wants to find
-
 Return ONLY valid JSON in this exact format:
 {{{{
-  "enhanced_query": "your enhanced query text here",
-  "entities": ["entity1", "entity2", ...],
-  "topics": ["topic1", "topic2", ...],
+  "enhanced_query": "enhanced query with more context and details",
+  "entities": ["entity1", "entity2"],
+  "topics": ["topic1", "topic2"],
   "document_type_hints": ["type1", "type2"],
   "intent": "brief intent description"
 }}}}
 
-Examples:
-
-Example 1:
-Query: "What does Felix know about cloud?"
-Response:
-{{{{
-  "enhanced_query": "What cloud computing technologies, platforms, and architectures does Felix Yang have experience with? Include AWS, Azure, GCP, cloud-native development, containerization, Kubernetes, serverless technologies, and cloud infrastructure management.",
-  "entities": ["Felix Yang", "AWS", "Azure", "GCP", "Kubernetes"],
-  "topics": ["cloud computing", "cloud platforms", "cloud architecture", "containerization", "serverless computing", "cloud-native development"],
-  "document_type_hints": ["resume", "technical_doc"],
-  "intent": "Find Felix Yang's cloud technology experience and expertise"
-}}}}
-
-Example 2:
-Query: "How do microservices communicate?"
-Response:
-{{{{
-  "enhanced_query": "How do microservices communicate with each other? What communication patterns, protocols, and technologies are used for inter-service communication in microservices architecture? Include REST APIs, message queues, event-driven architecture, gRPC, and service mesh.",
-  "entities": ["REST", "gRPC", "message queues", "service mesh"],
-  "topics": ["microservices architecture", "inter-service communication", "distributed systems", "API design", "event-driven architecture"],
-  "document_type_hints": ["technical_doc", "manual", "article"],
-  "intent": "Understand microservices communication patterns and technologies"
-}}}}
-
-Example 3:
-Query: "Felix's work at BDO"
-Response:
-{{{{
-  "enhanced_query": "What work experience, projects, and responsibilities did Felix Yang have at BDO? What technologies, methodologies, and achievements were involved in his role at BDO?",
-  "entities": ["Felix Yang", "BDO"],
-  "topics": ["work experience", "professional background", "projects", "career history"],
-  "document_type_hints": ["resume"],
-  "intent": "Find Felix Yang's work experience and projects at BDO"
-}}}}
-
-Example 4:
-Query: "Tell me about the authentication system"
-Response:
-{{{{
-  "enhanced_query": "Explain the authentication system architecture, implementation, and components. How does user authentication work? What authentication methods, protocols, and security measures are used?",
-  "entities": ["authentication", "security"],
-  "topics": ["authentication systems", "security architecture", "user authentication", "access control"],
-  "document_type_hints": ["technical_doc", "manual", "article"],
-  "intent": "Understand the authentication system design and implementation"
-}}}}
-
-Example 5 (DATE QUERY - CRITICAL):
-Query: "do we have meal in 2025 oct?"
-Response:
-{{{{
-  "enhanced_query": "Do we have any meals, receipts, or invoices from October 2025 (2025-10, 10/2025, month 10)? Show me meal records from 2025-10.",
-  "entities": [],
-  "topics": ["meal records", "receipts", "invoices", "October 2025"],
-  "document_type_hints": ["receipt", "invoice"],
-  "intent": "Find meal receipts or records from October 2025"
-}}}}
+Guidelines:
+- Enhanced query: Expand abbreviations, add related terms, keep it natural
+- Entities: Named entities (people, organizations, products, technologies)
+- Topics: Subject areas and domains
+- Document type hints: Types of documents (resume, manual, report, article, technical_doc, receipt, invoice, etc.)
+- Intent: Brief description of what the user wants
 
 Now analyze this query:
 Query: {query}
