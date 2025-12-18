@@ -238,6 +238,8 @@ class Document(Base):
     indexed_pages_info = Column(JSONB, nullable=True, default=lambda: {"indexed": [], "pending": [], "failed": []})
     # Document metadata from hierarchical summarization: type, subject, topics, entities, summary
     document_metadata = Column(JSONB, nullable=True, default=None)
+    # Granular OCR status tracking for selective re-processing (page-level, embedded images)
+    ocr_details = Column(JSONB, nullable=True, default=None)
     # Granular indexing status tracking for selective re-indexing (vector, metadata, GraphRAG)
     indexing_details = Column(JSONB, nullable=True, default=None)
     # Use values_callable to ensure SQLAlchemy uses enum values (lowercase) not names (uppercase)
@@ -270,6 +272,7 @@ class Document(Base):
             "indexed_chunks": self.indexed_chunks,
             "indexed_pages_info": self.indexed_pages_info,
             "document_metadata": self.document_metadata,
+            "ocr_details": self.ocr_details,
             "indexing_details": self.indexing_details,
             "upload_status": self.upload_status.value if self.upload_status else None,
             "convert_status": self.convert_status.value if self.convert_status else None,

@@ -47,6 +47,20 @@ class DocumentService {
   }
 
   /**
+   * Get list of documents that are currently in progress (converting or indexing)
+   * @returns {Promise} - List of in-progress documents
+   */
+  async getInProgressDocuments() {
+    try {
+      const response = await http.get(`${this.apiDomain}/documents/in-progress`);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching in-progress documents:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Detect if a file should use doc_service converter
    * @param {string} filename - The filename to check
    * @returns {boolean} - True if file should use doc_service
@@ -242,6 +256,15 @@ class DocumentService {
   }
 
   /**
+   * Get WebSocket base URL
+   * @returns {string} - WebSocket base URL (ws:// or wss://)
+   */
+  getWebSocketUrl() {
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${wsProtocol}//${this.apiDomain.replace(/^https?:\/\//, "")}`;
+  }
+
+  /**
    * Connect to WebSocket for real-time progress updates
    * @param {string} conversionId - The conversion task ID
    * @param {Function} onMessage - Callback for progress updates
@@ -250,8 +273,7 @@ class DocumentService {
    */
   connectToConversionProgress(conversionId, onMessage, onError) {
     try {
-      const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const wsUrl = `${wsProtocol}//${this.apiDomain.replace(/^https?:\/\//, "")}/ws/conversion/${conversionId}`;
+      const wsUrl = `${this.getWebSocketUrl()}/ws/conversion/${conversionId}`;
 
       const ws = new WebSocket(wsUrl);
 

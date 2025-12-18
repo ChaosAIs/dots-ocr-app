@@ -294,36 +294,50 @@ class DocumentRepository:
 
     def init_indexing_details(self, doc: Document) -> Document:
         """Initialize indexing_details structure for a new document."""
+        # Initialize empty dict if None
         if not doc.indexing_details:
-            doc.indexing_details = {
-                "version": "1.0",
-                "vector_indexing": {
-                    "status": "pending",
-                    "total_chunks": 0,
-                    "indexed_chunks": 0,
-                    "failed_chunks": 0,
-                    "pages": {},
-                    "chunks": {}
-                },
-                "metadata_extraction": {
-                    "status": "pending",
-                    "error": None,
-                    "retry_count": 0
-                },
-                "graphrag_indexing": {
-                    "status": "pending",
-                    "total_chunks": 0,
-                    "expected_total_chunks": 0,
-                    "processed_chunks": 0,
-                    "failed_chunks": 0,
-                    "skipped_chunks": 0,
-                    "entities_extracted": 0,
-                    "relationships_extracted": 0,
-                    "chunks": {}
-                }
+            doc.indexing_details = {}
+
+        # Ensure all required fields exist (merge with existing data)
+        if "version" not in doc.indexing_details:
+            doc.indexing_details["version"] = "1.0"
+
+        if "vector_indexing" not in doc.indexing_details:
+            doc.indexing_details["vector_indexing"] = {
+                "status": "pending",
+                "total_chunks": 0,
+                "indexed_chunks": 0,
+                "failed_chunks": 0,
+                "pages": {},
+                "chunks": {}
             }
-            self.db.commit()
-            self.db.refresh(doc)
+
+        if "metadata_extraction" not in doc.indexing_details:
+            doc.indexing_details["metadata_extraction"] = {
+                "status": "pending",
+                "error": None,
+                "retry_count": 0
+            }
+
+        if "graphrag_indexing" not in doc.indexing_details:
+            doc.indexing_details["graphrag_indexing"] = {
+                "status": "pending",
+                "total_chunks": 0,
+                "expected_total_chunks": 0,
+                "processed_chunks": 0,
+                "failed_chunks": 0,
+                "skipped_chunks": 0,
+                "entities_extracted": 0,
+                "relationships_extracted": 0,
+                "chunks": {}
+            }
+
+        # Mark as modified for SQLAlchemy to detect changes
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(doc, "indexing_details")
+
+        self.db.commit()
+        self.db.refresh(doc)
         return doc
 
     def update_vector_indexing_status(

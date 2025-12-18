@@ -815,6 +815,22 @@ def _run_graphrag_background(
                 f"{num_entities} entities, {num_rels} relationships"
             )
 
+            # Update database status to INDEXED (all phases complete)
+            if DB_AVAILABLE and filename:
+                try:
+                    from db.models import IndexStatus
+                    with get_db_session() as db:
+                        repo = DocumentRepository(db)
+                        doc = repo.get_by_filename(filename)
+                        if doc:
+                            repo.update_index_status(
+                                doc, IndexStatus.INDEXED, doc.indexed_chunks or 0,
+                                message=f"Fully indexed: {num_entities} entities, {num_rels} relationships"
+                            )
+                            logger.info(f"[GraphRAG Phase 2] Updated database status to INDEXED for {filename}")
+                except Exception as e:
+                    logger.warning(f"Could not update database to INDEXED status: {e}")
+
             # Send WebSocket notification that GraphRAG completed
             if broadcast_callback and conversion_id:
                 broadcast_callback(conversion_id, {
@@ -1069,7 +1085,7 @@ def trigger_embedding_for_document(
                 except Exception as e:
                     logger.warning(f"Could not check indexing status: {e}")
 
-            # Update database status to INDEXING (only if not all phases complete)
+            # Initialize indexing_details structure and update status to INDEXING
             if not (vector_complete and metadata_complete and graphrag_complete):
                 if DB_AVAILABLE and filename and IndexStatus:
                     try:
@@ -1077,6 +1093,9 @@ def trigger_embedding_for_document(
                             repo = DocumentRepository(db)
                             doc = repo.get_by_filename(filename)
                             if doc:
+                                # Initialize indexing_details structure for granular status tracking
+                                repo.init_indexing_details(doc)
+                                # Update status to INDEXING
                                 repo.update_index_status(
                                     doc, IndexStatus.INDEXING, 0,
                                     message="Resuming indexing..."
@@ -1150,7 +1169,7 @@ def trigger_embedding_for_document(
                 # Send WebSocket notification that Phase 1 completed
                 if broadcast_callback and conversion_id:
                     broadcast_callback(conversion_id, {
-                        "status": "indexed",
+                        "status": "vector_indexed",
                         "progress": 100,
                         "message": f"Document indexed successfully ({chunks} chunks). Extracting metadata...",
                         "indexing_status": "completed",

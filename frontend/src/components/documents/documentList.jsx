@@ -1,9 +1,8 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef, useCallback, forwardRef, useImperativeHandle } from "react";
 import { DataTable } from "primereact/datatable";
 import { Column } from "primereact/column";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
-import { ProgressBar } from "primereact/progressbar";
 import { Dialog } from "primereact/dialog";
 import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
@@ -11,19 +10,37 @@ import { messageService } from "../../core/message/messageService";
 import MarkdownViewer from "./markdownViewer";
 import "./documentList.scss";
 
-export const DocumentList = ({ refreshTrigger }) => {
+export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
   const { t, i18n, ready } = useTranslation();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [selectedDocument, setSelectedDocument] = useState(null);
   const [showMarkdownViewer, setShowMarkdownViewer] = useState(false);
-  const [converting, setConverting] = useState(null);
-  const [webSockets, setWebSockets] = useState({}); // conversion_id -> websocket
-  const [indexing, setIndexing] = useState(null); // filename being indexed
   const [batchIndexStatus, setBatchIndexStatus] = useState(null); // batch indexing status
   const [showStatusLogs, setShowStatusLogs] = useState(false); // status logs dialog
   const [statusLogs, setStatusLogs] = useState([]); // status logs data
   const [statusLogsLoading, setStatusLogsLoading] = useState(false);
+  const [tableKey, setTableKey] = useState(0); // Force DataTable re-render
+  // Ref to store the latest loadDocuments function for WebSocket handler
+  const loadDocumentsRef = useRef(null);
+  // Ref to store WebSocket instance for reconnection
+  const wsRef = useRef(null);
+  // Ref to track reconnection attempts
+  const reconnectAttemptsRef = useRef(0);
+  const maxReconnectAttempts = 5;
+  // Ref to store reconnection timeout
+  const reconnectTimeoutRef = useRef(null);
+  // Ref to store currently subscribed document IDs
+  const subscribedDocIdsRef = useRef(new Set());
+
+  // Debug: Log whenever documents state changes
+  useEffect(() => {
+    console.log("🔄 Documents state changed! New count:", documents.length);
+    console.log("📊 Document statuses:", documents.map(d => ({
+      filename: d.filename,
+      index_status: d.index_status
+    })));
+  }, [documents]);
 
   // Load documents on component mount and when refreshTrigger changes
   useEffect(() => {
@@ -47,47 +64,186 @@ export const DocumentList = ({ refreshTrigger }) => {
     };
   }, [batchIndexStatus?.status]);
 
-  // Poll for document status updates when documents are being indexed in background
-  // This handles cases where indexing happens during server startup (auto-resume)
-  useEffect(() => {
-    let intervalId = null;
-
-    // Check if any documents are currently being indexed (status = "INDEXING")
-    const hasIndexingDocuments = documents.some(
-      (doc) => doc.index_status === "INDEXING" || doc.index_status === "PENDING"
-    );
-
-    if (hasIndexingDocuments && !loading) {
-      // Poll every 3 seconds to check for status updates
-      intervalId = setInterval(() => {
-        loadDocuments();
-      }, 3000);
+  // Subscribe to document updates via WebSocket
+  const subscribeToDocuments = useCallback((documentIds) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      console.warn("⚠️ Cannot subscribe - WebSocket not connected");
+      return;
     }
 
+    if (!documentIds || documentIds.length === 0) {
+      console.log("📭 No documents to subscribe to");
+      return;
+    }
+
+    // Filter out already subscribed documents
+    const newDocIds = documentIds.filter(id => !subscribedDocIdsRef.current.has(id));
+
+    if (newDocIds.length === 0) {
+      console.log("✅ Already subscribed to all requested documents");
+      return;
+    }
+
+    console.log(`📬 Subscribing to ${newDocIds.length} documents:`, newDocIds);
+
+    wsRef.current.send(JSON.stringify({
+      action: "subscribe",
+      document_ids: newDocIds
+    }));
+
+    // Update subscribed set
+    newDocIds.forEach(id => subscribedDocIdsRef.current.add(id));
+  }, []);
+
+  // Expose subscribeToDocuments method to parent component via ref
+  useImperativeHandle(ref, () => ({
+    subscribeToNewDocuments: (documentIds) => {
+      console.log(`📨 DocumentList: Received request to subscribe to ${documentIds?.length || 0} new documents:`, documentIds);
+      subscribeToDocuments(documentIds);
+    }
+  }), [subscribeToDocuments]);
+
+  // WebSocket connection with automatic reconnection and subscription support
+  const connectWebSocket = useCallback(() => {
+    // Don't reconnect if already connected or connecting
+    if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
+      return;
+    }
+
+    // Check if we've exceeded max reconnection attempts
+    if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
+      console.error("❌ Max WebSocket reconnection attempts reached");
+      return;
+    }
+
+    try {
+      const wsUrl = `${documentService.getWebSocketUrl()}/ws/document-status`;
+      console.log(`🔌 Connecting to WebSocket (attempt ${reconnectAttemptsRef.current + 1}/${maxReconnectAttempts})...`);
+
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = async () => {
+        console.log("✅ Connected to centralized document status WebSocket");
+        reconnectAttemptsRef.current = 0; // Reset counter on successful connection
+
+        // Check for in-progress documents and subscribe to them
+        try {
+          const response = await documentService.getInProgressDocuments();
+
+          if (response.status === "success" && response.documents.length > 0) {
+            const docIds = response.documents.map(d => d.id);
+            console.log(`📋 Found ${docIds.length} in-progress documents on connect - subscribing...`);
+
+            // Subscribe to in-progress documents
+            subscribeToDocuments(docIds);
+          } else {
+            console.log("✅ No in-progress documents found on connect");
+          }
+        } catch (error) {
+          console.error("Error checking in-progress documents:", error);
+        }
+
+        // Reload documents immediately to get latest status from database
+        if (loadDocumentsRef.current) {
+          loadDocumentsRef.current();
+        }
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          console.log("📨 Document status update:", data);
+
+          // Handle different event types
+          if (data.event_type === "connected") {
+            console.log("✅ WebSocket connection confirmed");
+            return;
+          }
+
+          if (data.event_type === "subscribed") {
+            console.log(`✅ Subscribed to ${data.count} documents`);
+            return;
+          }
+
+          if (data.event_type === "unsubscribed") {
+            console.log(`✅ Unsubscribed from ${data.count} documents`);
+            return;
+          }
+
+          // Update specific document in state when status changes
+          if (data.event_type && data.document_id) {
+            console.log(`🔄 Received status update for document ${data.document_id}: ${data.event_type}`, data);
+
+            // Always reload documents to get the latest status from backend
+            console.log(`🔄 Reloading all documents due to ${data.event_type} for document ${data.document_id}`);
+            if (loadDocumentsRef.current) {
+              loadDocumentsRef.current();
+            }
+
+            // If indexing/conversion completed, remove from subscriptions
+            if (data.event_type === "indexing_completed" || data.event_type === "ocr_completed") {
+              subscribedDocIdsRef.current.delete(data.document_id);
+              console.log(`📭 Removed ${data.document_id} from subscriptions (completed)`);
+            }
+          }
+        } catch (error) {
+          console.error("Error parsing WebSocket message:", error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error("❌ WebSocket error:", error);
+      };
+
+      ws.onclose = (event) => {
+        console.log("🔌 WebSocket connection closed", event.code, event.reason);
+        wsRef.current = null;
+
+        // Don't reconnect on normal closure or policy violation
+        if (event.code === 1000 || event.code === 1008) {
+          console.log("WebSocket closed normally - not reconnecting");
+          return;
+        }
+
+        // Attempt to reconnect after delay if we have subscribed documents
+        if (subscribedDocIdsRef.current.size > 0 && reconnectAttemptsRef.current < maxReconnectAttempts) {
+          reconnectAttemptsRef.current += 1;
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current - 1), 10000); // Exponential backoff, max 10s
+          console.log(`🔄 Scheduling reconnection in ${delay}ms (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts})`);
+
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectWebSocket();
+          }, delay);
+        } else {
+          console.log("⏸️ No subscribed documents - not reconnecting");
+        }
+      };
+    } catch (error) {
+      console.error("Error creating WebSocket connection:", error);
+    }
+  }, [subscribeToDocuments]);
+
+  // Centralized WebSocket connection for all document status updates
+  useEffect(() => {
+    connectWebSocket();
+
+    // Cleanup function
     return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
+        wsRef.current.close();
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [documents, loading]);
+  }, [connectWebSocket]);
 
   // Force re-render when language changes to update translations
   useEffect(() => {
     // This effect ensures the component re-renders when language changes
     // The i18n.language property will trigger a re-render
   }, [i18n.language]);
-
-  // Cleanup WebSockets on unmount
-  useEffect(() => {
-    return () => {
-      Object.values(webSockets).forEach((ws) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.close();
-        }
-      });
-    };
-  }, [webSockets]);
 
   const checkBatchIndexStatus = async () => {
     try {
@@ -98,10 +254,12 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
-  const loadDocuments = async () => {
+  const loadDocuments = useCallback(async () => {
+    console.log("🔄 loadDocuments() called - fetching documents from API...");
     try {
       setLoading(true);
       const response = await documentService.getDocuments();
+      console.log("📦 API response received:", response);
       if (response.status === "success") {
         // Sort documents by upload_time in descending order (newest first)
         const sortedDocuments = (response.documents || []).sort((a, b) => {
@@ -109,15 +267,59 @@ export const DocumentList = ({ refreshTrigger }) => {
           const dateB = new Date(b.upload_time);
           return dateB - dateA; // Descending order
         });
-        setDocuments(sortedDocuments);
+        console.log("✅ Setting documents state with", sortedDocuments.length, "documents");
+        console.log("📄 Documents:", sortedDocuments.map(d => ({
+          filename: d.filename,
+          index_status: d.index_status,
+          markdown_exists: d.markdown_exists
+        })));
+        // Force new array reference to trigger DataTable re-render
+        setDocuments([...sortedDocuments]);
+        // Force DataTable to re-render by changing key
+        setTableKey(prev => prev + 1);
+        console.log("🔄 Forced DataTable re-render");
+
+        // Find in-progress documents and subscribe to them
+        const inProgressDocs = sortedDocuments.filter(doc =>
+          doc.convert_status === "converting" || doc.index_status === "indexing"
+        );
+
+        if (inProgressDocs.length > 0) {
+          const docIds = inProgressDocs.map(d => d.id);
+          console.log(`📊 Found ${inProgressDocs.length} in-progress documents - subscribing...`);
+          subscribeToDocuments(docIds);
+        } else {
+          console.log("✅ No in-progress documents found");
+        }
+      } else {
+        console.warn("⚠️ API response status is not 'success':", response.status);
       }
     } catch (error) {
       messageService.errorToast(t("DocumentList.FailedToLoad"));
-      console.error("Error loading documents:", error);
+      console.error("❌ Error loading documents:", error);
     } finally {
       setLoading(false);
+      console.log("✅ loadDocuments() completed");
     }
-  };
+  }, [t, subscribeToDocuments]);
+
+  // Update ref whenever loadDocuments changes
+  useEffect(() => {
+    loadDocumentsRef.current = loadDocuments;
+  }, [loadDocuments]);
+
+  // Monitor documents array changes for debugging
+  useEffect(() => {
+    console.log("📊 Documents array changed! Count:", documents.length);
+    console.log("📊 Document statuses:", documents.map(d => ({
+      id: d.id,
+      filename: d.filename,
+      index_status: d.index_status,
+      convert_status: d.convert_status,
+      markdown_exists: d.markdown_exists
+    })));
+    console.log("📊 TableKey:", tableKey);
+  }, [documents, tableKey]);
 
   const handleViewMarkdown = async (document) => {
     try {
@@ -154,298 +356,10 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
-  /**
-   * Unified Index handler - combines convert + index operations
-   * Handles first-time indexing and retry scenarios
-   */
-  const handleUnifiedIndex = async (document) => {
-    const { markdown_exists, indexing_details, convert_status } = document;
+  // Manual trigger functions removed - system is now fully automated
+  // OCR and indexing are triggered automatically on file upload
 
-    // Determine if this is a retry scenario
-    const needsConversion = !markdown_exists || convert_status === "failed" || convert_status === "partial";
-    const needsVectorIndex = !indexing_details ||
-                             indexing_details?.vector_indexing?.status === "failed" ||
-                             indexing_details?.vector_indexing?.status === "pending";
-    const needsMetadata = !indexing_details ||
-                          indexing_details?.metadata_extraction?.status === "failed" ||
-                          indexing_details?.metadata_extraction?.status === "pending";
-    const needsGraphRAG = !indexing_details ||
-                          indexing_details?.graphrag_indexing?.status === "failed" ||
-                          indexing_details?.graphrag_indexing?.status === "pending";
 
-    try {
-      setIndexing(document.filename);
-
-      // Step 1: Convert to markdown if needed
-      if (needsConversion) {
-        await handleConvertForUnifiedIndex(document);
-      }
-
-      // Step 2: Index document (vector + metadata + GraphRAG)
-      // The backend /index endpoint handles all three phases with WebSocket progress
-      if (needsVectorIndex || needsMetadata || needsGraphRAG) {
-        messageService.infoToast(t("DocumentList.StartingIndex"));
-        const response = await documentService.indexDocument(document.filename);
-
-        // Backend now returns conversion_id for WebSocket tracking
-        if (response.status === "accepted" && response.conversion_id) {
-          const conversionId = response.conversion_id;
-
-          // Connect to WebSocket for real-time indexing progress
-          const ws = documentService.connectToConversionProgress(
-            conversionId,
-            (progressData) => {
-              // Handle indexing status updates
-              if (progressData.status === "indexing") {
-                messageService.infoToast(progressData.message || t("DocumentList.IndexingDocument"));
-              }
-
-              if (progressData.status === "indexed") {
-                messageService.successToast(
-                  `${t("DocumentList.IndexSuccess")} (${progressData.chunks_indexed || 0} chunks)`
-                );
-                // Reload documents to update status
-                loadDocuments();
-              }
-
-              if (progressData.status === "extracting_metadata") {
-                messageService.infoToast(progressData.message || "Extracting metadata...");
-              }
-
-              if (progressData.status === "metadata_extracted") {
-                messageService.infoToast(
-                  progressData.message || "Metadata extracted successfully"
-                );
-                // Reload to show updated metadata
-                loadDocuments();
-              }
-
-              if (progressData.status === "graphrag_indexing") {
-                messageService.infoToast(progressData.message || "Building knowledge graph...");
-              }
-
-              if (progressData.status === "graphrag_indexed") {
-                messageService.successToast(
-                  progressData.message || "Knowledge graph built successfully"
-                );
-                // Final reload to show complete status
-                loadDocuments();
-                setIndexing(null);
-                // Close WebSocket after all phases complete
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                  ws.close();
-                }
-                // Remove from webSockets state
-                setWebSockets((prev) => {
-                  const updated = { ...prev };
-                  delete updated[conversionId];
-                  return updated;
-                });
-              }
-
-              if (progressData.status === "index_error") {
-                messageService.errorToast(progressData.message || t("DocumentList.IndexFailed"));
-                loadDocuments();
-                setIndexing(null);
-                // Close WebSocket on error
-                if (ws && ws.readyState === WebSocket.OPEN) {
-                  ws.close();
-                }
-                setWebSockets((prev) => {
-                  const updated = { ...prev };
-                  delete updated[conversionId];
-                  return updated;
-                });
-              }
-            },
-            (error) => {
-              console.error("WebSocket error during indexing:", error);
-              messageService.errorToast(t("DocumentList.ConnectionError"));
-              setIndexing(null);
-            }
-          );
-
-          // Store WebSocket reference
-          setWebSockets((prev) => ({
-            ...prev,
-            [conversionId]: ws,
-          }));
-        } else if (response.status === "success") {
-          // Fallback for old synchronous response (backward compatibility)
-          messageService.successToast(
-            `${t("DocumentList.IndexSuccess")} (${response.chunks_indexed} chunks)`
-          );
-          loadDocuments();
-        } else {
-          messageService.warnToast(t("DocumentList.IndexWarning"));
-        }
-      }
-    } catch (error) {
-      messageService.errorToast(t("DocumentList.IndexFailed"));
-      console.error("Error in unified index:", error);
-    } finally {
-      setIndexing(null);
-    }
-  };
-
-  /**
-   * Helper function to handle conversion as part of unified index
-   * Returns a promise that resolves when conversion is complete
-   */
-  const handleConvertForUnifiedIndex = async (document) => {
-    const { total_pages = 0, converted_pages = 0 } = document;
-    const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
-
-    return new Promise(async (resolve, reject) => {
-      try {
-        setConverting(document.filename);
-
-        // Update document with conversion status
-        setDocuments((prev) =>
-          prev.map((doc) =>
-            doc.filename === document.filename
-              ? { ...doc, conversionProgress: 0, conversionStatus: "converting" }
-              : doc
-          )
-        );
-
-        // For partially converted documents, use direct reconversion
-        if (isPartiallyConverted) {
-          messageService.infoToast(t("DocumentList.ReconvertingUncompleted"));
-          const response = await documentService.reconvertUncompletedPages(document.filename);
-
-          if (response.status === "success" || response.status === "partial") {
-            setDocuments((prev) =>
-              prev.map((doc) =>
-                doc.filename === document.filename
-                  ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
-                  : doc
-              )
-            );
-            setConverting(null);
-            await loadDocuments();
-            resolve();
-          } else {
-            throw new Error(response.message || "Reconversion failed");
-          }
-          return;
-        }
-
-        // For fresh conversions, use the normal flow with WebSocket
-        messageService.infoToast(t("DocumentList.StartingConversion"));
-
-        const response = await documentService.convertDocument(
-          document.filename,
-          "prompt_layout_all_en",
-          "auto"
-        );
-
-        if (response.status === "accepted" && response.conversion_id) {
-          const conversionId = response.conversion_id;
-
-          // Connect to WebSocket for progress updates
-          const ws = documentService.connectToConversionProgress(
-            conversionId,
-            (progressData) => {
-              // Update progress
-              if (progressData.progress !== undefined) {
-                setDocuments((prev) =>
-                  prev.map((doc) =>
-                    doc.filename === document.filename
-                      ? { ...doc, conversionProgress: progressData.progress }
-                      : doc
-                  )
-                );
-              }
-
-              // Handle completion
-              if (progressData.status === "completed") {
-                messageService.successToast(t("DocumentList.ConversionSuccess"));
-                setDocuments((prev) =>
-                  prev.map((doc) =>
-                    doc.filename === document.filename
-                      ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
-                      : doc
-                  )
-                );
-                setConverting(null);
-                loadDocuments().then(resolve);
-              }
-
-              // Handle errors
-              if (progressData.status === "error" || progressData.status === "failed") {
-                messageService.errorToast(progressData.message || t("DocumentList.ConversionFailed"));
-                setDocuments((prev) =>
-                  prev.map((doc) =>
-                    doc.filename === document.filename
-                      ? { ...doc, conversionStatus: "error" }
-                      : doc
-                  )
-                );
-                setConverting(null);
-                reject(new Error(progressData.message || "Conversion failed"));
-              }
-            },
-            (error) => {
-              console.error("WebSocket error:", error);
-              messageService.errorToast(t("DocumentList.ConnectionError"));
-              setDocuments((prev) =>
-                prev.map((doc) =>
-                  doc.filename === document.filename
-                    ? { ...doc, conversionStatus: "error" }
-                    : doc
-                )
-              );
-              setConverting(null);
-              reject(error);
-            }
-          );
-
-          // Store WebSocket reference
-          setWebSockets((prev) => ({
-            ...prev,
-            [conversionId]: ws,
-          }));
-        }
-      } catch (error) {
-        messageService.errorToast(t("DocumentList.FailedToConvert"));
-        console.error("Error in conversion:", error);
-        setDocuments((prev) =>
-          prev.map((doc) =>
-            doc.filename === document.filename
-              ? { ...doc, conversionStatus: "error" }
-              : doc
-          )
-        );
-        setConverting(null);
-        reject(error);
-      }
-    });
-  };
-
-  const handleIndex = async (document) => {
-    try {
-      setIndexing(document.filename);
-      messageService.infoToast(t("DocumentList.StartingIndex"));
-
-      const response = await documentService.indexDocument(document.filename);
-
-      if (response.status === "success") {
-        messageService.successToast(
-          `${t("DocumentList.IndexSuccess")} (${response.chunks_indexed} chunks)`
-        );
-        // Reload documents to update indexed status
-        loadDocuments();
-      } else {
-        messageService.warnToast(t("DocumentList.IndexWarning"));
-      }
-    } catch (error) {
-      messageService.errorToast(t("DocumentList.IndexFailed"));
-      console.error("Error indexing document:", error);
-    } finally {
-      setIndexing(null);
-    }
-  };
 
   const handleViewStatusLogs = async (document) => {
     try {
@@ -468,397 +382,9 @@ export const DocumentList = ({ refreshTrigger }) => {
     }
   };
 
-  const handleIndexAll = async () => {
-    try {
-      const response = await documentService.indexAllDocuments();
 
-      if (response.status === "accepted") {
-        messageService.infoToast(t("DocumentList.BatchIndexStarted"));
-        // Start polling for status
-        checkBatchIndexStatus();
-      } else if (response.status === "conflict") {
-        messageService.warnToast(t("DocumentList.BatchIndexInProgress"));
-      }
-    } catch (error) {
-      messageService.errorToast(t("DocumentList.BatchIndexFailed"));
-      console.error("Error starting batch indexing:", error);
-    }
-  };
 
-  const handleConvert = async (document) => {
-    const { total_pages = 0, converted_pages = 0 } = document;
-    const isPartiallyConverted = total_pages > 0 && converted_pages < total_pages;
 
-    try {
-      setConverting(document.filename);
-
-      // Update document with conversion status
-      setDocuments((prev) =>
-        prev.map((doc) =>
-          doc.filename === document.filename
-            ? { ...doc, conversionProgress: 0, conversionStatus: "converting" }
-            : doc
-        )
-      );
-
-      // For partially converted documents, use direct reconversion (skip dots_ocr_service)
-      if (isPartiallyConverted) {
-        messageService.infoToast(t("DocumentList.ReconvertingUncompleted"));
-        console.log(`Using direct reconversion for partial document: ${document.filename}`);
-
-        const response = await documentService.reconvertUncompletedPages(document.filename);
-
-        // Handle "accepted" status - this means the file was new and full conversion was started
-        // We need to connect to WebSocket for progress tracking
-        if (response.status === "accepted" && response.conversion_id) {
-          const conversionId = response.conversion_id;
-          messageService.infoToast(t("DocumentList.StartingConversion"));
-
-          // Connect to WebSocket for progress updates (same as fresh conversion flow)
-          const ws = documentService.connectToConversionProgress(
-            conversionId,
-            (progressData) => {
-              setDocuments((prev) =>
-                prev.map((doc) =>
-                  doc.filename === document.filename
-                    ? { ...doc, conversionProgress: progressData.progress || 0 }
-                    : doc
-                )
-              );
-
-              if (progressData.status === "completed") {
-                messageService.successToast(t("DocumentList.ConversionSuccess"));
-                setDocuments((prev) =>
-                  prev.map((doc) =>
-                    doc.filename === document.filename
-                      ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
-                      : doc
-                  )
-                );
-                setConverting(null);
-                // Note: Don't close WebSocket yet - wait for indexing to complete
-              }
-
-              // Handle indexing status updates
-              if (progressData.status === "indexing") {
-                messageService.infoToast(t("DocumentList.IndexingDocument") || "Indexing document...");
-              }
-
-              if (progressData.status === "indexed") {
-                messageService.successToast(
-                  `${t("DocumentList.IndexSuccess")} (${progressData.chunks_indexed || 0} chunks)`
-                );
-                // Reload documents to update status after indexing completes
-                loadDocuments();
-              }
-
-              if (progressData.status === "index_error") {
-                messageService.warnToast(progressData.message || t("DocumentList.IndexFailed"));
-                // Still reload to show current status
-                loadDocuments();
-              }
-
-              if (progressData.status === "warning") {
-                messageService.warnToast(progressData.message || t("DocumentList.ConversionWarning"));
-                setDocuments((prev) =>
-                  prev.map((doc) =>
-                    doc.filename === document.filename
-                      ? { ...doc, conversionStatus: "warning", conversionProgress: 100 }
-                      : doc
-                  )
-                );
-                setConverting(null);
-              }
-
-              if (progressData.status === "error") {
-                messageService.errorToast(progressData.message || t("DocumentList.ConversionFailed"));
-                setDocuments((prev) =>
-                  prev.map((doc) =>
-                    doc.filename === document.filename
-                      ? { ...doc, conversionStatus: "error" }
-                      : doc
-                  )
-                );
-                setConverting(null);
-              }
-            },
-            (error) => {
-              console.error("WebSocket error:", error);
-              messageService.errorToast(t("DocumentList.ConnectionError"));
-              setDocuments((prev) =>
-                prev.map((doc) =>
-                  doc.filename === document.filename
-                    ? { ...doc, conversionStatus: "error" }
-                    : doc
-                )
-              );
-              setConverting(null);
-            }
-          );
-
-          setWebSockets((prev) => ({
-            ...prev,
-            [conversionId]: ws,
-          }));
-          return;
-        }
-
-        if (response.status === "success" || response.status === "partial") {
-          const successCount = response.converted_count || 0;
-          const failedCount = response.failed_count || 0;
-
-          if (failedCount === 0) {
-            messageService.successToast(
-              `${t("DocumentList.ConversionSuccess")} (${successCount} pages)`
-            );
-          } else {
-            messageService.warnToast(
-              `Converted ${successCount} pages, ${failedCount} failed`
-            );
-          }
-
-          setDocuments((prev) =>
-            prev.map((doc) =>
-              doc.filename === document.filename
-                ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
-                : doc
-            )
-          );
-          setConverting(null);
-          // Reload documents to update status
-          setTimeout(() => loadDocuments(), 1000);
-        } else {
-          throw new Error(response.message || "Reconversion failed");
-        }
-        return;
-      }
-
-      // For fresh conversions, use the normal flow with WebSocket progress
-      messageService.infoToast(t("DocumentList.StartingConversion"));
-
-      // Use auto-detection to route to the appropriate converter
-      // - doc_service for Word/Excel/Text files
-      // - dots_ocr_service for PDF and images
-      const converterType = "auto";
-
-      // Start conversion (returns immediately with conversion_id)
-      const response = await documentService.convertDocument(
-        document.filename,
-        "prompt_layout_all_en",
-        converterType
-      );
-
-      if (response.status === "accepted" && response.conversion_id) {
-        const conversionId = response.conversion_id;
-
-        // Connect to WebSocket for progress updates
-        const ws = documentService.connectToConversionProgress(
-          conversionId,
-          (progressData) => {
-            // Update document with progress
-            setDocuments((prev) =>
-              prev.map((doc) =>
-                doc.filename === document.filename
-                  ? { ...doc, conversionProgress: progressData.progress || 0 }
-                  : doc
-              )
-            );
-
-            // Handle completion
-            if (progressData.status === "completed") {
-              messageService.successToast(t("DocumentList.ConversionSuccess"));
-              setDocuments((prev) =>
-                prev.map((doc) =>
-                  doc.filename === document.filename
-                    ? { ...doc, conversionStatus: "completed", conversionProgress: 100 }
-                    : doc
-                )
-              );
-              setConverting(null);
-              // Note: Don't reload yet - wait for indexing to complete
-            }
-
-            // Handle indexing status updates
-            if (progressData.status === "indexing") {
-              messageService.infoToast(t("DocumentList.IndexingDocument") || "Indexing document...");
-            }
-
-            if (progressData.status === "indexed") {
-              messageService.successToast(
-                `${t("DocumentList.IndexSuccess")} (${progressData.chunks_indexed || 0} chunks)`
-              );
-              // Reload documents to update status after indexing completes
-              loadDocuments();
-            }
-
-            if (progressData.status === "index_error") {
-              messageService.warnToast(progressData.message || t("DocumentList.IndexFailed"));
-              // Still reload to show current status
-              loadDocuments();
-            }
-
-            // Handle warnings (e.g., image skipped due to size)
-            if (progressData.status === "warning") {
-              messageService.warnToast(
-                progressData.message || t("DocumentList.ConversionWarning")
-              );
-              setDocuments((prev) =>
-                prev.map((doc) =>
-                  doc.filename === document.filename
-                    ? { ...doc, conversionStatus: "warning", conversionProgress: 100 }
-                    : doc
-                )
-              );
-              setConverting(null);
-            }
-
-            // Handle errors
-            if (progressData.status === "error") {
-              messageService.errorToast(
-                progressData.message || t("DocumentList.ConversionFailed")
-              );
-              setDocuments((prev) =>
-                prev.map((doc) =>
-                  doc.filename === document.filename
-                    ? { ...doc, conversionStatus: "error" }
-                    : doc
-                )
-              );
-              setConverting(null);
-            }
-          },
-          (error) => {
-            console.error("WebSocket error:", error);
-            messageService.errorToast(t("DocumentList.ConnectionError"));
-            setDocuments((prev) =>
-              prev.map((doc) =>
-                doc.filename === document.filename
-                  ? { ...doc, conversionStatus: "error" }
-                  : doc
-              )
-            );
-            setConverting(null);
-          }
-        );
-
-        // Store WebSocket reference for cleanup
-        setWebSockets((prev) => ({
-          ...prev,
-          [conversionId]: ws,
-        }));
-      }
-    } catch (error) {
-      messageService.errorToast(t("DocumentList.FailedToConvert"));
-      console.error("Error starting conversion:", error);
-      setDocuments((prev) =>
-        prev.map((doc) =>
-          doc.filename === document.filename
-            ? { ...doc, conversionStatus: "error" }
-            : doc
-        )
-      );
-      setConverting(null);
-    }
-  };
-
-  /**
-   * Determine the state of the unified Index button
-   */
-  const getUnifiedIndexButtonState = (rowData) => {
-    const {
-      markdown_exists,
-      convert_status,
-      indexing_details,
-      total_pages = 0,
-      converted_pages = 0
-    } = rowData;
-
-    // Check if currently processing
-    const isProcessing = converting === rowData.filename || indexing === rowData.filename;
-
-    // Check conversion status
-    const conversionFailed = convert_status === "failed";
-    // Partial means: started conversion (converted_pages > 0) but not finished (< total_pages)
-    // Don't treat fresh uploads (converted_pages = 0) as partial
-    const conversionPartial = convert_status === "partial" ||
-                              (total_pages > 0 && converted_pages > 0 && converted_pages < total_pages);
-    const conversionComplete = markdown_exists && !conversionFailed && !conversionPartial;
-
-    // Check indexing status
-    const vectorStatus = indexing_details?.vector_indexing?.status;
-    const metadataStatus = indexing_details?.metadata_extraction?.status;
-    const graphragStatus = indexing_details?.graphrag_indexing?.status;
-
-    const vectorComplete = vectorStatus === "completed";
-    const metadataComplete = metadataStatus === "completed";
-    const graphragComplete = graphragStatus === "completed";
-    const graphragProcessing = graphragStatus === "processing";
-
-    const vectorFailed = vectorStatus === "failed";
-    const metadataFailed = metadataStatus === "failed";
-    const graphragFailed = graphragStatus === "failed";
-
-    const anyIndexingFailed = vectorFailed || metadataFailed || graphragFailed;
-    const anyIndexingProcessing = vectorStatus === "processing" || metadataStatus === "processing" || graphragProcessing;
-
-    // Determine button state
-    if (isProcessing || anyIndexingProcessing) {
-      return {
-        type: "indexing",
-        icon: "pi pi-spin pi-spinner",
-        className: "p-button-rounded p-button-primary",
-        tooltip: t("DocumentList.Indexing"),
-        disabled: true,
-        loading: true
-      };
-    }
-
-    // All complete (including GraphRAG)
-    if (conversionComplete && vectorComplete && metadataComplete && graphragComplete) {
-      return {
-        type: "complete",
-        icon: "pi pi-check",
-        className: "p-button-rounded p-button-success",
-        tooltip: t("DocumentList.AllIndexingComplete"),
-        disabled: true,
-        loading: false
-      };
-    }
-
-    // Conversion + Vector + Metadata complete, GraphRAG still pending/processing
-    if (conversionComplete && vectorComplete && metadataComplete && !graphragComplete && !graphragFailed) {
-      return {
-        type: "partial_complete",
-        icon: "pi pi-clock",
-        className: "p-button-rounded p-button-secondary",
-        tooltip: t("DocumentList.GraphRAGPending"),
-        disabled: true,
-        loading: false
-      };
-    }
-
-    // Any failures - show retry
-    if (conversionFailed || conversionPartial || anyIndexingFailed) {
-      return {
-        type: "retry",
-        icon: "pi pi-refresh",
-        className: "p-button-rounded p-button-warning",
-        tooltip: t("DocumentList.RetryIndex"),
-        disabled: false,
-        loading: false
-      };
-    }
-
-    // First time - show index
-    return {
-      type: "index",
-      icon: "pi pi-database",
-      className: "p-button-rounded p-button-primary",
-      tooltip: t("DocumentList.IndexDocument"),
-      disabled: false,
-      loading: false
-    };
-  };
 
   const actionBodyTemplate = (rowData) => {
     const {
@@ -867,7 +393,6 @@ export const DocumentList = ({ refreshTrigger }) => {
       total_pages = 0,
       converted_pages = 0
     } = rowData;
-    const buttonState = getUnifiedIndexButtonState(rowData);
 
     // Check if conversion is fully completed with no errors
     const conversionFailed = convert_status === "failed";
@@ -878,17 +403,6 @@ export const DocumentList = ({ refreshTrigger }) => {
 
     return (
       <div className="action-buttons">
-        {/* Unified Index button */}
-        <Button
-          icon={buttonState.icon}
-          className={buttonState.className}
-          onClick={() => handleUnifiedIndex(rowData)}
-          loading={buttonState.loading}
-          disabled={buttonState.disabled || batchIndexStatus?.status === "running"}
-          tooltip={buttonState.tooltip}
-          tooltipPosition="top"
-        />
-
         {/* Show view button only if conversion is fully completed with no errors */}
         {markdown_exists && (
           <Button
@@ -1034,63 +548,6 @@ export const DocumentList = ({ refreshTrigger }) => {
     );
   };
 
-  const progressBodyTemplate = (rowData) => {
-    const { indexing_details } = rowData;
-
-    // Check if conversion is in progress
-    const conversionStatus = rowData.conversionStatus;
-    if (conversionStatus === "converting") {
-      const progress = rowData.conversionProgress || 0;
-      return (
-        <div className="progress-container">
-          <ProgressBar
-            value={progress}
-            showValue={true}
-            displayValueTemplate={() => `${Math.round(progress)}%`}
-          />
-        </div>
-      );
-    }
-
-    // Check if GraphRAG indexing is in progress
-    const graphragStatus = indexing_details?.graphrag_indexing?.status;
-    const graphragProcessing = graphragStatus === "processing";
-
-    if (graphragProcessing) {
-      const totalChunks = indexing_details?.graphrag_indexing?.total_chunks || 0;
-      const processedChunks = indexing_details?.graphrag_indexing?.processed_chunks || 0;
-      const progress = totalChunks > 0 ? Math.round((processedChunks / totalChunks) * 100) : 0;
-
-      return (
-        <div className="progress-container">
-          <ProgressBar
-            value={progress}
-            showValue={true}
-            displayValueTemplate={() => `GraphRAG: ${Math.round(progress)}%`}
-            className="graphrag-progress"
-          />
-        </div>
-      );
-    }
-
-    // Check if vector or metadata indexing is in progress
-    const vectorStatus = indexing_details?.vector_indexing?.status;
-    const metadataStatus = indexing_details?.metadata_extraction?.status;
-
-    if (vectorStatus === "processing" || metadataStatus === "processing") {
-      return (
-        <div className="progress-container">
-          <ProgressSpinner style={{ width: '30px', height: '30px' }} strokeWidth="4" />
-          <span style={{ marginLeft: '8px' }}>
-            {vectorStatus === "processing" ? "Indexing..." : "Extracting metadata..."}
-          </span>
-        </div>
-      );
-    }
-
-    return null;
-  };
-
   // Show loading spinner while translations are loading or documents are loading
   if (!ready || (loading && documents.length === 0)) {
     return (
@@ -1158,16 +615,7 @@ export const DocumentList = ({ refreshTrigger }) => {
       <div className="document-list-header">
         <h2>{t("DocumentList.Title")}</h2>
         <div className="header-actions">
-          <Button
-            icon="pi pi-database"
-            label={t("DocumentList.IndexAll")}
-            className="p-button-outlined p-button-help"
-            onClick={handleIndexAll}
-            loading={batchIndexStatus?.status === "running"}
-            disabled={batchIndexStatus?.status === "running"}
-            tooltip={t("DocumentList.IndexAllTooltip")}
-            tooltipPosition="top"
-          />
+          {/* Auto-processing status indicator */}
           {renderBatchIndexStatus()}
           <Button
             icon="pi pi-refresh"
@@ -1186,9 +634,9 @@ export const DocumentList = ({ refreshTrigger }) => {
         </div>
       ) : (
         <DataTable
-          key={i18n.language}
+          key={tableKey}
           value={documents}
-          dataKey="filename"
+          dataKey="id"
           className="p-datatable-striped"
           responsiveLayout="scroll"
           paginator
@@ -1215,11 +663,6 @@ export const DocumentList = ({ refreshTrigger }) => {
             header={t("DocumentList.Status")}
             body={statusBodyTemplate}
             style={{ width: "18%" }}
-          />
-          <Column
-            header={t("DocumentList.Progress")}
-            body={progressBodyTemplate}
-            style={{ width: "20%" }}
           />
           <Column
             body={actionBodyTemplate}
@@ -1270,4 +713,4 @@ export const DocumentList = ({ refreshTrigger }) => {
       </Dialog>
     </div>
   );
-};
+});

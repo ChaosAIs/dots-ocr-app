@@ -88,7 +88,7 @@ def get_db_session() -> Generator[Session, None, None]:
     """Context manager for database session."""
     if _SessionLocal is None:
         init_db()
-    
+
     db = _SessionLocal()
     try:
         yield db
@@ -98,4 +98,14 @@ def get_db_session() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
+
+
+def create_db_session() -> Session:
+    """
+    Create a new database session (caller is responsible for closing it).
+    Use get_db_session() context manager instead when possible.
+    """
+    if _SessionLocal is None:
+        init_db()
+    return _SessionLocal()
 

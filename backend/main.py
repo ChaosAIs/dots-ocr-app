@@ -40,6 +40,7 @@ import asyncio
 import threading
 from typing import Dict, Set, Optional
 import uuid
+from uuid import UUID
 import logging
 
 from dots_ocr_service.parser import DotsOCRParser
@@ -79,6 +80,9 @@ from auth.auth_api import router as auth_router
 # Import chat session management
 from chat_service.chat_session_api import router as chat_session_router
 
+# Import task queue system
+from queue_service import TaskQueueManager, TaskScheduler, QueueWorkerPool, TaskType, TaskPriority
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -96,12 +100,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"Database initialization failed: {e}")
         # Continue without database - will fall back to file-based status
 
-    # Set up the connection manager with the current event loop
+    # Set up the connection managers with the current event loop
     loop = asyncio.get_event_loop()
     connection_manager.set_event_loop(loop)
-    # Start the background broadcast worker
+    document_status_manager.set_event_loop(loop)
+    # Start the background broadcast workers
     asyncio.create_task(connection_manager.start_broadcast_worker())
-    logger.info("WebSocket broadcast worker started")
+    asyncio.create_task(document_status_manager.start_broadcast_worker())
+    logger.info("WebSocket broadcast workers started")
 
     # Initialize Neo4j indexes (including vector indexes) if GraphRAG is enabled
     if GRAPH_RAG_ENABLED:
@@ -113,42 +119,83 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to initialize Neo4j indexes: {e}")
 
-    # Initialize services in background thread
-    def _init_services():
-        # Sync existing files to database
-        _sync_files_to_database()
+    # Initialize task queue system if enabled
+    global task_queue_manager, task_scheduler, queue_worker_pool
 
-        # Resume incomplete OCR conversion for documents with pending/converting/partial/failed status
-        auto_resume_ocr = os.getenv("AUTO_RESUME_OCR", "true").lower() in ("true", "1", "yes")
-        if auto_resume_ocr:
-            try:
-                logger.info("Checking for incomplete OCR conversion tasks...")
-                _resume_incomplete_ocr()
-            except Exception as e:
-                logger.error(f"Error resuming incomplete OCR conversion: {e}")
-        else:
-            logger.info("Auto-resume OCR disabled (set AUTO_RESUME_OCR=true to enable)")
+    if TASK_QUEUE_ENABLED:
+        logger.info("🚀 Initializing task queue system...")
 
-        # Resume incomplete indexing for documents with pending/failed status
-        auto_resume_indexing = os.getenv("AUTO_RESUME_INDEXING", "true").lower() in ("true", "1", "yes")
-        if auto_resume_indexing:
-            try:
-                logger.info("Checking for incomplete indexing tasks...")
-                _resume_incomplete_indexing()
-            except Exception as e:
-                logger.error(f"Error resuming incomplete indexing: {e}")
-        else:
-            logger.info("Auto-resume indexing disabled (set AUTO_RESUME_INDEXING=true to enable)")
+        # Initialize task queue manager
+        task_queue_manager = TaskQueueManager(
+            stale_timeout_seconds=STALE_TASK_TIMEOUT,
+            heartbeat_interval_seconds=HEARTBEAT_INTERVAL
+        )
 
-    import threading
-    init_thread = threading.Thread(target=_init_services, daemon=True)
-    init_thread.start()
-    logger.info("Services initialization started in background thread")
+        # Initialize queue worker pool
+        queue_worker_pool = QueueWorkerPool(
+            num_workers=NUM_WORKERS,
+            task_queue_manager=task_queue_manager,
+            ocr_processor=_process_ocr_task,
+            indexing_processor=_process_indexing_task,
+            poll_interval=WORKER_POLL_INTERVAL,
+            heartbeat_interval=HEARTBEAT_INTERVAL
+        )
+        queue_worker_pool.start()
+
+        # Initialize and start scheduler
+        task_scheduler = TaskScheduler(
+            task_queue_manager=task_queue_manager,
+            check_interval_seconds=TASK_QUEUE_CHECK_INTERVAL
+        )
+        task_scheduler.start()
+
+        logger.info("✅ Task queue system initialized successfully")
+    else:
+        logger.info("Task queue system disabled (set TASK_QUEUE_ENABLED=true to enable)")
+
+        # Fall back to old resume logic if queue is disabled
+        def _init_services():
+            # Sync existing files to database
+            _sync_files_to_database()
+
+            # Resume incomplete OCR conversion for documents with pending/converting/partial/failed status
+            auto_resume_ocr = os.getenv("AUTO_RESUME_OCR", "true").lower() in ("true", "1", "yes")
+            if auto_resume_ocr:
+                try:
+                    logger.info("Checking for incomplete OCR conversion tasks...")
+                    _resume_incomplete_ocr()
+                except Exception as e:
+                    logger.error(f"Error resuming incomplete OCR conversion: {e}")
+            else:
+                logger.info("Auto-resume OCR disabled (set AUTO_RESUME_OCR=true to enable)")
+
+            # Resume incomplete indexing for documents with pending/failed status
+            auto_resume_indexing = os.getenv("AUTO_RESUME_INDEXING", "true").lower() in ("true", "1", "yes")
+            if auto_resume_indexing:
+                try:
+                    logger.info("Checking for incomplete indexing tasks...")
+                    _resume_incomplete_indexing()
+                except Exception as e:
+                    logger.error(f"Error resuming incomplete indexing: {e}")
+            else:
+                logger.info("Auto-resume indexing disabled (set AUTO_RESUME_INDEXING=true to enable)")
+
+        import threading
+        init_thread = threading.Thread(target=_init_services, daemon=True)
+        init_thread.start()
+        logger.info("Services initialization started in background thread")
 
     yield  # Application runs here
 
     # ===== SHUTDOWN =====
     logger.info("Application shutting down...")
+
+    # Stop task queue system if enabled
+    if TASK_QUEUE_ENABLED and task_scheduler and queue_worker_pool:
+        logger.info("Stopping task queue system...")
+        task_scheduler.stop()
+        queue_worker_pool.stop(wait=True)
+        logger.info("Task queue system stopped")
 
 
 # Initialize FastAPI app with lifespan handler
@@ -228,6 +275,18 @@ if qwen3_ocr_converter is None:
 # Get number of worker threads from environment (default: 4)
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 
+# Task queue configuration
+TASK_QUEUE_ENABLED = os.getenv("TASK_QUEUE_ENABLED", "true").lower() in ("true", "1", "yes")
+TASK_QUEUE_CHECK_INTERVAL = int(os.getenv("TASK_QUEUE_CHECK_INTERVAL", "300"))  # 5 minutes
+WORKER_POLL_INTERVAL = int(os.getenv("WORKER_POLL_INTERVAL", "5"))  # 5 seconds
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 30 seconds
+STALE_TASK_TIMEOUT = int(os.getenv("STALE_TASK_TIMEOUT", "300"))  # 5 minutes
+
+# Global task queue instances (initialized in lifespan)
+task_queue_manager: Optional[TaskQueueManager] = None
+task_scheduler: Optional[TaskScheduler] = None
+queue_worker_pool: Optional[QueueWorkerPool] = None
+
 
 # Conversion status tracking
 class ConversionManager:
@@ -272,6 +331,125 @@ class ConversionManager:
         with self.lock:
             if conversion_id in self.conversions:
                 del self.conversions[conversion_id]
+
+
+# WebSocket connection manager for document status updates
+class DocumentStatusManager:
+    """Manages centralized WebSocket connections for all document status updates with subscription support"""
+
+    def __init__(self):
+        self.active_connections: Set[WebSocket] = set()  # All connected clients
+        self.subscriptions: Dict[WebSocket, Set[str]] = {}  # websocket -> set of document_ids
+        self.lock = threading.Lock()
+        self._message_queue: asyncio.Queue = None
+        self._main_loop = None
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
+        """Set the main event loop for broadcasting messages from worker threads"""
+        self._main_loop = loop
+        self._message_queue = asyncio.Queue()
+
+    async def start_broadcast_worker(self):
+        """Start the background worker that processes broadcast messages"""
+        logger.info("📡 Document status broadcast worker started")
+        while True:
+            try:
+                message = await self._message_queue.get()
+                logger.info(f"📨 Broadcast worker received message: {message.get('event_type')} for {message.get('filename', message.get('document_id'))}")
+                await self._do_broadcast(message)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in document status broadcast worker: {e}")
+
+    async def connect(self, websocket: WebSocket):
+        """Register a new WebSocket connection"""
+        await websocket.accept()
+        with self.lock:
+            self.active_connections.add(websocket)
+            self.subscriptions[websocket] = set()  # Initialize empty subscription set
+        logger.info(f"Document status WebSocket connected. Total connections: {len(self.active_connections)}")
+
+    async def disconnect(self, websocket: WebSocket):
+        """Unregister a WebSocket connection"""
+        with self.lock:
+            self.active_connections.discard(websocket)
+            self.subscriptions.pop(websocket, None)  # Remove subscriptions
+        logger.info(f"Document status WebSocket disconnected. Total connections: {len(self.active_connections)}")
+
+    async def subscribe(self, websocket: WebSocket, document_ids: list):
+        """Subscribe a WebSocket to specific document updates"""
+        with self.lock:
+            if websocket not in self.subscriptions:
+                self.subscriptions[websocket] = set()
+            self.subscriptions[websocket].update(document_ids)
+        logger.info(f"WebSocket subscribed to {len(document_ids)} documents. Total subscriptions: {len(self.subscriptions[websocket])}")
+
+    async def unsubscribe(self, websocket: WebSocket, document_ids: list):
+        """Unsubscribe a WebSocket from specific document updates"""
+        with self.lock:
+            if websocket in self.subscriptions:
+                self.subscriptions[websocket].difference_update(document_ids)
+        logger.info(f"WebSocket unsubscribed from {len(document_ids)} documents")
+
+    async def _do_broadcast(self, message: dict):
+        """Send message only to clients subscribed to the document"""
+        document_id = message.get("document_id")
+
+        with self.lock:
+            connections = self.active_connections.copy()
+            subscriptions = self.subscriptions.copy()
+
+        logger.info(f"📡 Broadcasting to {len(connections)} connections, document_id={document_id}")
+        logger.info(f"📋 Subscriptions: {[(id(conn), list(subs)) for conn, subs in subscriptions.items()]}")
+
+        disconnected = []
+        sent_count = 0
+
+        for connection in connections:
+            try:
+                # Get subscriptions for this connection
+                subscribed_docs = subscriptions.get(connection, set())
+
+                logger.info(f"🔍 Checking connection {id(connection)}: subscribed_docs={list(subscribed_docs)}, document_id={document_id}")
+
+                # Send if:
+                # 1. Client is subscribed to this specific document, OR
+                # 2. Client has no subscriptions (backward compatibility - receives all)
+                if not subscribed_docs or (document_id and document_id in subscribed_docs):
+                    logger.info(f"✅ Sending message to connection {id(connection)}")
+                    await connection.send_json(message)
+                    sent_count += 1
+                else:
+                    logger.info(f"⏭️ Skipping connection {id(connection)} - not subscribed to {document_id}")
+
+            except Exception as e:
+                logger.error(f"Error sending document status message: {e}")
+                disconnected.append(connection)
+
+        # Clean up disconnected clients
+        if disconnected:
+            with self.lock:
+                for conn in disconnected:
+                    self.active_connections.discard(conn)
+                    self.subscriptions.pop(conn, None)
+
+        logger.info(f"📤 Broadcast sent to {sent_count}/{len(connections)} clients for document {document_id}")
+
+    async def broadcast(self, message: dict):
+        """Send message to all connected clients (async context)"""
+        await self._do_broadcast(message)
+
+    def broadcast_from_thread(self, message: dict):
+        """Thread-safe method to broadcast message from worker threads"""
+        if self._main_loop and self._message_queue:
+            logger.info(f"📤 Broadcasting document status: {message.get('event_type')} for {message.get('filename', message.get('document_id'))}")
+            asyncio.run_coroutine_threadsafe(
+                self._message_queue.put(message),
+                self._main_loop
+            )
+        else:
+            logger.error(f"❌ Cannot broadcast document status - event loop not initialized! main_loop={self._main_loop is not None}, message_queue={self._message_queue is not None}")
 
 
 # WebSocket connection manager
@@ -345,6 +523,7 @@ class ConnectionManager:
 
 conversion_manager = ConversionManager()
 connection_manager = ConnectionManager()
+document_status_manager = DocumentStatusManager()
 
 
 def _create_parser_progress_callback(conversion_id: str):
@@ -450,12 +629,48 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                 # Trigger embedding in background after successful conversion
                 if source_name:
                     logger.info(f"Triggering embedding for document: {source_name}")
+
+                    # Get document_id for broadcasting
+                    doc_id = None
+                    if filename:
+                        try:
+                            with get_db_session() as db:
+                                repo = DocumentRepository(db)
+                                doc = repo.get_by_filename(filename)
+                                if doc:
+                                    doc_id = str(doc.id)
+                        except Exception as e:
+                            logger.warning(f"Could not get document_id: {e}")
+
+                    # Create a wrapper callback that broadcasts to both WebSocket managers
+                    def dual_broadcast_callback(conv_id: str, message: dict):
+                        """Broadcast to both conversion WebSocket and document status WebSocket"""
+                        # Send to conversion WebSocket (for progress bars)
+                        connection_manager.broadcast_from_thread(conv_id, message)
+
+                        # Also send to document status WebSocket when indexing completes
+                        if doc_id and filename:
+                            status = message.get("status", "")
+                            # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
+                            if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
+                                event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
+                                logger.info(f"📤 Broadcasting document status: {event_type} for {filename} (status={status})")
+                                document_status_manager.broadcast_from_thread({
+                                    "event_type": event_type,
+                                    "document_id": doc_id,
+                                    "filename": filename,
+                                    "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
+                                    "progress": 100,
+                                    "message": message.get("message", "Indexing completed"),
+                                    "timestamp": datetime.now().isoformat()
+                                })
+
                     trigger_embedding_for_document(
                         source_name,
                         OUTPUT_DIR,
                         filename=filename,
                         conversion_id=conversion_id,
-                        broadcast_callback=connection_manager.broadcast_from_thread
+                        broadcast_callback=dual_broadcast_callback
                     )
 
         elif status == "error":
@@ -562,6 +777,237 @@ def _sync_files_to_database():
             logger.info(f"Database sync complete: {synced_count} new documents synced")
     except Exception as e:
         logger.error(f"Error syncing files to database: {e}")
+
+
+# ===== Task Queue Processor Functions =====
+
+def _process_ocr_task(document_id: UUID) -> dict:
+    """
+    Process OCR task for a document (called by queue workers).
+
+    This function:
+    1. Checks document status to determine if resume is needed
+    2. Processes document with checkpoint-based resume
+    3. Updates progress in documents.ocr_details
+    4. Broadcasts status updates via centralized WebSocket
+
+    Args:
+        document_id: Document UUID
+
+    Returns:
+        dict with result information
+    """
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_id(document_id)
+
+            if not doc:
+                raise ValueError(f"Document not found: {document_id}")
+
+            filename = doc.filename
+            logger.info(f"🔄 Processing OCR task for document: {filename} (id={document_id})")
+
+            # Create conversion ID for tracking
+            conversion_id = conversion_manager.create_conversion(filename)
+
+            # Update status to CONVERTING
+            repo.update_convert_status(doc, ConvertStatus.CONVERTING, message="Processing OCR task from queue")
+
+            # Store conversion_id in ocr_details
+            if doc.ocr_details is None:
+                doc.ocr_details = {}
+            doc.ocr_details["conversion_id"] = conversion_id
+            db.commit()
+
+            # Broadcast OCR started event
+            document_status_manager.broadcast_from_thread({
+                "event_type": "ocr_started",
+                "document_id": str(document_id),
+                "filename": filename,
+                "convert_status": "converting",
+                "progress": 0,
+                "message": "OCR processing started",
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Create progress callback
+            progress_callback = _create_parser_progress_callback(conversion_id)
+
+            # Process document (this will resume from checkpoint if needed)
+            result = _convert_document_background(
+                filename=filename,
+                prompt_mode="prompt_layout_all_en",
+                conversion_id=conversion_id,
+                progress_callback=progress_callback
+            )
+
+            # Update document status to CONVERTED
+            repo.update_convert_status(doc, ConvertStatus.CONVERTED, message="OCR processing completed")
+            db.commit()
+
+            # Broadcast OCR completed event
+            document_status_manager.broadcast_from_thread({
+                "event_type": "ocr_completed",
+                "document_id": str(document_id),
+                "filename": filename,
+                "convert_status": "converted",
+                "progress": 100,
+                "message": "OCR processing completed",
+                "timestamp": datetime.now().isoformat()
+            })
+
+            logger.info(f"✅ OCR task completed for document: {filename}")
+
+            # Auto-enqueue indexing task if queue system is enabled
+            if TASK_QUEUE_ENABLED and task_queue_manager:
+                indexing_task_id = task_queue_manager.enqueue_task(
+                    document_id=document_id,
+                    task_type=TaskType.INDEXING,
+                    priority=TaskPriority.NORMAL,
+                    db=db
+                )
+                if indexing_task_id:
+                    logger.info(f"✅ Auto-enqueued indexing task for {filename} (task_id={indexing_task_id})")
+                else:
+                    logger.info(f"Indexing task already exists for {filename}")
+
+            return {"status": "success", "filename": filename, "result": result}
+
+    except Exception as e:
+        logger.error(f"❌ OCR task failed for document {document_id}: {e}", exc_info=True)
+
+        # Broadcast OCR failed event
+        try:
+            document_status_manager.broadcast_from_thread({
+                "event_type": "ocr_failed",
+                "document_id": str(document_id),
+                "convert_status": "failed",
+                "progress": 0,
+                "message": f"OCR processing failed: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            })
+        except:
+            pass
+
+        raise
+
+
+def _process_indexing_task(document_id: UUID) -> dict:
+    """
+    Process indexing task for a document (called by queue workers).
+
+    This function:
+    1. Checks document status to determine if resume is needed
+    2. Processes indexing with checkpoint-based resume (vector, metadata, GraphRAG)
+    3. Updates progress in documents.indexing_details
+    4. Broadcasts status updates via centralized WebSocket
+
+    Args:
+        document_id: Document UUID
+
+    Returns:
+        dict with result information
+    """
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_id(document_id)
+
+            if not doc:
+                raise ValueError(f"Document not found: {document_id}")
+
+            filename = doc.filename
+            logger.info(f"🔄 Processing indexing task for document: {filename} (id={document_id})")
+
+            # Check if document is converted
+            if doc.convert_status != ConvertStatus.CONVERTED:
+                raise ValueError(f"Document not converted yet: {filename} (status={doc.convert_status.value})")
+
+            # Create conversion ID for WebSocket tracking
+            conversion_id = str(uuid.uuid4())
+
+            # Update status to INDEXING
+            repo.update_index_status(doc, IndexStatus.INDEXING, message="Processing indexing task from queue")
+
+            # Store conversion_id in indexing_details
+            if doc.indexing_details is None:
+                doc.indexing_details = {}
+            doc.indexing_details["conversion_id"] = conversion_id
+            db.commit()
+
+            # Broadcast indexing started event
+            document_status_manager.broadcast_from_thread({
+                "event_type": "indexing_started",
+                "document_id": str(document_id),
+                "filename": filename,
+                "index_status": "indexing",
+                "progress": 0,
+                "message": "Indexing started",
+                "timestamp": datetime.now().isoformat()
+            })
+
+            # Get source name (filename without extension)
+            file_name_without_ext = os.path.splitext(filename)[0]
+
+            # Create a wrapper callback that broadcasts to both WebSocket managers
+            def dual_broadcast_callback(conv_id: str, message: dict):
+                """Broadcast to both conversion WebSocket and document status WebSocket"""
+                # Send to conversion WebSocket (for progress bars)
+                connection_manager.broadcast_from_thread(conv_id, message)
+
+                # Also send to document status WebSocket when indexing completes
+                # Map the indexer's status messages to document status events
+                status = message.get("status", "")
+
+                # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
+                if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
+                    event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
+                    logger.info(f"📤 Broadcasting document status: {event_type} for {filename} (status={status})")
+                    document_status_manager.broadcast_from_thread({
+                        "event_type": event_type,
+                        "document_id": str(document_id),
+                        "filename": filename,
+                        "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
+                        "progress": 100,
+                        "message": message.get("message", "Indexing completed"),
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+            # Trigger indexing (this will resume from checkpoint if needed)
+            # This runs in background and updates the database status when complete
+            # The background thread will initialize indexing_details structure
+            trigger_embedding_for_document(
+                source_name=file_name_without_ext,
+                output_dir=OUTPUT_DIR,
+                filename=filename,
+                conversion_id=conversion_id,
+                broadcast_callback=dual_broadcast_callback
+            )
+
+            # Note: Status update to INDEXED is handled by trigger_embedding_for_document
+            # after Phase 1 completes. We don't update it here to avoid race conditions.
+
+            logger.info(f"✅ Indexing task enqueued for document: {filename}")
+            return {"status": "success", "filename": filename}
+
+    except Exception as e:
+        logger.error(f"❌ Indexing task failed for document {document_id}: {e}", exc_info=True)
+
+        # Broadcast indexing failed event
+        try:
+            document_status_manager.broadcast_from_thread({
+                "event_type": "indexing_failed",
+                "document_id": str(document_id),
+                "index_status": "failed",
+                "progress": 0,
+                "message": f"Indexing failed: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            })
+        except:
+            pass
+
+        raise
 
 
 def _resume_incomplete_ocr():
@@ -762,6 +1208,31 @@ def _resume_incomplete_indexing():
                         started_at=datetime.now().isoformat()
                     )
 
+                    # Create a wrapper callback that broadcasts to both WebSocket managers
+                    doc_id = str(doc.id)
+                    doc_filename = doc.filename
+
+                    def dual_broadcast_callback(conv_id: str, message: dict):
+                        """Broadcast to both conversion WebSocket and document status WebSocket"""
+                        # Send to conversion WebSocket (for progress bars)
+                        connection_manager.broadcast_from_thread(conv_id, message)
+
+                        # Also send to document status WebSocket when indexing completes
+                        status = message.get("status", "")
+                        # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
+                        if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
+                            event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
+                            logger.info(f"📤 Broadcasting document status: {event_type} for {doc_filename} (status={status})")
+                            document_status_manager.broadcast_from_thread({
+                                "event_type": event_type,
+                                "document_id": doc_id,
+                                "filename": doc_filename,
+                                "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
+                                "progress": 100,
+                                "message": message.get("message", "Indexing completed"),
+                                "timestamp": datetime.now().isoformat()
+                            })
+
                     # Trigger indexing in background (non-blocking)
                     # This will handle all three phases: vector, metadata, GraphRAG
                     trigger_embedding_for_document(
@@ -769,7 +1240,7 @@ def _resume_incomplete_indexing():
                         output_dir=OUTPUT_DIR,
                         filename=doc.filename,
                         conversion_id=conversion_id,
-                        broadcast_callback=connection_manager.broadcast_from_thread
+                        broadcast_callback=dual_broadcast_callback
                     )
 
                     logger.info(f"Triggered background indexing for: {doc.filename}")
@@ -804,6 +1275,47 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "Dots OCR API"
+    }
+
+
+@app.get("/queue/stats")
+async def get_queue_stats():
+    """
+    Get task queue statistics.
+
+    Returns:
+        Queue statistics including pending, claimed, completed, and failed tasks
+    """
+    if not task_queue_manager:
+        raise HTTPException(status_code=503, detail="Task queue system not initialized")
+
+    stats = task_queue_manager.get_queue_stats()
+    return stats
+
+
+@app.post("/queue/maintenance")
+async def trigger_queue_maintenance():
+    """
+    Manually trigger queue maintenance.
+
+    This will:
+    1. Release stale tasks (workers that died)
+    2. Find and enqueue orphaned documents
+    3. Return updated queue statistics
+    """
+    if not task_scheduler:
+        raise HTTPException(status_code=503, detail="Task scheduler not initialized")
+
+    # Run maintenance in background thread to avoid blocking
+    def run_maintenance():
+        task_scheduler._periodic_maintenance()
+
+    thread = threading.Thread(target=run_maintenance, daemon=True)
+    thread.start()
+
+    return {
+        "status": "success",
+        "message": "Queue maintenance triggered"
     }
 
 
@@ -1011,6 +1523,19 @@ async def upload_file(file: UploadFile = File(...)):
                 doc_id = str(doc.id)
                 if not created:
                     logger.info(f"Document record already exists: {file.filename}")
+
+                # Auto-enqueue OCR task if queue system is enabled
+                if TASK_QUEUE_ENABLED and task_queue_manager:
+                    task_id = task_queue_manager.enqueue_task(
+                        document_id=doc.id,
+                        task_type=TaskType.OCR,
+                        priority=TaskPriority.HIGH,  # User uploads get high priority
+                        db=db
+                    )
+                    if task_id:
+                        logger.info(f"✅ Auto-enqueued OCR task for {file.filename} (task_id={task_id})")
+                    else:
+                        logger.info(f"OCR task already exists for {file.filename}")
         except Exception as e:
             logger.warning(f"Could not create database record: {e}")
 
@@ -1749,6 +2274,96 @@ async def get_worker_pool_status():
         raise HTTPException(status_code=500, detail=f"Error getting worker pool status: {str(e)}")
 
 
+@app.websocket("/ws/document-status")
+async def websocket_document_status(websocket: WebSocket):
+    """
+    Centralized WebSocket endpoint for all document status updates with subscription support.
+
+    Clients can subscribe to specific documents to receive only relevant updates.
+    This eliminates the need for polling and reduces unnecessary network traffic.
+
+    Client -> Server messages:
+    - {"action": "subscribe", "document_ids": ["uuid1", "uuid2", ...]}
+    - {"action": "unsubscribe", "document_ids": ["uuid1", "uuid2", ...]}
+    - {"action": "ping"} (keepalive)
+
+    Server -> Client messages:
+    - document_id: UUID of the document
+    - filename: Name of the document
+    - event_type: "ocr_started", "ocr_progress", "ocr_completed", "ocr_failed",
+                  "indexing_started", "indexing_progress", "indexing_completed", "indexing_failed"
+    - convert_status: Current OCR status
+    - index_status: Current indexing status
+    - progress: Progress percentage (0-100)
+    - message: Status message
+    - timestamp: ISO timestamp
+    """
+    try:
+        # Connect the WebSocket
+        await document_status_manager.connect(websocket)
+
+        # Send initial connection confirmation
+        await websocket.send_json({
+            "event_type": "connected",
+            "message": "Connected to document status updates",
+            "timestamp": datetime.now().isoformat()
+        })
+
+        # Keep connection alive and listen for client messages
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
+
+            try:
+                message = json.loads(data)
+                action = message.get("action")
+
+                if action == "subscribe":
+                    # Subscribe to specific documents
+                    document_ids = message.get("document_ids", [])
+                    if document_ids:
+                        await document_status_manager.subscribe(websocket, document_ids)
+                        await websocket.send_json({
+                            "event_type": "subscribed",
+                            "document_ids": document_ids,
+                            "count": len(document_ids),
+                            "timestamp": datetime.now().isoformat()
+                        })
+
+                elif action == "unsubscribe":
+                    # Unsubscribe from specific documents
+                    document_ids = message.get("document_ids", [])
+                    if document_ids:
+                        await document_status_manager.unsubscribe(websocket, document_ids)
+                        await websocket.send_json({
+                            "event_type": "unsubscribed",
+                            "document_ids": document_ids,
+                            "count": len(document_ids),
+                            "timestamp": datetime.now().isoformat()
+                        })
+
+                elif action == "ping":
+                    # Respond to keepalive ping
+                    await websocket.send_json({
+                        "event_type": "pong",
+                        "timestamp": datetime.now().isoformat()
+                    })
+
+                else:
+                    logger.warning(f"Unknown WebSocket action: {action}")
+
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON received from WebSocket: {data}")
+            except Exception as e:
+                logger.error(f"Error processing WebSocket message: {e}")
+
+    except WebSocketDisconnect:
+        await document_status_manager.disconnect(websocket)
+    except Exception as e:
+        logger.error(f"Document status WebSocket error: {e}")
+        await document_status_manager.disconnect(websocket)
+
+
 @app.websocket("/ws/conversion/{conversion_id}")
 async def websocket_conversion_progress(websocket: WebSocket, conversion_id: str):
     """
@@ -1983,6 +2598,90 @@ async def update_markdown_content(filename: str, request: Request, page_no: int 
         raise HTTPException(status_code=500, detail=f"Error updating markdown file: {str(e)}")
 
 
+@app.get("/documents/in-progress")
+async def get_in_progress_documents():
+    """
+    Get all documents that are currently being processed (converting or indexing).
+
+    This endpoint is used by the frontend to:
+    1. Check for in-progress operations on page load/refresh
+    2. Resume polling/monitoring for those operations
+
+    Returns:
+    - JSON with list of documents that have:
+      - convert_status = 'converting' OR
+      - index_status = 'indexing'
+    """
+    try:
+        in_progress_docs = []
+
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            all_docs = repo.get_all()
+
+            for doc in all_docs:
+                # Check if document is in progress (converting or indexing)
+                is_converting = doc.convert_status == ConvertStatus.CONVERTING
+                is_indexing = doc.index_status == IndexStatus.INDEXING
+
+                # Also check granular indexing details for background processing
+                is_granular_indexing = False
+                all_phases_complete = False
+                if doc.indexing_details:
+                    vector_status = doc.indexing_details.get("vector_indexing", {}).get("status")
+                    metadata_status = doc.indexing_details.get("metadata_extraction", {}).get("status")
+                    graphrag_status = doc.indexing_details.get("graphrag_indexing", {}).get("status")
+
+                    # Consider "processing" or "pending" as in-progress
+                    is_granular_indexing = (
+                        vector_status in ["processing", "pending"] or
+                        metadata_status in ["processing", "pending"] or
+                        graphrag_status in ["processing", "pending"]
+                    )
+
+                    # Check if all phases are complete
+                    all_phases_complete = (
+                        vector_status == "completed" and
+                        metadata_status == "completed" and
+                        graphrag_status == "completed"
+                    )
+
+                # Fix data inconsistency: if all phases are complete but index_status is still "indexing",
+                # update it to "indexed"
+                if all_phases_complete and is_indexing:
+                    try:
+                        indexed_chunks = doc.indexed_chunks or 0
+                        repo.update_index_status(
+                            doc, IndexStatus.INDEXED, indexed_chunks,
+                            message="All indexing phases completed"
+                        )
+                        logger.info(f"Fixed index_status for {doc.filename}: all phases complete, updated to INDEXED")
+                        is_indexing = False  # No longer in progress
+                    except Exception as e:
+                        logger.warning(f"Could not fix index_status for {doc.filename}: {e}")
+
+                if is_converting or is_indexing or is_granular_indexing:
+                    doc_dict = doc.to_dict()
+
+                    # Add additional computed fields for frontend
+                    doc_dict["is_converting"] = is_converting
+                    doc_dict["is_indexing"] = is_indexing or is_granular_indexing
+
+                    in_progress_docs.append(doc_dict)
+
+        logger.info(f"Found {len(in_progress_docs)} in-progress documents")
+
+        return JSONResponse(content={
+            "status": "success",
+            "documents": in_progress_docs,
+            "total": len(in_progress_docs),
+        })
+
+    except Exception as e:
+        logger.error(f"Error getting in-progress documents: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting in-progress documents: {str(e)}")
+
+
 @app.delete("/documents/{filename}")
 async def delete_document(filename: str):
     """
@@ -2179,6 +2878,40 @@ async def index_single_document(filename: str):
             "message": "Preparing to index document...",
         })
 
+        # Get document_id for broadcasting
+        doc_id = None
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    doc_id = str(doc.id)
+        except Exception as e:
+            logger.warning(f"Could not get document_id: {e}")
+
+        # Create a wrapper callback that broadcasts to both WebSocket managers
+        def dual_broadcast_callback(conv_id: str, message: dict):
+            """Broadcast to both conversion WebSocket and document status WebSocket"""
+            # Send to conversion WebSocket (for progress bars)
+            connection_manager.broadcast_from_thread(conv_id, message)
+
+            # Also send to document status WebSocket when indexing completes
+            if doc_id:
+                status = message.get("status", "")
+                # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
+                if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
+                    event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
+                    logger.info(f"📤 Broadcasting document status: {event_type} for {filename} (status={status})")
+                    document_status_manager.broadcast_from_thread({
+                        "event_type": event_type,
+                        "document_id": doc_id,
+                        "filename": filename,
+                        "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
+                        "progress": 100,
+                        "message": message.get("message", "Indexing completed"),
+                        "timestamp": datetime.now().isoformat()
+                    })
+
         # Trigger two-phase indexing with WebSocket support
         # This runs in background and sends progress updates via WebSocket
         trigger_embedding_for_document(
@@ -2186,7 +2919,7 @@ async def index_single_document(filename: str):
             output_dir=OUTPUT_DIR,
             filename=filename,
             conversion_id=conversion_id,
-            broadcast_callback=connection_manager.broadcast_from_thread
+            broadcast_callback=dual_broadcast_callback
         )
 
         return JSONResponse(content={

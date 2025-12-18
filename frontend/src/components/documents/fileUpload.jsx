@@ -29,6 +29,8 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
       setUploading(true);
       setUploadProgress(0);
 
+      const uploadedDocIds = []; // Track uploaded document IDs for WebSocket subscription
+
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
 
@@ -50,6 +52,12 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
               t("FileUpload.UploadSuccess", { filename: file.name })
             );
             setUploadProgress(((i + 1) / files.length) * 100);
+
+            // Track the uploaded document ID for WebSocket subscription
+            if (response.document_id) {
+              uploadedDocIds.push(response.document_id);
+              console.log(`📤 Uploaded document ID: ${response.document_id} (${file.name})`);
+            }
           }
         } catch (error) {
           messageService.errorToast(
@@ -64,9 +72,9 @@ export const DocumentFileUpload = ({ onUploadSuccess }) => {
         fileUploadRef.current.clear();
       }
 
-      // Notify parent component
+      // Notify parent component with uploaded document IDs
       if (onUploadSuccess) {
-        onUploadSuccess();
+        onUploadSuccess(uploadedDocIds);
       }
     } catch (error) {
       messageService.errorToast(t("FileUpload.ErrorUploading"));
