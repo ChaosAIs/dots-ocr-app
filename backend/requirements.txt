@@ -24,6 +24,7 @@ langgraph
 qdrant-client
 watchdog
 requests
+dateparser  # For date normalization in RAG pipeline
 
 # Database dependencies
 psycopg2-binary

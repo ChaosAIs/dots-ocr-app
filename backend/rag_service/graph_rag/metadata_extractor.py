@@ -16,6 +16,11 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 
 from ..llm_service import get_llm_service
+from ..utils.date_normalizer import (
+    find_and_normalize_dates,
+    extract_primary_date,
+    DateEntity,
+)
 from .prompts import (
     METADATA_BATCH_SUMMARY_PROMPT,
     METADATA_META_SUMMARY_PROMPT,
@@ -85,15 +90,59 @@ class HierarchicalMetadataExtractor:
             structured_metadata = await self._level3_extract_structured_metadata(
                 meta_summary, source_name, valid_chunks
             )
-            
+
+            # Date normalization: Find and normalize all dates in the document
+            if progress_callback:
+                progress_callback("Normalizing dates...")
+
+            all_text = "\n\n".join([c.get("page_content", "") for c in valid_chunks])
+            normalized_dates = find_and_normalize_dates(all_text)
+
+            logger.info(f"[Metadata] Found {len(normalized_dates)} dates in {source_name}")
+
+            # Enhance date entities in key_entities with normalized dates
+            for entity in structured_metadata.get("key_entities", []):
+                if entity.get("type") == "date":
+                    entity_name = entity.get("name", "")
+                    # Try to find matching normalized date
+                    for date_entity in normalized_dates:
+                        # Match if raw date appears in entity name or vice versa
+                        if (date_entity.raw in entity_name or
+                            entity_name in date_entity.raw or
+                            date_entity.normalized in entity_name):
+                            entity["date_normalized"] = date_entity.normalized
+                            entity["date_raw"] = date_entity.raw
+                            if date_entity.time:
+                                entity["date_time"] = date_entity.time
+                            entity["date_components"] = {
+                                "year": date_entity.year,
+                                "month": date_entity.month,
+                                "day": date_entity.day,
+                            }
+                            logger.debug(
+                                f"[Metadata] Enhanced date entity: {entity_name} → {date_entity.normalized}"
+                            )
+                            break
+
+            # Create dedicated dates section
+            document_type = structured_metadata.get("document_type", "")
+            primary_date = extract_primary_date(normalized_dates, document_type)
+
+            dates_section = {
+                "primary_date": primary_date.to_dict() if primary_date else None,
+                "all_dates": [d.to_dict() for d in normalized_dates],
+                "count": len(normalized_dates),
+            }
+
             # Build final metadata
             processing_time = (datetime.now() - start_time).total_seconds()
-            
+
             metadata = {
-                "extraction_version": "1.0",
+                "extraction_version": "2.0",  # Bumped version for date normalization
                 "extracted_at": datetime.now().isoformat(),
                 "extraction_method": "hierarchical_summarization",
                 **structured_metadata,
+                "dates": dates_section,  # NEW: Dedicated dates section
                 "hierarchical_summary": {
                     "level1_summaries": level1_summaries,
                     "meta_summary": meta_summary,
@@ -101,6 +150,7 @@ class HierarchicalMetadataExtractor:
                 "processing_stats": {
                     "total_chunks": len(chunks),
                     "processed_chunks": len(valid_chunks),
+                    "dates_found": len(normalized_dates),
                     "llm_calls": len(level1_summaries) + 2,  # batches + meta + structured
                     "processing_time_seconds": round(processing_time, 2),
                 },

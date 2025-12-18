@@ -2153,13 +2153,13 @@ async def index_single_document(filename: str):
                 detail=f"Document output folder not found: {file_name_without_ext}"
             )
 
-        # Generate a conversion_id for WebSocket tracking
-        conversion_id = str(uuid.uuid4())
-
         # Register the indexing task in conversion manager
-        conversion_manager.create_conversion(
-            conversion_id=conversion_id,
-            filename=filename,
+        # create_conversion() generates and returns the conversion_id
+        conversion_id = conversion_manager.create_conversion(filename)
+
+        # Update status to indexing
+        conversion_manager.update_conversion(
+            conversion_id,
             status="indexing",
             progress=0,
             message="Starting indexing process..."

@@ -61,6 +61,9 @@ KNOWLEDGE_FORMAT_TEMPLATE = """
 
 **Relationships Found**:
 {relationships}
+
+**Document Content**:
+{chunks}
 """
 
 

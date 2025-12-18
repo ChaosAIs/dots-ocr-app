@@ -34,6 +34,7 @@ class GraphRAGContext:
     chunks: List[Dict[str, Any]]
     mode: QueryMode
     enhanced_query: str
+    final_answer: str = ""  # Answer from iterative reasoning (if available)
 
 
 class GraphRAG:
@@ -173,7 +174,12 @@ class GraphRAG:
             logger.warning(f"[GraphRAG Query] Error retrieving chunks: {e}")
             return []
 
-    async def _get_vector_search_chunks(self, query: str, top_k: int = 60) -> List[Dict[str, Any]]:
+    async def _get_vector_search_chunks(
+        self,
+        query: str,
+        top_k: int = 60,
+        source_names: List[str] = None
+    ) -> List[Dict[str, Any]]:
         """
         Perform direct Qdrant vector search for the query.
 
@@ -183,6 +189,7 @@ class GraphRAG:
         Args:
             query: User query string
             top_k: Number of chunks to retrieve
+            source_names: Optional list of source names to filter results (for document routing)
 
         Returns:
             List of chunk dictionaries with page_content and metadata
@@ -193,12 +200,29 @@ class GraphRAG:
 
         try:
             from ..vectorstore import get_vectorstore
+            from qdrant_client import models
 
             # Get vectorstore instance
             vectorstore = get_vectorstore()
 
-            # Perform vector search using similarity_search
-            docs = vectorstore.similarity_search(query, k=top_k)
+            # Build search kwargs with optional source filtering
+            search_kwargs = {"k": top_k}
+
+            # Add source filter if specified (for document routing)
+            if source_names and len(source_names) > 0:
+                search_kwargs["filter"] = models.Filter(
+                    should=[
+                        models.FieldCondition(
+                            key="metadata.source",
+                            match=models.MatchValue(value=source_name),
+                        )
+                        for source_name in source_names
+                    ]
+                )
+                logger.debug(f"[GraphRAG] Filtering vector search to sources: {source_names}")
+
+            # Perform vector search using similarity_search with filter
+            docs = vectorstore.similarity_search(query, **search_kwargs)
             chunks = [
                 {
                     "page_content": doc.page_content,
@@ -354,6 +378,7 @@ class GraphRAG:
         retrieved_knowledge = []
         queries_made = []
         is_complete = False
+        final_answer = ""  # Store the final answer from LLM
 
         # Accumulated results
         all_entities = []
@@ -464,16 +489,50 @@ class GraphRAG:
             think_response = think_response_msg.content.strip()
 
             logger.info(f"[GraphRAG] LLM response preview: {think_response[:200]}...")
+            logger.info(f"[GraphRAG] LLM response length: {len(think_response)} chars")
+
+            # Debug: Check if tags exist in response
+            has_answer_tag = '<answer>' in think_response
+            has_query_tag = '<query>' in think_response
+            logger.info(f"[GraphRAG] Tags present: <answer>={has_answer_tag}, <query>={has_query_tag}")
 
             # Parse response for <answer> or <query> tags
             answer_match = re.search(r'<answer>(.*?)</answer>', think_response, re.DOTALL)
             next_query_match = re.search(r'<query>(.*?)</query>', think_response, re.DOTALL)
 
-            if answer_match:
+            logger.info(f"[GraphRAG] Regex matches: answer_match={answer_match is not None}, next_query_match={next_query_match is not None}")
+
+            # Handle case where LLM starts <answer> but doesn't close it properly
+            if not answer_match and has_answer_tag:
+                # Extract everything after <answer> tag
+                answer_start = think_response.find('<answer>')
+                if answer_start != -1:
+                    final_answer = think_response[answer_start + 8:].strip()  # 8 = len('<answer>')
+                    is_complete = True
+                    logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE - Answer found (unclosed tag)")
+                    logger.info(f"[GraphRAG] Termination reason: LLM provided <answer> tag without closing")
+                    logger.info(f"[GraphRAG] Final answer preview: {final_answer[:200]}...")
+            elif answer_match:
                 # LLM decided it has enough information
+                final_answer = answer_match.group(1).strip()
                 is_complete = True
                 logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE - Answer found")
                 logger.info(f"[GraphRAG] Termination reason: LLM provided <answer> tag")
+                logger.info(f"[GraphRAG] Final answer preview: {final_answer[:200]}...")
+            elif not next_query_match and has_query_tag:
+                # Handle case where LLM starts <query> but doesn't close it properly
+                query_start = think_response.find('<query>')
+                if query_start != -1:
+                    next_query = think_response[query_start + 7:].strip()  # 7 = len('<query>')
+                    if next_query and next_query not in queries_made:
+                        current_query = next_query
+                        logger.info(f"[GraphRAG] 🔄 DECISION: CONTINUE - New query generated (unclosed tag)")
+                        logger.info(f"[GraphRAG] Next query: '{next_query}'")
+                    else:
+                        # Duplicate or empty query, terminate
+                        is_complete = True
+                        logger.info(f"[GraphRAG] ⚠️ DECISION: TERMINATE - Duplicate or empty query")
+                        logger.info(f"[GraphRAG] Termination reason: Query already used or empty")
             elif next_query_match:
                 # LLM wants to continue with a new query
                 next_query = next_query_match.group(1).strip()
@@ -507,6 +566,8 @@ class GraphRAG:
         logger.info(f"  - Total unique entities: {len(all_entities)}")
         logger.info(f"  - Total relationships: {len(all_relationships)}")
         logger.info(f"  - Total chunks: {len(all_chunks)}")
+        if final_answer:
+            logger.info(f"  - Final answer generated: Yes ({len(final_answer)} chars)")
         logger.info("=" * 70)
 
         # Return accumulated context
@@ -516,6 +577,7 @@ class GraphRAG:
             chunks=all_chunks,
             mode=QueryMode.HYBRID,  # Iterative mode uses all modes
             enhanced_query=f"Iterative reasoning: {queries_made}",
+            final_answer=final_answer,
         )
 
     def _format_knowledge_summary(self, retrieved_knowledge: List[Dict]) -> str:
@@ -529,15 +591,18 @@ class GraphRAG:
         for i, knowledge in enumerate(retrieved_knowledge, 1):
             entities = knowledge.get("entities", [])
             relationships = knowledge.get("relationships", [])
+            chunks = knowledge.get("chunks", [])
 
-            if entities or relationships:
+            if entities or relationships or chunks:
                 entities_str = self._format_entities_for_prompt(entities)
                 relationships_str = self._format_relationships_for_prompt(relationships)
+                chunks_str = self._format_chunks_for_prompt(chunks)
                 summaries.append(
                     KNOWLEDGE_FORMAT_TEMPLATE.format(
                         step=i,
                         entities=entities_str,
                         relationships=relationships_str,
+                        chunks=chunks_str,
                     )
                 )
             else:
@@ -582,6 +647,26 @@ class GraphRAG:
 
         return "\n".join(lines) if lines else "None"
 
+    def _format_chunks_for_prompt(self, chunks: List[Dict]) -> str:
+        """Format document chunks for LLM prompt."""
+        if not chunks:
+            return "None"
+
+        lines = []
+        for i, chunk in enumerate(chunks[:5], 1):  # Limit to top 5 chunks
+            content = chunk.get("page_content", chunk.get("content", ""))
+            # Truncate very long chunks but keep enough for invoice data
+            if len(content) > 800:
+                content = content[:800] + "..."
+            source = chunk.get("metadata", {}).get("source", "Unknown")
+            score = chunk.get("_score", 0)
+            lines.append(f"**Chunk {i}** (from {source}, score: {score:.2f}):\n{content}\n")
+
+        if len(chunks) > 5:
+            lines.append(f"... and {len(chunks) - 5} more chunks")
+
+        return "\n".join(lines) if lines else "None"
+
     async def _local_retrieval(
         self, query: str, params: QueryParam
     ) -> GraphRAGContext:
@@ -606,6 +691,7 @@ class GraphRAG:
                         query_embedding=query_embedding,
                         limit=params.top_k,
                         min_score=0.5,
+                        source_names=params.source_names,
                     )
                     logger.debug(f"[GraphRAG Query] LOCAL mode - vector search found {len(entities)} entities")
                 except Exception as e:
@@ -620,6 +706,9 @@ class GraphRAG:
             for name in entity_names[:10]:  # Limit to top 10 names
                 try:
                     found = await self._graph_storage.get_nodes_by_name(name, limit=5)
+                    # Filter by source_names if document routing is enabled
+                    if params.source_names and len(params.source_names) > 0:
+                        found = [e for e in found if e.get("source_doc") in params.source_names]
                     for entity in found:
                         if entity not in entities:
                             entities.append(entity)
@@ -633,8 +722,12 @@ class GraphRAG:
         # Retrieve source chunks for the found entities
         entity_chunks = self._get_chunks_for_entities(entities)
 
-        # ALWAYS include direct Qdrant vector search results
-        vector_chunks = await self._get_vector_search_chunks(query, params.top_k)
+        # ALWAYS include direct Qdrant vector search results (with optional source filtering)
+        vector_chunks = await self._get_vector_search_chunks(
+            query,
+            params.top_k,
+            source_names=params.source_names
+        )
 
         # Combine and deduplicate chunks
         chunks = self._merge_chunks(entity_chunks, vector_chunks)
@@ -674,6 +767,7 @@ class GraphRAG:
                         query_embedding=query_embedding,
                         limit=params.top_k,
                         min_score=0.5,
+                        source_names=params.source_names,
                     )
                     for rel in rel_results:
                         relationships.append({
@@ -695,6 +789,9 @@ class GraphRAG:
             for name in entity_names[:5]:  # Limit traversal
                 try:
                     found = await self._graph_storage.get_nodes_by_name(name, limit=3)
+                    # Filter by source_names if document routing is enabled
+                    if params.source_names and len(params.source_names) > 0:
+                        found = [e for e in found if e.get("source_doc") in params.source_names]
                     for entity in found:
                         if entity not in entities:
                             entities.append(entity)
@@ -702,12 +799,20 @@ class GraphRAG:
                         entity_id = entity.get("id")
                         if entity_id:
                             edges = await self._graph_storage.get_node_edges(entity_id)
+                            # Filter edges by source_doc
+                            if params.source_names and len(params.source_names) > 0:
+                                edges = [
+                                    (src_id, tgt_id, edge_data)
+                                    for src_id, tgt_id, edge_data in edges
+                                    if edge_data.get("source_doc") in params.source_names
+                                ]
                             for src_id, tgt_id, edge_data in edges:
                                 rel = {
                                     "src_entity_id": src_id,
                                     "tgt_entity_id": tgt_id,
                                     "description": edge_data.get("description", ""),
                                     "keywords": edge_data.get("keywords", ""),
+                                    "source_doc": edge_data.get("source_doc"),
                                 }
                                 if rel not in relationships:
                                     relationships.append(rel)
@@ -726,8 +831,12 @@ class GraphRAG:
         # Retrieve source chunks for the found entities
         entity_chunks = self._get_chunks_for_entities(entities)
 
-        # ALWAYS include direct Qdrant vector search results
-        vector_chunks = await self._get_vector_search_chunks(query, params.top_k)
+        # ALWAYS include direct Qdrant vector search results (with optional source filtering)
+        vector_chunks = await self._get_vector_search_chunks(
+            query,
+            params.top_k,
+            source_names=params.source_names
+        )
 
         # Combine and deduplicate chunks
         chunks = self._merge_chunks(entity_chunks, vector_chunks)
@@ -768,6 +877,7 @@ class GraphRAG:
                         query_embedding=query_embedding,
                         limit=params.top_k // 2,
                         min_score=0.5,
+                        source_names=params.source_names,
                     )
                     for entity in entity_results:
                         entity_id = entity.get("id")
@@ -783,6 +893,7 @@ class GraphRAG:
                         query_embedding=query_embedding,
                         limit=params.top_k // 2,
                         min_score=0.5,
+                        source_names=params.source_names,
                     )
                     for rel in rel_results:
                         relationships.append({
@@ -791,6 +902,7 @@ class GraphRAG:
                             "description": rel.get("description", ""),
                             "keywords": rel.get("keywords", ""),
                             "_score": rel.get("_score", 0),
+                            "source_doc": rel.get("source_doc"),
                         })
                 except Exception as e:
                     logger.warning(f"[GraphRAG Query] Relationship vector search failed: {e}")
@@ -801,6 +913,13 @@ class GraphRAG:
             if entity_id:
                 try:
                     edges = await self._graph_storage.get_node_edges(entity_id)
+                    # Filter edges by source_doc if document routing is enabled
+                    if params.source_names and len(params.source_names) > 0:
+                        edges = [
+                            (src_id, tgt_id, edge_data)
+                            for src_id, tgt_id, edge_data in edges
+                            if edge_data.get("source_doc") in params.source_names
+                        ]
                     for src_id, tgt_id, edge_data in edges:
                         # Add relationship if not already present
                         rel = {
@@ -808,15 +927,20 @@ class GraphRAG:
                             "tgt_entity_id": tgt_id,
                             "description": edge_data.get("description", ""),
                             "keywords": edge_data.get("keywords", ""),
+                            "source_doc": edge_data.get("source_doc"),
                         }
                         if rel not in relationships:
                             relationships.append(rel)
 
-                        # Add neighbor entity
+                        # Add neighbor entity (only if from same source documents)
                         neighbor_id = tgt_id if src_id == entity_id else src_id
                         if neighbor_id not in seen_entity_ids:
                             neighbor = await self._graph_storage.get_node(neighbor_id)
                             if neighbor:
+                                # Filter neighbor by source_doc
+                                if params.source_names and len(params.source_names) > 0:
+                                    if neighbor.get("source_doc") not in params.source_names:
+                                        continue
                                 entities.append(neighbor)
                                 seen_entity_ids.add(neighbor_id)
                 except Exception as e:
@@ -830,6 +954,9 @@ class GraphRAG:
             for name in entity_names[:5]:
                 try:
                     found = await self._graph_storage.get_nodes_by_name(name, limit=3)
+                    # Filter by source_names if document routing is enabled
+                    if params.source_names and len(params.source_names) > 0:
+                        found = [e for e in found if e.get("source_doc") in params.source_names]
                     for entity in found:
                         entity_id = entity.get("id")
                         if entity_id and entity_id not in seen_entity_ids:
@@ -837,6 +964,25 @@ class GraphRAG:
                             seen_entity_ids.add(entity_id)
                 except Exception as e:
                     logger.warning(f"[GraphRAG Query] Error in text search for '{name}': {e}")
+
+        # Filter entities and relationships by source_names if document routing is enabled
+        if params.source_names and len(params.source_names) > 0:
+            before_filter_e = len(entities)
+            before_filter_r = len(relationships)
+            entities = [
+                e for e in entities
+                if e.get("source_doc") in params.source_names
+            ]
+            relationships = [
+                r for r in relationships
+                if r.get("source_doc") in params.source_names
+            ]
+            if len(entities) < before_filter_e or len(relationships) < before_filter_r:
+                logger.info(
+                    f"[GraphRAG] Filtered by source: entities {before_filter_e} → {len(entities)}, "
+                    f"relationships {before_filter_r} → {len(relationships)} "
+                    f"(sources: {params.source_names})"
+                )
 
         # Limit to top_k
         entities = entities[:params.top_k]
@@ -850,8 +996,12 @@ class GraphRAG:
         # Retrieve source chunks for the found entities
         entity_chunks = self._get_chunks_for_entities(entities)
 
-        # ALWAYS include direct Qdrant vector search results
-        vector_chunks = await self._get_vector_search_chunks(query, params.top_k)
+        # ALWAYS include direct Qdrant vector search results (with optional source filtering)
+        vector_chunks = await self._get_vector_search_chunks(
+            query,
+            params.top_k,
+            source_names=params.source_names
+        )
 
         # Combine and deduplicate chunks
         chunks = self._merge_chunks(entity_chunks, vector_chunks)
@@ -876,29 +1026,32 @@ class GraphRAG:
         """
         parts = []
 
+        # Prioritize chunks (actual document content) over entities/relationships
+        # Chunks contain the raw invoice data which is most important for answering questions
+        if context.chunks:
+            parts.append("## Document Content (from 2025 invoices)\n")
+            for i, chunk in enumerate(context.chunks[:15], 1):  # Increased from 5 to 15
+                # Use page_content (from Qdrant Document) or content as fallback
+                content = chunk.get("page_content", chunk.get("content", ""))
+                if content:
+                    # Don't truncate chunks - include full content for invoice data
+                    parts.append(f"### Chunk {i}\n{content}\n---\n")
+
         if context.entities:
-            parts.append("## Relevant Entities\n")
-            for entity in context.entities[:10]:
+            parts.append("\n## Relevant Entities (extracted from invoices)\n")
+            for entity in context.entities[:20]:  # Increased from 10 to 20
                 name = entity.get("name", "Unknown")
                 entity_type = entity.get("entity_type", "")
                 description = entity.get("description", "")
                 parts.append(f"- **{name}** ({entity_type}): {description}\n")
 
         if context.relationships:
-            parts.append("\n## Relationships\n")
-            for rel in context.relationships[:10]:
+            parts.append("\n## Relationships (connections in invoice data)\n")
+            for rel in context.relationships[:20]:  # Increased from 10 to 20
                 src = rel.get("src_name", "?")
                 tgt = rel.get("tgt_name", "?")
                 desc = rel.get("description", "related to")
                 parts.append(f"- {src} → {tgt}: {desc}\n")
-
-        if context.chunks:
-            parts.append("\n## Related Content\n")
-            for chunk in context.chunks[:5]:
-                # Use page_content (from Qdrant Document) or content as fallback
-                content = chunk.get("page_content", chunk.get("content", ""))
-                if content:
-                    parts.append(f"{content[:500]}\n---\n")
 
         return "".join(parts) if parts else ""
 

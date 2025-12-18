@@ -246,6 +246,7 @@ INSTRUCTIONS:
 Extract the following metadata and respond in valid JSON format:
 
 1. **document_type**: Classify as one of:
+   - "receipt" - Receipt, invoice, or transaction record
    - "resume" - CV, resume, or professional profile
    - "manual" - User manual, guide, or how-to document
    - "report" - Business report, analysis, or white paper
@@ -255,10 +256,15 @@ Extract the following metadata and respond in valid JSON format:
    - "other" - Anything else
 
 2. **subject_name**: The PRIMARY subject of the document
-   - For resumes: The person's name (e.g., "Felix Yang", "John Smith")
-   - For manuals: The product/system name (e.g., "iPhone 15", "AWS Lambda")
-   - For reports: The main topic or company (e.g., "Q4 Financial Results", "Tesla")
-   - For technical docs: The technology/API name (e.g., "React Hooks", "Kubernetes")
+   - **IMPORTANT**: Analyze BOTH the document name (provided above) AND the content to determine the most appropriate subject
+   - The document name may contain useful patterns (dates, IDs, categories) that provide context
+   - Extract the most semantically meaningful subject based on your analysis:
+     * For receipts/invoices: The business/vendor name, transaction date, transaction type and amount, or a combination that best represents the transaction
+     * For resumes: The person's name, year, and role
+     * For manuals: The product/system name
+     * For reports: The main topic or company
+     * For technical docs: The technology/API name
+   - Use your judgment to create a subject_name that is most useful for search and retrieval
    - Set to null if no clear subject
 
 3. **subject_type**: Type of the subject
@@ -266,6 +272,7 @@ Extract the following metadata and respond in valid JSON format:
    - "organization" - Company, institution, or group
    - "product" - Product, service, or system
    - "concept" - Abstract concept, technology, or methodology
+   - "transaction" - Receipt, invoice, or financial transaction
    - Set to null if subject_name is null
 
 4. **title**: Document title (extract from overview or source_name)
@@ -273,11 +280,15 @@ Extract the following metadata and respond in valid JSON format:
 5. **author**: Document author if mentioned (null if not found)
 
 6. **summary**: Brief 1-2 sentence summary of the document
+   - **IMPORTANT**: Include key searchable terms relevant to the document type
+   - For receipts: Include vendor/business name, transaction type, date, and amount
+   - For other documents: Include main topic, key dates, and important details
 
 7. **topics**: Array of 3-5 main topics/themes (lowercase, e.g., ["software development", "cloud computing"])
+   - For receipts, include terms like: "meal receipt", "restaurant expense", "credit card transaction", "purchase invoice", "ticket invoice", "grocery receipt", "utility bill", "transportation ticket", "event ticket", "parking receipt", "medical receipt", "service receipt", "rental receipt", "membership receipt", "subscription receipt", "donation receipt", "tax receipt", "warranty receipt", "guarantee receipt", "refund receipt", "return receipt", "cancellation receipt", "adjustment receipt", "correction receipt", "dispute receipt", "reversal receipt"
 
 8. **key_entities**: Array of 5-10 most important entities with scores
-   Format: [{{"name": "Entity Name", "type": "person|organization|technology|location", "score": 0-100}}]
+   Format: [{{"name": "Entity Name", "type": "person|organization|technology|location|date|financial|product", "score": 0-100}}]
    Score based on importance/frequency in the document
 
 9. **confidence**: Your confidence in the extraction (0.0 to 1.0)
@@ -318,6 +329,17 @@ Analyze the query and return JSON with two parts:
 - Make implicit entities explicit (e.g., "Felix" → "Felix Yang")
 - Add context that would help find relevant information
 - Keep it natural and readable
+- **CRITICAL FOR DATES - ALWAYS NORMALIZE**: When the query mentions dates or months:
+  - ALWAYS expand abbreviated month names to full names (Oct → October)
+  - ALWAYS add the ISO year-month format in parentheses
+  - ALWAYS include multiple date format variations
+  - Examples:
+    * "2025 Oct" → "October 2025 (2025-10, 10/2025)"
+    * "Oct 2025" → "October 2025 (2025-10, 10/2025)"
+    * "meals in Oct" → "meals in October (month 10)"
+    * "do we have meal in 2025 oct?" → "Do we have any meals or receipts from October 2025 (2025-10, 10/2025, month 10)?"
+  - This is CRITICAL because documents contain dates in various formats (10/14/2025, 2025-10-14, October 2025)
+  - The enhanced query MUST include all these format variations to ensure matching
 
 **Part 2: Metadata for Document Routing**
 - **entities**: Specific named entities (people, organizations, products, technologies)
@@ -391,6 +413,58 @@ Response:
   "intent": "Understand the authentication system design and implementation"
 }}}}
 
+Example 5 (DATE QUERY - CRITICAL):
+Query: "do we have meal in 2025 oct?"
+Response:
+{{{{
+  "enhanced_query": "Do we have any meals, receipts, or invoices from October 2025 (2025-10, 10/2025, month 10)? Show me meal records from 2025-10.",
+  "entities": [],
+  "topics": ["meal records", "receipts", "invoices", "October 2025"],
+  "document_type_hints": ["receipt", "invoice"],
+  "intent": "Find meal receipts or records from October 2025"
+}}}}
+
 Now analyze this query:
 Query: {query}
 """
+
+
+# Document Routing - LLM-based Relevance Scoring
+DOCUMENT_RELEVANCE_SCORING_PROMPT = """You are a document relevance scoring expert. Score how relevant a document is to a user's query.
+
+USER QUERY:
+{query}
+
+QUERY METADATA (extracted from query):
+- Entities: {query_entities}
+- Topics: {query_topics}
+- Document Type Hints: {query_doc_types}
+
+DOCUMENT TO SCORE:
+- Filename: {doc_filename}
+- Subject: {doc_subject}
+- Document Type: {doc_type}
+- Summary: {doc_summary}
+- Topics: {doc_topics}
+- Key Entities: {doc_entities}
+
+INSTRUCTIONS:
+Score the relevance of this document to the user's query on a scale of 0.0 to 10.0:
+
+- **10.0**: Perfect match - document directly answers the query
+- **7.0-9.0**: High relevance - document contains most of the information needed
+- **4.0-6.0**: Moderate relevance - document has some related information
+- **1.0-3.0**: Low relevance - document has minimal connection to query
+- **0.0**: No relevance - document is completely unrelated
+
+SCORING CRITERIA:
+1. **Subject/Entity Match** (40%): Do the document's subject and entities match the query's entities?
+2. **Topic Match** (30%): Do the document's topics align with the query's topics?
+3. **Content Relevance** (20%): Does the document summary indicate it contains relevant information?
+4. **Document Type Match** (10%): Does the document type match what the query is looking for?
+
+RESPOND ONLY WITH A VALID JSON OBJECT:
+{{
+  "score": <float between 0.0 and 10.0>,
+  "reasoning": "<brief explanation of the score in 1-2 sentences>"
+}}"""

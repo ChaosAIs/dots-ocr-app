@@ -16,6 +16,7 @@ from langgraph.prebuilt import ToolNode
 
 from .vectorstore import get_retriever, get_retriever_with_sources
 from .llm_service import get_llm_service
+from .utils.date_normalizer import normalize_query_dates
 
 # Import GraphRAG components
 try:
@@ -54,12 +55,22 @@ You have access to a search tool that can retrieve relevant information from ind
 When answering questions:
 1. For greetings, casual conversation, or general questions that don't require document knowledge, respond directly without searching
 2. For questions about specific documents, topics, or information that might be in the indexed documents, use the search_documents tool first
-3. Base your answers on the retrieved context when available
-4. If you can't find relevant information, say so honestly
+3. **ALWAYS base your answers on the retrieved context when it is provided** - the context contains actual document content
+4. If you can't find relevant information in the provided context, say so honestly
 5. Cite the source document when possible
-6. Provide clear, concise answers
+6. Provide clear, detailed answers based on the context
 
-IMPORTANT INSTRUCTIONS:
+CRITICAL INSTRUCTIONS FOR USING CONTEXT:
+- When "Relevant document context" is provided in the system message, it contains ACTUAL DATA from the user's documents
+- The "Document Content" section contains the raw text from the documents - USE THIS DATA to answer questions
+- The "Relevant Entities" and "Relationships" sections provide structured information extracted from the documents
+- DO NOT say "I don't have access" if context is provided - the context IS the data you need
+- Analyze the provided context thoroughly and extract the information requested by the user
+- If you see invoice data, receipt data, or financial data in the context, YOU HAVE ACCESS TO IT - use it to answer
+- Extract numbers, dates, vendors, items, prices, and other details directly from the "Document Content" chunks
+- Perform calculations, aggregations, and analysis based on the data you see in the context
+
+IMPORTANT FORMATTING INSTRUCTIONS:
 - Provide ONLY your final answer to the user's question
 - Do NOT include any JSON objects, XML tags, or structured data in your response
 - Do NOT echo or repeat the context format
@@ -76,6 +87,7 @@ Examples of queries that DO need document search:
 - Specific questions: "what is the definition of X?", "explain Y", "how does Z work?"
 - Document-specific queries: "what does the document say about...", "find information on..."
 - Topic-based questions: "tell me about microservices", "what are the benefits of..."
+- Analysis requests: "analyze my invoices", "generate a report", "summarize the data"
 """
 
 
@@ -171,6 +183,9 @@ def _classify_query_intent(query: str) -> str:
     # Default to SEARCH for longer queries or questions
     logger.info(f"[Query Classification] '{query}' classified as SEARCH (default)")
     return "SEARCH"
+
+
+# Date normalization is now handled by utils.date_normalizer.normalize_query_dates()
 
 
 def _analyze_query_with_llm(query: str) -> Dict[str, Any]:
@@ -282,7 +297,7 @@ def _analyze_query_with_llm(query: str) -> Dict[str, Any]:
 GRAPHRAG_QUERY_MODE = os.getenv("GRAPHRAG_QUERY_MODE", "auto").lower()
 
 
-def _get_graphrag_context(query: str, max_steps: int = None) -> str:
+def _get_graphrag_context(query: str, max_steps: int = None, source_names: List[str] = None) -> str:
     """
     Get additional context from GraphRAG if enabled.
 
@@ -300,6 +315,7 @@ def _get_graphrag_context(query: str, max_steps: int = None) -> str:
     Args:
         query: The search query.
         max_steps: Optional override for max iterative reasoning steps (uses LLM-determined value if provided)
+        source_names: Optional list of source names to filter results (for document routing)
 
     Returns:
         Formatted GraphRAG context string combining graph and vector results,
@@ -329,11 +345,14 @@ def _get_graphrag_context(query: str, max_steps: int = None) -> str:
         # Determine query mode
         mode = GRAPHRAG_QUERY_MODE if GRAPHRAG_QUERY_MODE != "auto" else None
 
-        # Create QueryParam with dynamic max_steps if provided
+        # Create QueryParam with dynamic max_steps and source filtering if provided
         params = QueryParam()
         if max_steps is not None:
             params.max_steps = max_steps
             logger.info(f"[GraphRAG Query] Using LLM-determined max_steps={max_steps} for query complexity")
+        if source_names is not None:
+            params.source_names = source_names
+            logger.info(f"[GraphRAG Query] Filtering to sources: {source_names}")
 
         # Helper function to run the async query
         async def _run_query():
@@ -356,10 +375,16 @@ def _get_graphrag_context(query: str, max_steps: int = None) -> str:
         logger.debug(
             f"[GraphRAG Query] Raw result - mode={context.mode.value}, "
             f"entities={len(context.entities)}, relationships={len(context.relationships)}, "
-            f"chunks={len(context.chunks)}, enhanced_query='{context.enhanced_query[:50]}...'"
+            f"chunks={len(context.chunks)}, enhanced_query='{context.enhanced_query[:50]}...', "
+            f"final_answer={'Yes' if context.final_answer else 'No'}"
         )
 
-        # Format context combining graph results and vector search results
+        # If GraphRAG generated a final answer through iterative reasoning, return it directly
+        if context.final_answer:
+            logger.info(f"[GraphRAG Query] Using final answer from iterative reasoning ({len(context.final_answer)} chars)")
+            return f"[GraphRAG Final Answer]\n{context.final_answer}"
+
+        # Otherwise, format context combining graph results and vector search results
         if context.entities or context.relationships or context.chunks:
             formatted = graphrag.format_context(context)
             logger.info(
@@ -416,8 +441,10 @@ def search_documents(query: str) -> str:
 
         # Step 2: Route to relevant documents based on metadata
         from .document_router import DocumentRouter
-        router = DocumentRouter()
-        relevant_sources = router.route_query(query_metadata)
+        from .llm_service import get_llm_service
+        llm_service = get_llm_service()
+        router = DocumentRouter(llm_service=llm_service)
+        relevant_sources = router.route_query(query_metadata, original_query=query)
 
         # Step 3: Create retriever with optional source filtering
         if relevant_sources:
@@ -439,15 +466,19 @@ def search_documents(query: str) -> str:
         results = []
         seen_sources = set()
 
-        # Step 5: Get GraphRAG context with dynamic max_steps (entities and relationships)
-        graphrag_context = _get_graphrag_context(enhanced_query, max_steps=max_steps)
+        # Step 5: Get GraphRAG context with dynamic max_steps and source filtering (entities and relationships)
+        graphrag_context = _get_graphrag_context(
+            enhanced_query,
+            max_steps=max_steps,
+            source_names=relevant_sources if relevant_sources else None
+        )
         if graphrag_context:
             results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
 
         for i, doc in enumerate(docs, 1):
             source = doc.metadata.get("source", "Unknown")
             heading = doc.metadata.get("heading_path", "")
-            content = doc.page_content[:800]  # Limit content length
+            content = doc.page_content  # Use full content (no truncation) to preserve augmented dates
 
             result = f"[Document {i}: {source}]"
             if heading:
@@ -564,15 +595,55 @@ def call_model(state: AgentState) -> AgentState:
                 logger.info(f"[vLLM] Searching documents for query: {user_query[:50]}...")
                 context = search_documents.invoke({"query": user_query})
 
-                # Add context to the system message
-                context_message = f"\n\nRelevant document context:\n{context}"
+                # Add context to the system message with explicit instructions
+                if context.startswith("[GraphRAG Final Answer]"):
+                    # GraphRAG generated a complete answer - use it directly
+                    context_message = f"\n\nRelevant document context:\n{context}"
+                else:
+                    # Normalize dates in the user query for better matching
+                    normalized_query = normalize_query_dates(user_query)
+                    if normalized_query != user_query:
+                        logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
+
+                    # Simple context message - dates are already normalized in the content
+                    context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
+
                 augmented_messages = list(messages)
                 if isinstance(augmented_messages[0], SystemMessage):
                     augmented_messages[0] = SystemMessage(
                         content=augmented_messages[0].content + context_message
                     )
 
+                # DEBUG: Log the context being sent to LLM
+                logger.info(f"[vLLM] Context length: {len(context)} chars")
+                logger.info(f"[vLLM] Context preview (first 500 chars): {context[:500]}")
+
+                # DEBUG: Check if context contains October date
+                if "10/14/2025" in context or "10-14-2025" in context:
+                    logger.info(f"[vLLM] ✅ Context CONTAINS October 2025 date (10/14/2025)")
+                    # Find and log the chunk containing the October date
+                    lines = context.split('\n')
+                    for i, line in enumerate(lines):
+                        if '10/14/2025' in line:
+                            # Log surrounding lines for context
+                            start = max(0, i - 3)
+                            end = min(len(lines), i + 10)
+                            logger.info(f"[vLLM] October date found at line {i}:")
+                            logger.info(f"[vLLM] Context around October date:\n" + '\n'.join(lines[start:end]))
+                            break
+                else:
+                    logger.warning(f"[vLLM] ❌ Context does NOT contain 10/14/2025")
+
+                # DEBUG: Log the full system message being sent
+                if isinstance(augmented_messages[0], SystemMessage):
+                    logger.info(f"[vLLM] System message length: {len(augmented_messages[0].content)} chars")
+                    logger.info(f"[vLLM] System message preview (last 500 chars): ...{augmented_messages[0].content[-500:]}")
+
                 response = llm.invoke(augmented_messages)
+
+                # DEBUG: Log the LLM's raw response
+                if hasattr(response, 'content'):
+                    logger.info(f"[vLLM] LLM raw response (first 500 chars): {response.content[:500]}")
 
                 # Clean up the response to remove any artifacts
                 if hasattr(response, 'content'):

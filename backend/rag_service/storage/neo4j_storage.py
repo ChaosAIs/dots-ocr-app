@@ -171,6 +171,7 @@ class Neo4jStorage(BaseGraphStorage):
         source_chunk_id: str,
         key_score: int = 50,
         embedding: List[float] = None,
+        metadata: Dict[str, Any] = None,
     ) -> str:
         """
         Upsert an entity with document-level deduplication and optional embedding.
@@ -186,6 +187,7 @@ class Neo4jStorage(BaseGraphStorage):
             source_chunk_id: Source chunk ID
             key_score: Importance score
             embedding: Optional embedding vector for semantic search
+            metadata: Optional metadata dict (e.g., date properties for date entities)
 
         Returns:
             Entity ID used in the graph
@@ -198,12 +200,25 @@ class Neo4jStorage(BaseGraphStorage):
         entity_key = f"{self.workspace_id}:{source_doc}:{entity_type.lower()}:{name.lower().strip()}"
         entity_id = hashlib.md5(entity_key.encode()).hexdigest()
 
+        # Build metadata properties for Cypher query
+        metadata = metadata or {}
+        metadata_params = {}
+        metadata_set_clauses = []
+
+        for key, value in metadata.items():
+            # Only include simple types (str, int, float, bool)
+            if isinstance(value, (str, int, float, bool)):
+                param_name = f"meta_{key}"
+                metadata_params[param_name] = value
+                metadata_set_clauses.append(f"e.{key} = ${param_name}")
+
+        metadata_set_str = ", ".join(metadata_set_clauses) if metadata_set_clauses else ""
+
         async with driver.session() as session:
             if embedding:
                 # MERGE with embedding - store as property for vector index
-                await session.run(
-                    """
-                    MERGE (e:Entity {id: $id, workspace_id: $workspace_id})
+                query = f"""
+                    MERGE (e:Entity {{id: $id, workspace_id: $workspace_id}})
                     ON CREATE SET
                         e.name = $name,
                         e.entity_type = $entity_type,
@@ -212,6 +227,7 @@ class Neo4jStorage(BaseGraphStorage):
                         e.source_chunk_ids = [$source_chunk_id],
                         e.key_score = $key_score,
                         e.embedding = $embedding
+                        {', ' + metadata_set_str if metadata_set_str else ''}
                     ON MATCH SET
                         e.description = CASE
                             WHEN e.description CONTAINS $description THEN e.description
@@ -226,7 +242,11 @@ class Neo4jStorage(BaseGraphStorage):
                             ELSE e.key_score
                         END,
                         e.embedding = $embedding
-                    """,
+                        {', ' + metadata_set_str if metadata_set_str else ''}
+                    """
+
+                await session.run(
+                    query,
                     id=entity_id,
                     workspace_id=self.workspace_id,
                     name=name,
@@ -236,12 +256,12 @@ class Neo4jStorage(BaseGraphStorage):
                     source_chunk_id=source_chunk_id,
                     key_score=key_score,
                     embedding=embedding,
+                    **metadata_params,
                 )
             else:
                 # MERGE without embedding
-                await session.run(
-                    """
-                    MERGE (e:Entity {id: $id, workspace_id: $workspace_id})
+                query = f"""
+                    MERGE (e:Entity {{id: $id, workspace_id: $workspace_id}})
                     ON CREATE SET
                         e.name = $name,
                         e.entity_type = $entity_type,
@@ -249,6 +269,7 @@ class Neo4jStorage(BaseGraphStorage):
                         e.source_doc = $source_doc,
                         e.source_chunk_ids = [$source_chunk_id],
                         e.key_score = $key_score
+                        {', ' + metadata_set_str if metadata_set_str else ''}
                     ON MATCH SET
                         e.description = CASE
                             WHEN e.description CONTAINS $description THEN e.description
@@ -262,7 +283,11 @@ class Neo4jStorage(BaseGraphStorage):
                             WHEN $key_score > e.key_score THEN $key_score
                             ELSE e.key_score
                         END
-                    """,
+                        {', ' + metadata_set_str if metadata_set_str else ''}
+                    """
+
+                await session.run(
+                    query,
                     id=entity_id,
                     workspace_id=self.workspace_id,
                     name=name,
@@ -271,6 +296,7 @@ class Neo4jStorage(BaseGraphStorage):
                     source_doc=source_doc,
                     source_chunk_id=source_chunk_id,
                     key_score=key_score,
+                    **metadata_params,
                 )
 
         logger.debug(f"Upserted entity: {name} ({entity_type}) for doc: {source_doc}")
@@ -689,6 +715,7 @@ class Neo4jStorage(BaseGraphStorage):
         query_embedding: List[float],
         limit: int = 10,
         min_score: float = 0.7,
+        source_names: List[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for entities using vector similarity.
@@ -697,6 +724,7 @@ class Neo4jStorage(BaseGraphStorage):
             query_embedding: Query embedding vector
             limit: Maximum number of results
             min_score: Minimum similarity score (0-1)
+            source_names: Optional list of source document names to filter by
 
         Returns:
             List of entity dictionaries with similarity scores
@@ -704,25 +732,50 @@ class Neo4jStorage(BaseGraphStorage):
         driver = self._get_driver()
         async with driver.session() as session:
             try:
-                result = await session.run(
-                    """
-                    CALL db.index.vector.queryNodes('entity_embedding', $limit, $embedding)
-                    YIELD node, score
-                    WHERE node.workspace_id = $workspace_id AND score >= $min_score
-                    RETURN properties(node) as props, score
-                    ORDER BY score DESC
-                    """,
-                    embedding=query_embedding,
-                    limit=limit * 2,  # Fetch more to filter by workspace
-                    workspace_id=self.workspace_id,
-                    min_score=min_score,
-                )
+                # If source filtering is required, use KNN pre-filtered search
+                # (Neo4j vector indexes don't support pre-filtering, so we filter first then compute similarity)
+                if source_names and len(source_names) > 0:
+                    query = """
+                        MATCH (e:Entity)
+                        WHERE e.workspace_id = $workspace_id
+                          AND e.source_doc IN $source_names
+                          AND e.embedding IS NOT NULL
+                        WITH e, vector.similarity.cosine(e.embedding, $embedding) AS score
+                        WHERE score >= $min_score
+                        RETURN properties(e) as props, score
+                        ORDER BY score DESC
+                        LIMIT $limit
+                        """
+                    params = {
+                        "embedding": query_embedding,
+                        "workspace_id": self.workspace_id,
+                        "source_names": source_names,
+                        "min_score": min_score,
+                        "limit": limit,
+                    }
+                else:
+                    # Use vector index for unfiltered search
+                    query = """
+                        CALL db.index.vector.queryNodes('entity_embedding', $limit, $embedding)
+                        YIELD node, score
+                        WHERE node.workspace_id = $workspace_id AND score >= $min_score
+                        RETURN properties(node) as props, score
+                        ORDER BY score DESC
+                        """
+                    params = {
+                        "embedding": query_embedding,
+                        "limit": limit * 2,  # Fetch more to filter by workspace
+                        "workspace_id": self.workspace_id,
+                        "min_score": min_score,
+                    }
+
+                result = await session.run(query, **params)
                 entities = []
                 async for record in result:
                     entity = dict(record["props"])
                     entity["_score"] = record["score"]
                     entities.append(entity)
-                    if len(entities) >= limit:
+                    if not (source_names and len(source_names) > 0) and len(entities) >= limit:
                         break
                 return entities
             except Exception as e:
@@ -734,6 +787,7 @@ class Neo4jStorage(BaseGraphStorage):
         query_embedding: List[float],
         limit: int = 10,
         min_score: float = 0.7,
+        source_names: List[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for relationships using vector similarity.
@@ -742,6 +796,7 @@ class Neo4jStorage(BaseGraphStorage):
             query_embedding: Query embedding vector
             limit: Maximum number of results
             min_score: Minimum similarity score (0-1)
+            source_names: Optional list of source document names to filter by
 
         Returns:
             List of relationship dictionaries with similarity scores
@@ -749,28 +804,58 @@ class Neo4jStorage(BaseGraphStorage):
         driver = self._get_driver()
         async with driver.session() as session:
             try:
-                result = await session.run(
-                    """
-                    CALL db.index.vector.queryRelationships('relationship_embedding', $limit, $embedding)
-                    YIELD relationship, score
-                    WHERE relationship.source_doc IS NOT NULL AND score >= $min_score
-                    WITH relationship, score,
-                         startNode(relationship) as src,
-                         endNode(relationship) as tgt
-                    WHERE src.workspace_id = $workspace_id
-                    RETURN properties(relationship) as props,
-                           src.name as src_name,
-                           tgt.name as tgt_name,
-                           src.entity_type as src_type,
-                           tgt.entity_type as tgt_type,
-                           score
-                    ORDER BY score DESC
-                    """,
-                    embedding=query_embedding,
-                    limit=limit * 2,
-                    workspace_id=self.workspace_id,
-                    min_score=min_score,
-                )
+                # If source filtering is required, use KNN pre-filtered search
+                # (Neo4j vector indexes don't support pre-filtering, so we filter first then compute similarity)
+                if source_names and len(source_names) > 0:
+                    query = """
+                        MATCH (src:Entity)-[r:RELATES_TO]->(tgt:Entity)
+                        WHERE src.workspace_id = $workspace_id
+                          AND r.source_doc IN $source_names
+                          AND r.embedding IS NOT NULL
+                        WITH r, src, tgt, vector.similarity.cosine(r.embedding, $embedding) AS score
+                        WHERE score >= $min_score
+                        RETURN properties(r) as props,
+                               src.name as src_name,
+                               tgt.name as tgt_name,
+                               src.entity_type as src_type,
+                               tgt.entity_type as tgt_type,
+                               score
+                        ORDER BY score DESC
+                        LIMIT $limit
+                        """
+                    params = {
+                        "embedding": query_embedding,
+                        "workspace_id": self.workspace_id,
+                        "source_names": source_names,
+                        "min_score": min_score,
+                        "limit": limit,
+                    }
+                else:
+                    # Use vector index for unfiltered search
+                    query = """
+                        CALL db.index.vector.queryRelationships('relationship_embedding', $limit, $embedding)
+                        YIELD relationship, score
+                        WHERE relationship.source_doc IS NOT NULL AND score >= $min_score
+                        WITH relationship, score,
+                             startNode(relationship) as src,
+                             endNode(relationship) as tgt
+                        WHERE src.workspace_id = $workspace_id
+                        RETURN properties(relationship) as props,
+                               src.name as src_name,
+                               tgt.name as tgt_name,
+                               src.entity_type as src_type,
+                               tgt.entity_type as tgt_type,
+                               score
+                        ORDER BY score DESC
+                        """
+                    params = {
+                        "embedding": query_embedding,
+                        "limit": limit * 2,
+                        "workspace_id": self.workspace_id,
+                        "min_score": min_score,
+                    }
+
+                result = await session.run(query, **params)
                 relationships = []
                 async for record in result:
                     rel = dict(record["props"])

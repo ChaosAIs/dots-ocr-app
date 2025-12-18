@@ -233,13 +233,19 @@ def get_retriever_with_sources(
 
     # Add source filter if specified
     if source_names and len(source_names) > 0:
+        # Use 'should' for multiple sources (OR logic) - match ANY of the specified sources
+        # But wrap in 'must' to ensure the filter is applied (not optional)
         search_kwargs["filter"] = models.Filter(
-            should=[
-                models.FieldCondition(
-                    key="metadata.source",
-                    match=models.MatchValue(value=source_name),
+            must=[
+                models.Filter(
+                    should=[
+                        models.FieldCondition(
+                            key="metadata.source",
+                            match=models.MatchValue(value=source_name),
+                        )
+                        for source_name in source_names
+                    ]
                 )
-                for source_name in source_names
             ]
         )
 

@@ -43,6 +43,7 @@ class QueryParam:
         max_token_for_text_unit: Max tokens for document chunks
         max_token_for_global_context: Max tokens for relationship descriptions
         max_token_for_local_context: Max tokens for entity descriptions
+        source_names: Optional list of source names to filter results (for document routing)
     """
     mode: QueryMode = QueryMode.HYBRID
     top_k: int = field(default_factory=lambda: int(os.getenv("GRAPH_RAG_TOP_K", "60")))
@@ -52,6 +53,7 @@ class QueryParam:
     max_token_for_text_unit: int = 4000
     max_token_for_global_context: int = 4000
     max_token_for_local_context: int = 4000
+    source_names: Optional[List[str]] = None
 
 
 @dataclass

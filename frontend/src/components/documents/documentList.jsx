@@ -47,6 +47,31 @@ export const DocumentList = ({ refreshTrigger }) => {
     };
   }, [batchIndexStatus?.status]);
 
+  // Poll for document status updates when documents are being indexed in background
+  // This handles cases where indexing happens during server startup (auto-resume)
+  useEffect(() => {
+    let intervalId = null;
+
+    // Check if any documents are currently being indexed (status = "INDEXING")
+    const hasIndexingDocuments = documents.some(
+      (doc) => doc.index_status === "INDEXING" || doc.index_status === "PENDING"
+    );
+
+    if (hasIndexingDocuments && !loading) {
+      // Poll every 3 seconds to check for status updates
+      intervalId = setInterval(() => {
+        loadDocuments();
+      }, 3000);
+    }
+
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [documents, loading]);
+
   // Force re-render when language changes to update translations
   useEffect(() => {
     // This effect ensures the component re-renders when language changes

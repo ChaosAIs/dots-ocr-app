@@ -3,9 +3,8 @@ Test script to validate GraphRAG performance optimizations.
 
 This script tests:
 1. Importance score filtering
-2. Chunk filtering logic
-3. Selective entity extraction
-4. Configuration loading
+2. Selective entity extraction
+3. Configuration loading
 
 Run with: python -m pytest backend/test/test_graphrag_optimization.py -v
 """
@@ -18,7 +17,6 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from rag_service.graph_rag.entity_extractor import EntityExtractor
-from rag_service.graph_rag.graph_indexer import _is_low_information_chunk
 from rag_service.graph_rag.base import Entity
 
 
@@ -57,53 +55,8 @@ class TestImportanceFiltering:
         del os.environ["GRAPH_RAG_MAX_GLEANING"]
 
 
-class TestChunkFiltering:
-    """Test chunk filtering logic."""
-
-    def test_empty_chunk_filtered(self):
-        """Test that empty chunks are filtered."""
-        assert _is_low_information_chunk("") is True
-        assert _is_low_information_chunk("   ") is True
-        assert _is_low_information_chunk("\n\n") is True
-
-    def test_short_chunk_filtered(self):
-        """Test that very short chunks are filtered."""
-        assert _is_low_information_chunk("Short") is True
-        assert _is_low_information_chunk("A bit longer but still short") is True
-
-    def test_mostly_numbers_filtered(self):
-        """Test that chunks with mostly numbers are filtered (tables/data)."""
-        table_chunk = "123 456 789 012 345 678 901 234 567 890 123 456 789"
-        assert _is_low_information_chunk(table_chunk) is True
-
-    def test_low_alpha_ratio_filtered(self):
-        """Test that chunks with few letters are filtered."""
-        symbols_chunk = "!@#$%^&*()_+-=[]{}|;':\",./<>? 123 456 789"
-        assert _is_low_information_chunk(symbols_chunk) is True
-
-    def test_repetitive_chunk_filtered(self):
-        """Test that highly repetitive chunks are filtered."""
-        repetitive = "the the the the the the the the the the the the"
-        assert _is_low_information_chunk(repetitive) is True
-
-    def test_normal_chunk_not_filtered(self):
-        """Test that normal text chunks are NOT filtered."""
-        normal_text = """
-        This is a normal paragraph with meaningful content about machine learning
-        and artificial intelligence. It contains various concepts and ideas that
-        should be extracted for the knowledge graph. The text has good vocabulary
-        diversity and semantic value.
-        """
-        assert _is_low_information_chunk(normal_text) is False
-
-    def test_technical_content_not_filtered(self):
-        """Test that technical content with some numbers is NOT filtered."""
-        technical = """
-        The system processes 1000 requests per second using a distributed
-        architecture with 5 microservices. Each service handles specific
-        business logic and communicates via REST APIs.
-        """
-        assert _is_low_information_chunk(technical) is False
+# Chunk filtering tests removed - content-based filtering has been disabled
+# to prevent loss of important data from structured documents (invoices, tables, etc.)
 
 
 class TestSelectiveExtraction:
@@ -138,19 +91,7 @@ class TestConfigurationLoading:
         # Should be loaded from .env
         assert hasattr(graph_indexer, 'GRAPH_RAG_ENABLED')
 
-    def test_min_chunk_length_config(self):
-        """Test GRAPH_RAG_MIN_CHUNK_LENGTH loading."""
-        from rag_service.graph_rag import graph_indexer
-        
-        assert hasattr(graph_indexer, 'GRAPH_RAG_MIN_CHUNK_LENGTH')
-        assert graph_indexer.GRAPH_RAG_MIN_CHUNK_LENGTH >= 0
-
-    def test_chunk_filtering_enabled_config(self):
-        """Test GRAPH_RAG_ENABLE_CHUNK_FILTERING loading."""
-        from rag_service.graph_rag import graph_indexer
-        
-        assert hasattr(graph_indexer, 'GRAPH_RAG_ENABLE_CHUNK_FILTERING')
-        assert isinstance(graph_indexer.GRAPH_RAG_ENABLE_CHUNK_FILTERING, bool)
+    # Chunk filtering config tests removed - feature has been disabled
 
 
 if __name__ == "__main__":
