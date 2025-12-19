@@ -362,6 +362,10 @@ class TaskQueueManager:
         """
         Find documents that need OCR but don't have a task in the queue.
 
+        This includes:
+        1. Documents with convert_status = PENDING (never started)
+        2. Documents with convert_status = CONVERTING (started but worker died/crashed)
+
         Returns:
             List of document IDs
         """
@@ -370,10 +374,10 @@ class TaskQueueManager:
             db = create_db_session()
 
         try:
-            # Find documents with convert_status = PENDING but no active OCR task
+            # Find documents with convert_status in (PENDING, CONVERTING) but no active OCR task
             orphaned = db.query(Document.id).filter(
                 and_(
-                    Document.convert_status == ConvertStatus.PENDING,
+                    Document.convert_status.in_([ConvertStatus.PENDING, ConvertStatus.CONVERTING]),
                     ~Document.id.in_(
                         db.query(TaskQueue.document_id).filter(
                             and_(
@@ -398,6 +402,10 @@ class TaskQueueManager:
         """
         Find documents that need indexing but don't have a task in the queue.
 
+        This includes:
+        1. Documents with index_status = PENDING (never started)
+        2. Documents with index_status = INDEXING (started but worker died/crashed)
+
         Returns:
             List of document IDs
         """
@@ -406,10 +414,11 @@ class TaskQueueManager:
             db = create_db_session()
 
         try:
-            # Find documents with index_status = PENDING and convert_status = CONVERTED but no active INDEXING task
+            # Find documents with index_status in (PENDING, INDEXING) and convert_status = CONVERTED
+            # but no active INDEXING task in the queue
             orphaned = db.query(Document.id).filter(
                 and_(
-                    Document.index_status == IndexStatus.PENDING,
+                    Document.index_status.in_([IndexStatus.PENDING, IndexStatus.INDEXING]),
                     Document.convert_status == ConvertStatus.CONVERTED,
                     ~Document.id.in_(
                         db.query(TaskQueue.document_id).filter(

@@ -242,7 +242,119 @@ class DocumentRouter:
         original_query: str
     ) -> List[Tuple[str, float]]:
         """
-        Score documents using LLM-based relevance scoring.
+        Score documents using LLM-based relevance scoring (BATCH OPTIMIZED).
+
+        Returns:
+            List of (source_name, score) tuples, sorted by score descending
+        """
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        from rag_service.graph_rag.prompts import DOCUMENT_RELEVANCE_BATCH_SCORING_PROMPT
+
+        # Try batch scoring first (much faster - 1 LLM call instead of N calls)
+        try:
+            return self._score_documents_llm_batch(query_metadata, documents, original_query)
+        except Exception as e:
+            logger.warning(f"[Router LLM] Batch scoring failed: {e}, falling back to individual scoring")
+            # Fallback to individual scoring
+            return self._score_documents_llm_individual(query_metadata, documents, original_query)
+
+    def _score_documents_llm_batch(
+        self,
+        query_metadata: Dict[str, Any],
+        documents: List[Dict[str, Any]],
+        original_query: str
+    ) -> List[Tuple[str, float]]:
+        """
+        Score ALL documents in a single LLM call (OPTIMIZED).
+
+        Returns:
+            List of (source_name, score) tuples, sorted by score descending
+        """
+        from langchain_core.prompts import ChatPromptTemplate
+        from langchain_core.output_parsers import StrOutputParser
+        from rag_service.graph_rag.prompts import DOCUMENT_RELEVANCE_BATCH_SCORING_PROMPT
+
+        # Get LangChain chat model from LLM service
+        llm_model = self.llm_service.get_query_model(temperature=0.1, num_predict=2048)
+
+        # Format all documents for batch scoring
+        documents_list = []
+        for i, doc in enumerate(documents, 1):
+            doc_meta = doc["metadata"]
+            doc_subject = doc_meta.get("subject_name", "Unknown")
+            doc_type = doc_meta.get("document_type", "other")
+            doc_summary = doc_meta.get("summary", "No summary available")
+            doc_topics = ", ".join(doc_meta.get("topics", []))
+
+            # Get key entities (top 5)
+            key_entities = doc_meta.get("key_entities", [])[:5]
+            doc_entities = ", ".join([f"{e.get('name')} ({e.get('type')})" for e in key_entities])
+
+            doc_info = f"""
+Document {i}:
+- Filename: {doc["filename"]}
+- Subject: {doc_subject}
+- Document Type: {doc_type}
+- Summary: {doc_summary[:200]}...
+- Topics: {doc_topics}
+- Key Entities: {doc_entities}
+"""
+            documents_list.append(doc_info)
+
+        # Query metadata
+        query_entities = ", ".join(query_metadata.get("entities", []))
+        query_topics = ", ".join(query_metadata.get("topics", []))
+        query_doc_types = ", ".join(query_metadata.get("document_type_hints", []))
+
+        # Create prompt and chain
+        prompt = ChatPromptTemplate.from_template(DOCUMENT_RELEVANCE_BATCH_SCORING_PROMPT)
+        chain = prompt | llm_model | StrOutputParser()
+
+        # Single LLM call for all documents
+        logger.info(f"[Router LLM] Batch scoring {len(documents)} documents in 1 LLM call...")
+        response = chain.invoke({
+            "query": original_query,
+            "query_entities": query_entities,
+            "query_topics": query_topics,
+            "query_doc_types": query_doc_types,
+            "documents_list": "\n".join(documents_list),
+            "num_documents": len(documents),
+        })
+
+        # Parse JSON response
+        response_clean = response.strip()
+        if response_clean.startswith("```"):
+            lines = response_clean.split("\n")
+            response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
+
+        results = json.loads(response_clean)
+
+        # Build scored list
+        scored = []
+        for i, doc in enumerate(documents):
+            if i < len(results):
+                score = float(results[i].get("score", 0.0))
+                reasoning = results[i].get("reasoning", "")
+                scored.append((doc["source_name"], score))
+                logger.debug(f"[Router LLM] {doc['source_name']}: {score:.2f} - {reasoning}")
+            else:
+                logger.warning(f"[Router LLM] Missing score for {doc['source_name']}, using 0.0")
+                scored.append((doc["source_name"], 0.0))
+
+        # Sort by score descending
+        scored.sort(key=lambda x: x[1], reverse=True)
+        logger.info(f"[Router LLM] ✅ Batch scoring complete: {len(scored)} documents scored")
+        return scored
+
+    def _score_documents_llm_individual(
+        self,
+        query_metadata: Dict[str, Any],
+        documents: List[Dict[str, Any]],
+        original_query: str
+    ) -> List[Tuple[str, float]]:
+        """
+        Score documents individually (FALLBACK - slower but more reliable).
 
         Returns:
             List of (source_name, score) tuples, sorted by score descending
@@ -259,6 +371,7 @@ class DocumentRouter:
         prompt = ChatPromptTemplate.from_template(DOCUMENT_RELEVANCE_SCORING_PROMPT)
         chain = prompt | llm_model | StrOutputParser()
 
+        logger.info(f"[Router LLM] Individual scoring {len(documents)} documents ({len(documents)} LLM calls)...")
         for doc in documents:
             try:
                 score = self._calculate_match_score_llm(

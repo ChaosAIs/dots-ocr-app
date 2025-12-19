@@ -363,13 +363,29 @@ class GraphRAG:
             KNOWLEDGE_FORMAT_TEMPLATE,
             NO_KNOWLEDGE_TEMPLATE,
         )
+        from .reward_scorer import RewardScorer
         import re
+
+        # Initialize LLM service first (needed by reward scorer)
+        if not self._llm_service:
+            from ..llm_service import get_llm_service
+            self._llm_service = get_llm_service()
+
+        # Initialize reward scorer for quality-based termination (AFTER LLM service)
+        enable_reward_scoring = os.getenv("GRAPH_RAG_ENABLE_REWARD_SCORING", "true").lower() == "true"
+        reward_scorer = RewardScorer(llm_service=self._llm_service) if enable_reward_scoring else None
+
+        # Reward thresholds from environment
+        format_reward_high_threshold = float(os.getenv("GRAPH_RAG_FORMAT_REWARD_HIGH_THRESHOLD", "0.8"))
+        format_reward_low_threshold = float(os.getenv("GRAPH_RAG_FORMAT_REWARD_LOW_THRESHOLD", "0.3"))
+        answer_reward_threshold = float(os.getenv("GRAPH_RAG_ANSWER_REWARD_THRESHOLD", "0.6"))
 
         logger.info("=" * 70)
         logger.info("[GraphRAG] 🚀 STARTING ITERATIVE REASONING (Graph-R1)")
         logger.info("=" * 70)
         logger.info(f"[GraphRAG] Question: {question}")
         logger.info(f"[GraphRAG] Max steps: {params.max_steps}")
+        logger.info(f"[GraphRAG] Reward-based termination: {enable_reward_scoring}")
         logger.info("-" * 70)
 
         # State tracking
@@ -379,6 +395,7 @@ class GraphRAG:
         queries_made = []
         is_complete = False
         final_answer = ""  # Store the final answer from LLM
+        reward_history = []  # Track reward scores for each step
 
         # Accumulated results
         all_entities = []
@@ -390,11 +407,6 @@ class GraphRAG:
         # Step 1: Generate initial query
         logger.info("[GraphRAG] 📝 PHASE 1: Generating initial search query...")
         initial_query_prompt = INITIAL_QUERY_PROMPT.format(question=question)
-
-        # Initialize LLM service if needed
-        if not self._llm_service:
-            from ..llm_service import get_llm_service
-            self._llm_service = get_llm_service()
 
         # Get LLM chat model and invoke it
         from langchain_core.messages import HumanMessage
@@ -491,6 +503,24 @@ class GraphRAG:
             logger.info(f"[GraphRAG] LLM response preview: {think_response[:200]}...")
             logger.info(f"[GraphRAG] LLM response length: {len(think_response)} chars")
 
+            # Compute reward scores for quality assessment (Graph-R1 alignment)
+            if enable_reward_scoring and reward_scorer:
+                format_score, format_details = reward_scorer.compute_format_reward(think_response)
+
+                logger.info("=" * 50)
+                logger.info("[GraphRAG] 📊 REWARD SCORING")
+                logger.info("=" * 50)
+                logger.info(f"[GraphRAG] Format Reward: {format_score:.2f}")
+                logger.info(f"[GraphRAG] Format Details: {format_details['breakdown']}")
+
+                # Store reward data
+                reward_data = {
+                    'step': step,
+                    'format_score': format_score,
+                    'format_details': format_details,
+                }
+                reward_history.append(reward_data)
+
             # Debug: Check if tags exist in response
             has_answer_tag = '<answer>' in think_response
             has_query_tag = '<query>' in think_response
@@ -502,23 +532,78 @@ class GraphRAG:
 
             logger.info(f"[GraphRAG] Regex matches: answer_match={answer_match is not None}, next_query_match={next_query_match is not None}")
 
-            # Handle case where LLM starts <answer> but doesn't close it properly
+            # Extract answer if present
+            answer_text = None
             if not answer_match and has_answer_tag:
-                # Extract everything after <answer> tag
+                # Handle case where LLM starts <answer> but doesn't close it properly
                 answer_start = think_response.find('<answer>')
                 if answer_start != -1:
-                    final_answer = think_response[answer_start + 8:].strip()  # 8 = len('<answer>')
-                    is_complete = True
-                    logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE - Answer found (unclosed tag)")
-                    logger.info(f"[GraphRAG] Termination reason: LLM provided <answer> tag without closing")
-                    logger.info(f"[GraphRAG] Final answer preview: {final_answer[:200]}...")
+                    answer_text = think_response[answer_start + 8:].strip()  # 8 = len('<answer>')
             elif answer_match:
-                # LLM decided it has enough information
-                final_answer = answer_match.group(1).strip()
-                is_complete = True
-                logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE - Answer found")
-                logger.info(f"[GraphRAG] Termination reason: LLM provided <answer> tag")
-                logger.info(f"[GraphRAG] Final answer preview: {final_answer[:200]}...")
+                answer_text = answer_match.group(1).strip()
+
+            # Reward-based termination logic (Graph-R1 alignment)
+            if enable_reward_scoring and reward_scorer and reward_history:
+                format_score = reward_history[-1]['format_score']
+
+                # Decision 1: High format score + answer found = Check answer quality
+                if format_score >= format_reward_high_threshold and answer_text:
+                    answer_score, answer_details = await reward_scorer.compute_answer_reward(
+                        answer_text, question
+                    )
+                    logger.info(f"[GraphRAG] Answer Quality Score: {answer_score:.2f}")
+                    reward_history[-1]['answer_score'] = answer_score
+                    reward_history[-1]['answer_details'] = answer_details
+
+                    if answer_score >= answer_reward_threshold:
+                        final_answer = answer_text
+                        is_complete = True
+                        logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE")
+                        logger.info(f"[GraphRAG] Reason: High format score ({format_score:.2f}) + good answer quality ({answer_score:.2f})")
+                        logger.info(f"[GraphRAG] Final answer preview: {final_answer[:200]}...")
+                    else:
+                        logger.info(f"[GraphRAG] 🔄 DECISION: CONTINUE")
+                        logger.info(f"[GraphRAG] Reason: Answer quality too low ({answer_score:.2f} < {answer_reward_threshold})")
+                        # Force continuation despite <answer> tag
+                        answer_text = None
+
+                # Decision 2: Low format score = Likely hallucination, terminate and regenerate
+                elif format_score < format_reward_low_threshold:
+                    is_complete = True
+                    logger.info(f"[GraphRAG] ⚠️ DECISION: TERMINATE")
+                    logger.info(f"[GraphRAG] Reason: Low format score ({format_score:.2f}) - likely hallucination")
+                    logger.info(f"[GraphRAG] Will generate final answer from accumulated knowledge...")
+                    # Don't use the LLM's answer, will generate from knowledge
+                    answer_text = None
+
+                # Decision 3: Medium format score + answer = Check quality
+                elif answer_text and format_score >= 0.5:
+                    answer_score, answer_details = await reward_scorer.compute_answer_reward(
+                        answer_text, question
+                    )
+                    logger.info(f"[GraphRAG] Answer Quality Score: {answer_score:.2f}")
+                    reward_history[-1]['answer_score'] = answer_score
+                    reward_history[-1]['answer_details'] = answer_details
+
+                    if answer_score >= answer_reward_threshold:
+                        final_answer = answer_text
+                        is_complete = True
+                        logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE")
+                        logger.info(f"[GraphRAG] Reason: Acceptable format ({format_score:.2f}) + good answer ({answer_score:.2f})")
+                    else:
+                        logger.info(f"[GraphRAG] 🔄 DECISION: CONTINUE")
+                        logger.info(f"[GraphRAG] Reason: Answer quality too low ({answer_score:.2f})")
+                        # Force continuation
+                        answer_text = None
+
+            # Fallback to original logic if reward scoring disabled or no answer yet
+            if not enable_reward_scoring or not reward_scorer:
+                if answer_text:
+                    final_answer = answer_text
+                    is_complete = True
+                    logger.info(f"[GraphRAG] ✅ DECISION: TERMINATE - Answer found")
+                    logger.info(f"[GraphRAG] Termination reason: LLM provided <answer> tag")
+                    logger.info(f"[GraphRAG] Final answer preview: {final_answer[:200]}...")
             elif not next_query_match and has_query_tag:
                 # Handle case where LLM starts <query> but doesn't close it properly
                 query_start = think_response.find('<query>')
@@ -554,6 +639,18 @@ class GraphRAG:
         # Check if max steps reached
         if step >= max_steps and not is_complete:
             logger.info(f"[GraphRAG] ⚠️ MAX STEPS REACHED ({max_steps})")
+
+        # Log reward summary if available
+        if enable_reward_scoring and reward_history:
+            logger.info("=" * 70)
+            logger.info("[GraphRAG] 📊 REWARD SUMMARY")
+            logger.info("=" * 70)
+            for i, reward_data in enumerate(reward_history, 1):
+                logger.info(f"Step {i}:")
+                logger.info(f"  Format Score: {reward_data.get('format_score', 'N/A'):.2f}")
+                if 'answer_score' in reward_data:
+                    logger.info(f"  Answer Score: {reward_data['answer_score']:.2f}")
+            logger.info("=" * 70)
 
         # Final summary
         logger.info("=" * 70)
@@ -648,22 +745,57 @@ class GraphRAG:
         return "\n".join(lines) if lines else "None"
 
     def _format_chunks_for_prompt(self, chunks: List[Dict]) -> str:
-        """Format document chunks for LLM prompt."""
+        """Format document chunks for LLM prompt, grouped by source document.
+
+        Shows top N chunks (by relevance score) from EACH source document.
+        N is configured by GRAPH_RAG_CHUNKS_PER_SOURCE in .env (default: 3).
+        ALL sources are included to ensure complete coverage.
+        """
         if not chunks:
             return "None"
 
-        lines = []
-        for i, chunk in enumerate(chunks[:5], 1):  # Limit to top 5 chunks
-            content = chunk.get("page_content", chunk.get("content", ""))
-            # Truncate very long chunks but keep enough for invoice data
-            if len(content) > 800:
-                content = content[:800] + "..."
-            source = chunk.get("metadata", {}).get("source", "Unknown")
-            score = chunk.get("_score", 0)
-            lines.append(f"**Chunk {i}** (from {source}, score: {score:.2f}):\n{content}\n")
+        # Get chunks per source from environment (default: 3)
+        chunks_per_source = int(os.getenv("GRAPH_RAG_CHUNKS_PER_SOURCE", "3"))
 
-        if len(chunks) > 5:
-            lines.append(f"... and {len(chunks) - 5} more chunks")
+        # Group chunks by source document
+        chunks_by_source = {}
+        for chunk in chunks:
+            source = chunk.get("metadata", {}).get("source", "Unknown")
+            if source not in chunks_by_source:
+                chunks_by_source[source] = []
+            chunks_by_source[source].append(chunk)
+
+        logger.info(f"[GraphRAG] Formatting chunks from {len(chunks_by_source)} sources (showing top {chunks_per_source} chunks per source)")
+        logger.info(f"[GraphRAG] Sources: {list(chunks_by_source.keys())}")
+
+        lines = []
+        total_chunks_shown = 0
+
+        # Format chunks grouped by source - INCLUDE ALL SOURCES (no max_sources limit)
+        for source_idx, (source, source_chunks) in enumerate(chunks_by_source.items(), 1):
+            # Sort chunks by relevance score (descending) within each source
+            sorted_chunks = sorted(
+                source_chunks,
+                key=lambda c: c.get("_score", 0),
+                reverse=True
+            )
+
+            lines.append(f"\n**From Document: {source}** ({len(source_chunks)} chunks available)")
+
+            # Show top N chunks by score
+            for chunk_idx, chunk in enumerate(sorted_chunks[:chunks_per_source], 1):
+                content = chunk.get("page_content", chunk.get("content", ""))
+                # Truncate very long chunks but keep enough for invoice data
+                if len(content) > 500:
+                    content = content[:500] + "..."
+                score = chunk.get("_score", 0)
+                lines.append(f"  Chunk {chunk_idx} (score: {score:.2f}):\n  {content}\n")
+                total_chunks_shown += 1
+
+            if len(sorted_chunks) > chunks_per_source:
+                lines.append(f"  ... and {len(sorted_chunks) - chunks_per_source} more chunks from this source\n")
+
+        logger.info(f"[GraphRAG] Formatted {total_chunks_shown} chunks from {len(chunks_by_source)} sources for LLM prompt")
 
         return "\n".join(lines) if lines else "None"
 

@@ -175,7 +175,18 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     # Stream response and accumulate content
                     full_response = ""
                     try:
-                        async for chunk in stream_agent_response(message, history):
+                        # Create progress callback for WebSocket updates
+                        async def progress_callback(message: str, percent: int = None):
+                            """Send progress updates to frontend via WebSocket."""
+                            try:
+                                payload = {"type": "progress", "message": message}
+                                if percent is not None:
+                                    payload["percent"] = percent
+                                await websocket.send_json(payload)
+                            except Exception as e:
+                                logger.error(f"Error sending progress update: {e}")
+
+                        async for chunk in stream_agent_response(message, history, progress_callback=progress_callback):
                             full_response += chunk
                             await websocket.send_json({
                                 "type": "token",

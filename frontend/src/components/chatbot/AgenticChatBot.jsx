@@ -106,7 +106,18 @@ export const AgenticChatBot = () => {
       try {
         const data = JSON.parse(event.data);
 
-        if (data.type === "token") {
+        if (data.type === "progress") {
+          // Display progress message (e.g., "Analyzing query...", "Routing to documents...")
+          const progressMsg = data.message || "Processing...";
+          const progressPercent = data.percent;
+
+          // Update streaming content to show progress
+          const progressText = progressPercent
+            ? `🔄 ${progressMsg} (${progressPercent}%)`
+            : `🔄 ${progressMsg}`;
+
+          setStreamingContent(progressText);
+        } else if (data.type === "token") {
           streamingContentRef.current += data.content;
           setStreamingContent(streamingContentRef.current);
         } else if (data.type === "end") {

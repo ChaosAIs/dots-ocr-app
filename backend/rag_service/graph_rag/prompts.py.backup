@@ -82,12 +82,7 @@ For entities, use:
 (entity|<entity_type>|<entity_name>|<entity_description>|<importance_score>)
 
 Where:
-- entity_type: person, organization, location, concept, technology, event, project,
-              electronic_product, software_product, food_product, office_supply, hardware_product,
-              service, document, etc.
-              (Use specific product types when applicable: electronic_product for devices/electronics,
-               software_product for software, food_product for food items, office_supply for office items,
-               hardware_product for physical hardware/tools. Use generic 'product' only if none fit.)
+- entity_type: person, organization, location, concept, technology, event, product, project, etc.
 - entity_name: The name of the entity (use proper capitalization)
 - entity_description: A concise description of the entity and its significance
 - importance_score: 1-100 indicating importance (be selective - use high scores for truly important entities)
@@ -116,7 +111,6 @@ Example output:
 (entity|person|John Smith|CEO and founder of Acme Corporation, leading AI innovation initiatives|90)
 (entity|organization|Acme Corporation|Technology company specializing in artificial intelligence and machine learning solutions|85)
 (entity|technology|Machine Learning|Core technology used by Acme Corporation for product development|75)
-(entity|electronic_product|KVM Switch HDMI 2 Port Box|A 2-port HDMI KVM switch for sharing keyboard, mouse, and monitor between computers|70)
 (relationship|John Smith|Acme Corporation|John Smith founded and currently leads Acme Corporation as CEO|CEO, founder, leadership|9)
 (relationship|Acme Corporation|Machine Learning|Acme Corporation specializes in developing machine learning solutions|specialization, technology, development|8)
 

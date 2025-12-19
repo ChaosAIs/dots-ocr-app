@@ -212,23 +212,205 @@ def get_all_chunks_for_source(source_name: str) -> List[Document]:
         return []
 
 
+def _create_per_source_retriever(
+    vectorstore,
+    source_names: List[str],
+    k: int,
+    fetch_k: int,
+    lambda_mult: float = None
+):
+    """
+    Create a custom retriever that retrieves chunks from each source separately,
+    then combines them to ensure all sources are represented.
+
+    This prevents MMR from excluding entire sources due to diversity filtering.
+
+    Args:
+        vectorstore: The Qdrant vectorstore instance
+        source_names: List of source names to retrieve from
+        k: Total number of chunks to retrieve
+        fetch_k: Number of candidates to fetch per source for MMR
+        lambda_mult: MMR diversity parameter
+
+    Returns:
+        A custom retriever that ensures per-source representation
+    """
+    from langchain_core.retrievers import BaseRetriever
+    from langchain_core.callbacks import CallbackManagerForRetrieverRun
+    from typing import List as TypingList
+
+    class PerSourceRetriever(BaseRetriever):
+        """Custom retriever that ensures all sources are represented."""
+
+        vectorstore: QdrantVectorStore
+        source_names: TypingList[str]
+        k: int
+        fetch_k: int
+        lambda_mult: float
+
+        class Config:
+            arbitrary_types_allowed = True
+
+        def _get_relevant_documents(
+            self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
+        ) -> TypingList[Document]:
+            """Retrieve documents with per-source selection."""
+
+            # Calculate chunks per source (distribute k evenly)
+            chunks_per_source = max(2, k // len(self.source_names))
+            fetch_per_source = max(10, self.fetch_k // len(self.source_names))
+
+            logger.info(
+                f"[PerSourceRetriever] Retrieving {chunks_per_source} chunks from each of "
+                f"{len(self.source_names)} sources (total target: {k})"
+            )
+
+            all_docs = []
+            seen_chunk_ids = set()
+
+            # Retrieve from each source separately
+            for source_name in self.source_names:
+                try:
+                    # Create filter for this specific source
+                    source_filter = models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="metadata.source",
+                                match=models.MatchValue(value=source_name),
+                            )
+                        ]
+                    )
+
+                    # First, check how many chunks exist for this source
+                    try:
+                        test_docs = self.vectorstore.similarity_search(
+                            query,
+                            k=1,
+                            filter=source_filter
+                        )
+                        if not test_docs:
+                            logger.warning(
+                                f"[PerSourceRetriever] No chunks found for source: {source_name} "
+                                f"(source may not exist in vectorstore or has no matching chunks)"
+                            )
+                            continue
+                    except Exception as e:
+                        logger.warning(f"[PerSourceRetriever] Cannot access source {source_name}: {e}")
+                        continue
+
+                    # Search with MMR for this source only
+                    docs = self.vectorstore.max_marginal_relevance_search(
+                        query,
+                        k=chunks_per_source,
+                        fetch_k=fetch_per_source,
+                        filter=source_filter,
+                        lambda_mult=self.lambda_mult if self.lambda_mult is not None else 0.5
+                    )
+
+                    # Log details about retrieved chunks
+                    logger.info(
+                        f"[PerSourceRetriever] Source '{source_name}': Retrieved {len(docs)} chunks"
+                    )
+
+                    # Deduplicate by chunk_id and log chunk details
+                    added_count = 0
+                    for i, doc in enumerate(docs, 1):
+                        chunk_id = doc.metadata.get("chunk_id")
+                        heading = doc.metadata.get("heading_path", "")
+                        content_preview = doc.page_content[:100].replace('\n', ' ')
+
+                        logger.debug(
+                            f"[PerSourceRetriever]   Chunk {i}: {source_name} | "
+                            f"heading='{heading}' | preview='{content_preview}...'"
+                        )
+
+                        if chunk_id and chunk_id not in seen_chunk_ids:
+                            all_docs.append(doc)
+                            seen_chunk_ids.add(chunk_id)
+                            added_count += 1
+                        elif not chunk_id:
+                            # No chunk_id, add anyway
+                            all_docs.append(doc)
+                            added_count += 1
+                        else:
+                            logger.debug(f"[PerSourceRetriever]   Skipped duplicate chunk_id: {chunk_id}")
+
+                    logger.info(
+                        f"[PerSourceRetriever] Source '{source_name}': Added {added_count}/{len(docs)} chunks "
+                        f"(after deduplication)"
+                    )
+
+                except Exception as e:
+                    logger.error(f"[PerSourceRetriever] Error retrieving from source {source_name}: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    continue
+
+            # If we got more than k chunks, trim to k (keep highest scoring)
+            if len(all_docs) > self.k:
+                logger.info(
+                    f"[PerSourceRetriever] Got {len(all_docs)} chunks, trimming to {self.k}"
+                )
+                all_docs = all_docs[:self.k]
+
+            logger.info(
+                f"[PerSourceRetriever] Final result: {len(all_docs)} chunks from "
+                f"{len(set(doc.metadata.get('source', 'Unknown') for doc in all_docs))} sources"
+            )
+
+            return all_docs
+
+    # Create and return the custom retriever
+    return PerSourceRetriever(
+        vectorstore=vectorstore,
+        source_names=source_names,
+        k=k,
+        fetch_k=fetch_k,
+        lambda_mult=lambda_mult if lambda_mult is not None else 0.5
+    )
+
+
 def get_retriever_with_sources(
     k: int = 8,
     fetch_k: int = 30,
-    source_names: List[str] = None
+    source_names: List[str] = None,
+    lambda_mult: float = None,
+    per_source_selection: bool = True
 ):
     """
     Get a retriever from the vectorstore with optional source filtering.
 
     Args:
-        k: Number of documents to retrieve.
+        k: Number of documents to retrieve (total across all sources).
         fetch_k: Number of documents to fetch for MMR.
         source_names: Optional list of source names to filter results.
+        lambda_mult: MMR diversity parameter (0.0 = max diversity, 1.0 = max relevance).
+                     If None, uses default (0.5).
+        per_source_selection: If True and source_names is provided, retrieve chunks
+                              from each source separately to ensure all sources are
+                              represented. If False, use global MMR across all sources.
 
     Returns:
-        A LangChain retriever configured for MMR search.
+        A LangChain retriever configured for MMR search, or a custom retriever
+        that ensures per-source representation.
     """
     vectorstore = get_vectorstore()
+
+    # If per-source selection is enabled and we have multiple sources, use custom retriever
+    if per_source_selection and source_names and len(source_names) > 1:
+        logger.info(
+            f"[Retriever] Using per-source selection for {len(source_names)} sources "
+            f"to ensure all sources are represented"
+        )
+        return _create_per_source_retriever(
+            vectorstore=vectorstore,
+            source_names=source_names,
+            k=k,
+            fetch_k=fetch_k,
+            lambda_mult=lambda_mult
+        )
+
+    # Otherwise, use standard MMR retriever
     search_kwargs = {"k": k, "fetch_k": fetch_k}
 
     # Add source filter if specified
@@ -248,6 +430,10 @@ def get_retriever_with_sources(
                 )
             ]
         )
+
+    # Add lambda_mult if specified (controls relevance vs diversity tradeoff)
+    if lambda_mult is not None:
+        search_kwargs["lambda_mult"] = lambda_mult
 
     return vectorstore.as_retriever(
         search_type="mmr",

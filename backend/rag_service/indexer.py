@@ -34,6 +34,7 @@ Benefits:
 import os
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Set, Optional
 
@@ -815,7 +816,7 @@ def _run_graphrag_background(
                 f"{num_entities} entities, {num_rels} relationships"
             )
 
-            # Update database status to INDEXED (all phases complete)
+            # Verify all phases are complete before marking as INDEXED
             if DB_AVAILABLE and filename:
                 try:
                     from db.models import IndexStatus
@@ -823,11 +824,39 @@ def _run_graphrag_background(
                         repo = DocumentRepository(db)
                         doc = repo.get_by_filename(filename)
                         if doc:
-                            repo.update_index_status(
-                                doc, IndexStatus.INDEXED, doc.indexed_chunks or 0,
-                                message=f"Fully indexed: {num_entities} entities, {num_rels} relationships"
+                            # Refresh document to get latest granular statuses
+                            db.refresh(doc)
+
+                            # Check all granular statuses
+                            vector_status = doc.indexing_details.get("vector_indexing", {}).get("status") if doc.indexing_details else None
+                            metadata_status = doc.indexing_details.get("metadata_extraction", {}).get("status") if doc.indexing_details else None
+                            graphrag_status = doc.indexing_details.get("graphrag_indexing", {}).get("status") if doc.indexing_details else None
+
+                            logger.info(
+                                f"[GraphRAG Phase 2] Granular statuses for {filename}: "
+                                f"vector={vector_status}, metadata={metadata_status}, graphrag={graphrag_status}"
                             )
-                            logger.info(f"[GraphRAG Phase 2] Updated database status to INDEXED for {filename}")
+
+                            # Only mark as INDEXED if ALL phases are complete
+                            all_phases_complete = (
+                                vector_status == "completed" and
+                                metadata_status == "completed" and
+                                graphrag_status == "completed"
+                            )
+
+                            if all_phases_complete:
+                                # Update document-level status to INDEXED
+                                repo.update_index_status(
+                                    doc, IndexStatus.INDEXED, doc.indexed_chunks or 0,
+                                    message=f"Fully indexed: {num_entities} entities, {num_rels} relationships"
+                                )
+                                logger.info(f"[GraphRAG Phase 2] ✅ All phases complete - Updated status to INDEXED for {filename}")
+                            else:
+                                # Some phases are not complete - keep status as INDEXING
+                                logger.warning(
+                                    f"[GraphRAG Phase 2] ⚠️ Cannot mark as INDEXED - not all phases complete for {filename}: "
+                                    f"vector={vector_status}, metadata={metadata_status}, graphrag={graphrag_status}"
+                                )
                 except Exception as e:
                     logger.warning(f"Could not update database to INDEXED status: {e}")
 
@@ -844,6 +873,28 @@ def _run_graphrag_background(
 
         except Exception as e:
             logger.error(f"[GraphRAG Phase 2] Failed for {source_name}: {e}", exc_info=True)
+
+            # Update granular GraphRAG status to failed
+            if DB_AVAILABLE and filename:
+                try:
+                    with get_db_session() as db:
+                        repo = DocumentRepository(db)
+                        doc = repo.get_by_filename(filename)
+                        if doc and doc.indexing_details:
+                            details = doc.indexing_details
+                            graphrag = details.get("graphrag_indexing", {})
+                            graphrag["status"] = "failed"
+                            graphrag["error"] = str(e)
+                            graphrag["failed_at"] = datetime.utcnow().isoformat()
+                            doc.indexing_details = details
+
+                            from sqlalchemy.orm.attributes import flag_modified
+                            flag_modified(doc, "indexing_details")
+                            db.commit()
+                            db.refresh(doc)
+                            logger.info(f"[GraphRAG Phase 2] Updated granular status to failed for {filename}")
+                except Exception as db_error:
+                    logger.warning(f"Could not update GraphRAG status to failed: {db_error}")
 
             # Send WebSocket notification for error (non-blocking, document is still queryable)
             if broadcast_callback and conversion_id:
@@ -1152,19 +1203,23 @@ def trigger_embedding_for_document(
             if not vector_complete:
                 logger.info(f"[Phase 1] Complete for {source_name}: {chunks} chunks indexed to Qdrant")
 
-                # Update database status to INDEXED (document is now queryable)
+                # Keep status as INDEXING (document is queryable but metadata/GraphRAG still processing)
+                # Status will be updated to INDEXED after Phase 2 (GraphRAG) completes
                 if DB_AVAILABLE and filename and IndexStatus:
                     try:
                         with get_db_session() as db:
                             repo = DocumentRepository(db)
                             doc = repo.get_by_filename(filename)
                             if doc:
-                                repo.update_index_status(
-                                    doc, IndexStatus.INDEXED, chunks,
-                                    message=f"Indexed {chunks} chunks (GraphRAG processing in background)"
+                                # Update indexed_chunks count but keep status as INDEXING
+                                doc.indexed_chunks = chunks
+                                db.commit()
+                                logger.info(
+                                    f"[Phase 1] Updated indexed_chunks to {chunks} for {filename} "
+                                    f"(status remains INDEXING until all phases complete)"
                                 )
                     except Exception as e:
-                        logger.warning(f"Could not update database to INDEXED status: {e}")
+                        logger.warning(f"Could not update indexed_chunks: {e}")
 
                 # Send WebSocket notification that Phase 1 completed
                 if broadcast_callback and conversion_id:

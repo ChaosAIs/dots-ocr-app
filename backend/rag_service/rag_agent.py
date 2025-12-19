@@ -29,6 +29,51 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Global progress callback for tool functions
+_progress_callback = None
+
+
+def _send_progress(message: str, percent: int = None):
+    """
+    Helper function to send progress updates from synchronous tool functions.
+
+    Handles the async progress_callback properly from a sync context by:
+    1. Getting the running event loop
+    2. Creating a task in that loop to execute the async callback
+
+    Args:
+        message: Progress message to send
+        percent: Optional progress percentage (0-100)
+    """
+    if not _progress_callback:
+        return
+
+    import asyncio
+    import inspect
+
+    # Check if callback is async
+    if not inspect.iscoroutinefunction(_progress_callback):
+        # Synchronous callback - call directly
+        try:
+            _progress_callback(message, percent)
+        except Exception as e:
+            logger.debug(f"Error in sync progress callback: {e}")
+        return
+
+    # Async callback - need to schedule it properly
+    try:
+        # Try to get the running event loop
+        loop = asyncio.get_running_loop()
+        # Schedule the coroutine as a task in the running loop
+        asyncio.ensure_future(_progress_callback(message, percent), loop=loop)
+    except RuntimeError:
+        # No running event loop - we're in a sync context
+        # This can happen if the tool is called from a sync wrapper
+        # In this case, we can't send progress updates
+        logger.debug("Cannot send progress update: no running event loop")
+    except Exception as e:
+        logger.debug(f"Error sending progress update: {e}")
+
 # Legacy aliases for backward compatibility (used by other modules that import these)
 RAG_OLLAMA_HOST = os.getenv("RAG_OLLAMA_HOST", os.getenv("OLLAMA_HOST", "localhost"))
 RAG_OLLAMA_PORT = os.getenv("RAG_OLLAMA_PORT", os.getenv("OLLAMA_PORT", "11434"))
@@ -421,15 +466,27 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
+        # Send progress update: Analyzing query
+        _send_progress("Analyzing query complexity...", 10)
+
         # Step 0: Analyze query complexity and determine max_steps (COMBINED LLM CALL)
         from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
         complexity_analysis = analyze_complexity(query)
-        max_steps = complexity_analysis.max_steps
+        llm_max_steps = complexity_analysis.max_steps
+
+        # Cap max_steps to configured maximum (prevent LLM from setting too high)
+        config_max_steps = int(os.getenv("GRAPH_RAG_MAX_STEPS", "5"))
+        max_steps = min(llm_max_steps, config_max_steps)
+
+        if llm_max_steps > config_max_steps:
+            logger.info(f"[Search] LLM suggested max_steps={llm_max_steps}, capped to config max={config_max_steps}")
 
         logger.info(f"[Search] Query complexity analysis: max_steps={max_steps}, "
                    f"reasoning='{complexity_analysis.reasoning}'")
 
         # Step 1: Enhance query and extract metadata (SINGLE LLM CALL)
+        _send_progress("Extracting query metadata...", 20)
+
         query_analysis = _analyze_query_with_llm(query)
         enhanced_query = query_analysis["enhanced_query"]
         query_metadata = query_analysis["metadata"]
@@ -440,23 +497,38 @@ def search_documents(query: str) -> str:
         logger.info(f"[Search] Extracted topics: {query_metadata.get('topics', [])}")
 
         # Step 2: Route to relevant documents based on metadata
+        _send_progress("Routing to relevant documents...", 30)
+
         from .document_router import DocumentRouter
         from .llm_service import get_llm_service
         llm_service = get_llm_service()
         router = DocumentRouter(llm_service=llm_service)
         relevant_sources = router.route_query(query_metadata, original_query=query)
 
+        if relevant_sources:
+            logger.info(
+                f"[Search] Document router selected {len(relevant_sources)} sources: {relevant_sources}"
+            )
+
         # Step 3: Create retriever with optional source filtering
         if relevant_sources:
+            # When document routing is active, use per-source selection to ensure
+            # all routed sources are represented in results.
+            # This retrieves chunks from EACH source separately, then combines them,
+            # preventing MMR from excluding entire sources due to diversity filtering.
             retriever = get_retriever_with_sources(
-                k=15,
+                k=18,  # Total chunks across all sources
                 fetch_k=50,
-                source_names=relevant_sources
+                source_names=relevant_sources,
+                lambda_mult=0.5,  # Balanced relevance/diversity within each source
+                per_source_selection=True  # Ensure all sources are represented
             )
         else:
             retriever = get_retriever(k=15, fetch_k=50)
 
         # Step 4: Search with enhanced query
+        _send_progress("Searching document chunks...", 50)
+
         docs = retriever.invoke(enhanced_query)
 
         if not docs:
@@ -467,6 +539,8 @@ def search_documents(query: str) -> str:
         seen_sources = set()
 
         # Step 5: Get GraphRAG context with dynamic max_steps and source filtering (entities and relationships)
+        _send_progress("Retrieving knowledge from graph...", 60)
+
         graphrag_context = _get_graphrag_context(
             enhanced_query,
             max_steps=max_steps,
@@ -487,11 +561,23 @@ def search_documents(query: str) -> str:
             results.append(result)
             seen_sources.add(source)
 
-        # Log which sources were found
+        # Log which sources were found and check for missing sources
         logger.info(
             f"[Search] Found {len(docs)} chunks from {len(seen_sources)} sources: {seen_sources} | "
             f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
         )
+
+        # Check if any routed sources are missing from results
+        if relevant_sources and len(seen_sources) < len(relevant_sources):
+            missing_sources = set(relevant_sources) - seen_sources
+            logger.warning(
+                f"[Search] {len(missing_sources)} routed source(s) missing from results: {missing_sources}. "
+                f"This may indicate MMR diversity filtering excluded them. "
+                f"Consider increasing k or lambda_mult if information is missing."
+            )
+
+        # Send progress update: Generating answer
+        _send_progress("Generating answer...", 80)
 
         return "\n\n---\n\n".join(results)
 
@@ -617,23 +703,7 @@ def call_model(state: AgentState) -> AgentState:
                 # DEBUG: Log the context being sent to LLM
                 logger.info(f"[vLLM] Context length: {len(context)} chars")
                 logger.info(f"[vLLM] Context preview (first 500 chars): {context[:500]}")
-
-                # DEBUG: Check if context contains October date
-                if "10/14/2025" in context or "10-14-2025" in context:
-                    logger.info(f"[vLLM] ✅ Context CONTAINS October 2025 date (10/14/2025)")
-                    # Find and log the chunk containing the October date
-                    lines = context.split('\n')
-                    for i, line in enumerate(lines):
-                        if '10/14/2025' in line:
-                            # Log surrounding lines for context
-                            start = max(0, i - 3)
-                            end = min(len(lines), i + 10)
-                            logger.info(f"[vLLM] October date found at line {i}:")
-                            logger.info(f"[vLLM] Context around October date:\n" + '\n'.join(lines[start:end]))
-                            break
-                else:
-                    logger.warning(f"[vLLM] ❌ Context does NOT contain 10/14/2025")
-
+                
                 # DEBUG: Log the full system message being sent
                 if isinstance(augmented_messages[0], SystemMessage):
                     logger.info(f"[vLLM] System message length: {len(augmented_messages[0].content)} chars")
@@ -695,17 +765,22 @@ def create_agent_executor():
     return workflow.compile()
 
 
-async def stream_agent_response(query: str, conversation_history: List[dict] = None):
+async def stream_agent_response(query: str, conversation_history: List[dict] = None, progress_callback=None):
     """
     Stream the agent response for a query.
 
     Args:
         query: The user's question.
         conversation_history: Optional list of previous messages.
+        progress_callback: Optional async callback function(message: str, percent: int) for progress updates.
 
     Yields:
         Chunks of the response text.
     """
+    # Store progress callback in a global variable so tools can access it
+    global _progress_callback
+    _progress_callback = progress_callback
+
     agent = create_agent_executor()
 
     # Build message history
