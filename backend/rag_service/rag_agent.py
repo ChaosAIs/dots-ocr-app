@@ -6,7 +6,7 @@ Supports multiple LLM backends: Ollama and vLLM.
 import os
 import logging
 import json
-from typing import Annotated, TypedDict, List, Dict, Any
+from typing import Annotated, TypedDict, List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
 from langchain_core.tools import tool
@@ -115,6 +115,26 @@ CRITICAL INSTRUCTIONS FOR USING CONTEXT:
 - Extract numbers, dates, vendors, items, prices, and other details directly from the "Document Content" chunks
 - Perform calculations, aggregations, and analysis based on the data you see in the context
 
+CRITICAL INSTRUCTIONS FOR PRODUCT/PURCHASE QUERIES:
+- When asked about "products" or "purchases", ONLY include actual items/goods that were purchased
+- DO NOT include fees, charges, taxes, or shipping costs as "products"
+- **IMPORTANT**: Filter out ALL non-product items from your response
+- Examples of what to EXCLUDE from product lists (DO NOT LIST THESE):
+  * Shipping Charges, Delivery Fees, Freight Charges, Postage
+  * Environmental Handling Fees, Recycling Fees, Disposal Fees, Eco Fees
+  * Federal Tax, Provincial Tax, GST/HST, Sales Tax, VAT, Tax amounts
+  * Discounts, Rebates, Credits, Promotional discounts
+  * Service Fees, Processing Fees, Handling Fees, Administrative fees
+  * Subtotals, Totals, Grand Totals
+  * Any line item that contains the words: "Fee", "Tax", "Charge", "Shipping", "Discount", "Subtotal", "Total"
+- Examples of what to INCLUDE as products:
+  * Physical items with descriptions (e.g., "Lenovo 300e Windows", "Laptop", "Monitor", "Mouse", "Keyboard")
+  * Software licenses or subscriptions
+  * Services that are the main purchase (e.g., "Consulting Services", "Installation Service")
+- **FILTERING RULE**: Before including any item in your product list, ask yourself: "Is this an actual product/item that was purchased, or is it a fee/tax/charge?" If it's a fee/tax/charge, DO NOT include it
+- When listing products, focus on the "Description" field and exclude items that are clearly fees/charges/taxes
+- If you see invoice line items like "Environmental Handling Fee" or "Shipping Charges", these are NOT products - skip them entirely
+
 IMPORTANT FORMATTING INSTRUCTIONS:
 - Provide ONLY your final answer to the user's question
 - Do NOT include any JSON objects, XML tags, or structured data in your response
@@ -149,7 +169,44 @@ Create a concise, focused search query (50-100 words max) that:
 Output ONLY the search query text, nothing else."""
 
 
-# Prompt for query classification - determine if document search is needed
+# Prompt for query classification with conversation context awareness
+QUERY_CLASSIFICATION_WITH_CONTEXT_PROMPT = """Classify the user's query based on whether it needs document search or can be answered from conversation history.
+
+## Conversation History (Last 2 Rounds):
+{conversation_context}
+
+## Current User Query:
+{query}
+
+## Classification Rules:
+
+**CONVERSATION_ONLY** - Answer from conversation history alone (NO document search):
+- Calculations/aggregations on previous results (e.g., "how much total?", "sum them up", "what's the average?")
+- Clarification questions about previous answers (e.g., "can you explain that?", "what do you mean?")
+- Follow-up questions that can be answered by analyzing the previous response (e.g., "which one is the most expensive?")
+- The previous assistant response contains ALL the data needed to answer
+
+**SAME_CONTEXT** - Reuse previous document sources (limited search):
+- Follow-up questions about the same topic/entities mentioned in conversation history
+- Refinement or filtering of previous queries (e.g., "show me only the expensive ones", "filter by month")
+- The query is about the same subject but needs to re-query the same documents
+
+**NEW_SEARCH** - Full document search needed:
+- New topics/entities NOT mentioned in conversation history
+- Completely different questions unrelated to previous conversation
+- Requires searching different documents than before
+
+**DIRECT** - No search needed at all:
+- Greetings, casual conversation (e.g., "hi", "hello", "thanks")
+- General questions about capabilities (e.g., "what can you do?")
+
+## Response Format:
+Respond with ONLY ONE of these four words: CONVERSATION_ONLY, SAME_CONTEXT, NEW_SEARCH, or DIRECT
+
+Classification:"""
+
+
+# Legacy prompt for query classification (without conversation context)
 QUERY_CLASSIFICATION_PROMPT = """Classify if the following user message requires searching through documents or can be answered directly.
 
 User Message: {query}
@@ -175,9 +232,82 @@ Classification:"""
 
 
 
+def _classify_query_with_context(query: str, conversation_history: List[dict] = None) -> str:
+    """
+    Classify query intent with conversation context awareness.
+
+    Args:
+        query: The user's current message
+        conversation_history: Previous conversation messages
+
+    Returns:
+        One of: "CONVERSATION_ONLY", "SAME_CONTEXT", "NEW_SEARCH", "DIRECT"
+    """
+    # Quick pattern matching for greetings
+    query_lower = query.lower().strip()
+    direct_patterns = [
+        "hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening",
+        "how are you", "what's up", "wassup", "sup",
+        "thanks", "thank you", "thx", "ty",
+        "bye", "goodbye", "see you", "later",
+        "ok", "okay", "sure", "yes", "no", "yep", "nope",
+    ]
+
+    for pattern in direct_patterns:
+        if query_lower == pattern or query_lower.startswith(pattern + " ") or query_lower.endswith(" " + pattern):
+            logger.info(f"[Query Classification] '{query}' -> DIRECT (greeting pattern)")
+            return "DIRECT"
+
+    # If no conversation history, must be a new search
+    if not conversation_history or len(conversation_history) < 2:
+        logger.info(f"[Query Classification] '{query}' -> NEW_SEARCH (no conversation history)")
+        return "NEW_SEARCH"
+
+    # Build conversation context (last 2 rounds = 4 messages)
+    recent_messages = conversation_history[-4:] if len(conversation_history) >= 4 else conversation_history
+    conversation_context = ""
+    for msg in recent_messages:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"][:500]  # Limit length
+        conversation_context += f"{role}: {content}\n\n"
+
+    # Use LLM to classify with context
+    try:
+        llm_service = get_llm_service()
+        llm = llm_service.get_query_model(temperature=0.0, num_predict=20)
+
+        from langchain_core.messages import HumanMessage
+        prompt = QUERY_CLASSIFICATION_WITH_CONTEXT_PROMPT.format(
+            conversation_context=conversation_context,
+            query=query
+        )
+        response = llm.invoke([HumanMessage(content=prompt)])
+
+        classification = response.content.strip().upper()
+
+        # Parse classification
+        if "CONVERSATION_ONLY" in classification or "CONVERSATION" in classification:
+            logger.info(f"[Query Classification] '{query}' -> CONVERSATION_ONLY (can answer from history)")
+            return "CONVERSATION_ONLY"
+        elif "SAME_CONTEXT" in classification or "SAME" in classification:
+            logger.info(f"[Query Classification] '{query}' -> SAME_CONTEXT (reuse document sources)")
+            return "SAME_CONTEXT"
+        elif "DIRECT" in classification:
+            logger.info(f"[Query Classification] '{query}' -> DIRECT (no search needed)")
+            return "DIRECT"
+        else:
+            logger.info(f"[Query Classification] '{query}' -> NEW_SEARCH (default/new topic)")
+            return "NEW_SEARCH"
+
+    except Exception as e:
+        logger.warning(f"[Query Classification] LLM classification failed: {e}, defaulting to NEW_SEARCH")
+        return "NEW_SEARCH"
+
+
 def _classify_query_intent(query: str) -> str:
     """
     Classify if a query requires document search or can be answered directly.
+    (Legacy function without conversation context)
 
     Args:
         query: The user's message
@@ -765,7 +895,94 @@ def create_agent_executor():
     return workflow.compile()
 
 
-async def stream_agent_response(query: str, conversation_history: List[dict] = None, progress_callback=None):
+def _build_context_aware_system_message(
+    session_context: Dict[str, Any],
+    recent_conversation: List[Dict[str, str]] = None
+) -> Optional[str]:
+    """
+    Build a context-aware system message based on session metadata and recent conversation.
+
+    Args:
+        session_context: Session metadata containing entities, topics, documents, etc.
+        recent_conversation: Last 2 rounds (4 messages) of conversation for immediate context.
+
+    Returns:
+        System message content with conversation context, or None if no context available.
+    """
+    if not session_context and not recent_conversation:
+        return None
+
+    system_message = """You are a helpful AI assistant with access to document knowledge.
+
+"""
+
+    # Add recent conversation context (last 2 rounds)
+    if recent_conversation and len(recent_conversation) >= 2:
+        system_message += """Recent Conversation Context:
+The user just had this conversation with you:
+"""
+        # Get last 4 messages (2 rounds of user-assistant exchange)
+        recent_messages = recent_conversation[-4:] if len(recent_conversation) >= 4 else recent_conversation
+        for msg in recent_messages:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            content = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
+            system_message += f"\n{role}: {content}\n"
+
+        system_message += """
+IMPORTANT: When the user asks a follow-up question, it is likely related to the conversation above.
+Pay close attention to:
+- Time periods mentioned (e.g., "2025", "last month")
+- Specific topics discussed (e.g., "expenses", "purchases")
+- Entities referenced (e.g., document names, people, items)
+
+If the user's question seems incomplete or vague (e.g., "how much totally", "summarize it"),
+assume they are referring to the context from the recent conversation above.
+
+"""
+
+    # Add session-level context
+    context_parts = []
+
+    # Add main topic if available
+    main_topic = session_context.get("main_topic")
+    if main_topic:
+        context_parts.append(f"Main Topic: {main_topic}")
+
+    # Add document context
+    documents = session_context.get("documents", [])
+    if documents:
+        context_parts.append(f"Active Documents: {', '.join(documents[:3])}")
+
+    # Add topic context
+    topics = session_context.get("topics", [])
+    if topics:
+        context_parts.append(f"Conversation Topics: {', '.join(topics[:5])}")
+
+    # Add people context
+    people = session_context.get("people", [])
+    if people:
+        context_parts.append(f"Mentioned People: {', '.join(people[:3])}")
+
+    # Add objects/entities context
+    objects = session_context.get("objects", [])
+    if objects:
+        context_parts.append(f"Mentioned Items: {', '.join(objects[:3])}")
+
+    if context_parts:
+        system_message += """Session Context Summary:
+"""
+        system_message += "\n".join(f"- {part}" for part in context_parts)
+        system_message += "\n"
+
+    return system_message
+
+
+async def stream_agent_response(
+    query: str,
+    conversation_history: List[dict] = None,
+    progress_callback=None,
+    session_context: Optional[Dict[str, Any]] = None
+):
     """
     Stream the agent response for a query.
 
@@ -773,6 +990,7 @@ async def stream_agent_response(query: str, conversation_history: List[dict] = N
         query: The user's question.
         conversation_history: Optional list of previous messages.
         progress_callback: Optional async callback function(message: str, percent: int) for progress updates.
+        session_context: Optional session metadata with entities, topics, and conversation context.
 
     Yields:
         Chunks of the response text.
@@ -781,10 +999,65 @@ async def stream_agent_response(query: str, conversation_history: List[dict] = N
     global _progress_callback
     _progress_callback = progress_callback
 
+    # Classify query with conversation context
+    query_classification = _classify_query_with_context(query, conversation_history)
+    logger.info(f"[Query Classification] Query: '{query}' -> {query_classification}")
+
+    # Handle CONVERSATION_ONLY queries - answer directly from conversation history without document search
+    if query_classification == "CONVERSATION_ONLY":
+        logger.info(f"[CONVERSATION_ONLY] Answering from conversation history without document search")
+
+        # Build messages with conversation history
+        messages = []
+
+        # Add system message
+        system_prompt = """You are a helpful AI assistant. Answer the user's question based on the conversation history provided.
+
+IMPORTANT: The conversation history contains all the information you need. Analyze the previous messages and provide a direct answer.
+For calculations or aggregations, perform them based on the data in the conversation history.
+
+Do NOT say you need to search documents - the information is already in the conversation history."""
+
+        messages.append(SystemMessage(content=system_prompt))
+
+        # Add conversation history
+        if conversation_history:
+            for msg in conversation_history:
+                if msg["role"] == "user":
+                    messages.append(HumanMessage(content=msg["content"]))
+                elif msg["role"] == "assistant":
+                    messages.append(AIMessage(content=msg["content"]))
+
+        # Add current query
+        messages.append(HumanMessage(content=query))
+
+        # Stream response directly from LLM (no agent/tools)
+        llm_service = get_llm_service()
+        llm = llm_service.get_chat_model(temperature=0.7)
+
+        async for chunk in llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
+
+        return  # Exit early, no need for agent
+
+    # For all other classifications, use the agent with tools
     agent = create_agent_executor()
 
-    # Build message history
+    # Build message history with context awareness
     messages = []
+
+    # Add system message with context if available
+    # Pass recent conversation (last 2 rounds) for immediate context
+    if session_context or conversation_history:
+        system_content = _build_context_aware_system_message(
+            session_context or {},
+            conversation_history
+        )
+        if system_content:
+            messages.append(SystemMessage(content=system_content))
+            logger.info(f"[Context] Added context-aware system message with recent conversation")
+
     if conversation_history:
         for msg in conversation_history:
             if msg["role"] == "user":

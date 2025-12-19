@@ -172,6 +172,97 @@ class ChatRepository:
             ChatMessage.session_id == session_id
         ).order_by(desc(ChatMessage.created_at)).limit(limit).all()[::-1]  # Reverse to chronological order
 
+    def delete_messages_after(
+        self,
+        session_id: UUID,
+        message_id: UUID
+    ) -> int:
+        """
+        Delete all messages after a specific message (including the message itself).
+        Used for retry functionality to clean up failed conversation attempts.
+
+        Returns:
+            Number of messages deleted
+        """
+        # Get the target message to find its timestamp
+        target_message = self.db.query(ChatMessage).filter(
+            ChatMessage.id == message_id,
+            ChatMessage.session_id == session_id
+        ).first()
+
+        if not target_message:
+            logger.warning(f"Message {message_id} not found in session {session_id}")
+            return 0
+
+        target_timestamp = target_message.created_at
+
+        # Get all messages in the session ordered by creation time
+        all_messages = self.db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id
+        ).order_by(ChatMessage.created_at).all()
+
+        # Find the index of the target message
+        target_index = None
+        for idx, msg in enumerate(all_messages):
+            if msg.id == message_id:
+                target_index = idx
+                break
+
+        if target_index is None:
+            logger.warning(f"Message {message_id} not found in ordered list")
+            return 0
+
+        # Delete the target message and all messages after it (by index)
+        messages_to_delete = all_messages[target_index:]
+
+        count = len(messages_to_delete)
+
+        logger.info(f"Deleting {count} messages starting from index {target_index} (message {message_id})")
+        for msg in messages_to_delete:
+            logger.debug(f"  Deleting message {msg.id}: {msg.role} - {msg.content[:50]}...")
+            self.db.delete(msg)
+
+        # Update session message count by recalculating from actual messages
+        session = self.get_session(session_id)
+        if session:
+            # Recalculate message count from actual messages in database
+            actual_count = self.db.query(ChatMessage).filter(
+                ChatMessage.session_id == session_id
+            ).count()
+            session.message_count = actual_count
+            session.updated_at = datetime.utcnow()
+            logger.info(f"Updated session message_count to {actual_count} (deleted {count} messages)")
+
+        self.db.commit()
+
+        # Refresh the session to ensure the updated message_count is reflected
+        if session:
+            self.db.refresh(session)
+
+        logger.info(f"Successfully deleted {count} messages after message {message_id} in session {session_id}")
+        return count
+
+    def recalculate_message_count(self, session_id: UUID) -> int:
+        """
+        Recalculate and update the message count for a session based on actual messages.
+        Returns the updated count.
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return 0
+
+        actual_count = self.db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id
+        ).count()
+
+        session.message_count = actual_count
+        session.updated_at = datetime.utcnow()
+        self.db.commit()
+        self.db.refresh(session)
+
+        logger.info(f"Recalculated message count for session {session_id}: {actual_count}")
+        return actual_count
+
     # ===== Chat Session Summary Operations =====
 
     def create_summary(

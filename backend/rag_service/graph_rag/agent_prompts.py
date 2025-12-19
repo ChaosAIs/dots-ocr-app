@@ -14,6 +14,13 @@ AGENT_THINK_PROMPT = """## Current State
 ## Task
 Analyze the retrieved knowledge and decide your next action.
 
+## CRITICAL: Product/Purchase Query Filtering Rules
+**If the question asks about "products" or "purchases", you MUST filter out non-product items:**
+- **EXCLUDE** from your answer: Shipping Charges, Delivery Fees, Environmental Handling Fees, Recycling Fees, Federal Tax, Provincial Tax, GST/HST, Sales Tax, VAT, Discounts, Rebates, Service Fees, Processing Fees, Handling Fees, Subtotals, Totals
+- **EXCLUDE** any line item containing: "Fee", "Tax", "Charge", "Shipping", "Discount", "Subtotal", "Total"
+- **INCLUDE** only actual products: Physical items (e.g., "Monitor", "Mouse", "Keyboard", "Laptop"), Software licenses, Services that are the main purchase
+- **FILTERING RULE**: Before including any item, ask: "Is this an actual product/item purchased, or is it a fee/tax/charge?" If it's a fee/tax/charge, DO NOT include it
+
 ## CRITICAL: Response Format Requirements
 You MUST respond with EXACTLY ONE of these two formats:
 

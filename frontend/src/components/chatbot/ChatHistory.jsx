@@ -12,12 +12,23 @@ export const ChatHistory = forwardRef(({ currentSessionId, onSessionSelect }, re
   const toast = useRef(null);
 
   const loadSessions = useCallback(async () => {
+    console.log("[ChatHistory] loadSessions called");
     try {
       setLoading(true);
       const data = await chatService.getSessions();
+      console.log("[ChatHistory] Received sessions data:", data);
+      console.log("[ChatHistory] Sessions count:", data.length);
+      if (data.length > 0) {
+        console.log("[ChatHistory] First session:", {
+          id: data[0].id,
+          name: data[0].session_name,
+          message_count: data[0].message_count
+        });
+      }
       setSessions(data);
+      console.log("[ChatHistory] State updated with new sessions");
     } catch (error) {
-      console.error("Error loading sessions:", error);
+      console.error("[ChatHistory] Error loading sessions:", error);
       toast.current?.show({
         severity: "error",
         summary: "Error",

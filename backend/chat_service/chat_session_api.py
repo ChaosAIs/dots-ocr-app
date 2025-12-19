@@ -337,6 +337,47 @@ def get_session_messages(
     return [MessageResponse(**msg.to_dict()) for msg in messages]
 
 
+@router.delete("/{session_id}/messages/after/{message_id}")
+def delete_messages_after(
+    session_id: str,
+    message_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Delete all messages after a specific message (including the message itself).
+    Used for retry functionality to clean up failed conversation attempts.
+    """
+    conv_manager = ConversationManager(db)
+
+    # Verify session exists and user owns it
+    session = conv_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    # Verify ownership
+    if str(session.user_id) != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+
+    # Delete messages
+    try:
+        deleted_count = conv_manager.delete_messages_after(UUID(session_id), UUID(message_id))
+        logger.info(f"Deleted {deleted_count} messages after message {message_id} in session {session_id}")
+        return {"deleted_count": deleted_count, "message": f"Deleted {deleted_count} messages"}
+    except Exception as e:
+        logger.error(f"Error deleting messages: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete messages: {str(e)}"
+        )
+
+
 @router.get("/{session_id}/context", response_model=ConversationContextResponse)
 def get_conversation_context(
     session_id: str,

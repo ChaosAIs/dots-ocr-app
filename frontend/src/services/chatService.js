@@ -28,15 +28,18 @@ class ChatService {
    */
   async getSessions(limit = 50) {
     try {
+      console.log(`[ChatService] getSessions called with limit=${limit}`);
       const response = await http.get(
         `${API_BASE_URL}/api/chat/sessions`,
         {
           params: { limit }
         }
       );
+      console.log(`[ChatService] getSessions response:`, response.data);
+      console.log(`[ChatService] Number of sessions:`, response.data.length);
       return response.data;
     } catch (error) {
-      console.error("Error fetching chat sessions:", error);
+      console.error("[ChatService] Error fetching chat sessions:", error);
       throw error;
     }
   }
@@ -110,6 +113,27 @@ class ChatService {
       return response.data;
     } catch (error) {
       console.error("Error deleting chat session:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Delete all messages after a specific message (including the message itself)
+   * Used for retry functionality
+   * @param {string} sessionId - Session UUID
+   * @param {string} messageId - Message UUID to delete from (inclusive)
+   * @returns {Promise<Object>} Object with deleted_count and message
+   */
+  async deleteMessagesAfter(sessionId, messageId) {
+    try {
+      console.log(`[ChatService] deleteMessagesAfter called: sessionId=${sessionId}, messageId=${messageId}`);
+      const response = await http.delete(
+        `${API_BASE_URL}/api/chat/sessions/${sessionId}/messages/after/${messageId}`
+      );
+      console.log(`[ChatService] deleteMessagesAfter response:`, response.data);
+      return response.data;
+    } catch (error) {
+      console.error("[ChatService] Error deleting messages:", error);
       throw error;
     }
   }

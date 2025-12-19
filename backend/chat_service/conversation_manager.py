@@ -399,7 +399,17 @@ class ConversationManager:
     def delete_session(self, session_id: UUID) -> bool:
         """Delete a chat session."""
         return self.chat_repo.delete_session(session_id)
-    
+
+    def delete_messages_after(self, session_id: UUID, message_id: UUID) -> int:
+        """
+        Delete all messages after a specific message (including the message itself).
+        Used for retry functionality to clean up failed conversation attempts.
+
+        Returns:
+            Number of messages deleted
+        """
+        return self.chat_repo.delete_messages_after(session_id, message_id)
+
     def _maybe_create_summary(self, session_id: UUID):
         """
         Create a summary if needed.

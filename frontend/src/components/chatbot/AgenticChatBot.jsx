@@ -20,6 +20,7 @@ export const AgenticChatBot = () => {
   const [streamingContent, setStreamingContent] = useState("");
   const [sessionId, setSessionId] = useState(null);
   const [isInitializing, setIsInitializing] = useState(true);
+  const [sessionContext, setSessionContext] = useState(null);
 
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -139,21 +140,56 @@ export const AgenticChatBot = () => {
 
           // Refresh chat history after each assistant response (to show auto-generated/updated title)
           // Backend now checks and updates title on every response if needed
+          console.log("[AgenticChatBot] Assistant response completed, scheduling sidebar refresh");
           if (chatHistoryRef.current?.loadSessions) {
             setTimeout(() => {
+              console.log("[AgenticChatBot] Calling chatHistoryRef.loadSessions() after assistant response");
               chatHistoryRef.current.loadSessions();
             }, 500); // Small delay to ensure backend has updated the title
+          } else {
+            console.warn("[AgenticChatBot] chatHistoryRef.current.loadSessions not available");
+          }
+
+          // Refresh session context after each message exchange
+          if (sessionId) {
+            setTimeout(async () => {
+              try {
+                const session = await chatService.getSession(sessionId);
+                setSessionContext(session.session_metadata || {});
+              } catch (error) {
+                console.error("Error refreshing session context:", error);
+              }
+            }, 500);
           }
         } else if (data.type === "error") {
+          // Show error toast
           toast.current?.show({
             severity: "error",
             summary: "Error",
-            detail: data.message,
+            detail: data.message || "An error occurred while processing your message",
             life: 5000,
           });
+
+          // Clear streaming content
           streamingContentRef.current = "";
           setStreamingContent("");
           setIsLoading(false);
+
+          // Mark the last user message as having an error (for retry functionality)
+          // Find the last user message and add error flag
+          setMessages((prev) => {
+            const lastUserMsgIndex = prev.length - 1;
+            if (lastUserMsgIndex >= 0 && prev[lastUserMsgIndex].role === "user") {
+              const updated = [...prev];
+              updated[lastUserMsgIndex] = {
+                ...updated[lastUserMsgIndex],
+                hasError: true,
+                errorMessage: data.message
+              };
+              return updated;
+            }
+            return prev;
+          });
         }
       } catch (e) {
         console.error("Error parsing message:", e);
@@ -184,6 +220,7 @@ export const AgenticChatBot = () => {
         if (history && history.length > 0) {
           setMessages(
             history.map((msg) => ({
+              id: msg.id,  // Include message ID for retry functionality
               role: msg.role,
               content: msg.content,
             }))
@@ -197,17 +234,42 @@ export const AgenticChatBot = () => {
     loadHistory();
   }, [sessionId]);
 
+  // Load session context (metadata) when session changes
+  useEffect(() => {
+    const loadSessionContext = async () => {
+      if (!sessionId) {
+        setSessionContext(null);
+        return;
+      }
+
+      try {
+        const session = await chatService.getSession(sessionId);
+        setSessionContext(session.session_metadata || {});
+      } catch (error) {
+        console.error("Error loading session context:", error);
+        setSessionContext(null);
+      }
+    };
+
+    loadSessionContext();
+  }, [sessionId]);
+
   const sendMessage = useCallback(async () => {
     if (!inputValue.trim() || isLoading) return;
 
+    const messageContent = inputValue.trim();
+
     // Create session if it doesn't exist (lazy creation)
     let currentSessionId = sessionId;
+    let needsConnection = false;
+
     if (!currentSessionId) {
       try {
         const session = await chatService.createSession();
         currentSessionId = session.id;
         setSessionId(session.id);
         messageCountRef.current = 0;
+        needsConnection = true;
         console.log("Chat session created:", session.id);
       } catch (error) {
         console.error("Error creating session:", error);
@@ -223,7 +285,7 @@ export const AgenticChatBot = () => {
 
     const userMessage = {
       role: "user",
-      content: inputValue.trim(),
+      content: messageContent,
     };
 
     setMessages((prev) => [...prev, userMessage]);
@@ -231,6 +293,37 @@ export const AgenticChatBot = () => {
     setIsLoading(true);
     streamingContentRef.current = "";
     setStreamingContent("");
+
+    // If we just created a new session, wait for WebSocket to connect
+    if (needsConnection) {
+      console.log("Waiting for WebSocket connection...");
+
+      // Wait up to 2 seconds for WebSocket to connect
+      let retries = 0;
+      const maxRetries = 20; // 20 * 100ms = 2 seconds
+
+      while (wsRef.current?.readyState !== WebSocket.OPEN && retries < maxRetries) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        retries++;
+      }
+
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        console.error("WebSocket failed to connect after session creation");
+        toast.current?.show({
+          severity: "error",
+          summary: "Connection Failed",
+          detail: "Could not connect to chat server. Please try again.",
+          life: 5000,
+        });
+        setIsLoading(false);
+        // Restore the message so user can try again
+        setMessages((prev) => prev.slice(0, -1));
+        setInputValue(messageContent);
+        return;
+      }
+
+      console.log("WebSocket connected successfully");
+    }
 
     // Send to WebSocket (history is now managed by backend)
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -250,6 +343,84 @@ export const AgenticChatBot = () => {
       connectWebSocket();
     }
   }, [inputValue, isLoading, sessionId, connectWebSocket]);
+
+  const handleRetry = useCallback(async (msg, msgIndex) => {
+    if (isLoading || !sessionId) return;
+
+    console.log(`[AgenticChatBot] handleRetry called for message at index ${msgIndex}`);
+    try {
+      // If the message has an ID (from database), delete all messages after it
+      if (msg.id) {
+        console.log(`[AgenticChatBot] Deleting messages after message ${msg.id} in session ${sessionId}`);
+        await chatService.deleteMessagesAfter(sessionId, msg.id);
+        console.log(`[AgenticChatBot] Delete request completed, waiting 500ms for DB commit`);
+
+        // Wait to ensure the delete operation is fully committed in the database
+        // This prevents race conditions where the backend might load old history
+        await new Promise(resolve => setTimeout(resolve, 500));
+        console.log(`[AgenticChatBot] DB commit wait completed`);
+      }
+
+      // Remove all messages after this one from the UI (including this message)
+      console.log(`[AgenticChatBot] Removing messages from UI, keeping first ${msgIndex} messages`);
+      setMessages((prev) => prev.slice(0, msgIndex));
+
+      // Resend the message
+      const messageContent = msg.content;
+
+      // Add the user message back to UI
+      const userMessage = {
+        role: "user",
+        content: messageContent,
+      };
+
+      setMessages((prev) => [...prev, userMessage]);
+      setIsLoading(true);
+      streamingContentRef.current = "";
+      setStreamingContent("");
+
+      // Wait for WebSocket to be ready
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        console.log("WebSocket not ready, waiting...");
+        let retries = 0;
+        const maxRetries = 20;
+
+        while (wsRef.current?.readyState !== WebSocket.OPEN && retries < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          retries++;
+        }
+
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          toast.current?.show({
+            severity: "error",
+            summary: "Connection Failed",
+            detail: "Could not connect to chat server. Please try again.",
+            life: 5000,
+          });
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // Send to WebSocket
+      wsRef.current.send(
+        JSON.stringify({
+          message: messageContent,
+        })
+      );
+
+      console.log(`Retrying message: ${messageContent}`);
+    } catch (error) {
+      console.error("Error retrying message:", error);
+      toast.current?.show({
+        severity: "error",
+        summary: "Retry Failed",
+        detail: "Failed to retry message. Please try again.",
+        life: 5000,
+      });
+      setIsLoading(false);
+    }
+  }, [isLoading, sessionId]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -399,17 +570,37 @@ export const AgenticChatBot = () => {
             )}
 
         {messages.map((msg, idx) => (
-          <div key={idx} className={`message ${msg.role}`}>
+          <div key={idx} className={`message ${msg.role} ${msg.hasError ? 'has-error' : ''}`}>
             <div className="message-avatar">
               <i className={`pi ${msg.role === "user" ? "pi-user" : "pi-android"}`} />
             </div>
-            <Card className="message-content">
-              {msg.role === "assistant" ? (
-                <ReactMarkdown>{msg.content}</ReactMarkdown>
-              ) : (
-                <p>{msg.content}</p>
+            <div className="message-content-wrapper">
+              <Card className="message-content">
+                {msg.role === "assistant" ? (
+                  <ReactMarkdown>{msg.content}</ReactMarkdown>
+                ) : (
+                  <p>{msg.content}</p>
+                )}
+              </Card>
+              {msg.role === "user" && (
+                <div className="message-actions">
+                  <Button
+                    icon="pi pi-refresh"
+                    className="p-button-text p-button-sm retry-button"
+                    onClick={() => handleRetry(msg, idx)}
+                    tooltip="Retry this message"
+                    tooltipOptions={{ position: "top" }}
+                    disabled={isLoading}
+                  />
+                </div>
               )}
-            </Card>
+              {msg.hasError && (
+                <div className="error-indicator">
+                  <i className="pi pi-exclamation-triangle" />
+                  <span>Failed to send. Click retry to try again.</span>
+                </div>
+              )}
+            </div>
           </div>
         ))}
 
@@ -439,6 +630,36 @@ export const AgenticChatBot = () => {
 
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Context Indicators */}
+          {sessionContext && (sessionContext.documents?.length > 0 || sessionContext.topics?.length > 0) && (
+            <div className="context-indicators">
+              {sessionContext.documents?.length > 0 && (
+                <div className="context-chip">
+                  <i className="pi pi-file" />
+                  <span>Discussing: {sessionContext.documents.slice(0, 2).join(", ")}</span>
+                  {sessionContext.documents.length > 2 && (
+                    <span className="context-more">+{sessionContext.documents.length - 2} more</span>
+                  )}
+                </div>
+              )}
+              {sessionContext.topics?.length > 0 && (
+                <div className="context-chip">
+                  <i className="pi pi-tag" />
+                  <span>Topics: {sessionContext.topics.slice(0, 3).join(", ")}</span>
+                  {sessionContext.topics.length > 3 && (
+                    <span className="context-more">+{sessionContext.topics.length - 3} more</span>
+                  )}
+                </div>
+              )}
+              {sessionContext.people?.length > 0 && (
+                <div className="context-chip">
+                  <i className="pi pi-users" />
+                  <span>People: {sessionContext.people.slice(0, 2).join(", ")}</span>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Input Area */}
           <div className="chatbot-input">
