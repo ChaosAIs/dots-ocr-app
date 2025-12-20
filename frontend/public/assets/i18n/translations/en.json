@@ -1,4 +1,20 @@
 {
+    "Chat": {
+        "EditMessage": "Edit message",
+        "EditResponse": "Edit response",
+        "RetryMessage": "Retry this message",
+        "RetryWithEdit": "Retry",
+        "RetryWithEditTooltip": "Update message and regenerate response",
+        "SubmitCorrection": "Submit Correction",
+        "SubmitCorrectionTooltip": "Save the corrected response",
+        "Cancel": "Cancel",
+        "Edited": "(edited)",
+        "FailedToSend": "Failed to send. Click retry to try again.",
+        "CorrectionSaved": "Correction Saved",
+        "CorrectionSavedDetail": "The response has been updated successfully.",
+        "CorrectionFailed": "Save Failed",
+        "CorrectionFailedDetail": "Failed to save the correction. Please try again."
+    },
     "Nav": {
         "Home": "Home",
         "Chat": "Chat",
@@ -26,9 +42,9 @@
         "MaxFileSize": "Max file size:",
         "MaxFileSizeValue": "50MB",
         "PleaseSelectFiles": "Please select files to upload",
-        "InvalidFileType": "Invalid file type: {filename}. Supported types: PDF, Images, DOC, EXCEL",
-        "UploadSuccess": "{filename} uploaded successfully",
-        "UploadFailed": "Failed to upload {filename}",
+        "InvalidFileType": "Invalid file type: {{filename}}. Supported types: PDF, Images, DOC, EXCEL",
+        "UploadSuccess": "{{filename}} uploaded successfully",
+        "UploadFailed": "Failed to upload {{filename}}",
         "ErrorUploading": "Error uploading files"
     },
     "DocumentList": {
@@ -89,7 +105,7 @@
         "FailedToLoad": "Failed to load documents",
         "FailedToView": "Failed to view markdown",
         "FailedToConvert": "Failed to start conversion",
-        "PaginatorTemplate": "{first} to {last} of {totalRecords}",
+        "PaginatorTemplate": "{{first}} to {{last}} of {{totalRecords}}",
         "SelectConverter": "Select Converter",
         "ConverterAuto": "Auto",
         "ConverterDocService": "Doc Service",
@@ -165,7 +181,7 @@
             "WarnTest": "Warn Test",
             "ErrorTest": "Error Test",
             "SuccessTest": "Success Test",
-            "Choiced": "Choiced: {response}"
+            "Choiced": "Choiced: {{response}}"
         },
         "UserProfile": {
             "Title": "It is user profile page",

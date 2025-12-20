@@ -7,12 +7,14 @@ import { Toast } from "primereact/toast";
 import ReactMarkdown from "react-markdown";
 import chatService from "../../services/chatService";
 import { ChatHistory } from "./ChatHistory";
+import { useTranslation } from "react-i18next";
 import "./AgenticChatBot.scss";
 
 // Get WebSocket URL from environment or use default
 const WS_BASE_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8080";
 
 export const AgenticChatBot = () => {
+  const { t } = useTranslation();
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -21,6 +23,9 @@ export const AgenticChatBot = () => {
   const [sessionId, setSessionId] = useState(null);
   const [isInitializing, setIsInitializing] = useState(true);
   const [sessionContext, setSessionContext] = useState(null);
+  const [editingMessageIndex, setEditingMessageIndex] = useState(null);
+  const [editingContent, setEditingContent] = useState("");
+  const [isSavingCorrection, setIsSavingCorrection] = useState(false);
 
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -359,6 +364,12 @@ export const AgenticChatBot = () => {
         // This prevents race conditions where the backend might load old history
         await new Promise(resolve => setTimeout(resolve, 500));
         console.log(`[AgenticChatBot] DB commit wait completed`);
+
+        // Refresh the chat history sidebar to show updated message count
+        if (chatHistoryRef.current?.loadSessions) {
+          console.log(`[AgenticChatBot] Refreshing chat history sidebar after message deletion`);
+          chatHistoryRef.current.loadSessions();
+        }
       }
 
       // Remove all messages after this one from the UI (including this message)
@@ -421,6 +432,169 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
     }
   }, [isLoading, sessionId]);
+
+  // Start editing a message
+  const handleStartEdit = useCallback((msgIndex, content) => {
+    setEditingMessageIndex(msgIndex);
+    setEditingContent(content);
+  }, []);
+
+  // Cancel editing
+  const handleCancelEdit = useCallback(() => {
+    setEditingMessageIndex(null);
+    setEditingContent("");
+  }, []);
+
+  // Handle editing content change
+  const handleEditContentChange = useCallback((newContent) => {
+    setEditingContent(newContent);
+  }, []);
+
+  // Submit correction for assistant message (just updates the database)
+  const handleSubmitCorrection = useCallback(async (msg, msgIndex) => {
+    if (!sessionId || !msg.id || isSavingCorrection) return;
+
+    const newContent = editingContent.trim();
+    if (!newContent || newContent === msg.content) {
+      handleCancelEdit();
+      return;
+    }
+
+    setIsSavingCorrection(true);
+    try {
+      await chatService.updateMessage(sessionId, msg.id, newContent);
+
+      // Update the message in UI
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[msgIndex] = {
+          ...updated[msgIndex],
+          content: newContent,
+          isEdited: true
+        };
+        return updated;
+      });
+
+      toast.current?.show({
+        severity: "success",
+        summary: t("Chat.CorrectionSaved"),
+        detail: t("Chat.CorrectionSavedDetail"),
+        life: 3000,
+      });
+
+      handleCancelEdit();
+    } catch (error) {
+      console.error("Error saving correction:", error);
+      toast.current?.show({
+        severity: "error",
+        summary: t("Chat.CorrectionFailed"),
+        detail: t("Chat.CorrectionFailedDetail"),
+        life: 5000,
+      });
+    } finally {
+      setIsSavingCorrection(false);
+    }
+  }, [sessionId, editingContent, isSavingCorrection, handleCancelEdit, t]);
+
+  // Handle retry with edited user message
+  const handleRetryWithEdit = useCallback(async (msg, msgIndex) => {
+    if (isLoading || !sessionId) return;
+
+    const newContent = editingContent.trim();
+    if (!newContent) {
+      handleCancelEdit();
+      return;
+    }
+
+    // If content hasn't changed, just do a normal retry
+    if (newContent === msg.content) {
+      handleCancelEdit();
+      handleRetry(msg, msgIndex);
+      return;
+    }
+
+    console.log(`[AgenticChatBot] handleRetryWithEdit called for message at index ${msgIndex}`);
+    try {
+      // If the message has an ID (from database), update it and delete messages after it
+      if (msg.id) {
+        // First update the message content
+        await chatService.updateMessage(sessionId, msg.id, newContent);
+        console.log(`[AgenticChatBot] Updated message ${msg.id} with new content`);
+
+        // Then delete all messages after this one
+        await chatService.deleteMessagesAfter(sessionId, msg.id);
+        console.log(`[AgenticChatBot] Deleted messages after ${msg.id}`);
+
+        // Wait for DB commit
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        // Refresh the chat history sidebar to show updated message count
+        if (chatHistoryRef.current?.loadSessions) {
+          console.log(`[AgenticChatBot] Refreshing chat history sidebar after message deletion`);
+          chatHistoryRef.current.loadSessions();
+        }
+      }
+
+      // Cancel edit mode
+      handleCancelEdit();
+
+      // Remove all messages after this one from the UI (including this message)
+      setMessages((prev) => prev.slice(0, msgIndex));
+
+      // Add the updated user message back to UI
+      const userMessage = {
+        id: msg.id,
+        role: "user",
+        content: newContent,
+      };
+
+      setMessages((prev) => [...prev, userMessage]);
+      setIsLoading(true);
+      streamingContentRef.current = "";
+      setStreamingContent("");
+
+      // Wait for WebSocket to be ready
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        console.log("WebSocket not ready, waiting...");
+        let retries = 0;
+        const maxRetries = 20;
+
+        while (wsRef.current?.readyState !== WebSocket.OPEN && retries < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+          retries++;
+        }
+
+        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+          toast.current?.show({
+            severity: "error",
+            summary: "Connection Failed",
+            detail: "Could not connect to chat server. Please try again.",
+            life: 5000,
+          });
+          setIsLoading(false);
+          return;
+        }
+      }
+
+      // Send to WebSocket
+      wsRef.current.send(
+        JSON.stringify({
+          message: newContent,
+        })
+      );
+
+      console.log(`Retrying with edited message: ${newContent}`);
+    } catch (error) {
+      console.error("Error retrying with edit:", error);
+      toast.current?.show({
+        severity: "error",
+        summary: "Retry Failed",
+        detail: "Failed to retry message. Please try again.",
+        life: 5000,
+      });
+      setIsLoading(false);
+    }
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -570,34 +744,107 @@ export const AgenticChatBot = () => {
             )}
 
         {messages.map((msg, idx) => (
-          <div key={idx} className={`message ${msg.role} ${msg.hasError ? 'has-error' : ''}`}>
+          <div key={idx} className={`message ${msg.role} ${msg.hasError ? 'has-error' : ''} ${editingMessageIndex === idx ? 'editing' : ''}`}>
             <div className="message-avatar">
               <i className={`pi ${msg.role === "user" ? "pi-user" : "pi-android"}`} />
             </div>
             <div className="message-content-wrapper">
-              <Card className="message-content">
-                {msg.role === "assistant" ? (
-                  <ReactMarkdown>{msg.content}</ReactMarkdown>
-                ) : (
-                  <p>{msg.content}</p>
-                )}
-              </Card>
-              {msg.role === "user" && (
-                <div className="message-actions">
-                  <Button
-                    icon="pi pi-refresh"
-                    className="p-button-text p-button-sm retry-button"
-                    onClick={() => handleRetry(msg, idx)}
-                    tooltip="Retry this message"
-                    tooltipOptions={{ position: "top" }}
-                    disabled={isLoading}
+              {editingMessageIndex === idx ? (
+                // Editing mode
+                <div className="message-edit-container">
+                  <InputTextarea
+                    value={editingContent}
+                    onChange={(e) => handleEditContentChange(e.target.value)}
+                    rows={3}
+                    autoResize
+                    className="message-edit-textarea"
+                    disabled={isLoading || isSavingCorrection}
                   />
+                  <div className="message-edit-actions">
+                    {msg.role === "user" ? (
+                      // User message: Retry button to resend with edited content
+                      <Button
+                        icon={isLoading ? "pi pi-spin pi-spinner" : "pi pi-refresh"}
+                        label={t("Chat.RetryWithEdit")}
+                        className="p-button-sm p-button-primary"
+                        onClick={() => handleRetryWithEdit(msg, idx)}
+                        disabled={isLoading || !editingContent.trim()}
+                        tooltip={t("Chat.RetryWithEditTooltip")}
+                        tooltipOptions={{ position: "top" }}
+                      />
+                    ) : (
+                      // Assistant message: Submit Correction button
+                      <Button
+                        icon={isSavingCorrection ? "pi pi-spin pi-spinner" : "pi pi-check"}
+                        label={t("Chat.SubmitCorrection")}
+                        className="p-button-sm p-button-success"
+                        onClick={() => handleSubmitCorrection(msg, idx)}
+                        disabled={isSavingCorrection || !editingContent.trim()}
+                        tooltip={t("Chat.SubmitCorrectionTooltip")}
+                        tooltipOptions={{ position: "top" }}
+                      />
+                    )}
+                    <Button
+                      icon="pi pi-times"
+                      label={t("Chat.Cancel")}
+                      className="p-button-sm p-button-secondary p-button-text"
+                      onClick={handleCancelEdit}
+                      disabled={isLoading || isSavingCorrection}
+                    />
+                  </div>
                 </div>
+              ) : (
+                // Display mode
+                <>
+                  <Card className={`message-content ${msg.isEdited ? 'edited' : ''}`}>
+                    {msg.role === "assistant" ? (
+                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                    ) : (
+                      <p>{msg.content}</p>
+                    )}
+                    {msg.isEdited && (
+                      <span className="edited-indicator">{t("Chat.Edited")}</span>
+                    )}
+                  </Card>
+                  <div className="message-actions">
+                    {msg.role === "user" ? (
+                      // User message actions
+                      <>
+                        <Button
+                          icon="pi pi-pencil"
+                          className="p-button-text p-button-sm edit-button"
+                          onClick={() => handleStartEdit(idx, msg.content)}
+                          tooltip={t("Chat.EditMessage")}
+                          tooltipOptions={{ position: "top" }}
+                          disabled={isLoading || editingMessageIndex !== null}
+                        />
+                        <Button
+                          icon="pi pi-refresh"
+                          className="p-button-text p-button-sm retry-button"
+                          onClick={() => handleRetry(msg, idx)}
+                          tooltip={t("Chat.RetryMessage")}
+                          tooltipOptions={{ position: "top" }}
+                          disabled={isLoading || editingMessageIndex !== null}
+                        />
+                      </>
+                    ) : (
+                      // Assistant message actions
+                      <Button
+                        icon="pi pi-pencil"
+                        className="p-button-text p-button-sm edit-button"
+                        onClick={() => handleStartEdit(idx, msg.content)}
+                        tooltip={t("Chat.EditResponse")}
+                        tooltipOptions={{ position: "top" }}
+                        disabled={isLoading || editingMessageIndex !== null || !msg.id}
+                      />
+                    )}
+                  </div>
+                </>
               )}
               {msg.hasError && (
                 <div className="error-indicator">
                   <i className="pi pi-exclamation-triangle" />
-                  <span>Failed to send. Click retry to try again.</span>
+                  <span>{t("Chat.FailedToSend")}</span>
                 </div>
               )}
             </div>

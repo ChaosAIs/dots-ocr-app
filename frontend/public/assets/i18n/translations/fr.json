@@ -1,4 +1,20 @@
 {
+  "Chat": {
+    "EditMessage": "Modifier le message",
+    "EditResponse": "Modifier la réponse",
+    "RetryMessage": "Réessayer ce message",
+    "RetryWithEdit": "Réessayer",
+    "RetryWithEditTooltip": "Mettre à jour le message et régénérer la réponse",
+    "SubmitCorrection": "Soumettre la correction",
+    "SubmitCorrectionTooltip": "Enregistrer la réponse corrigée",
+    "Cancel": "Annuler",
+    "Edited": "(modifié)",
+    "FailedToSend": "Échec de l'envoi. Cliquez sur réessayer pour réessayer.",
+    "CorrectionSaved": "Correction enregistrée",
+    "CorrectionSavedDetail": "La réponse a été mise à jour avec succès.",
+    "CorrectionFailed": "Échec de l'enregistrement",
+    "CorrectionFailedDetail": "Impossible d'enregistrer la correction. Veuillez réessayer."
+  },
   "Nav": {
     "Home": "Domicile",
     "Chat": "Discussion",
@@ -26,9 +42,9 @@
     "MaxFileSize": "Taille maximale du fichier :",
     "MaxFileSizeValue": "50 Mo",
     "PleaseSelectFiles": "Veuillez sélectionner des fichiers à télécharger",
-    "InvalidFileType": "Type de fichier invalide : {filename}. Types pris en charge : PDF, Images, DOC, EXCEL",
-    "UploadSuccess": "{filename} téléchargé avec succès",
-    "UploadFailed": "Échec du téléchargement de {filename}",
+    "InvalidFileType": "Type de fichier invalide : {{filename}}. Types pris en charge : PDF, Images, DOC, EXCEL",
+    "UploadSuccess": "{{filename}} téléchargé avec succès",
+    "UploadFailed": "Échec du téléchargement de {{filename}}",
     "ErrorUploading": "Erreur lors du téléchargement des fichiers"
   },
   "DocumentList": {
@@ -60,12 +76,11 @@
     "ReconvertingUncompleted": "Reconversion des pages incomplètes...",
     "ConversionSuccess": "Document converti avec succès",
     "ConversionWarning": "Conversion terminée avec des avertissements",
-    "ConversionFailed": "Échec de la conversion",
     "ConnectionError": "Erreur de connexion pendant la conversion",
     "FailedToLoad": "Échec du chargement des documents",
     "FailedToView": "Échec de l'affichage du markdown",
     "FailedToConvert": "Échec du démarrage de la conversion",
-    "PaginatorTemplate": "{first} à {last} sur {totalRecords}",
+    "PaginatorTemplate": "{{first}} à {{last}} sur {{totalRecords}}",
     "SelectConverter": "Sélectionner le convertisseur",
     "ConverterAuto": "Auto",
     "ConverterDocService": "Service Doc",
@@ -156,7 +171,7 @@
       "WarnTest": "Test d'avertissement",
       "ErrorTest": "Test d'erreur",
       "SuccessTest": "Test de succès",
-      "Choiced": "Choisi : {response}"
+      "Choiced": "Choisi : {{response}}"
     },
     "UserProfile": {
       "Title": "C'est la page de profil utilisateur",

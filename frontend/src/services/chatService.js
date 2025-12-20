@@ -139,6 +139,29 @@ class ChatService {
   }
 
   /**
+   * Update a chat message content
+   * Used for correcting user queries or AI assistant responses
+   * @param {string} sessionId - Session UUID
+   * @param {string} messageId - Message UUID to update
+   * @param {string} content - New message content
+   * @returns {Promise<Object>} Updated message object
+   */
+  async updateMessage(sessionId, messageId, content) {
+    try {
+      console.log(`[ChatService] updateMessage called: sessionId=${sessionId}, messageId=${messageId}`);
+      const response = await http.patch(
+        `${API_BASE_URL}/api/chat/sessions/${sessionId}/messages/${messageId}`,
+        { content }
+      );
+      console.log(`[ChatService] updateMessage response:`, response.data);
+      return response.data;
+    } catch (error) {
+      console.error("[ChatService] Error updating message:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Clean up empty chat sessions (sessions with 0 messages)
    * @returns {Promise<Object>} Object with deleted_count and message
    */

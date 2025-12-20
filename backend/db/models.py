@@ -146,8 +146,13 @@ class ChatSession(Base):
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
     summaries = relationship("ChatSessionSummary", back_populates="session", cascade="all, delete-orphan")
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert to dictionary."""
+    def to_dict(self, message_count: Optional[int] = None) -> Dict[str, Any]:
+        """Convert to dictionary.
+
+        Args:
+            message_count: If provided, use this as the message count (computed at runtime).
+                          If None, falls back to the stored message_count column.
+        """
         return {
             "id": str(self.id),
             "user_id": str(self.user_id),
@@ -155,7 +160,7 @@ class ChatSession(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
             "last_message_at": self.last_message_at.isoformat() if self.last_message_at else None,
-            "message_count": self.message_count,
+            "message_count": message_count if message_count is not None else self.message_count,
             "is_active": self.is_active,
             "session_metadata": self.session_metadata,
         }

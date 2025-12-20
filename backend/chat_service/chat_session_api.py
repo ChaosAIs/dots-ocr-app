@@ -32,6 +32,11 @@ class UpdateSessionRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
+class UpdateMessageRequest(BaseModel):
+    """Update chat message request."""
+    content: str = Field(..., min_length=1, description="The new message content")
+
+
 class SessionResponse(BaseModel):
     """Chat session response."""
     id: str
@@ -96,7 +101,14 @@ def list_sessions(
         limit=limit
     )
 
-    return [SessionResponse(**session.to_dict()) for session in sessions]
+    # Compute message counts at runtime for all sessions in a single query
+    session_ids = [session.id for session in sessions]
+    message_counts = conv_manager.chat_repo.get_message_counts_for_sessions(session_ids)
+
+    return [
+        SessionResponse(**session.to_dict(message_count=message_counts.get(session.id, 0)))
+        for session in sessions
+    ]
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
@@ -123,7 +135,10 @@ def get_session(
             detail="Access denied"
         )
 
-    return SessionResponse(**session.to_dict())
+    # Compute message count at runtime for consistency
+    message_count = conv_manager.chat_repo.get_message_count(UUID(session_id))
+
+    return SessionResponse(**session.to_dict(message_count=message_count))
 
 
 @router.patch("/{session_id}", response_model=SessionResponse)
@@ -158,7 +173,10 @@ def update_session(
         is_active=request.is_active
     )
 
-    return SessionResponse(**updated_session.to_dict())
+    # Compute message count at runtime for consistency
+    message_count = conv_manager.chat_repo.get_message_count(UUID(session_id))
+
+    return SessionResponse(**updated_session.to_dict(message_count=message_count))
 
 
 @router.delete("/{session_id}")
@@ -375,6 +393,58 @@ def delete_messages_after(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to delete messages: {str(e)}"
+        )
+
+
+@router.patch("/{session_id}/messages/{message_id}", response_model=MessageResponse)
+def update_message(
+    session_id: str,
+    message_id: str,
+    request: UpdateMessageRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Update a chat message content.
+    Used for correcting user queries or AI assistant responses.
+    """
+    conv_manager = ConversationManager(db)
+
+    # Verify session exists and user owns it
+    session = conv_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    # Verify ownership
+    if str(session.user_id) != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+
+    # Update the message
+    try:
+        updated_message = conv_manager.chat_repo.update_message(
+            message_id=UUID(message_id),
+            content=request.content
+        )
+
+        if not updated_message:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Message not found"
+            )
+
+        logger.info(f"Updated message {message_id} in session {session_id}")
+        return MessageResponse(**updated_message.to_dict())
+    except Exception as e:
+        logger.error(f"Error updating message: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update message: {str(e)}"
         )
 
 

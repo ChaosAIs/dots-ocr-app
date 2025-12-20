@@ -62,11 +62,11 @@ except ImportError as e:
 
 # Import GraphRAG indexer for entity extraction
 try:
-    from .graph_rag import index_chunks_sync, GRAPH_RAG_ENABLED
+    from .graph_rag import index_chunks_sync, GRAPH_RAG_INDEX_ENABLED
     GRAPHRAG_AVAILABLE = True
 except ImportError as e:
     GRAPHRAG_AVAILABLE = False
-    GRAPH_RAG_ENABLED = False
+    GRAPH_RAG_INDEX_ENABLED = False
     logging.getLogger(__name__).warning(f"GraphRAG not available for indexer: {e}")
 
 logger = logging.getLogger(__name__)
@@ -329,7 +329,7 @@ class MarkdownFileHandler(FileSystemEventHandler):
                     _indexed_files.add(file_key)
 
                 # ========== PHASE 2: GraphRAG in background ==========
-                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                if GRAPHRAG_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
                     graphrag_chunks = [
                         {
                             "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),
@@ -454,7 +454,7 @@ def index_existing_documents(output_dir: str = None):
                     total_files += 1
 
                     # Collect chunks for Phase 2 (grouped by source)
-                    if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                    if GRAPHRAG_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
                         if source_name not in source_chunks_map:
                             source_chunks_map[source_name] = []
                         for i, chunk in enumerate(result.chunks):
@@ -485,7 +485,7 @@ def index_existing_documents(output_dir: str = None):
     )
 
     # ========== PHASE 2: Start GraphRAG in background for each source ==========
-    if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED and source_chunks_map:
+    if GRAPHRAG_AVAILABLE and GRAPH_RAG_INDEX_ENABLED and source_chunks_map:
         logger.info(f"[Phase 2] Starting GraphRAG background processing for {len(source_chunks_map)} sources...")
         for source_name, chunks in source_chunks_map.items():
             _run_graphrag_background(
@@ -791,7 +791,7 @@ def _run_graphrag_background(
         conversion_id: The conversion ID for WebSocket notifications
         broadcast_callback: Function for WebSocket broadcasts
     """
-    if not GRAPHRAG_AVAILABLE or not GRAPH_RAG_ENABLED:
+    if not GRAPHRAG_AVAILABLE or not GRAPH_RAG_INDEX_ENABLED:
         logger.debug(f"[GraphRAG] Skipping background indexing - not enabled")
         return
 
@@ -1028,7 +1028,7 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
                         logger.warning(f"Could not update vector indexing status: {e}")
 
                 # Collect chunks for GraphRAG Phase 2
-                if GRAPHRAG_AVAILABLE and GRAPH_RAG_ENABLED:
+                if GRAPHRAG_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
                     for i, chunk in enumerate(result.chunks):
                         all_graphrag_chunks.append({
                             "id": chunk.metadata.get("chunk_id", f"{source_name}_{i}"),

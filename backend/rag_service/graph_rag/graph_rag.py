@@ -21,7 +21,7 @@ from .utils import extract_entity_names_from_query
 logger = logging.getLogger(__name__)
 
 # Feature flags
-GRAPH_RAG_ENABLED = os.getenv("GRAPH_RAG_ENABLED", "false").lower() == "true"
+GRAPH_RAG_QUERY_ENABLED = os.getenv("GRAPH_RAG_QUERY_ENABLED", "false").lower() == "true"
 DEFAULT_MODE = os.getenv("GRAPH_RAG_DEFAULT_MODE", "auto")
 GRAPH_RAG_VECTOR_SEARCH_ENABLED = os.getenv("GRAPH_RAG_VECTOR_SEARCH_ENABLED", "true").lower() == "true"
 
@@ -285,7 +285,7 @@ class GraphRAG:
         Returns:
             GraphRAGContext with entities, relationships, and chunks
         """
-        if not GRAPH_RAG_ENABLED:
+        if not GRAPH_RAG_QUERY_ENABLED:
             logger.debug("GraphRAG is disabled, returning empty context")
             return GraphRAGContext(
                 entities=[],

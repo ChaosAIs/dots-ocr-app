@@ -179,7 +179,8 @@
     opacity: 0;
     transition: opacity 0.2s ease;
 
-    .retry-button {
+    .retry-button,
+    .edit-button {
       padding: 0.25rem;
       width: 28px;
       height: 28px;
@@ -188,10 +189,76 @@
         font-size: 0.875rem;
       }
     }
+
+    .edit-button {
+      color: var(--text-color-secondary);
+
+      &:hover {
+        color: var(--primary-color);
+      }
+    }
   }
 
   .message:hover .message-actions {
     opacity: 1;
+  }
+
+  .message.editing .message-actions {
+    opacity: 1;
+  }
+
+  .message-edit-container {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    width: 100%;
+    min-width: 40vw;
+    max-width: 60vw;
+    background: var(--surface-card);
+    border: 1px solid var(--primary-300);
+    border-radius: 12px;
+    padding: 0.75rem;
+
+    .message-edit-textarea {
+      width: 100%;
+      border: 1px solid var(--surface-border);
+      border-radius: 8px;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.95rem;
+      line-height: 1.5;
+      resize: none;
+      min-height: 60px;
+
+      &:focus {
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 2px var(--primary-100);
+      }
+    }
+  }
+
+  .message-edit-actions {
+    display: flex;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    align-items: center;
+
+    .p-button {
+      font-size: 0.875rem;
+    }
+  }
+
+  .edited-indicator {
+    display: inline-block;
+    font-size: 0.75rem;
+    color: var(--text-color-secondary);
+    font-style: italic;
+    margin-top: 0.5rem;
+    padding-top: 0.25rem;
+    border-top: 1px solid var(--surface-border);
+  }
+
+  .message-content.edited {
+    position: relative;
   }
 
   .error-indicator {

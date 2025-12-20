@@ -14,14 +14,22 @@ logger = logging.getLogger(__name__)
 class JWTUtils:
     """Utility class for JWT token operations."""
 
-    # JWT configuration from environment
-    JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
     JWT_ALGORITHM = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
-    REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
-    # Log the secret key being used (first 10 chars only for security)
-    logger.info(f"JWT_SECRET_KEY loaded: {JWT_SECRET_KEY[:20]}...")
+    @classmethod
+    def _get_secret_key(cls) -> str:
+        """Get JWT secret key from environment at runtime."""
+        return os.getenv("JWT_SECRET_KEY", "your-secret-key-change-in-production")
+
+    @classmethod
+    def _get_access_token_expire_minutes(cls) -> int:
+        """Get access token expiration minutes from environment at runtime."""
+        return int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+
+    @classmethod
+    def _get_refresh_token_expire_days(cls) -> int:
+        """Get refresh token expiration days from environment at runtime."""
+        return int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
     
     @classmethod
     def create_access_token(
@@ -44,8 +52,8 @@ class JWTUtils:
             JWT token as string
         """
         now = datetime.utcnow()
-        expires_at = now + timedelta(minutes=cls.ACCESS_TOKEN_EXPIRE_MINUTES)
-        
+        expires_at = now + timedelta(minutes=cls._get_access_token_expire_minutes())
+
         payload = {
             "sub": str(user_id),
             "username": username,
@@ -54,11 +62,11 @@ class JWTUtils:
             "iat": now,
             "type": "access"
         }
-        
+
         if additional_claims:
             payload.update(additional_claims)
-        
-        token = jwt.encode(payload, cls.JWT_SECRET_KEY, algorithm=cls.JWT_ALGORITHM)
+
+        token = jwt.encode(payload, cls._get_secret_key(), algorithm=cls.JWT_ALGORITHM)
         return token
     
     @classmethod
@@ -78,8 +86,8 @@ class JWTUtils:
             Tuple of (token, expiration_datetime)
         """
         now = datetime.utcnow()
-        expires_at = now + timedelta(days=cls.REFRESH_TOKEN_EXPIRE_DAYS)
-        
+        expires_at = now + timedelta(days=cls._get_refresh_token_expire_days())
+
         payload = {
             "sub": str(user_id),
             "username": username,
@@ -87,8 +95,8 @@ class JWTUtils:
             "iat": now,
             "type": "refresh"
         }
-        
-        token = jwt.encode(payload, cls.JWT_SECRET_KEY, algorithm=cls.JWT_ALGORITHM)
+
+        token = jwt.encode(payload, cls._get_secret_key(), algorithm=cls.JWT_ALGORITHM)
         return token, expires_at
     
     @classmethod
@@ -105,7 +113,7 @@ class JWTUtils:
         try:
             payload = jwt.decode(
                 token,
-                cls.JWT_SECRET_KEY,
+                cls._get_secret_key(),
                 algorithms=[cls.JWT_ALGORITHM]
             )
             return payload

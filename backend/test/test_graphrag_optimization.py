@@ -84,12 +84,12 @@ class TestSelectiveExtraction:
 class TestConfigurationLoading:
     """Test that configuration is loaded correctly from environment."""
 
-    def test_graph_rag_enabled_flag(self):
-        """Test GRAPH_RAG_ENABLED flag loading."""
+    def test_graph_rag_index_enabled_flag(self):
+        """Test GRAPH_RAG_INDEX_ENABLED flag loading."""
         from rag_service.graph_rag import graph_indexer
         
         # Should be loaded from .env
-        assert hasattr(graph_indexer, 'GRAPH_RAG_ENABLED')
+        assert hasattr(graph_indexer, 'GRAPH_RAG_INDEX_ENABLED')
 
     # Chunk filtering config tests removed - feature has been disabled
 

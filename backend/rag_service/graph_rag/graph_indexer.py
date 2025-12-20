@@ -35,7 +35,7 @@ from ..utils.date_normalizer import find_and_normalize_dates
 logger = logging.getLogger(__name__)
 
 # Feature flags and configuration
-GRAPH_RAG_ENABLED = os.getenv("GRAPH_RAG_ENABLED", "false").lower() == "true"
+GRAPH_RAG_INDEX_ENABLED = os.getenv("GRAPH_RAG_INDEX_ENABLED", "false").lower() == "true"
 GRAPH_RAG_EMBEDDINGS_ENABLED = os.getenv("GRAPH_RAG_EMBEDDINGS_ENABLED", "true").lower() == "true"
 
 
@@ -149,7 +149,7 @@ class GraphRAGIndexer:
         Returns:
             Tuple of (num_entities, num_relationships)
         """
-        if not GRAPH_RAG_ENABLED:
+        if not GRAPH_RAG_INDEX_ENABLED:
             logger.debug("[GraphRAG] GraphRAG is disabled, skipping entity extraction")
             return 0, 0
 
@@ -390,7 +390,7 @@ class GraphRAGIndexer:
         Args:
             source_name: Source document name
         """
-        if not GRAPH_RAG_ENABLED:
+        if not GRAPH_RAG_INDEX_ENABLED:
             return
 
         await self._init_storage()
@@ -406,7 +406,7 @@ class GraphRAGIndexer:
 
     async def delete_workspace(self) -> None:
         """Delete all GraphRAG data for the current workspace."""
-        if not GRAPH_RAG_ENABLED:
+        if not GRAPH_RAG_INDEX_ENABLED:
             return
 
         await self._init_storage()
@@ -440,7 +440,7 @@ def index_chunks_sync(
     Returns:
         Tuple of (num_entities, num_relationships)
     """
-    if not GRAPH_RAG_ENABLED:
+    if not GRAPH_RAG_INDEX_ENABLED:
         return 0, 0
 
     indexer = GraphRAGIndexer(workspace_id=workspace_id)
@@ -471,7 +471,7 @@ def delete_graphrag_by_source_sync(
         source_name: Source document name
         workspace_id: Workspace ID
     """
-    if not GRAPH_RAG_ENABLED:
+    if not GRAPH_RAG_INDEX_ENABLED:
         return
 
     indexer = GraphRAGIndexer(workspace_id=workspace_id)

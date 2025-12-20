@@ -253,10 +253,10 @@ def reindex_failed_graphrag_chunks(
     Returns:
         Dictionary with re-indexing results
     """
-    from .graph_rag import index_chunks_sync, GRAPH_RAG_ENABLED
+    from .graph_rag import index_chunks_sync, GRAPH_RAG_INDEX_ENABLED
 
-    if not GRAPH_RAG_ENABLED:
-        logger.warning(f"[Selective Re-index] GraphRAG is disabled, skipping")
+    if not GRAPH_RAG_INDEX_ENABLED:
+        logger.warning(f"[Selective Re-index] GraphRAG indexing is disabled, skipping")
         return {"chunks_reindexed": 0, "entities_extracted": 0, "relationships_extracted": 0}
 
     logger.info(f"[Selective Re-index] Starting GraphRAG re-indexing for {doc.filename}")

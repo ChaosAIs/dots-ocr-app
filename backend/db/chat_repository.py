@@ -172,6 +172,56 @@ class ChatRepository:
             ChatMessage.session_id == session_id
         ).order_by(desc(ChatMessage.created_at)).limit(limit).all()[::-1]  # Reverse to chronological order
 
+    def get_message(self, message_id: UUID) -> Optional[ChatMessage]:
+        """Get a specific message by ID."""
+        return self.db.query(ChatMessage).filter(
+            ChatMessage.id == message_id
+        ).first()
+
+    def update_message(
+        self,
+        message_id: UUID,
+        content: str,
+        message_metadata: Optional[Dict[str, Any]] = None
+    ) -> Optional[ChatMessage]:
+        """
+        Update a chat message content.
+        Used for correcting user queries or assistant responses.
+
+        Returns:
+            Updated ChatMessage or None if not found
+        """
+        message = self.get_message(message_id)
+
+        if not message:
+            logger.warning(f"Message {message_id} not found for update")
+            return None
+
+        message.content = content
+
+        if message_metadata is not None:
+            # Merge with existing metadata
+            existing_metadata = message.message_metadata or {}
+            existing_metadata.update(message_metadata)
+            existing_metadata["last_edited_at"] = datetime.utcnow().isoformat()
+            message.message_metadata = existing_metadata
+        else:
+            # Just mark as edited
+            existing_metadata = message.message_metadata or {}
+            existing_metadata["last_edited_at"] = datetime.utcnow().isoformat()
+            message.message_metadata = existing_metadata
+
+        # Update session's updated_at timestamp
+        session = self.get_session(message.session_id)
+        if session:
+            session.updated_at = datetime.utcnow()
+
+        self.db.commit()
+        self.db.refresh(message)
+
+        logger.info(f"Updated message {message_id} content")
+        return message
+
     def delete_messages_after(
         self,
         session_id: UUID,
@@ -216,22 +266,23 @@ class ChatRepository:
         messages_to_delete = all_messages[target_index:]
 
         count = len(messages_to_delete)
+        # Calculate the new message count directly: messages at indices 0 to target_index-1 remain
+        new_message_count = target_index
 
         logger.info(f"Deleting {count} messages starting from index {target_index} (message {message_id})")
         for msg in messages_to_delete:
             logger.debug(f"  Deleting message {msg.id}: {msg.role} - {msg.content[:50]}...")
             self.db.delete(msg)
 
-        # Update session message count by recalculating from actual messages
+        # Flush the deletes to ensure they are executed
+        self.db.flush()
+
+        # Update session message count using the calculated value (more reliable than querying)
         session = self.get_session(session_id)
         if session:
-            # Recalculate message count from actual messages in database
-            actual_count = self.db.query(ChatMessage).filter(
-                ChatMessage.session_id == session_id
-            ).count()
-            session.message_count = actual_count
+            session.message_count = new_message_count
             session.updated_at = datetime.utcnow()
-            logger.info(f"Updated session message_count to {actual_count} (deleted {count} messages)")
+            logger.info(f"Updated session message_count to {new_message_count} (deleted {count} messages)")
 
         self.db.commit()
 
@@ -241,6 +292,41 @@ class ChatRepository:
 
         logger.info(f"Successfully deleted {count} messages after message {message_id} in session {session_id}")
         return count
+
+    def get_message_count(self, session_id: UUID) -> int:
+        """
+        Get the actual message count for a session by counting messages in the database.
+        This is the runtime count and should be used instead of the stored message_count column.
+        """
+        return self.db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id
+        ).count()
+
+    def get_message_counts_for_sessions(self, session_ids: List[UUID]) -> Dict[UUID, int]:
+        """
+        Get the actual message counts for multiple sessions in a single query.
+        Returns a dictionary mapping session_id to message count.
+        """
+        from sqlalchemy import func as sqlfunc
+
+        if not session_ids:
+            return {}
+
+        results = self.db.query(
+            ChatMessage.session_id,
+            sqlfunc.count(ChatMessage.id).label('count')
+        ).filter(
+            ChatMessage.session_id.in_(session_ids)
+        ).group_by(
+            ChatMessage.session_id
+        ).all()
+
+        # Build dictionary with counts, defaulting to 0 for sessions with no messages
+        counts = {session_id: 0 for session_id in session_ids}
+        for session_id, count in results:
+            counts[session_id] = count
+
+        return counts
 
     def recalculate_message_count(self, session_id: UUID) -> int:
         """

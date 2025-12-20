@@ -61,13 +61,14 @@ from rag_service.indexer import (
 )
 from rag_service.vectorstore import delete_documents_by_source, get_collection_info, clear_collection, is_document_indexed
 
-# Import GraphRAG for source-level deletion
+# Import GraphRAG for source-level deletion and Neo4j initialization
 try:
-    from rag_service.graph_rag import delete_graphrag_by_source_sync, GRAPH_RAG_ENABLED
+    from rag_service.graph_rag import delete_graphrag_by_source_sync, GRAPH_RAG_INDEX_ENABLED, GRAPH_RAG_QUERY_ENABLED
     GRAPHRAG_DELETE_AVAILABLE = True
 except ImportError:
     GRAPHRAG_DELETE_AVAILABLE = False
-    GRAPH_RAG_ENABLED = False
+    GRAPH_RAG_INDEX_ENABLED = False
+    GRAPH_RAG_QUERY_ENABLED = False
 
 # Import database services
 from db.database import init_db, get_db_session
@@ -109,8 +110,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(document_status_manager.start_broadcast_worker())
     logger.info("WebSocket broadcast workers started")
 
-    # Initialize Neo4j indexes (including vector indexes) if GraphRAG is enabled
-    if GRAPH_RAG_ENABLED:
+    # Initialize Neo4j indexes (including vector indexes) if GraphRAG indexing or querying is enabled
+    if GRAPH_RAG_INDEX_ENABLED or GRAPH_RAG_QUERY_ENABLED:
         try:
             from rag_service.storage import Neo4jStorage
             neo4j_storage = Neo4jStorage()
@@ -2758,7 +2759,7 @@ async def delete_document(filename: str):
             logger.error(error_msg)
 
         # Delete GraphRAG data (Neo4j, PostgreSQL GraphRAG tables, Qdrant entity/edge vectors)
-        if GRAPHRAG_DELETE_AVAILABLE and GRAPH_RAG_ENABLED:
+        if GRAPHRAG_DELETE_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
             try:
                 delete_graphrag_by_source_sync(file_name_without_ext)
                 logger.info(f"Deleted GraphRAG data for: {file_name_without_ext}")

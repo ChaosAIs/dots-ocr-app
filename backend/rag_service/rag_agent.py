@@ -20,12 +20,12 @@ from .utils.date_normalizer import normalize_query_dates
 
 # Import GraphRAG components
 try:
-    from .graph_rag import GraphRAG, GRAPH_RAG_ENABLED
-    # If the graph_rag library is available, set the GRAPH_RAG_ENABLED flag = True
+    from .graph_rag import GraphRAG, GRAPH_RAG_QUERY_ENABLED
+    # If the graph_rag library is available, set the GRAPHRAG_AVAILABLE flag = True
     GRAPHRAG_AVAILABLE = True
 except ImportError:
     GRAPHRAG_AVAILABLE = False
-    GRAPH_RAG_ENABLED = False
+    GRAPH_RAG_QUERY_ENABLED = False
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,41 @@ CRITICAL INSTRUCTIONS FOR PRODUCT/PURCHASE QUERIES:
 - **FILTERING RULE**: Before including any item in your product list, ask yourself: "Is this an actual product/item that was purchased, or is it a fee/tax/charge?" If it's a fee/tax/charge, DO NOT include it
 - When listing products, focus on the "Description" field and exclude items that are clearly fees/charges/taxes
 - If you see invoice line items like "Environmental Handling Fee" or "Shipping Charges", these are NOT products - skip them entirely
+
+CRITICAL INSTRUCTIONS FOR AMOUNT/PRICE QUERIES:
+- When asked about the price, cost, or amount of a SPECIFIC item, respond ONLY with that item's individual amount
+- DO NOT return the invoice total, subtotal, or grand total when the user asks about a specific item's price
+- Match the item name carefully - if the user asks "how much was the laptop?", find the line item for the laptop and return ONLY that line item's amount
+- If an invoice has multiple items:
+  * "How much was X?" → Return ONLY the amount for item X (NOT the invoice total)
+  * "What is the total?" → Return the invoice total/grand total
+  * "How much did I spend on X?" → Return ONLY the amount for item X
+  * "What was the cost of X?" → Return ONLY the amount for item X
+- NEVER confuse:
+  * Individual line item amounts (what was paid for a single product/service)
+  * Invoice subtotals (sum before tax/fees)
+  * Invoice totals (final amount including everything)
+- If the user does not explicitly ask for "total", "subtotal", "grand total", or "all items", assume they want the specific item amount
+- When providing an amount, be explicit about what it represents (e.g., "The laptop cost $500" NOT "The total was $1500")
+
+CRITICAL INSTRUCTIONS FOR MULTIPLE ITEMS DETECTION:
+- If the context appears to list multiple items merged on one line (e.g., "Keyboard, Mouse, Webcam" or "Laptop / Monitor / Cable"), DO NOT treat them as a single item
+- When you detect comma-separated or slash-separated item names that appear to be multiple distinct products:
+  * First, check other parts of the context for detailed individual item entries
+  * If detailed entries exist, use those individual items with their respective prices/quantities
+  * List each item separately with its own details (price, quantity, etc.)
+- NEVER output merged item names as one entry (e.g., don't say "Keyboard, Mouse, Webcam costs $150")
+- Instead, if you find individual details elsewhere in the context, list them separately:
+  * "Keyboard: $50"
+  * "Mouse: $30"
+  * "Webcam: $70"
+- If the context ONLY has the merged summary line without individual details, respond:
+  "The context shows multiple items listed together (e.g., 'Keyboard, Mouse, Webcam') but individual item details are not available. Please check the original document for itemized pricing."
+- Common patterns that indicate merged items (DO NOT treat as single item):
+  * Items separated by commas: "Item A, Item B, Item C"
+  * Items separated by slashes: "Item A / Item B / Item C"
+  * Items separated by "and": "Item A and Item B and Item C"
+  * Items with "etc." or ellipsis: "Keyboards, Mice, etc."
 
 IMPORTANT FORMATTING INSTRUCTIONS:
 - Provide ONLY your final answer to the user's question
@@ -498,15 +533,15 @@ def _get_graphrag_context(query: str, max_steps: int = None, source_names: List[
     """
     logger.debug(
         f"[GraphRAG Query] Starting - GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}, "
-        f"GRAPH_RAG_ENABLED={GRAPH_RAG_ENABLED}, mode={GRAPHRAG_QUERY_MODE}"
+        f"GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}, mode={GRAPHRAG_QUERY_MODE}"
     )
 
     if not GRAPHRAG_AVAILABLE:
         logger.debug("[GraphRAG Query] Skipping - GraphRAG module not available")
         return ""
 
-    if not GRAPH_RAG_ENABLED:
-        logger.debug("[GraphRAG Query] Skipping - GRAPH_RAG_ENABLED=false in .env")
+    if not GRAPH_RAG_QUERY_ENABLED:
+        logger.debug("[GraphRAG Query] Skipping - GRAPH_RAG_QUERY_ENABLED=false in .env")
         return ""
 
     try:

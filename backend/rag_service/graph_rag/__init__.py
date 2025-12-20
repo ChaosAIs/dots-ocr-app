@@ -22,7 +22,7 @@ from .graph_indexer import (
     GraphRAGIndexer,
     index_chunks_sync,
     delete_graphrag_by_source_sync,
-    GRAPH_RAG_ENABLED,
+    GRAPH_RAG_INDEX_ENABLED,
 )
 from .query_mode_detector import QueryModeDetector
 from .graph_rag import GraphRAG, GraphRAGContext
@@ -49,11 +49,12 @@ __all__ = [
     "GraphRAGIndexer",
     "index_chunks_sync",
     "delete_graphrag_by_source_sync",
-    "GRAPH_RAG_ENABLED",
+    "GRAPH_RAG_INDEX_ENABLED",    
     # Query processing
     "QueryModeDetector",
     "GraphRAG",
     "GraphRAGContext",
+    "GRAPH_RAG_QUERY_ENABLED",
     # Utilities
     "generate_entity_id",
     "generate_relationship_id",
