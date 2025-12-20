@@ -33,9 +33,12 @@ export const AgenticChatBot = () => {
   const toast = useRef(null);
   const streamingContentRef = useRef("");
   const reconnectAttemptsRef = useRef(0);
-  const maxReconnectAttempts = 5;
+  const maxReconnectAttempts = 10; // Increased for better resilience
   const chatHistoryRef = useRef(null);
   const messageCountRef = useRef(0);
+  const pingIntervalRef = useRef(null);
+  const reconnectTimeoutRef = useRef(null);
+  const isManualCloseRef = useRef(false); // Track if close was intentional
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -50,9 +53,54 @@ export const AgenticChatBot = () => {
     setIsInitializing(false);
   }, []);
 
+  // Calculate exponential backoff delay for reconnection
+  const getReconnectDelay = useCallback((attempt) => {
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, max 30s
+    const baseDelay = 1000;
+    const maxDelay = 30000;
+    const delay = Math.min(baseDelay * Math.pow(2, attempt), maxDelay);
+    // Add jitter (±20%) to prevent thundering herd
+    const jitter = delay * 0.2 * (Math.random() - 0.5);
+    return Math.round(delay + jitter);
+  }, []);
+
+  // Start heartbeat to keep connection alive
+  const startHeartbeat = useCallback((ws) => {
+    // Clear any existing heartbeat
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+    }
+
+    // Send ping every 25 seconds (most servers timeout at 30-60s)
+    pingIntervalRef.current = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: "ping" }));
+          console.log("[WebSocket] Ping sent");
+        } catch (e) {
+          console.error("[WebSocket] Failed to send ping:", e);
+        }
+      }
+    }, 25000);
+  }, []);
+
+  // Stop heartbeat
+  const stopHeartbeat = useCallback(() => {
+    if (pingIntervalRef.current) {
+      clearInterval(pingIntervalRef.current);
+      pingIntervalRef.current = null;
+    }
+  }, []);
+
   const connectWebSocket = useCallback(() => {
     // Don't connect if no session ID or already connected
     if (!sessionId || wsRef.current?.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    // Don't connect if closing/connecting
+    if (wsRef.current?.readyState === WebSocket.CONNECTING) {
+      console.log("[WebSocket] Already connecting, skipping...");
       return;
     }
 
@@ -68,49 +116,74 @@ export const AgenticChatBot = () => {
       return;
     }
 
-    console.log(`Connecting to WebSocket with session ID: ${sessionId}`);
+    // Clear any pending reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    console.log(`[WebSocket] Connecting with session ID: ${sessionId} (attempt ${reconnectAttemptsRef.current + 1}/${maxReconnectAttempts})`);
     const ws = new WebSocket(`${WS_BASE_URL}/api/chat/ws/chat/${sessionId}`);
 
     ws.onopen = () => {
       setIsConnected(true);
       reconnectAttemptsRef.current = 0; // Reset counter on successful connection
-      console.log("WebSocket connected");
+      isManualCloseRef.current = false;
+      console.log("[WebSocket] Connected successfully");
+
+      // Start heartbeat to keep connection alive
+      startHeartbeat(ws);
     };
 
     ws.onclose = (event) => {
       setIsConnected(false);
-      console.log("WebSocket disconnected", event.code, event.reason);
+      stopHeartbeat();
+      console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}`);
+
+      // Don't reconnect if manually closed or auth errors
+      if (isManualCloseRef.current) {
+        console.log("[WebSocket] Manually closed - not reconnecting");
+        return;
+      }
 
       // Don't reconnect on authentication/authorization errors (403, 401)
       // or if the session was explicitly closed (1000)
       if (event.code === 1008 || event.code === 1000) {
-        console.log("WebSocket closed normally or due to policy violation - not reconnecting");
+        console.log("[WebSocket] Closed normally or due to policy violation - not reconnecting");
         return;
       }
 
-      // Increment reconnection attempts
-      reconnectAttemptsRef.current += 1;
-
-      // Attempt to reconnect after 3 seconds if we haven't exceeded max attempts
+      // Schedule reconnection with exponential backoff
       if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-        console.log(`Scheduling reconnection attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts}`);
-        setTimeout(connectWebSocket, 3000);
+        const delay = getReconnectDelay(reconnectAttemptsRef.current);
+        reconnectAttemptsRef.current += 1;
+        console.log(`[WebSocket] Scheduling reconnection in ${delay}ms (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts})`);
+
+        reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
+      } else {
+        toast.current?.show({
+          severity: "error",
+          summary: "Connection Lost",
+          detail: "Unable to reconnect. Please refresh the page.",
+          life: 10000,
+        });
       }
     };
 
     ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      toast.current?.show({
-        severity: "error",
-        summary: "Connection Error",
-        detail: "Failed to connect to chat server",
-        life: 3000,
-      });
+      console.error("[WebSocket] Error:", error);
+      // Don't show toast on every error - onclose will handle reconnection
     };
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+
+        // Handle pong response (heartbeat acknowledgment)
+        if (data.type === "pong") {
+          console.log("[WebSocket] Pong received");
+          return;
+        }
 
         if (data.type === "progress") {
           // Display progress message (e.g., "Analyzing query...", "Routing to documents...")
@@ -129,13 +202,19 @@ export const AgenticChatBot = () => {
         } else if (data.type === "end") {
           // Complete the message with the accumulated content
           const finalContent = streamingContentRef.current;
-          setMessages((prev) => [
-            ...prev,
-            {
-              role: "assistant",
-              content: finalContent,
-            },
-          ]);
+
+          // Only add the assistant message if there's actual content
+          // Empty messages at end of stream are normal and should be ignored
+          if (finalContent.trim()) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                role: "assistant",
+                content: finalContent,
+              },
+            ]);
+          }
+
           streamingContentRef.current = "";
           setStreamingContent("");
           setIsLoading(false);
@@ -202,18 +281,44 @@ export const AgenticChatBot = () => {
     };
 
     wsRef.current = ws;
-  }, [sessionId]);
+  }, [sessionId, startHeartbeat, stopHeartbeat, getReconnectDelay]);
 
+  // Handle visibility change - reconnect when tab becomes visible
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && sessionId) {
+        // Tab became visible - check if we need to reconnect
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          console.log("[WebSocket] Tab became visible - attempting to reconnect");
+          reconnectAttemptsRef.current = 0; // Reset attempts when user returns
+          connectWebSocket();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [sessionId, connectWebSocket]);
+
+  // Connect WebSocket when session ID is available
   useEffect(() => {
     if (sessionId) {
       connectWebSocket();
     }
     return () => {
+      // Cleanup on unmount
+      isManualCloseRef.current = true;
+      stopHeartbeat();
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
       if (wsRef.current) {
         wsRef.current.close();
       }
     };
-  }, [connectWebSocket, sessionId]);
+  }, [connectWebSocket, sessionId, stopHeartbeat]);
 
   // Load chat history when session is created
   useEffect(() => {
@@ -413,14 +518,15 @@ export const AgenticChatBot = () => {
         }
       }
 
-      // Send to WebSocket
+      // Send to WebSocket with is_retry flag to force new document search
       wsRef.current.send(
         JSON.stringify({
           message: messageContent,
+          is_retry: true,
         })
       );
 
-      console.log(`Retrying message: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -576,14 +682,15 @@ export const AgenticChatBot = () => {
         }
       }
 
-      // Send to WebSocket
+      // Send to WebSocket with is_retry flag to force new document search
       wsRef.current.send(
         JSON.stringify({
           message: newContent,
+          is_retry: true,
         })
       );
 
-      console.log(`Retrying with edited message: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({

@@ -29,8 +29,85 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Maximum input token limit for chat history (from .env)
+MAX_INPUT_TOKEN_LIMIT = int(os.getenv("MAX_INPUT_TOKEN_LIMIT", "4096"))
+
 # Global progress callback for tool functions
 _progress_callback = None
+
+
+def _estimate_token_count(text: str) -> int:
+    """
+    Estimate the token count for a given text.
+
+    Uses a simple heuristic: ~4 characters per token on average.
+    This is a reasonable approximation for most LLMs.
+
+    Args:
+        text: The text to estimate tokens for.
+
+    Returns:
+        Estimated token count.
+    """
+    if not text:
+        return 0
+    # Approximate: 1 token ≈ 4 characters (works well for English/code)
+    # For CJK languages, this may underestimate slightly
+    return len(text) // 4 + 1
+
+
+def _truncate_history_to_token_limit(
+    conversation_history: List[dict],
+    max_tokens: int = None
+) -> List[dict]:
+    """
+    Truncate conversation history to fit within token limit.
+
+    Keeps the most recent messages that fit within the token budget.
+    Always preserves at least the last message if possible.
+
+    Args:
+        conversation_history: List of message dicts with 'role' and 'content'.
+        max_tokens: Maximum token limit. Defaults to MAX_INPUT_TOKEN_LIMIT.
+
+    Returns:
+        Truncated list of messages (most recent) that fit within limit.
+    """
+    if not conversation_history:
+        return []
+
+    if max_tokens is None:
+        max_tokens = MAX_INPUT_TOKEN_LIMIT
+
+    # Calculate tokens for each message (from most recent to oldest)
+    messages_with_tokens = []
+    for msg in reversed(conversation_history):
+        content = msg.get("content", "")
+        token_count = _estimate_token_count(content)
+        messages_with_tokens.append((msg, token_count))
+
+    # Select messages from most recent until we hit the limit
+    selected_messages = []
+    total_tokens = 0
+
+    for msg, tokens in messages_with_tokens:
+        if total_tokens + tokens <= max_tokens:
+            selected_messages.append(msg)
+            total_tokens += tokens
+        else:
+            # Stop adding older messages once we exceed the limit
+            break
+
+    # Reverse back to chronological order
+    selected_messages.reverse()
+
+    if len(selected_messages) < len(conversation_history):
+        logger.info(
+            f"[Token Limit] Truncated history from {len(conversation_history)} to "
+            f"{len(selected_messages)} messages (~{total_tokens} tokens, limit={max_tokens})"
+        )
+
+    return selected_messages
 
 
 def _send_progress(message: str, percent: int = None):
@@ -104,6 +181,7 @@ When answering questions:
 4. If you can't find relevant information in the provided context, say so honestly
 5. Cite the source document when possible
 6. Provide clear, detailed answers based on the context
+7. Return the final answer only with markdown format, without any internal notes or reasoning steps
 
 CRITICAL INSTRUCTIONS FOR USING CONTEXT:
 - When "Relevant document context" is provided in the system message, it contains ACTUAL DATA from the user's documents
@@ -116,24 +194,11 @@ CRITICAL INSTRUCTIONS FOR USING CONTEXT:
 - Perform calculations, aggregations, and analysis based on the data you see in the context
 
 CRITICAL INSTRUCTIONS FOR PRODUCT/PURCHASE QUERIES:
-- When asked about "products" or "purchases", ONLY include actual items/goods that were purchased
-- DO NOT include fees, charges, taxes, or shipping costs as "products"
-- **IMPORTANT**: Filter out ALL non-product items from your response
-- Examples of what to EXCLUDE from product lists (DO NOT LIST THESE):
-  * Shipping Charges, Delivery Fees, Freight Charges, Postage
-  * Environmental Handling Fees, Recycling Fees, Disposal Fees, Eco Fees
-  * Federal Tax, Provincial Tax, GST/HST, Sales Tax, VAT, Tax amounts
-  * Discounts, Rebates, Credits, Promotional discounts
-  * Service Fees, Processing Fees, Handling Fees, Administrative fees
-  * Subtotals, Totals, Grand Totals
-  * Any line item that contains the words: "Fee", "Tax", "Charge", "Shipping", "Discount", "Subtotal", "Total"
+- When asked about "products" or "purchases", ONLY include actual items/goods that were purchased and its price/quantity/tax/discount/shipping fee
 - Examples of what to INCLUDE as products:
   * Physical items with descriptions (e.g., "Lenovo 300e Windows", "Laptop", "Monitor", "Mouse", "Keyboard")
   * Software licenses or subscriptions
   * Services that are the main purchase (e.g., "Consulting Services", "Installation Service")
-- **FILTERING RULE**: Before including any item in your product list, ask yourself: "Is this an actual product/item that was purchased, or is it a fee/tax/charge?" If it's a fee/tax/charge, DO NOT include it
-- When listing products, focus on the "Description" field and exclude items that are clearly fees/charges/taxes
-- If you see invoice line items like "Environmental Handling Fee" or "Shipping Charges", these are NOT products - skip them entirely
 
 CRITICAL INSTRUCTIONS FOR AMOUNT/PRICE QUERIES:
 - When asked about the price, cost, or amount of a SPECIFIC item, respond ONLY with that item's individual amount
@@ -267,18 +332,208 @@ Classification:"""
 
 
 
-def _classify_query_with_context(query: str, conversation_history: List[dict] = None) -> str:
+def _get_last_assistant_message(history: List[dict]) -> Optional[str]:
+    """
+    Get the last assistant message from history.
+
+    Args:
+        history: Conversation history
+
+    Returns:
+        Last assistant message content, or None if not found
+    """
+    for msg in reversed(history):
+        if msg.get("role") == "assistant":
+            return msg.get("content", "")
+    return None
+
+
+def _is_error_or_incomplete_response(response: Optional[str]) -> bool:
+    """
+    Check if a response indicates an error or incomplete answer.
+
+    Args:
+        response: Assistant response content
+
+    Returns:
+        True if the response appears to be an error or incomplete
+    """
+    if not response:
+        return True
+
+    response_lower = response.lower()
+
+    # Error indicators
+    error_indicators = [
+        "error", "failed", "could not", "unable to",
+        "no relevant documents", "no information found",
+        "i don't have", "i cannot find", "i couldn't find",
+        "no data", "not found", "unavailable",
+        "apologize", "sorry, i"
+    ]
+
+    # Check for error indicators
+    for indicator in error_indicators:
+        if indicator in response_lower:
+            return True
+
+    # Very short response might be incomplete (less than 100 chars)
+    if len(response.strip()) < 100:
+        return True
+
+    return False
+
+
+# Configuration for auto-fallback from CONVERSATION_ONLY to document search
+CHAT_AUTO_FALLBACK_ENABLED = os.getenv("CHAT_AUTO_FALLBACK_ENABLED", "true").lower() == "true"
+
+
+def _is_no_data_response(response: str) -> bool:
+    """
+    Detect if LLM response indicates no useful data was found in conversation history.
+
+    This is used to trigger automatic fallback to document search when
+    CONVERSATION_ONLY mode fails to find relevant information.
+
+    Args:
+        response: The LLM response from conversation-only mode
+
+    Returns:
+        True if the response indicates no useful data was found
+    """
+    if not response:
+        return True
+
+    response_lower = response.lower()
+
+    # Patterns that indicate the LLM couldn't find the requested information
+    no_data_patterns = [
+        # Direct "no data" statements
+        "no information available",
+        "no data found",
+        "no products found",
+        "no records",
+        "no items found",
+        "no purchases",
+        "no transactions",
+        # Cannot find patterns
+        "cannot find any",
+        "couldn't find any",
+        "could not find any",
+        "can't find any",
+        "unable to find",
+        # Don't have patterns
+        "don't have information",
+        "do not have information",
+        "don't have any information",
+        "don't have details",
+        "no relevant information",
+        "no specific information",
+        # Not mentioned patterns
+        "not mentioned",
+        "wasn't discussed",
+        "haven't been mentioned",
+        "not available in the conversation",
+        "not in the conversation",
+        "not discussed in",
+        # Request more info patterns
+        "please provide more details",
+        "check the date again",
+        "could you clarify",
+        "need more information",
+        # Appears/seems patterns
+        "it seems there is no",
+        "there doesn't appear to be",
+        "there appears to be no",
+        "it appears that no",
+    ]
+
+    for pattern in no_data_patterns:
+        if pattern in response_lower:
+            logger.info(f"[No-Data Detection] Pattern matched: '{pattern}'")
+            return True
+
+    return False
+
+
+def _build_enhanced_fallback_query(
+    original_query: str,
+    conversation_history: List[dict]
+) -> str:
+    """
+    Build an enhanced query for fallback document search by combining
+    the original query with context from conversation history.
+
+    Args:
+        original_query: The user's original query
+        conversation_history: Previous conversation messages
+
+    Returns:
+        Enhanced query string for document search
+    """
+    if not conversation_history:
+        return original_query
+
+    # Extract context from recent conversation history
+    context_parts = []
+
+    # Look at last few user messages for additional context
+    user_messages = [
+        msg["content"] for msg in conversation_history
+        if msg.get("role") == "user"
+    ][-3:]  # Last 3 user messages
+
+    # Extract potential entities and time periods from user messages
+    for user_msg in user_messages:
+        msg_lower = user_msg.lower()
+
+        # Extract year references
+        import re
+        years = re.findall(r'\b(20\d{2})\b', user_msg)
+        for year in years:
+            if year not in context_parts:
+                context_parts.append(year)
+
+        # Extract month references
+        months = ["january", "february", "march", "april", "may", "june",
+                  "july", "august", "september", "october", "november", "december"]
+        for month in months:
+            if month in msg_lower and month not in context_parts:
+                context_parts.append(month)
+
+    # Build enhanced query
+    if context_parts:
+        # Combine original query with extracted context
+        context_str = " ".join(context_parts)
+        enhanced_query = f"{original_query} {context_str}"
+        logger.info(f"[Fallback Query] Enhanced: '{original_query}' -> '{enhanced_query}'")
+        return enhanced_query
+
+    return original_query
+
+
+def _classify_query_with_context(
+    query: str,
+    conversation_history: List[dict] = None,
+    is_retry: bool = False
+) -> str:
     """
     Classify query intent with conversation context awareness.
 
     Args:
         query: The user's current message
         conversation_history: Previous conversation messages
+        is_retry: If True, user clicked retry button - always trigger new search
 
     Returns:
         One of: "CONVERSATION_ONLY", "SAME_CONTEXT", "NEW_SEARCH", "DIRECT"
     """
-    # Quick pattern matching for greetings
+    # Rule 1: Retry always triggers new search
+    if is_retry:
+        logger.info(f"[Query Classification] '{query}' -> NEW_SEARCH (retry action)")
+        return "NEW_SEARCH"
+
+    # Rule 2: Quick pattern matching for greetings
     query_lower = query.lower().strip()
     direct_patterns = [
         "hi", "hello", "hey", "greetings", "good morning", "good afternoon", "good evening",
@@ -286,6 +541,8 @@ def _classify_query_with_context(query: str, conversation_history: List[dict] = 
         "thanks", "thank you", "thx", "ty",
         "bye", "goodbye", "see you", "later",
         "ok", "okay", "sure", "yes", "no", "yep", "nope",
+        "cool", "awesome", "nice", "thanks", "thank you", "thx", "ty",
+        "great", "good job", "well done", "excellent", "fantastic", "amazing", "wow", "How are you"
     ]
 
     for pattern in direct_patterns:
@@ -293,17 +550,26 @@ def _classify_query_with_context(query: str, conversation_history: List[dict] = 
             logger.info(f"[Query Classification] '{query}' -> DIRECT (greeting pattern)")
             return "DIRECT"
 
-    # If no conversation history, must be a new search
-    if not conversation_history or len(conversation_history) < 2:
-        logger.info(f"[Query Classification] '{query}' -> NEW_SEARCH (no conversation history)")
+    # Rule 3: If no conversation history or too short, must be a new search
+    # Need at least 2 Q&A rounds (4 messages) for CONVERSATION_ONLY
+    if not conversation_history or len(conversation_history) < 4:
+        logger.info(f"[Query Classification] '{query}' -> NEW_SEARCH (insufficient history: {len(conversation_history) if conversation_history else 0} messages)")
         return "NEW_SEARCH"
 
-    # Build conversation context (last 2 rounds = 4 messages)
-    recent_messages = conversation_history[-4:] if len(conversation_history) >= 4 else conversation_history
+    # Rule 4: Check if last assistant response was an error/failure
+    last_assistant = _get_last_assistant_message(conversation_history)
+    if _is_error_or_incomplete_response(last_assistant):
+        logger.info(f"[Query Classification] '{query}' -> NEW_SEARCH (previous response was error/incomplete)")
+        return "NEW_SEARCH"
+
+    # Rule 5: Use full conversation history with token limit for LLM classification
+    # Truncate to fit within token budget, keeping most recent messages
+    truncated_history = _truncate_history_to_token_limit(conversation_history)
+
     conversation_context = ""
-    for msg in recent_messages:
+    for msg in truncated_history:
         role = "User" if msg["role"] == "user" else "Assistant"
-        content = msg["content"][:500]  # Limit length
+        content = msg["content"]
         conversation_context += f"{role}: {content}\n\n"
 
     # Use LLM to classify with context
@@ -631,6 +897,9 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
+        # Check if iterative reasoning is enabled
+        iterative_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
+
         # Send progress update: Analyzing query
         _send_progress("Analyzing query complexity...", 10)
 
@@ -675,80 +944,229 @@ def search_documents(query: str) -> str:
                 f"[Search] Document router selected {len(relevant_sources)} sources: {relevant_sources}"
             )
 
-        # Step 3: Create retriever with optional source filtering
-        if relevant_sources:
-            # When document routing is active, use per-source selection to ensure
-            # all routed sources are represented in results.
-            # This retrieves chunks from EACH source separately, then combines them,
-            # preventing MMR from excluding entire sources due to diversity filtering.
-            retriever = get_retriever_with_sources(
-                k=18,  # Total chunks across all sources
-                fetch_k=50,
-                source_names=relevant_sources,
-                lambda_mult=0.5,  # Balanced relevance/diversity within each source
-                per_source_selection=True  # Ensure all sources are represented
+        # Step 3: Use Iterative Reasoning Engine (unified for GraphRAG and vector-only)
+        if iterative_enabled:
+            return _search_with_iterative_reasoning(
+                query=query,
+                max_steps=max_steps,
+                relevant_sources=relevant_sources,
+                graphrag_enabled=GRAPHRAG_AVAILABLE and GRAPH_RAG_QUERY_ENABLED
             )
         else:
-            retriever = get_retriever(k=15, fetch_k=50)
-
-        # Step 4: Search with enhanced query
-        _send_progress("Searching document chunks...", 50)
-
-        docs = retriever.invoke(enhanced_query)
-
-        if not docs:
-            return "No relevant documents found for this query."
-
-        # Format results - include all unique sources for better coverage
-        results = []
-        seen_sources = set()
-
-        # Step 5: Get GraphRAG context with dynamic max_steps and source filtering (entities and relationships)
-        _send_progress("Retrieving knowledge from graph...", 60)
-
-        graphrag_context = _get_graphrag_context(
-            enhanced_query,
-            max_steps=max_steps,
-            source_names=relevant_sources if relevant_sources else None
-        )
-        if graphrag_context:
-            results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
-
-        for i, doc in enumerate(docs, 1):
-            source = doc.metadata.get("source", "Unknown")
-            heading = doc.metadata.get("heading_path", "")
-            content = doc.page_content  # Use full content (no truncation) to preserve augmented dates
-
-            result = f"[Document {i}: {source}]"
-            if heading:
-                result += f"\nSection: {heading}"
-            result += f"\n{content}"
-            results.append(result)
-            seen_sources.add(source)
-
-        # Log which sources were found and check for missing sources
-        logger.info(
-            f"[Search] Found {len(docs)} chunks from {len(seen_sources)} sources: {seen_sources} | "
-            f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
-        )
-
-        # Check if any routed sources are missing from results
-        if relevant_sources and len(seen_sources) < len(relevant_sources):
-            missing_sources = set(relevant_sources) - seen_sources
-            logger.warning(
-                f"[Search] {len(missing_sources)} routed source(s) missing from results: {missing_sources}. "
-                f"This may indicate MMR diversity filtering excluded them. "
-                f"Consider increasing k or lambda_mult if information is missing."
+            # Fallback to legacy single-shot search
+            return _search_legacy(
+                query=query,
+                enhanced_query=enhanced_query,
+                max_steps=max_steps,
+                relevant_sources=relevant_sources
             )
-
-        # Send progress update: Generating answer
-        _send_progress("Generating answer...", 80)
-
-        return "\n\n---\n\n".join(results)
 
     except Exception as e:
         logger.error(f"Error searching documents: {e}")
         return f"Error searching documents: {str(e)}"
+
+
+def _search_with_iterative_reasoning(
+    query: str,
+    max_steps: int,
+    relevant_sources: List[str],
+    graphrag_enabled: bool
+) -> str:
+    """
+    Search using the unified Iterative Reasoning Engine.
+
+    This provides multi-round query refinement for both GraphRAG and vector-only modes.
+
+    Args:
+        query: User's search query
+        max_steps: Maximum reasoning iterations
+        relevant_sources: List of source documents to filter (from routing)
+        graphrag_enabled: Whether GraphRAG (Neo4j) is available and enabled
+
+    Returns:
+        Formatted search results string
+    """
+    import asyncio
+    import concurrent.futures
+    from .iterative_reasoning import IterativeReasoningEngine, ReasoningResult
+
+    logger.info(f"[Search] Using Iterative Reasoning Engine (graphrag={graphrag_enabled}, max_steps={max_steps})")
+
+    # Create reasoning engine
+    engine = IterativeReasoningEngine(
+        graphrag_enabled=graphrag_enabled,
+        max_steps=max_steps,
+        source_names=relevant_sources if relevant_sources else None
+    )
+
+    # Define async reasoning function
+    async def _run_reasoning():
+        # Create async progress callback
+        async def progress_callback(message: str, percent: int):
+            _send_progress(message, percent)
+
+        return await engine.reason(query, progress_callback=progress_callback)
+
+    # Run async reasoning in sync context
+    try:
+        # Check if we're already in an event loop (e.g., FastAPI request)
+        asyncio.get_running_loop()
+        # We're in an existing event loop - run in a new thread
+        logger.debug("[Search] Running iterative reasoning in thread pool")
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(asyncio.run, _run_reasoning())
+            result: ReasoningResult = future.result()
+    except RuntimeError:
+        # No running event loop - use asyncio.run directly
+        logger.debug("[Search] Running iterative reasoning with asyncio.run")
+        result: ReasoningResult = asyncio.run(_run_reasoning())
+
+    # Format results
+    return _format_reasoning_result(result)
+
+
+def _format_reasoning_result(result) -> str:
+    """
+    Format the ReasoningResult into a string for the LLM.
+
+    Args:
+        result: ReasoningResult from IterativeReasoningEngine
+
+    Returns:
+        Formatted string with answer and/or context
+    """
+    from .iterative_reasoning import ReasoningResult
+
+    results = []
+
+    # If we have a final answer from iterative reasoning, prioritize it
+    if result.final_answer:
+        logger.info(f"[Search] Using final answer from iterative reasoning ({len(result.final_answer)} chars)")
+        results.append(f"[Iterative Reasoning Answer]\n{result.final_answer}")
+
+    # Add entity/relationship context if available (from GraphRAG)
+    if result.entities:
+        entity_context = "[Knowledge Graph Entities]\n"
+        for entity in result.entities[:15]:
+            name = entity.get("name", entity.get("entity_name", "Unknown"))
+            entity_type = entity.get("entity_type", "")
+            desc = entity.get("description", "")[:200]
+            entity_context += f"- **{name}** ({entity_type}): {desc}\n"
+        results.append(entity_context)
+
+    if result.relationships:
+        rel_context = "[Knowledge Graph Relationships]\n"
+        for rel in result.relationships[:15]:
+            src = rel.get("src_name", rel.get("src_entity_id", "?"))
+            tgt = rel.get("tgt_name", rel.get("tgt_entity_id", "?"))
+            desc = rel.get("description", "related to")
+            rel_context += f"- {src} → {tgt}: {desc}\n"
+        results.append(rel_context)
+
+    # Add document chunks as context
+    seen_sources = set()
+    for i, chunk in enumerate(result.chunks[:20], 1):
+        source = chunk.get("metadata", {}).get("source", "Unknown")
+        heading = chunk.get("metadata", {}).get("heading_path", "")
+        content = chunk.get("page_content", chunk.get("content", ""))
+
+        chunk_result = f"[Document {i}: {source}]"
+        if heading:
+            chunk_result += f"\nSection: {heading}"
+        chunk_result += f"\n{content}"
+        results.append(chunk_result)
+        seen_sources.add(source)
+
+    # Log summary
+    logger.info(
+        f"[Search] Iterative reasoning complete: {result.steps_taken} steps, "
+        f"{len(result.queries_made)} queries, {len(result.chunks)} chunks from {len(seen_sources)} sources, "
+        f"answer={'yes' if result.final_answer else 'no'}"
+    )
+
+    if not results:
+        return "No relevant documents found for this query."
+
+    _send_progress("Generating answer...", 90)
+
+    return "\n\n---\n\n".join(results)
+
+
+def _search_legacy(
+    query: str,
+    enhanced_query: str,
+    max_steps: int,
+    relevant_sources: List[str]
+) -> str:
+    """
+    Legacy single-shot search (fallback when iterative reasoning is disabled).
+
+    Args:
+        query: Original user query
+        enhanced_query: LLM-enhanced query
+        max_steps: Max steps for GraphRAG (if enabled)
+        relevant_sources: Source filter from routing
+
+    Returns:
+        Formatted search results string
+    """
+    logger.info("[Search] Using legacy single-shot search")
+
+    # Step 3: Create retriever with optional source filtering
+    if relevant_sources:
+        retriever = get_retriever_with_sources(
+            k=18,
+            fetch_k=50,
+            source_names=relevant_sources,
+            lambda_mult=0.5,
+            per_source_selection=True
+        )
+    else:
+        retriever = get_retriever(k=15, fetch_k=50)
+
+    # Step 4: Search with enhanced query
+    _send_progress("Searching document chunks...", 50)
+
+    docs = retriever.invoke(enhanced_query)
+
+    if not docs:
+        return "No relevant documents found for this query."
+
+    # Format results
+    results = []
+    seen_sources = set()
+
+    # Step 5: Get GraphRAG context (if enabled)
+    _send_progress("Retrieving knowledge from graph...", 60)
+
+    graphrag_context = _get_graphrag_context(
+        enhanced_query,
+        max_steps=max_steps,
+        source_names=relevant_sources if relevant_sources else None
+    )
+    if graphrag_context:
+        results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
+
+    for i, doc in enumerate(docs, 1):
+        source = doc.metadata.get("source", "Unknown")
+        heading = doc.metadata.get("heading_path", "")
+        content = doc.page_content
+
+        result = f"[Document {i}: {source}]"
+        if heading:
+            result += f"\nSection: {heading}"
+        result += f"\n{content}"
+        results.append(result)
+        seen_sources.add(source)
+
+    logger.info(
+        f"[Search] Legacy search: {len(docs)} chunks from {len(seen_sources)} sources | "
+        f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
+    )
+
+    _send_progress("Generating answer...", 80)
+
+    return "\n\n---\n\n".join(results)
 
 
 # Define tools
@@ -932,38 +1350,43 @@ def create_agent_executor():
 
 def _build_context_aware_system_message(
     session_context: Dict[str, Any],
-    recent_conversation: List[Dict[str, str]] = None
+    conversation_history: List[Dict[str, str]] = None
 ) -> Optional[str]:
     """
-    Build a context-aware system message based on session metadata and recent conversation.
+    Build a context-aware system message based on session metadata and conversation history.
+
+    Uses the full conversation history (truncated to token limit) for better context awareness.
+    The token limit is controlled by MAX_INPUT_TOKEN_LIMIT environment variable.
 
     Args:
         session_context: Session metadata containing entities, topics, documents, etc.
-        recent_conversation: Last 2 rounds (4 messages) of conversation for immediate context.
+        conversation_history: Full conversation history (will be truncated to token limit).
 
     Returns:
         System message content with conversation context, or None if no context available.
     """
-    if not session_context and not recent_conversation:
+    if not session_context and not conversation_history:
         return None
 
     system_message = """You are a helpful AI assistant with access to document knowledge.
 
 """
 
-    # Add recent conversation context (last 2 rounds)
-    if recent_conversation and len(recent_conversation) >= 2:
-        system_message += """Recent Conversation Context:
-The user just had this conversation with you:
-"""
-        # Get last 4 messages (2 rounds of user-assistant exchange)
-        recent_messages = recent_conversation[-4:] if len(recent_conversation) >= 4 else recent_conversation
-        for msg in recent_messages:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            content = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
-            system_message += f"\n{role}: {content}\n"
+    # Add conversation context (full history truncated to token limit)
+    if conversation_history and len(conversation_history) >= 2:
+        # Truncate history to fit within token budget, keeping most recent messages
+        truncated_history = _truncate_history_to_token_limit(conversation_history)
 
-        system_message += """
+        if truncated_history:
+            system_message += """Conversation History:
+The following is the conversation history with the user:
+"""
+            for msg in truncated_history:
+                role = "User" if msg["role"] == "user" else "Assistant"
+                content = msg["content"]
+                system_message += f"\n{role}: {content}\n"
+
+            system_message += """
 IMPORTANT: When the user asks a follow-up question, it is likely related to the conversation above.
 Pay close attention to:
 - Time periods mentioned (e.g., "2025", "last month")
@@ -971,7 +1394,7 @@ Pay close attention to:
 - Entities referenced (e.g., document names, people, items)
 
 If the user's question seems incomplete or vague (e.g., "how much totally", "summarize it"),
-assume they are referring to the context from the recent conversation above.
+assume they are referring to the context from the conversation history above.
 
 """
 
@@ -1016,7 +1439,8 @@ async def stream_agent_response(
     query: str,
     conversation_history: List[dict] = None,
     progress_callback=None,
-    session_context: Optional[Dict[str, Any]] = None
+    session_context: Optional[Dict[str, Any]] = None,
+    is_retry: bool = False
 ):
     """
     Stream the agent response for a query.
@@ -1026,6 +1450,7 @@ async def stream_agent_response(
         conversation_history: Optional list of previous messages.
         progress_callback: Optional async callback function(message: str, percent: int) for progress updates.
         session_context: Optional session metadata with entities, topics, and conversation context.
+        is_retry: If True, user clicked retry button - always trigger new document search.
 
     Yields:
         Chunks of the response text.
@@ -1034,8 +1459,8 @@ async def stream_agent_response(
     global _progress_callback
     _progress_callback = progress_callback
 
-    # Classify query with conversation context
-    query_classification = _classify_query_with_context(query, conversation_history)
+    # Classify query with conversation context and retry flag
+    query_classification = _classify_query_with_context(query, conversation_history, is_retry=is_retry)
     logger.info(f"[Query Classification] Query: '{query}' -> {query_classification}")
 
     # Handle CONVERSATION_ONLY queries - answer directly from conversation history without document search
@@ -1066,15 +1491,84 @@ Do NOT say you need to search documents - the information is already in the conv
         # Add current query
         messages.append(HumanMessage(content=query))
 
-        # Stream response directly from LLM (no agent/tools)
+        # Phase 1: Get response from LLM using conversation history
         llm_service = get_llm_service()
         llm = llm_service.get_chat_model(temperature=0.7)
 
-        async for chunk in llm.astream(messages):
-            if chunk.content:
-                yield chunk.content
+        # If auto-fallback is enabled, collect full response first to check for "no data"
+        if CHAT_AUTO_FALLBACK_ENABLED:
+            logger.info(f"[CONVERSATION_ONLY] Auto-fallback enabled, collecting response first")
 
-        return  # Exit early, no need for agent
+            # Collect full response
+            full_response = ""
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    full_response += chunk.content
+
+            # Check if response indicates no useful data
+            if _is_no_data_response(full_response):
+                logger.info(f"[CONVERSATION_ONLY] Response indicates no data, triggering fallback to document search")
+
+                # Send progress update if callback available
+                if progress_callback:
+                    await progress_callback("No data in history, searching documents...", 20)
+
+                # Phase 2: Fallback to document search with enhanced query
+                enhanced_query = _build_enhanced_fallback_query(query, conversation_history)
+                logger.info(f"[Fallback] Using enhanced query for document search: '{enhanced_query}'")
+
+                # Use the agent with tools for document search
+                agent = create_agent_executor()
+
+                # Build message history for agent
+                agent_messages = []
+
+                # Add system message with context if available
+                if session_context or conversation_history:
+                    system_content = _build_context_aware_system_message(
+                        session_context or {},
+                        conversation_history
+                    )
+                    if system_content:
+                        agent_messages.append(SystemMessage(content=system_content))
+
+                if conversation_history:
+                    for msg in conversation_history:
+                        if msg["role"] == "user":
+                            agent_messages.append(HumanMessage(content=msg["content"]))
+                        elif msg["role"] == "assistant":
+                            agent_messages.append(AIMessage(content=msg["content"]))
+
+                # Add enhanced query
+                agent_messages.append(HumanMessage(content=enhanced_query))
+
+                # Stream response from agent
+                async for event in agent.astream_events(
+                    {"messages": agent_messages},
+                    version="v2",
+                ):
+                    if event["event"] == "on_chat_model_stream":
+                        parent_ids = event.get("parent_ids", [])
+                        if len(parent_ids) <= 2:
+                            content = event["data"]["chunk"].content
+                            if content:
+                                yield content
+
+                return  # Exit after fallback search
+
+            else:
+                # Response is good, stream it to the user
+                logger.info(f"[CONVERSATION_ONLY] Response has useful data, streaming to user")
+                yield full_response
+                return  # Exit early
+
+        else:
+            # Auto-fallback disabled, stream directly
+            async for chunk in llm.astream(messages):
+                if chunk.content:
+                    yield chunk.content
+
+            return  # Exit early, no need for agent
 
     # For all other classifications, use the agent with tools
     agent = create_agent_executor()

@@ -146,8 +146,15 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                 try:
                     request = json.loads(data)
+
+                    # Handle ping/pong for keepalive
+                    if request.get("type") == "ping":
+                        await websocket.send_json({"type": "pong"})
+                        continue
+
                     message = request.get("message", "")
                     user_id = request.get("user_id")
+                    is_retry = request.get("is_retry", False)  # Flag for retry action
 
                     if not message:
                         await websocket.send_json({
@@ -241,13 +248,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                         # Use enhanced message with resolved pronouns and pass session context
                         chunk_count = 0
-                        logger.info(f"[Streaming] Starting to stream response for message: '{enhanced_message[:100]}...'")
+                        logger.info(f"[Streaming] Starting to stream response for message: '{enhanced_message[:100]}...' (is_retry={is_retry})")
                         try:
                             async for chunk in stream_agent_response(
                                 enhanced_message,
                                 history,
                                 progress_callback=progress_callback,
-                                session_context=session_context
+                                session_context=session_context,
+                                is_retry=is_retry
                             ):
                                 chunk_count += 1
                                 full_response += chunk
@@ -266,6 +274,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 full_response = "I apologize, but I encountered an issue generating a response. Please try again."
                                 streaming_error = Exception("No response chunks received from agent")
 
+                        except WebSocketDisconnect as stream_error:
+                            # Client disconnected - expected behavior (user navigated away, network issue, etc.)
+                            streaming_error = stream_error
+                            logger.info(f"[Streaming] Client disconnected after {chunk_count} chunks - this is normal if user navigated away")
+                            # Don't raise - just stop streaming gracefully
                         except Exception as stream_error:
                             streaming_error = stream_error
                             error_msg = str(stream_error) if str(stream_error) else f"{type(stream_error).__name__}"

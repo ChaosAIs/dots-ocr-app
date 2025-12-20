@@ -488,15 +488,21 @@ class GraphRAG:
             # Format knowledge summary for LLM
             knowledge_summary = self._format_knowledge_summary(retrieved_knowledge)
 
+            # Format previous queries for anti-duplication
+            previous_queries_str = ", ".join(f'"{q}"' for q in queries_made) if queries_made else "None"
+
             think_prompt = AGENT_THINK_PROMPT.format(
                 question=question,
                 step=step,
                 max_steps=max_steps,
                 retrieved_knowledge=knowledge_summary,
+                previous_queries=previous_queries_str,
             )
 
             # Get LLM chat model and invoke it
-            llm = self._llm_service.get_chat_model(temperature=0.2, num_predict=1000)
+            # Increased num_predict for enhanced deep reasoning prompt
+            # 4000 tokens allows for comprehensive answers with multiple products/items
+            llm = self._llm_service.get_chat_model(temperature=0.2, num_predict=4000)
             think_response_msg = await llm.ainvoke([HumanMessage(content=think_prompt)])
             think_response = think_response_msg.content.strip()
 
@@ -678,7 +684,7 @@ class GraphRAG:
         )
 
     def _format_knowledge_summary(self, retrieved_knowledge: List[Dict]) -> str:
-        """Format retrieved knowledge for LLM prompt."""
+        """Format retrieved knowledge for LLM prompt with enhanced template."""
         from .agent_prompts import KNOWLEDGE_FORMAT_TEMPLATE, NO_KNOWLEDGE_TEMPLATE
 
         if not retrieved_knowledge:
@@ -689,21 +695,36 @@ class GraphRAG:
             entities = knowledge.get("entities", [])
             relationships = knowledge.get("relationships", [])
             chunks = knowledge.get("chunks", [])
+            query = knowledge.get("query", "")
 
             if entities or relationships or chunks:
                 entities_str = self._format_entities_for_prompt(entities)
                 relationships_str = self._format_relationships_for_prompt(relationships)
                 chunks_str = self._format_chunks_for_prompt(chunks)
+
+                # Extract unique sources from chunks
+                sources = set()
+                for chunk in chunks:
+                    source = chunk.get("metadata", {}).get("source", "")
+                    if source:
+                        sources.add(source)
+                sources_str = ", ".join(sources) if sources else "None"
+
                 summaries.append(
                     KNOWLEDGE_FORMAT_TEMPLATE.format(
                         step=i,
+                        query=query,
                         entities=entities_str,
                         relationships=relationships_str,
                         chunks=chunks_str,
+                        entity_count=len(entities),
+                        relationship_count=len(relationships),
+                        chunk_count=len(chunks),
+                        sources=sources_str,
                     )
                 )
             else:
-                summaries.append(NO_KNOWLEDGE_TEMPLATE.format(step=i))
+                summaries.append(NO_KNOWLEDGE_TEMPLATE.format(step=i, query=query))
 
         return "\n".join(summaries)
 
@@ -785,9 +806,10 @@ class GraphRAG:
             # Show top N chunks by score
             for chunk_idx, chunk in enumerate(sorted_chunks[:chunks_per_source], 1):
                 content = chunk.get("page_content", chunk.get("content", ""))
-                # Truncate very long chunks but keep enough for invoice data
-                if len(content) > 500:
-                    content = content[:500] + "..."
+                # Truncate very long chunks but keep enough for invoice/product data
+                # Increased from 500 to 800 to capture complete product information
+                if len(content) > 800:
+                    content = content[:800] + "..."
                 score = chunk.get("_score", 0)
                 lines.append(f"  Chunk {chunk_idx} (score: {score:.2f}):\n  {content}\n")
                 total_chunks_shown += 1
