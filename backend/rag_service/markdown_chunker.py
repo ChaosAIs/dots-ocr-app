@@ -1,11 +1,23 @@
 """
 Markdown chunking utilities for semantic document splitting.
-Uses LangChain's text splitters to chunk markdown files by headers.
+
+This module provides both the original chunking approach and a new adaptive
+chunking system that selects optimal strategies based on document type.
+
+The adaptive chunking system supports:
+- Domain-aware chunking (legal, academic, medical, engineering, education, etc.)
+- LLM-based document classification
+- Multiple chunking strategies optimized for different document types
+- Enhanced metadata with domain-specific fields
+
+For backward compatibility, the original functions are preserved and work as before.
+To use adaptive chunking, use chunk_markdown_adaptive() or chunk_content_adaptive().
 """
 
 import logging
 import re
 import uuid
+import os
 from typing import List, Tuple, Optional
 from pathlib import Path
 from dataclasses import dataclass
@@ -18,7 +30,28 @@ from langchain_core.documents import Document
 
 from .utils.date_normalizer import find_and_normalize_dates, augment_text_with_dates
 
+# Import adaptive chunking system
+try:
+    from .chunking import (
+        AdaptiveChunker,
+        AdaptiveChunkingResult,
+        ChunkingProfile,
+        DocumentClassifier,
+        classify_document,
+        chunk_document_adaptive,
+        chunk_file_adaptive,
+    )
+    ADAPTIVE_CHUNKING_AVAILABLE = True
+except ImportError as e:
+    ADAPTIVE_CHUNKING_AVAILABLE = False
+    logging.getLogger(__name__).debug(f"Adaptive chunking not available: {e}")
+
 logger = logging.getLogger(__name__)
+
+# Environment variable to enable adaptive chunking by default
+ADAPTIVE_CHUNKING_ENABLED = os.environ.get("ADAPTIVE_CHUNKING_ENABLED", "false").lower() == "true"
+# Environment variable to enable LLM classification
+ADAPTIVE_CHUNKING_USE_LLM = os.environ.get("ADAPTIVE_CHUNKING_USE_LLM", "true").lower() == "true"
 
 
 @dataclass
@@ -486,6 +519,7 @@ def chunk_markdown_with_summaries(
     md_path: str,
     source_name: str = None,
     generate_summaries: bool = True,
+    use_adaptive: bool = None,
 ) -> ChunkingResult:
     """
     Chunk a markdown file.
@@ -497,11 +531,18 @@ def chunk_markdown_with_summaries(
         md_path: Path to the markdown file.
         source_name: Name to use as source metadata. If None, uses the filename.
         generate_summaries: Deprecated, ignored. Kept for backward compatibility.
+        use_adaptive: Whether to use adaptive chunking. Defaults to ADAPTIVE_CHUNKING_ENABLED.
 
     Returns:
         ChunkingResult with chunks and empty file_summary.
     """
-    # Get the chunks
+    # Determine whether to use adaptive chunking
+    should_use_adaptive = use_adaptive if use_adaptive is not None else ADAPTIVE_CHUNKING_ENABLED
+
+    if should_use_adaptive and ADAPTIVE_CHUNKING_AVAILABLE:
+        return chunk_markdown_adaptive(md_path, source_name)
+
+    # Get the chunks using original method
     chunks = chunk_markdown_file(md_path, source_name)
 
     if not chunks:
@@ -514,3 +555,182 @@ def chunk_markdown_with_summaries(
     logger.info(f"Chunked {source_name}: {len(chunks)} chunks")
 
     return ChunkingResult(chunks=chunks)
+
+
+# ============================================================================
+# ADAPTIVE CHUNKING FUNCTIONS
+# ============================================================================
+
+def chunk_markdown_adaptive(
+    md_path: str,
+    source_name: str = None,
+    use_llm: bool = None,
+    force_strategy: str = None,
+) -> ChunkingResult:
+    """
+    Chunk a markdown file using adaptive domain-aware chunking.
+
+    This function uses document classification to select the optimal
+    chunking strategy based on document type and domain.
+
+    Args:
+        md_path: Path to the markdown file.
+        source_name: Name to use as source metadata. If None, uses the filename.
+        use_llm: Whether to use LLM for classification. Defaults to ADAPTIVE_CHUNKING_USE_LLM.
+        force_strategy: Force a specific strategy (bypasses classification).
+
+    Returns:
+        ChunkingResult with chunks and metadata.
+
+    Supported strategies:
+        - whole_document: For small atomic documents
+        - semantic_header: For well-structured documents with headers
+        - clause_preserving: For legal documents with numbered clauses
+        - academic_structure: For research papers with citations
+        - medical_section: For clinical documents with SOAP structure
+        - requirement_based: For technical specifications
+        - educational_unit: For learning materials
+        - table_preserving: For documents with significant tables
+        - paragraph: For narrative documents
+    """
+    if not ADAPTIVE_CHUNKING_AVAILABLE:
+        logger.warning("Adaptive chunking not available, falling back to standard chunking")
+        return chunk_markdown_with_summaries(md_path, source_name, use_adaptive=False)
+
+    md_path = Path(md_path)
+
+    if not md_path.exists():
+        logger.error(f"Markdown file not found: {md_path}")
+        return ChunkingResult(chunks=[])
+
+    # Use filename as source name if not provided
+    if source_name is None:
+        source_name = md_path.stem
+
+    # Determine LLM usage
+    should_use_llm = use_llm if use_llm is not None else ADAPTIVE_CHUNKING_USE_LLM
+
+    try:
+        # Use the adaptive chunker
+        result = chunk_file_adaptive(
+            file_path=str(md_path),
+            source_name=source_name,
+            use_llm=should_use_llm,
+            force_strategy=force_strategy,
+        )
+
+        logger.info(
+            f"[Adaptive] Chunked {source_name}: {len(result.chunks)} chunks "
+            f"using {result.profile.recommended_strategy} strategy "
+            f"(type: {result.profile.document_type}, domain: {result.profile.document_domain})"
+        )
+
+        return ChunkingResult(chunks=result.chunks)
+
+    except Exception as e:
+        logger.error(f"Adaptive chunking failed for {md_path}, falling back: {e}")
+        return chunk_markdown_with_summaries(md_path, source_name, use_adaptive=False)
+
+
+def chunk_content_adaptive(
+    content: str,
+    source_name: str,
+    file_path: str = "",
+    use_llm: bool = None,
+    force_strategy: str = None,
+) -> ChunkingResult:
+    """
+    Chunk text content using adaptive domain-aware chunking.
+
+    Args:
+        content: The text content to chunk.
+        source_name: Name to use as source metadata.
+        file_path: Optional file path for metadata.
+        use_llm: Whether to use LLM for classification.
+        force_strategy: Force a specific strategy.
+
+    Returns:
+        ChunkingResult with chunks.
+    """
+    if not ADAPTIVE_CHUNKING_AVAILABLE:
+        logger.warning("Adaptive chunking not available, falling back to standard chunking")
+        chunks = chunk_text_content(content, source_name, file_path)
+        return ChunkingResult(chunks=chunks)
+
+    if not content or not content.strip():
+        return ChunkingResult(chunks=[])
+
+    # Determine LLM usage
+    should_use_llm = use_llm if use_llm is not None else ADAPTIVE_CHUNKING_USE_LLM
+
+    try:
+        chunks = chunk_document_adaptive(
+            content=content,
+            source_name=source_name,
+            file_path=file_path,
+            use_llm=should_use_llm,
+            force_strategy=force_strategy,
+        )
+
+        logger.info(f"[Adaptive] Chunked content {source_name}: {len(chunks)} chunks")
+
+        return ChunkingResult(chunks=chunks)
+
+    except Exception as e:
+        logger.error(f"Adaptive content chunking failed, falling back: {e}")
+        chunks = chunk_text_content(content, source_name, file_path)
+        return ChunkingResult(chunks=chunks)
+
+
+def get_chunking_profile(
+    content: str,
+    filename: str = "",
+    use_llm: bool = True,
+) -> Optional[dict]:
+    """
+    Get the chunking profile for a document without actually chunking it.
+
+    Useful for understanding how a document would be processed.
+
+    Args:
+        content: The document content.
+        filename: The document filename.
+        use_llm: Whether to use LLM for classification.
+
+    Returns:
+        Dictionary with classification results, or None if not available.
+    """
+    if not ADAPTIVE_CHUNKING_AVAILABLE:
+        return None
+
+    try:
+        profile = classify_document(content, filename, use_llm=use_llm)
+        return profile.to_dict()
+    except Exception as e:
+        logger.error(f"Failed to get chunking profile: {e}")
+        return None
+
+
+def list_available_strategies() -> List[str]:
+    """
+    List all available chunking strategies.
+
+    Returns:
+        List of strategy names.
+    """
+    return [
+        "whole_document",
+        "semantic_header",
+        "clause_preserving",
+        "academic_structure",
+        "medical_section",
+        "requirement_based",
+        "educational_unit",
+        "table_preserving",
+        "paragraph",
+    ]
+
+
+def is_adaptive_chunking_available() -> bool:
+    """Check if adaptive chunking is available."""
+    return ADAPTIVE_CHUNKING_AVAILABLE

@@ -25,7 +25,7 @@ from .graph_indexer import (
     GRAPH_RAG_INDEX_ENABLED,
 )
 from .query_mode_detector import QueryModeDetector
-from .graph_rag import GraphRAG, GraphRAGContext
+from .graph_rag import GraphRAG, GraphRAGContext, GRAPH_RAG_QUERY_ENABLED
 from .utils import (
     generate_entity_id,
     generate_relationship_id,

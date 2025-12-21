@@ -73,16 +73,27 @@ class GraphRAG:
         if self._storage_initialized:
             return
 
+        logger.info("[GraphRAG Query] Initializing Neo4j storage...")
+
         try:
             from ..storage import Neo4jStorage
 
             self._graph_storage = Neo4jStorage(self.workspace_id)
 
             self._storage_initialized = True
-            logger.info("[GraphRAG Query] Neo4j storage initialized")
+            logger.info(f"[GraphRAG Query] Neo4j storage initialized successfully (storage={self._graph_storage is not None})")
 
+        except ImportError as e:
+            logger.error(f"[GraphRAG Query] Failed to import Neo4jStorage: {e}")
+            import traceback
+            logger.error(f"[GraphRAG Query] Import traceback:\n{traceback.format_exc()}")
+            self._storage_initialized = True  # Mark as initialized to prevent retries
+            raise
         except Exception as e:
             logger.error(f"[GraphRAG Query] Failed to initialize Neo4j storage: {e}")
+            import traceback
+            logger.error(f"[GraphRAG Query] Init traceback:\n{traceback.format_exc()}")
+            self._storage_initialized = True  # Mark as initialized to prevent retries
             raise
 
     async def _init_embedding_service(self):
@@ -833,6 +844,9 @@ class GraphRAG:
         3. Retrieve source chunks for matched entities from Qdrant
         4. ALWAYS include direct Qdrant vector search results for the query
         """
+        # Ensure storage is initialized (may be called directly by UnifiedRetriever)
+        await self._init_storage()
+
         entities = []
 
         # Try vector search first
@@ -908,6 +922,9 @@ class GraphRAG:
         4. Fall back to text-based entity search if needed
         5. Retrieve source chunks for context
         """
+        # Ensure storage is initialized (may be called directly by UnifiedRetriever)
+        await self._init_storage()
+
         entities = []
         relationships = []
 
@@ -1015,6 +1032,9 @@ class GraphRAG:
         2. Expand via graph traversal from matched entities
         3. Retrieve source chunks for context
         """
+        # Ensure storage is initialized (may be called directly by UnifiedRetriever)
+        await self._init_storage()
+
         entities = []
         relationships = []
         seen_entity_ids = set()

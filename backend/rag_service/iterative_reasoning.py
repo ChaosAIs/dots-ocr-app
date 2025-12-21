@@ -124,6 +124,9 @@ class IterativeReasoningEngine:
         logger.info(f"[IterativeReasoning] Question: {question}")
         logger.info(f"[IterativeReasoning] Max steps: {self.max_steps}")
         logger.info(f"[IterativeReasoning] GraphRAG enabled: {self.graphrag_enabled}")
+        logger.info(f"[IterativeReasoning] Source filter: {self.source_names}")
+        logger.info(f"[IterativeReasoning] Retriever type: {type(self.retriever).__name__}")
+        logger.info(f"[IterativeReasoning] Retriever.graphrag_enabled: {self.retriever.graphrag_enabled}")
         logger.info("-" * 70)
 
         # Import prompts

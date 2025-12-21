@@ -18,16 +18,43 @@ from .vectorstore import get_retriever, get_retriever_with_sources
 from .llm_service import get_llm_service
 from .utils.date_normalizer import normalize_query_dates
 
+# Set up early logger for GraphRAG import debugging
+_early_logger = logging.getLogger(__name__)
+
 # Import GraphRAG components
 try:
     from .graph_rag import GraphRAG, GRAPH_RAG_QUERY_ENABLED
     # If the graph_rag library is available, set the GRAPHRAG_AVAILABLE flag = True
     GRAPHRAG_AVAILABLE = True
-except ImportError:
+    _early_logger.info(f"[RAG Agent INIT] GraphRAG imported successfully, GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
+except ImportError as e:
     GRAPHRAG_AVAILABLE = False
     GRAPH_RAG_QUERY_ENABLED = False
+    # Log import failure for debugging
+    import traceback
+    error_msg = f"[RAG Agent INIT] GraphRAG import failed: {e}"
+    traceback_msg = traceback.format_exc()
+    _early_logger.error(error_msg)
+    _early_logger.error(f"[RAG Agent INIT] Traceback:\n{traceback_msg}")
+    # Also print to ensure visibility
+    print(error_msg)
+    print(f"[RAG Agent INIT] Traceback:\n{traceback_msg}")
+except Exception as e:
+    # Catch any other exception type
+    GRAPHRAG_AVAILABLE = False
+    GRAPH_RAG_QUERY_ENABLED = False
+    import traceback
+    error_msg = f"[RAG Agent INIT] GraphRAG import failed with {type(e).__name__}: {e}"
+    traceback_msg = traceback.format_exc()
+    _early_logger.error(error_msg)
+    _early_logger.error(f"[RAG Agent INIT] Traceback:\n{traceback_msg}")
+    print(error_msg)
+    print(f"[RAG Agent INIT] Traceback:\n{traceback_msg}")
 
 logger = logging.getLogger(__name__)
+
+# Log GraphRAG status at module load time
+logger.info(f"[RAG Agent INIT] Final status: GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}, GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
 
 # Maximum input token limit for chat history (from .env)
 MAX_INPUT_TOKEN_LIMIT = int(os.getenv("MAX_INPUT_TOKEN_LIMIT", "4096"))
@@ -990,6 +1017,11 @@ def _search_with_iterative_reasoning(
     import concurrent.futures
     from .iterative_reasoning import IterativeReasoningEngine, ReasoningResult
 
+    # Debug: Log the decision factors for GraphRAG
+    logger.info(f"[Search] GraphRAG Decision Debug:")
+    logger.info(f"[Search]   - GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}")
+    logger.info(f"[Search]   - GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
+    logger.info(f"[Search]   - graphrag_enabled parameter={graphrag_enabled}")
     logger.info(f"[Search] Using Iterative Reasoning Engine (graphrag={graphrag_enabled}, max_steps={max_steps})")
 
     # Create reasoning engine

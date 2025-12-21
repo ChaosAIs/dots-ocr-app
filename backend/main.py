@@ -4,12 +4,13 @@ import os
 
 # CRITICAL: Load .env file FIRST before any other imports
 # This ensures JWT_SECRET_KEY and other env vars are available when modules are imported
+# Use explicit path to .env file so it works regardless of working directory
 from dotenv import load_dotenv
-load_dotenv()
+_env_path = os.path.join(os.path.dirname(__file__), '.env')
+load_dotenv(_env_path)
 
 # Load .env file manually to get HF_HOME before other imports
-# We can't use load_dotenv() yet because it would be too late
-_env_path = os.path.join(os.path.dirname(__file__), '.env')
+# (load_dotenv above handles most vars, but HF_HOME needs special handling for ~ expansion)
 if os.path.exists(_env_path):
     with open(_env_path, 'r') as f:
         for line in f:

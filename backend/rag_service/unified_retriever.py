@@ -66,15 +66,28 @@ class UnifiedRetriever:
         if self._initialized:
             return
 
+        logger.info(f"[UnifiedRetriever] Initializing - graphrag_enabled={self.graphrag_enabled}")
+
         if self.graphrag_enabled:
             try:
-                from .graph_rag import GraphRAG
+                from .graph_rag import GraphRAG, GRAPH_RAG_QUERY_ENABLED
+                logger.info(f"[UnifiedRetriever] GraphRAG module imported, GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
                 self._graphrag = GraphRAG(workspace_id=self.workspace_id)
-                logger.info("[UnifiedRetriever] GraphRAG backend initialized")
-            except Exception as e:
-                logger.warning(f"[UnifiedRetriever] Failed to init GraphRAG: {e}, falling back to vector-only")
+                logger.info("[UnifiedRetriever] GraphRAG backend initialized successfully")
+            except ImportError as e:
+                logger.warning(f"[UnifiedRetriever] Failed to import GraphRAG: {e}")
+                import traceback
+                logger.warning(f"[UnifiedRetriever] Import traceback: {traceback.format_exc()}")
                 self.graphrag_enabled = False
                 self._graphrag = None
+            except Exception as e:
+                logger.warning(f"[UnifiedRetriever] Failed to init GraphRAG: {e}, falling back to vector-only")
+                import traceback
+                logger.warning(f"[UnifiedRetriever] Init traceback: {traceback.format_exc()}")
+                self.graphrag_enabled = False
+                self._graphrag = None
+        else:
+            logger.info("[UnifiedRetriever] GraphRAG disabled by caller, using vector-only")
 
         self._initialized = True
 
@@ -96,6 +109,12 @@ class UnifiedRetriever:
             RetrievalResult with entities, relationships, and chunks
         """
         await self._init_graphrag()
+
+        # Debug: Log retrieval decision
+        logger.info(f"[UnifiedRetriever] Retrieve decision debug:")
+        logger.info(f"[UnifiedRetriever]   - graphrag_enabled: {self.graphrag_enabled}")
+        logger.info(f"[UnifiedRetriever]   - _graphrag instance: {self._graphrag is not None}")
+        logger.info(f"[UnifiedRetriever]   - Will use: {'graph_retrieval' if (self.graphrag_enabled and self._graphrag) else 'vector_only'}")
 
         if self.graphrag_enabled and self._graphrag:
             return await self._graph_retrieval(query, top_k, mode)
