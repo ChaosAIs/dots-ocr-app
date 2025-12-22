@@ -30,6 +30,7 @@ if 'HF_HOME' not in os.environ:
     os.environ['HF_HOME'] = os.path.expanduser('~/huggingface_cache')
 
 import json
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
 from fastapi.responses import JSONResponse, FileResponse
@@ -82,8 +83,14 @@ from auth.auth_api import router as auth_router
 # Import chat session management
 from chat_service.chat_session_api import router as chat_session_router
 
-# Import task queue system
-from queue_service import TaskQueueManager, TaskScheduler, QueueWorkerPool, TaskType, TaskPriority
+# Import task queue system (hierarchical)
+from queue_service import (
+    HierarchicalTaskQueueManager,
+    TaskScheduler,
+    HierarchicalWorkerPool,
+    TaskStatus,
+    TaskQueuePage,
+)
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -121,37 +128,39 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Failed to initialize Neo4j indexes: {e}")
 
-    # Initialize task queue system if enabled
+    # Initialize hierarchical task queue system if enabled
     global task_queue_manager, task_scheduler, queue_worker_pool
 
     if TASK_QUEUE_ENABLED:
-        logger.info("🚀 Initializing task queue system...")
+        logger.info("🚀 Initializing hierarchical task queue system...")
 
-        # Initialize task queue manager
-        task_queue_manager = TaskQueueManager(
+        # Initialize hierarchical task queue manager
+        task_queue_manager = HierarchicalTaskQueueManager(
             stale_timeout_seconds=STALE_TASK_TIMEOUT,
-            heartbeat_interval_seconds=HEARTBEAT_INTERVAL
+            max_retries=int(os.getenv("MAX_TASK_RETRIES", "3"))
         )
 
-        # Initialize queue worker pool
-        queue_worker_pool = QueueWorkerPool(
+        # Initialize hierarchical worker pool with phase-specific processors
+        queue_worker_pool = HierarchicalWorkerPool(
             num_workers=NUM_WORKERS,
-            task_queue_manager=task_queue_manager,
-            ocr_processor=_process_ocr_task,
-            indexing_processor=_process_indexing_task,
+            task_manager=task_queue_manager,
+            ocr_processor=_process_ocr_page_task,
+            vector_processor=_process_vector_chunk_task,
+            graphrag_processor=_process_graphrag_chunk_task,
             poll_interval=WORKER_POLL_INTERVAL,
-            heartbeat_interval=HEARTBEAT_INTERVAL
+            heartbeat_interval=HEARTBEAT_INTERVAL,
+            status_broadcast_callback=document_status_manager.broadcast_from_thread
         )
         queue_worker_pool.start()
 
         # Initialize and start scheduler
         task_scheduler = TaskScheduler(
-            task_queue_manager=task_queue_manager,
+            task_manager=task_queue_manager,
             check_interval_seconds=TASK_QUEUE_CHECK_INTERVAL
         )
         task_scheduler.start()
 
-        logger.info("✅ Task queue system initialized successfully")
+        logger.info("✅ Hierarchical task queue system initialized successfully")
     else:
         logger.info("Task queue system disabled (set TASK_QUEUE_ENABLED=true to enable)")
 
@@ -285,9 +294,9 @@ HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 30 seconds
 STALE_TASK_TIMEOUT = int(os.getenv("STALE_TASK_TIMEOUT", "300"))  # 5 minutes
 
 # Global task queue instances (initialized in lifespan)
-task_queue_manager: Optional[TaskQueueManager] = None
+task_queue_manager: Optional[HierarchicalTaskQueueManager] = None
 task_scheduler: Optional[TaskScheduler] = None
-queue_worker_pool: Optional[QueueWorkerPool] = None
+queue_worker_pool: Optional[HierarchicalWorkerPool] = None
 
 
 # Conversion status tracking
@@ -781,7 +790,365 @@ def _sync_files_to_database():
         logger.error(f"Error syncing files to database: {e}")
 
 
-# ===== Task Queue Processor Functions =====
+# ===== Hierarchical Task Queue Processor Functions =====
+
+def _process_ocr_page_task(page_task) -> str:
+    """
+    Process OCR task for a single page (called by hierarchical queue workers).
+
+    This function checks if the page markdown exists. If not, it triggers the full document
+    conversion (OCR processes all pages at once). After markdown exists, it chunks the content
+    and creates chunk tasks for vector/graphrag processing.
+
+    Args:
+        page_task: PageTaskData with document_id, page_number, etc.
+
+    Returns:
+        str: Path to the generated page markdown file (_nohf.md)
+    """
+    from rag_service.markdown_chunker import chunk_markdown_with_summaries
+    import hashlib
+
+    try:
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_id(page_task.document_id)
+
+            if not doc:
+                raise ValueError(f"Document not found: {page_task.document_id}")
+
+            filename = doc.filename
+            base_name = os.path.splitext(filename)[0]
+            logger.info(f"🔄 Processing OCR for page {page_task.page_number} of document: {filename}")
+
+            # Get input file path
+            input_path = os.path.join(INPUT_DIR, filename)
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"Input file not found: {input_path}")
+
+            # Check expected page markdown file path (matches parser output format)
+            # Parser uses different naming for single-page vs multi-page documents:
+            # - Single page (images): {base_name}_nohf.md
+            # - Multi-page (PDFs): {base_name}_page_{N}_nohf.md
+            page_output_dir = os.path.join(OUTPUT_DIR, base_name)
+
+            # Helper function to find the actual page markdown file
+            def find_page_markdown(page_num: int, total_pages: int) -> str:
+                """Find the actual markdown file for a given page number."""
+                # For single-page documents (images), use simple naming
+                if total_pages == 1:
+                    simple_path = os.path.join(page_output_dir, f"{base_name}_nohf.md")
+                    if os.path.exists(simple_path):
+                        return simple_path
+
+                # For multi-page documents (PDFs), use page-numbered naming
+                page_path = os.path.join(page_output_dir, f"{base_name}_page_{page_num}_nohf.md")
+                if os.path.exists(page_path):
+                    return page_path
+
+                # Fallback: try simple naming even for multi-page (in case of single-page PDF)
+                simple_path = os.path.join(page_output_dir, f"{base_name}_nohf.md")
+                if os.path.exists(simple_path):
+                    return simple_path
+
+                return None
+
+            # Get total pages for naming logic
+            total_pages = doc.total_pages or 1
+
+            # Check if page markdown already exists
+            page_output_path = find_page_markdown(page_task.page_number, total_pages)
+
+            if not page_output_path:
+                # Page markdown doesn't exist - need to trigger OCR conversion
+                # The parser will process all pages at once
+                logger.info(f"📄 Page markdown not found, triggering OCR for document: {filename}")
+
+                # Check if other pages already exist (partial conversion)
+                other_pages_exist = os.path.exists(page_output_dir) and any(
+                    f.endswith("_nohf.md") for f in os.listdir(page_output_dir)
+                )
+
+                if other_pages_exist:
+                    # Some pages already converted but this specific page is missing
+                    # This happens when OCR failed for specific pages during the original conversion
+                    logger.warning(
+                        f"⚠️ Page {page_task.page_number} is missing but other pages exist. "
+                        f"This page likely failed during original OCR conversion."
+                    )
+                    # Try to re-convert just this page by running OCR again
+                    # The parser will skip existing pages
+
+                # Check if conversion is already in progress (another worker may have started it)
+                # Use a simple file lock
+                lock_file = os.path.join(OUTPUT_DIR, f".{base_name}.converting")
+
+                if os.path.exists(lock_file):
+                    # Conversion in progress - wait and check periodically
+                    logger.info(f"⏳ OCR conversion in progress by another worker, waiting...")
+                    for _ in range(120):  # Wait up to 10 minutes (120 * 5 seconds)
+                        time.sleep(5)
+                        page_output_path = find_page_markdown(page_task.page_number, total_pages)
+                        if page_output_path:
+                            logger.info(f"✅ Page markdown now available: {page_output_path}")
+                            break
+                        if not os.path.exists(lock_file):
+                            # Conversion finished but page still missing?
+                            break
+                    else:
+                        raise TimeoutError(f"Timeout waiting for page {page_task.page_number} OCR")
+                else:
+                    # Create lock file and start conversion
+                    try:
+                        os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+                        with open(lock_file, 'w') as f:
+                            f.write(str(page_task.document_id))
+
+                        # Run OCR conversion for the entire document
+                        # The parser will skip pages that already have output files
+                        logger.info(f"🚀 Starting OCR conversion for {filename}")
+                        results = parser.parse_file(
+                            input_path,
+                            output_dir=OUTPUT_DIR,
+                            prompt_mode="prompt_layout_all_en",
+                        )
+                        logger.info(f"✅ OCR conversion completed for {filename}: {len(results)} pages")
+
+                    finally:
+                        # Remove lock file
+                        if os.path.exists(lock_file):
+                            os.remove(lock_file)
+
+                # Try to find the markdown file again after OCR
+                page_output_path = find_page_markdown(page_task.page_number, total_pages)
+
+            # Verify page markdown exists now
+            if not page_output_path:
+                # List what files were actually created for debugging
+                if os.path.exists(page_output_dir):
+                    files = [f for f in os.listdir(page_output_dir) if f.endswith("_nohf.md")]
+                    logger.error(f"Found {len(files)} _nohf.md files in {page_output_dir}, but page {page_task.page_number} is missing")
+
+                # Check if this is a case of missing page in a partially converted document
+                if os.path.exists(page_output_dir):
+                    existing_files = [f for f in os.listdir(page_output_dir) if f.endswith("_nohf.md")]
+                    if len(existing_files) > 0:
+                        # Other pages exist - this specific page failed during OCR
+                        raise FileNotFoundError(
+                            f"Page {page_task.page_number} failed during OCR conversion. "
+                            f"Document has {len(existing_files)} pages converted, but this page is missing. "
+                            f"This may be due to OCR error for this specific page."
+                        )
+
+                raise FileNotFoundError(
+                    f"Page markdown not found after OCR. Expected patterns: "
+                    f"{base_name}_nohf.md or {base_name}_page_{page_task.page_number}_nohf.md"
+                )
+
+            # Read the page content and create chunks
+            logger.info(f"📚 Chunking page {page_task.page_number} content...")
+
+            # Get the page task record to get its UUID
+            page_record = db.query(TaskQueuePage).filter(
+                TaskQueuePage.id == page_task.id
+            ).first()
+
+            if page_record:
+                # Chunk the markdown content using adaptive chunking (same as vector/graphrag phases)
+                # This ensures chunk count matches between task creation and processing
+                result = chunk_markdown_with_summaries(
+                    page_output_path,
+                    source_name=f"{filename}_page_{page_task.page_number}"
+                )
+                chunks = result.chunks
+
+                if chunks:
+                    # Create chunk tasks for vector/graphrag processing
+                    chunk_data = []
+                    for idx, chunk in enumerate(chunks):
+                        # Generate unique chunk ID
+                        content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
+                        chunk_id = f"{page_task.document_id}_{page_task.page_number}_{idx}_{content_hash}"
+                        chunk_data.append((chunk_id, idx))
+
+                    # Create chunk task records
+                    if chunk_data and task_queue_manager:
+                        task_queue_manager.create_chunk_tasks(
+                            page_id=page_task.id,
+                            document_id=page_task.document_id,
+                            chunks=chunk_data,
+                            db=db
+                        )
+                        logger.info(f"📦 Created {len(chunk_data)} chunk tasks for page {page_task.page_number}")
+
+                    # Update page chunk count
+                    page_record.chunk_count = len(chunks)
+                    db.commit()
+
+            logger.info(f"✅ OCR completed for page {page_task.page_number} of {filename}")
+            return page_output_path
+
+    except Exception as e:
+        logger.error(f"❌ OCR page task failed for page {page_task.page_number} of doc {page_task.document_id}: {e}", exc_info=True)
+        raise
+
+
+def _process_vector_chunk_task(chunk_task) -> bool:
+    """
+    Process Vector indexing task for a single chunk (called by hierarchical queue workers).
+
+    This function indexes a single chunk to Qdrant.
+    Uses chunk_markdown_with_summaries which respects ADAPTIVE_CHUNKING_ENABLED setting
+    for domain-aware chunking strategies.
+
+    Args:
+        chunk_task: ChunkTaskData with chunk_id, document_id, page_id, chunk_index, etc.
+
+    Returns:
+        bool: True if indexing succeeded
+    """
+    from rag_service.markdown_chunker import chunk_markdown_with_summaries
+    from rag_service.vectorstore import get_vectorstore
+
+    try:
+        logger.info(f"🔄 Processing Vector index for chunk: {chunk_task.chunk_id}")
+
+        # Get the page file path from the page task record
+        with get_db_session() as db:
+            page_record = db.query(TaskQueuePage).filter(
+                TaskQueuePage.id == chunk_task.page_id
+            ).first()
+
+            if not page_record or not page_record.page_file_path:
+                raise ValueError(f"Page record or file path not found for page_id: {chunk_task.page_id}")
+
+            page_file_path = page_record.page_file_path
+
+            # Get document info for source name
+            doc = db.query(Document).filter(Document.id == chunk_task.document_id).first()
+            if not doc:
+                raise ValueError(f"Document not found: {chunk_task.document_id}")
+
+            source_name = os.path.splitext(doc.filename)[0]
+
+        # Re-chunk the page content using adaptive chunking (respects ADAPTIVE_CHUNKING_ENABLED)
+        result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
+        chunks = result.chunks
+
+        if not chunks or chunk_task.chunk_index >= len(chunks):
+            raise ValueError(
+                f"Chunk index {chunk_task.chunk_index} out of range. "
+                f"Page has {len(chunks) if chunks else 0} chunks."
+            )
+
+        # Get the specific chunk
+        chunk = chunks[chunk_task.chunk_index]
+
+        # Update chunk metadata with the chunk_id from task
+        chunk.metadata["chunk_id"] = chunk_task.chunk_id
+
+        # Index to Qdrant vectorstore
+        vectorstore = get_vectorstore()
+        vectorstore.add_documents([chunk])
+
+        logger.info(f"✅ Vector index completed for chunk: {chunk_task.chunk_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Vector chunk task failed for chunk {chunk_task.chunk_id}: {e}", exc_info=True)
+        raise
+
+
+def _process_graphrag_chunk_task(chunk_task) -> tuple:
+    """
+    Process GraphRAG indexing task for a single chunk (called by hierarchical queue workers).
+
+    This function extracts entities and relationships from a chunk and stores in Neo4j.
+    Uses chunk_markdown_with_summaries which respects ADAPTIVE_CHUNKING_ENABLED setting
+    for domain-aware chunking strategies.
+
+    Args:
+        chunk_task: ChunkTaskData with chunk_id, document_id, page_id, chunk_index, etc.
+
+    Returns:
+        tuple: (entities_count, relationships_count)
+    """
+    from rag_service.markdown_chunker import chunk_markdown_with_summaries
+
+    try:
+        logger.info(f"🔄 Processing GraphRAG index for chunk: {chunk_task.chunk_id}")
+
+        # Check if GraphRAG indexing is enabled
+        if not GRAPH_RAG_INDEX_ENABLED:
+            logger.debug(f"GraphRAG indexing disabled, skipping chunk: {chunk_task.chunk_id}")
+            return (0, 0)
+
+        # Get the page file path from the page task record
+        with get_db_session() as db:
+            page_record = db.query(TaskQueuePage).filter(
+                TaskQueuePage.id == chunk_task.page_id
+            ).first()
+
+            if not page_record or not page_record.page_file_path:
+                raise ValueError(f"Page record or file path not found for page_id: {chunk_task.page_id}")
+
+            page_file_path = page_record.page_file_path
+
+            # Get document info for source name
+            doc = db.query(Document).filter(Document.id == chunk_task.document_id).first()
+            if not doc:
+                raise ValueError(f"Document not found: {chunk_task.document_id}")
+
+            source_name = os.path.splitext(doc.filename)[0]
+
+        # Re-chunk the page content using adaptive chunking (respects ADAPTIVE_CHUNKING_ENABLED)
+        result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
+        chunks = result.chunks
+
+        if not chunks or chunk_task.chunk_index >= len(chunks):
+            raise ValueError(
+                f"Chunk index {chunk_task.chunk_index} out of range. "
+                f"Page has {len(chunks) if chunks else 0} chunks."
+            )
+
+        # Get the specific chunk
+        chunk = chunks[chunk_task.chunk_index]
+
+        # Prepare chunk data for GraphRAG indexing
+        chunk_data = {
+            "id": chunk_task.chunk_id,
+            "page_content": chunk.page_content,
+            "metadata": chunk.metadata,
+        }
+
+        # Run GraphRAG indexing synchronously
+        entities_count = 0
+        relationships_count = 0
+
+        try:
+            from rag_service.graph_rag.graph_indexer import index_chunks_sync
+
+            # Index single chunk - returns tuple (entities, relationships)
+            entities_count, relationships_count = index_chunks_sync(
+                chunks=[chunk_data],
+                source_name=source_name,
+            )
+
+        except ImportError:
+            logger.warning("GraphRAG indexer not available")
+        except Exception as e:
+            logger.error(f"GraphRAG indexing failed for chunk {chunk_task.chunk_id}: {e}")
+            # Don't raise - allow task to complete with 0 entities
+
+        logger.info(f"✅ GraphRAG index completed for chunk: {chunk_task.chunk_id} (entities={entities_count}, relationships={relationships_count})")
+        return (entities_count, relationships_count)
+
+    except Exception as e:
+        logger.error(f"❌ GraphRAG chunk task failed for chunk {chunk_task.chunk_id}: {e}", exc_info=True)
+        raise
+
+
+# ===== Legacy Task Queue Processor Functions (for backward compatibility) =====
 
 def _process_ocr_task(document_id: UUID) -> dict:
     """
@@ -861,18 +1228,8 @@ def _process_ocr_task(document_id: UUID) -> dict:
 
             logger.info(f"✅ OCR task completed for document: {filename}")
 
-            # Auto-enqueue indexing task if queue system is enabled
-            if TASK_QUEUE_ENABLED and task_queue_manager:
-                indexing_task_id = task_queue_manager.enqueue_task(
-                    document_id=document_id,
-                    task_type=TaskType.INDEXING,
-                    priority=TaskPriority.NORMAL,
-                    db=db
-                )
-                if indexing_task_id:
-                    logger.info(f"✅ Auto-enqueued indexing task for {filename} (task_id={indexing_task_id})")
-                else:
-                    logger.info(f"Indexing task already exists for {filename}")
+            # Note: With hierarchical queue, indexing is automatically triggered via page/chunk tasks
+            # The old enqueue_task method is no longer used
 
             return {"status": "success", "filename": filename, "result": result}
 
@@ -1526,18 +1883,35 @@ async def upload_file(file: UploadFile = File(...)):
                 if not created:
                     logger.info(f"Document record already exists: {file.filename}")
 
-                # Auto-enqueue OCR task if queue system is enabled
+                # Detect page count (for PDFs) or set to 1 (for images)
+                try:
+                    import fitz  # PyMuPDF
+                    pdf_doc = fitz.open(file_path)
+                    total_pages = len(pdf_doc)
+                    pdf_doc.close()
+                    logger.info(f"📄 Detected {total_pages} pages in PDF: {file.filename}")
+                except Exception:
+                    total_pages = 1  # Single page for non-PDF files (images, etc.)
+                    logger.info(f"🖼️ Non-PDF file, treating as single page: {file.filename}")
+
+                # Update document total_pages
+                doc.total_pages = total_pages
+                db.commit()  # Commit the total_pages update
+
+                # Auto-create document task with page tasks if queue system is enabled
                 if TASK_QUEUE_ENABLED and task_queue_manager:
-                    task_id = task_queue_manager.enqueue_task(
+                    # Create or reset page tasks for this document
+                    task_created = task_queue_manager.create_document_task(
                         document_id=doc.id,
-                        task_type=TaskType.OCR,
-                        priority=TaskPriority.HIGH,  # User uploads get high priority
+                        total_pages=total_pages,
                         db=db
                     )
-                    if task_id:
-                        logger.info(f"✅ Auto-enqueued OCR task for {file.filename} (task_id={task_id})")
+                    if task_created:
+                        logger.info(f"✅ Created/verified {total_pages} page tasks for {file.filename}")
                     else:
-                        logger.info(f"OCR task already exists for {file.filename}")
+                        logger.warning(f"⚠️ Failed to create page tasks for {file.filename}")
+                else:
+                    logger.info(f"ℹ️ Task queue disabled or not initialized, skipping task creation for {file.filename}")
         except Exception as e:
             logger.warning(f"Could not create database record: {e}")
 

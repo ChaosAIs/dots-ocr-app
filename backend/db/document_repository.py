@@ -340,6 +340,31 @@ class DocumentRepository:
         self.db.refresh(doc)
         return doc
 
+    def start_vector_indexing(self, doc: Document) -> Document:
+        """
+        Mark vector indexing as started/processing.
+        Call this when Phase 1 (vector indexing) begins.
+        """
+        if not doc.indexing_details:
+            self.init_indexing_details(doc)
+
+        details = doc.indexing_details
+        vector = details["vector_indexing"]
+
+        # Only update if still pending (don't overwrite partial/completed)
+        if vector.get("status") in ["pending", None]:
+            vector["status"] = "processing"
+            vector["started_at"] = datetime.utcnow().isoformat()
+
+            doc.indexing_details = details
+            flag_modified(doc, "indexing_details")
+            self.db.commit()
+            self.db.refresh(doc)
+
+            logger.info(f"Started vector indexing for {doc.filename}")
+
+        return doc
+
     def update_vector_indexing_status(
         self,
         doc: Document,
@@ -489,6 +514,7 @@ class DocumentRepository:
         # Set the expected total chunks (not just the ones we've started processing)
         graphrag["expected_total_chunks"] = total_chunks
         graphrag["status"] = "processing"
+        graphrag["started_at"] = datetime.utcnow().isoformat()
 
         doc.indexing_details = details
         flag_modified(doc, "indexing_details")

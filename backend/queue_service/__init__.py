@@ -1,28 +1,45 @@
 """
-Task Queue Service for OCR and Indexing Coordination
+Hierarchical Task Queue Service for OCR and Indexing Coordination
 
-This module provides a central queue system for managing OCR and indexing tasks.
-It coordinates worker processes and ensures reliable task execution with:
-- Automatic task enqueueing on file upload
-- Periodic checks for pending/orphaned tasks
+This module provides a hierarchical queue system for managing OCR and indexing tasks
+with a 3-level hierarchy: Document → Page → Chunk.
+
+Features:
+- Three processing phases: OCR → Vector Index → GraphRAG Index
+- Sequential dependencies between phases
 - Heartbeat-based stale task detection
+- Priority-based task pickup (failed first, then pending)
+- Automatic status bubble-up from children to parents
 - Retry logic for failed tasks
-- Resume from checkpoint for long-running tasks
 """
 
-from .models import TaskQueue, TaskType, TaskPriority, TaskStatus
-from .task_queue_manager import TaskQueueManager
+from .models import (
+    TaskStatus,
+    TaskQueuePage,
+    TaskQueueChunk,
+)
+
+from .hierarchical_task_manager import (
+    HierarchicalTaskQueueManager,
+    PageTaskData,
+    ChunkTaskData,
+)
+
+from .hierarchical_worker_pool import (
+    HierarchicalWorkerPool,
+    HierarchicalWorker,
+)
+
 from .scheduler import TaskScheduler
-from .queue_worker_pool import QueueWorkerPool, QueueWorker
 
 __all__ = [
-    "TaskQueue",
-    "TaskType",
-    "TaskPriority",
     "TaskStatus",
-    "TaskQueueManager",
+    "TaskQueuePage",
+    "TaskQueueChunk",
+    "HierarchicalTaskQueueManager",
+    "PageTaskData",
+    "ChunkTaskData",
+    "HierarchicalWorkerPool",
+    "HierarchicalWorker",
     "TaskScheduler",
-    "QueueWorkerPool",
-    "QueueWorker",
 ]
-

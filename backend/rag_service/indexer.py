@@ -949,7 +949,9 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
                 if doc:
                     # Initialize indexing_details structure
                     repo.init_indexing_details(doc)
-                    logger.info(f"[Phase 1] Tracking granular status for: {filename_with_ext}")
+                    # Mark vector indexing as started (with timestamp for orphan detection)
+                    repo.start_vector_indexing(doc)
+                    logger.info(f"[Phase 1] Started vector indexing for: {filename_with_ext}")
         except Exception as e:
             logger.warning(f"Could not get document from database: {e}")
 

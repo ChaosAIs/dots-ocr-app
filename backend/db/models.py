@@ -51,6 +51,14 @@ class IndexStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+class TaskStatus(str, enum.Enum):
+    """Task status enumeration for hierarchical task queue phases"""
+    PENDING = "pending"      # Waiting to be picked up by a worker
+    PROCESSING = "processing"  # Worker is actively processing
+    COMPLETED = "completed"  # Successfully finished
+    FAILED = "failed"        # Failed after max retries
+
+
 # ===== User Management Models =====
 
 class User(Base):
@@ -251,6 +259,27 @@ class Document(Base):
     upload_status = Column(Enum(UploadStatus, name="upload_status", values_callable=lambda x: [e.value for e in x]), default=UploadStatus.PENDING)
     convert_status = Column(Enum(ConvertStatus, name="convert_status", values_callable=lambda x: [e.value for e in x]), default=ConvertStatus.PENDING)
     index_status = Column(Enum(IndexStatus, name="index_status", values_callable=lambda x: [e.value for e in x]), default=IndexStatus.PENDING)
+
+    # Hierarchical task queue status columns (added by migration 012)
+    # Phase 1: OCR status
+    ocr_status = Column(Enum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]), default=TaskStatus.PENDING)
+    ocr_started_at = Column(DateTime(timezone=True), nullable=True)
+    ocr_completed_at = Column(DateTime(timezone=True), nullable=True)
+    ocr_error = Column(Text, nullable=True)
+    # Phase 2: Vector indexing status
+    vector_status = Column(Enum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]), default=TaskStatus.PENDING)
+    vector_started_at = Column(DateTime(timezone=True), nullable=True)
+    vector_completed_at = Column(DateTime(timezone=True), nullable=True)
+    vector_error = Column(Text, nullable=True)
+    # Phase 3: GraphRAG indexing status
+    graphrag_status = Column(Enum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]), default=TaskStatus.PENDING)
+    graphrag_started_at = Column(DateTime(timezone=True), nullable=True)
+    graphrag_completed_at = Column(DateTime(timezone=True), nullable=True)
+    graphrag_error = Column(Text, nullable=True)
+    # Worker tracking at document level
+    current_worker_id = Column(String(100), nullable=True)
+    last_heartbeat = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)
