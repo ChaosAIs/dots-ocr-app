@@ -12,6 +12,9 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
+# Parent/child chunk configuration
+PARENT_CHUNK_AUTO_INCLUDE = os.getenv("PARENT_CHUNK_AUTO_INCLUDE", "true").lower() == "true"
+
 
 @dataclass
 class RetrievalResult:
@@ -20,10 +23,14 @@ class RetrievalResult:
 
     Contains entities, relationships, and chunks regardless of backend.
     When GraphRAG is disabled, entities and relationships will be empty.
+
+    Parent chunks (if parent/child chunk design is enabled) are automatically
+    included when child chunks are retrieved.
     """
     entities: List[Dict[str, Any]] = field(default_factory=list)
     relationships: List[Dict[str, Any]] = field(default_factory=list)
     chunks: List[Dict[str, Any]] = field(default_factory=list)
+    parent_chunks: List[Dict[str, Any]] = field(default_factory=list)  # Parent context chunks
     sources: Set[str] = field(default_factory=set)
     query_used: str = ""
     retrieval_mode: str = "vector"  # "vector", "graph", "hybrid"
@@ -132,6 +139,9 @@ class UnifiedRetriever:
         This is used when GraphRAG is disabled. Returns chunks only,
         with empty entities and relationships.
 
+        When PARENT_CHUNK_AUTO_INCLUDE is enabled, automatically fetches
+        parent chunks for any child chunks in the results.
+
         Args:
             query: Search query string
             top_k: Maximum number of chunks to retrieve
@@ -142,7 +152,7 @@ class UnifiedRetriever:
         logger.info(f"[UnifiedRetriever] Vector-only retrieval for: '{query[:50]}...'")
 
         try:
-            from .vectorstore import get_vectorstore
+            from .vectorstore import get_vectorstore, get_parent_chunks_for_children
 
             vectorstore = get_vectorstore()
 
@@ -169,22 +179,93 @@ class UnifiedRetriever:
             # Convert to unified chunk format
             chunks = []
             sources = set()
-            for doc in docs:
+            child_chunk_ids = []  # Track child chunks for parent lookup
+
+            logger.debug(f"[UnifiedRetriever] Processing {len(docs)} documents from vector search")
+
+            for i, doc in enumerate(docs):
                 source = doc.metadata.get("source", "Unknown")
                 sources.add(source)
+                chunk_id = doc.metadata.get("chunk_id", "")
+                chunk_type = doc.metadata.get("chunk_type", "unknown")
+                is_parent_chunk = doc.metadata.get("is_parent_chunk", False)
+                parent_chunk_id = doc.metadata.get("parent_chunk_id")
+
+                # Detailed logging for each chunk
+                content_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else ""
+                logger.debug(
+                    f"[UnifiedRetriever] Chunk {i+1}/{len(docs)}: id={chunk_id}, "
+                    f"type={chunk_type}, is_parent={is_parent_chunk}, "
+                    f"parent_id={parent_chunk_id}, source={source}"
+                )
+
                 chunks.append({
                     "page_content": doc.page_content,
                     "metadata": doc.metadata,
-                    "chunk_id": doc.metadata.get("chunk_id", ""),
+                    "chunk_id": chunk_id,
+                    "is_parent": is_parent_chunk,
                     "_score": 0,  # Qdrant similarity_search doesn't return scores directly
                 })
 
-            logger.info(f"[UnifiedRetriever] Vector search found {len(chunks)} chunks from {len(sources)} sources")
+                # Track child chunks that have a parent
+                if parent_chunk_id:
+                    child_chunk_ids.append(chunk_id)
+                    logger.debug(f"[UnifiedRetriever] → Identified as CHILD chunk, will fetch parent: {parent_chunk_id}")
+
+            # Summary of chunk types found
+            parent_count = sum(1 for c in chunks if c.get("is_parent"))
+            child_count = len(child_chunk_ids)
+            atomic_count = len(chunks) - parent_count - child_count
+            logger.info(
+                f"[UnifiedRetriever] Vector search results: {len(chunks)} chunks "
+                f"(parents={parent_count}, children={child_count}, atomic={atomic_count}) from {len(sources)} sources"
+            )
+
+            # Auto-include parent chunks for child matches
+            parent_chunks = []
+            if PARENT_CHUNK_AUTO_INCLUDE and child_chunk_ids:
+                logger.info(f"[UnifiedRetriever] PARENT_CHUNK_AUTO_INCLUDE enabled, fetching parents for {len(child_chunk_ids)} child chunks")
+                logger.debug(f"[UnifiedRetriever] Child chunk IDs: {child_chunk_ids}")
+
+                parent_docs = get_parent_chunks_for_children(child_chunk_ids, self.source_names)
+
+                # Add parent chunks (deduplicated from regular chunks)
+                seen_ids = {c["chunk_id"] for c in chunks}
+                already_present_count = 0
+                for doc in parent_docs:
+                    parent_id = doc.metadata.get("chunk_id", "")
+                    if parent_id not in seen_ids:
+                        parent_chunk = {
+                            "page_content": doc.page_content,
+                            "metadata": doc.metadata,
+                            "chunk_id": parent_id,
+                            "is_parent": True,
+                            "is_context_expansion": True,  # Mark as expanded context
+                        }
+                        parent_chunks.append(parent_chunk)
+                        seen_ids.add(parent_id)
+                        sources.add(doc.metadata.get("source", "Unknown"))
+                        content_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else ""
+                        logger.debug(f"[UnifiedRetriever] + Added parent chunk: {parent_id}, content='{content_preview}...'")
+                    else:
+                        already_present_count += 1
+                        logger.debug(f"[UnifiedRetriever] - Parent chunk {parent_id} already in results, skipping")
+
+                if parent_chunks:
+                    logger.info(
+                        f"[UnifiedRetriever] ✓ Added {len(parent_chunks)} parent chunks for context expansion "
+                        f"({already_present_count} already present, skipped)"
+                    )
+            elif not PARENT_CHUNK_AUTO_INCLUDE:
+                logger.debug("[UnifiedRetriever] PARENT_CHUNK_AUTO_INCLUDE is disabled, skipping parent fetch")
+            elif not child_chunk_ids:
+                logger.debug("[UnifiedRetriever] No child chunks found in results, no parent fetch needed")
 
             return RetrievalResult(
                 entities=[],
                 relationships=[],
                 chunks=chunks,
+                parent_chunks=parent_chunks,
                 sources=sources,
                 query_used=query,
                 retrieval_mode="vector"
@@ -206,6 +287,9 @@ class UnifiedRetriever:
         This uses the existing GraphRAG infrastructure which already combines
         graph search with vector search internally.
 
+        When PARENT_CHUNK_AUTO_INCLUDE is enabled, automatically fetches
+        parent chunks for any child chunks in the results.
+
         Args:
             query: Search query string
             top_k: Maximum number of results
@@ -218,6 +302,7 @@ class UnifiedRetriever:
 
         try:
             from .graph_rag.base import QueryParam, QueryMode
+            from .vectorstore import get_parent_chunks_for_children
 
             # Create query params (single-step, no iteration here - iteration handled by engine)
             params = QueryParam()
@@ -234,22 +319,90 @@ class UnifiedRetriever:
             else:  # hybrid (default)
                 context = await self._graphrag._hybrid_retrieval(query, params)
 
-            # Extract sources from chunks
+            # Extract sources from chunks and track child chunks
             sources = set()
-            for chunk in context.chunks:
-                source = chunk.get("metadata", {}).get("source", "")
+            child_chunk_ids = []
+
+            logger.debug(f"[UnifiedRetriever] Processing {len(context.chunks)} chunks from graph retrieval")
+
+            for i, chunk in enumerate(context.chunks):
+                metadata = chunk.get("metadata", {})
+                source = metadata.get("source", "")
+                chunk_id = chunk.get("chunk_id", "")
+                chunk_type = metadata.get("chunk_type", "unknown")
+                is_parent_chunk = metadata.get("is_parent_chunk", False)
+                parent_chunk_id = metadata.get("parent_chunk_id")
+
                 if source:
                     sources.add(source)
 
+                # Detailed logging for each chunk
+                logger.debug(
+                    f"[UnifiedRetriever] Graph chunk {i+1}/{len(context.chunks)}: id={chunk_id}, "
+                    f"type={chunk_type}, is_parent={is_parent_chunk}, parent_id={parent_chunk_id}"
+                )
+
+                # Track child chunks that have a parent
+                if parent_chunk_id:
+                    child_chunk_ids.append(chunk_id)
+                    logger.debug(f"[UnifiedRetriever] → Identified as CHILD chunk, will fetch parent: {parent_chunk_id}")
+
+            # Summary of chunk types found
+            parent_count = sum(1 for c in context.chunks if c.get("metadata", {}).get("is_parent_chunk"))
+            child_count = len(child_chunk_ids)
+            atomic_count = len(context.chunks) - parent_count - child_count
+
             logger.info(
                 f"[UnifiedRetriever] Graph retrieval found {len(context.entities)} entities, "
-                f"{len(context.relationships)} relationships, {len(context.chunks)} chunks"
+                f"{len(context.relationships)} relationships, {len(context.chunks)} chunks "
+                f"(parents={parent_count}, children={child_count}, atomic={atomic_count})"
             )
+
+            # Auto-include parent chunks for child matches
+            parent_chunks = []
+            if PARENT_CHUNK_AUTO_INCLUDE and child_chunk_ids:
+                logger.info(f"[UnifiedRetriever] PARENT_CHUNK_AUTO_INCLUDE enabled, fetching parents for {len(child_chunk_ids)} child chunks")
+                logger.debug(f"[UnifiedRetriever] Child chunk IDs: {child_chunk_ids}")
+
+                parent_docs = get_parent_chunks_for_children(child_chunk_ids, self.source_names)
+
+                # Add parent chunks (deduplicated from regular chunks)
+                seen_ids = {c.get("chunk_id", "") for c in context.chunks}
+                already_present_count = 0
+                for doc in parent_docs:
+                    parent_id = doc.metadata.get("chunk_id", "")
+                    if parent_id not in seen_ids:
+                        parent_chunk = {
+                            "page_content": doc.page_content,
+                            "metadata": doc.metadata,
+                            "chunk_id": parent_id,
+                            "is_parent": True,
+                            "is_context_expansion": True,
+                        }
+                        parent_chunks.append(parent_chunk)
+                        seen_ids.add(parent_id)
+                        sources.add(doc.metadata.get("source", "Unknown"))
+                        content_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else ""
+                        logger.debug(f"[UnifiedRetriever] + Added parent chunk: {parent_id}, content='{content_preview}...'")
+                    else:
+                        already_present_count += 1
+                        logger.debug(f"[UnifiedRetriever] - Parent chunk {parent_id} already in results, skipping")
+
+                if parent_chunks:
+                    logger.info(
+                        f"[UnifiedRetriever] ✓ Added {len(parent_chunks)} parent chunks for context expansion "
+                        f"({already_present_count} already present, skipped)"
+                    )
+            elif not PARENT_CHUNK_AUTO_INCLUDE:
+                logger.debug("[UnifiedRetriever] PARENT_CHUNK_AUTO_INCLUDE is disabled, skipping parent fetch")
+            elif not child_chunk_ids:
+                logger.debug("[UnifiedRetriever] No child chunks found in graph results, no parent fetch needed")
 
             return RetrievalResult(
                 entities=context.entities,
                 relationships=context.relationships,
                 chunks=context.chunks,
+                parent_chunks=parent_chunks,
                 sources=sources,
                 query_used=query,
                 retrieval_mode=mode
@@ -277,9 +430,11 @@ class UnifiedRetriever:
         all_entities = []
         all_relationships = []
         all_chunks = []
+        all_parent_chunks = []
         all_sources = set()
         seen_entity_ids = set()
         seen_chunk_ids = set()
+        seen_parent_chunk_ids = set()
 
         for result in results:
             # Merge entities (deduplicate by id)
@@ -304,6 +459,13 @@ class UnifiedRetriever:
                 else:
                     all_chunks.append(chunk)
 
+            # Merge parent chunks (deduplicate by chunk_id)
+            for parent_chunk in result.parent_chunks:
+                parent_id = parent_chunk.get("chunk_id", "")
+                if parent_id and parent_id not in seen_parent_chunk_ids:
+                    all_parent_chunks.append(parent_chunk)
+                    seen_parent_chunk_ids.add(parent_id)
+
             # Merge sources
             all_sources.update(result.sources)
 
@@ -311,6 +473,7 @@ class UnifiedRetriever:
             entities=all_entities,
             relationships=all_relationships,
             chunks=all_chunks,
+            parent_chunks=all_parent_chunks,
             sources=all_sources,
             query_used=results[-1].query_used if results else "",
             retrieval_mode="merged"

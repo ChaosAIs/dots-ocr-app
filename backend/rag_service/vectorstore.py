@@ -218,6 +218,97 @@ def get_all_chunks_for_source(source_name: str) -> List[Document]:
         return []
 
 
+def get_parent_chunks_for_children(
+    child_chunk_ids: List[str],
+    source_names: List[str] = None
+) -> List[Document]:
+    """
+    Retrieve parent chunks for given child chunk IDs.
+
+    This function implements parent context retrieval for the parent/child
+    chunk design. It:
+    1. Fetches child chunks to get their parent_chunk_id
+    2. Retrieves parent chunks by those IDs
+
+    Args:
+        child_chunk_ids: List of child chunk IDs to look up parents for
+        source_names: Optional list of source names to filter
+
+    Returns:
+        List of parent Document objects (deduplicated)
+    """
+    logger.debug(f"[ParentChunk] get_parent_chunks_for_children called with {len(child_chunk_ids) if child_chunk_ids else 0} child IDs")
+
+    if not child_chunk_ids:
+        logger.debug("[ParentChunk] No child chunk IDs provided, returning empty")
+        return []
+
+    client = get_qdrant_client()
+
+    try:
+        # Step 1: Get child chunks to extract parent_chunk_ids
+        logger.debug(f"[ParentChunk] Step 1: Fetching child chunks by IDs: {child_chunk_ids[:5]}{'...' if len(child_chunk_ids) > 5 else ''}")
+        child_docs = get_chunks_by_ids(child_chunk_ids, source_names)
+        logger.debug(f"[ParentChunk] Retrieved {len(child_docs)} child documents from Qdrant")
+
+        parent_ids = set()
+        child_to_parent_map = {}  # Track which child maps to which parent
+        for doc in child_docs:
+            parent_id = doc.metadata.get("parent_chunk_id")
+            chunk_id = doc.metadata.get("chunk_id", "unknown")
+            chunk_type = doc.metadata.get("chunk_type", "unknown")
+            is_parent = doc.metadata.get("is_parent_chunk", False)
+
+            logger.debug(f"[ParentChunk] Child chunk '{chunk_id}': type={chunk_type}, is_parent={is_parent}, parent_id={parent_id}")
+
+            if parent_id:
+                parent_ids.add(parent_id)
+                child_to_parent_map[chunk_id] = parent_id
+
+        if not parent_ids:
+            logger.info("[ParentChunk] No parent_chunk_ids found in any child chunks - chunks may be atomic (no parent)")
+            return []
+
+        logger.info(f"[ParentChunk] Step 2: Found {len(parent_ids)} unique parent IDs for {len(child_chunk_ids)} child chunks")
+        logger.debug(f"[ParentChunk] Parent IDs to fetch: {list(parent_ids)[:5]}{'...' if len(parent_ids) > 5 else ''}")
+        logger.debug(f"[ParentChunk] Child→Parent mapping: {dict(list(child_to_parent_map.items())[:5])}")
+
+        # Step 2: Retrieve parent chunks
+        parent_docs = get_chunks_by_ids(list(parent_ids), source_names)
+
+        logger.info(f"[ParentChunk] Successfully retrieved {len(parent_docs)} parent chunks")
+        for doc in parent_docs:
+            parent_chunk_id = doc.metadata.get("chunk_id", "unknown")
+            parent_source = doc.metadata.get("source", "unknown")
+            content_preview = doc.page_content[:100].replace('\n', ' ') if doc.page_content else ""
+            child_ids = doc.metadata.get("child_chunk_ids", [])
+            logger.debug(f"[ParentChunk] Parent '{parent_chunk_id}' from '{parent_source}': {len(child_ids)} children, content='{content_preview}...'")
+
+        return parent_docs
+
+    except Exception as e:
+        logger.error(f"Error getting parent chunks: {e}")
+        return []
+
+
+def get_parent_chunk_by_id(
+    parent_chunk_id: str,
+    source_names: List[str] = None
+) -> Optional[Document]:
+    """
+    Retrieve a single parent chunk by its ID.
+
+    Args:
+        parent_chunk_id: The parent chunk ID to retrieve
+        source_names: Optional list of source names to filter
+
+    Returns:
+        Document object for the parent chunk, or None if not found
+    """
+    docs = get_chunks_by_ids([parent_chunk_id], source_names)
+    return docs[0] if docs else None
+
+
 def _create_per_source_retriever(
     vectorstore,
     source_names: List[str],

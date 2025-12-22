@@ -223,7 +223,13 @@ class SemanticHeaderStrategy(ChunkingStrategy):
         file_path: str = "",
         existing_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[Document]:
-        """Split by headers, then recursively split large sections."""
+        """Split by headers, then recursively split large sections.
+
+        Implements parent/child chunk design:
+        - When a section is split, a parent chunk (full section) is created
+        - Child chunks reference the parent via parent_chunk_id
+        - Parent chunks have is_parent_chunk=True and child_chunk_ids list
+        """
         # Split by headers first
         header_splitter = MarkdownHeaderTextSplitter(
             headers_to_split_on=HEADERS_TO_SPLIT_ON,
@@ -251,9 +257,36 @@ class SemanticHeaderStrategy(ChunkingStrategy):
 
             # Check if chunk needs further splitting
             if len(page_content) > self.max_chunk_size:
-                # Split large chunks
+                # Generate parent chunk ID
+                parent_chunk_id = self._generate_chunk_id()
+
+                # Split into child chunks first to get IDs upfront
                 sub_chunks = recursive_splitter.split_text(page_content)
+                child_ids = [self._generate_chunk_id() for _ in sub_chunks]
+
+                # Create parent chunk with child IDs already populated
+                parent_metadata = self._create_base_metadata(
+                    source_name=source_name,
+                    file_path=file_path,
+                    chunk_index=chunk_index,
+                    total_chunks=0,  # Will update later
+                    content=page_content,
+                    existing_metadata={**chunk_metadata, **(existing_metadata or {})},
+                )
+                parent_metadata["chunk_type"] = "parent"
+                parent_metadata["is_parent_chunk"] = True
+                parent_metadata["chunk_id"] = parent_chunk_id  # Override generated ID
+                parent_metadata["child_chunk_ids"] = child_ids  # Set child IDs before creating Document
+                parent_metadata["parent_chunk_index"] = i
+
+                parent_doc = Document(page_content=page_content, metadata=parent_metadata)
+                final_chunks.append(parent_doc)
+                chunk_index += 1
+
+                # Create child chunks with pre-generated IDs
                 for j, sub_content in enumerate(sub_chunks):
+                    child_chunk_id = child_ids[j]
+
                     metadata = self._create_base_metadata(
                         source_name=source_name,
                         file_path=file_path,
@@ -262,14 +295,17 @@ class SemanticHeaderStrategy(ChunkingStrategy):
                         content=sub_content,
                         existing_metadata={**chunk_metadata, **(existing_metadata or {})},
                     )
-                    metadata["chunk_type"] = "recursive"
+                    metadata["chunk_type"] = "child"
+                    metadata["chunk_id"] = child_chunk_id  # Use pre-generated ID
+                    metadata["parent_chunk_id"] = parent_chunk_id
                     metadata["parent_chunk_index"] = i
                     metadata["sub_chunk_index"] = j
+                    metadata["is_parent_chunk"] = False
 
                     final_chunks.append(Document(page_content=sub_content, metadata=metadata))
                     chunk_index += 1
             else:
-                # Keep chunk as-is
+                # Keep chunk as-is (atomic chunk, no parent/child relationship)
                 metadata = self._create_base_metadata(
                     source_name=source_name,
                     file_path=file_path,
@@ -279,6 +315,8 @@ class SemanticHeaderStrategy(ChunkingStrategy):
                     existing_metadata={**chunk_metadata, **(existing_metadata or {})},
                 )
                 metadata["chunk_type"] = "semantic_header"
+                metadata["is_parent_chunk"] = False
+                metadata["is_atomic"] = True  # No splitting needed
 
                 final_chunks.append(Document(page_content=page_content, metadata=metadata))
                 chunk_index += 1
@@ -662,7 +700,12 @@ class MedicalSectionStrategy(ChunkingStrategy):
         file_path: str = "",
         existing_metadata: Optional[Dict[str, Any]] = None,
     ) -> List[Document]:
-        """Split by medical sections."""
+        """Split by medical sections.
+
+        Implements parent/child chunk design:
+        - When a section is split, a parent chunk (full section) is created
+        - Child chunks reference the parent via parent_chunk_id
+        """
         sections = self._split_by_sections(content)
         final_chunks = []
         chunk_index = 0
@@ -680,6 +723,8 @@ class MedicalSectionStrategy(ChunkingStrategy):
                 )
                 metadata["chunk_type"] = "medical_section"
                 metadata["section_type"] = section_name
+                metadata["is_parent_chunk"] = False
+                metadata["is_atomic"] = True
 
                 # Extract medical entities
                 entities = self._extract_medical_entities(section_content)
@@ -695,14 +740,51 @@ class MedicalSectionStrategy(ChunkingStrategy):
                 final_chunks.append(Document(page_content=section_content, metadata=metadata))
                 chunk_index += 1
             else:
-                # Split large section with recursive splitter
+                # Generate parent chunk ID
+                parent_chunk_id = self._generate_chunk_id()
+
+                # Split into child chunks first to get IDs upfront
                 splitter = RecursiveCharacterTextSplitter(
                     chunk_size=self.chunk_size,
                     chunk_overlap=self.chunk_overlap,
                 )
                 sub_chunks = splitter.split_text(section_content)
+                child_ids = [self._generate_chunk_id() for _ in sub_chunks]
 
+                # Create parent chunk with child IDs already populated
+                parent_metadata = self._create_base_metadata(
+                    source_name=source_name,
+                    file_path=file_path,
+                    chunk_index=chunk_index,
+                    total_chunks=0,
+                    content=section_content,
+                    existing_metadata=existing_metadata,
+                )
+                parent_metadata["chunk_type"] = "parent"
+                parent_metadata["is_parent_chunk"] = True
+                parent_metadata["chunk_id"] = parent_chunk_id
+                parent_metadata["child_chunk_ids"] = child_ids  # Set child IDs before creating Document
+                parent_metadata["section_type"] = section_name
+
+                # Extract medical entities for parent
+                entities = self._extract_medical_entities(section_content)
+                parent_metadata["icd_codes"] = entities["icd_codes"]
+                parent_metadata["medications_mentioned"] = entities["medications"]
+                parent_metadata["vitals_present"] = bool(entities["vitals"])
+
+                # Mark key sections
+                if section_name.lower() in ["assessment", "plan", "impression", "diagnosis"]:
+                    parent_metadata["is_key_section"] = True
+                    parent_metadata["importance_score"] = 0.9
+
+                parent_doc = Document(page_content=section_content, metadata=parent_metadata)
+                final_chunks.append(parent_doc)
+                chunk_index += 1
+
+                # Create child chunks with pre-generated IDs
                 for j, sub_content in enumerate(sub_chunks):
+                    child_chunk_id = child_ids[j]
+
                     metadata = self._create_base_metadata(
                         source_name=source_name,
                         file_path=file_path,
@@ -711,9 +793,13 @@ class MedicalSectionStrategy(ChunkingStrategy):
                         content=sub_content,
                         existing_metadata=existing_metadata,
                     )
-                    metadata["chunk_type"] = "medical_section_split"
+                    metadata["chunk_type"] = "child"
+                    metadata["chunk_id"] = child_chunk_id  # Use pre-generated ID
+                    metadata["parent_chunk_id"] = parent_chunk_id
+                    metadata["is_parent_chunk"] = False
                     metadata["section_type"] = section_name
                     metadata["section_part"] = j + 1
+                    metadata["sub_chunk_index"] = j
 
                     entities = self._extract_medical_entities(sub_content)
                     metadata["icd_codes"] = entities["icd_codes"]
@@ -983,26 +1069,77 @@ class TablePreservingStrategy(ChunkingStrategy):
 
             # Handle table
             if table_type == "html" and len(table_content) > self.chunk_size:
-                # Split large HTML table
+                # Split large HTML table with parent/child design
                 table_parts = self._split_html_table(table_content)
-                for j, part in enumerate(table_parts):
+
+                if len(table_parts) > 1:
+                    # Generate parent chunk ID and child IDs upfront
+                    parent_chunk_id = self._generate_chunk_id()
+                    child_ids = [self._generate_chunk_id() for _ in table_parts]
+
+                    # Create parent chunk with child IDs already populated
+                    parent_metadata = self._create_base_metadata(
+                        source_name=source_name,
+                        file_path=file_path,
+                        chunk_index=chunk_index,
+                        total_chunks=0,
+                        content=table_content,
+                        existing_metadata=existing_metadata,
+                    )
+                    parent_metadata["chunk_type"] = "parent"
+                    parent_metadata["is_parent_chunk"] = True
+                    parent_metadata["chunk_id"] = parent_chunk_id
+                    parent_metadata["child_chunk_ids"] = child_ids  # Set child IDs before creating Document
+                    parent_metadata["contains_table"] = True
+                    parent_metadata["table_type"] = table_type
+
+                    parent_doc = Document(page_content=table_content, metadata=parent_metadata)
+                    final_chunks.append(parent_doc)
+                    chunk_index += 1
+
+                    # Create child chunks with pre-generated IDs
+                    for j, part in enumerate(table_parts):
+                        child_chunk_id = child_ids[j]
+
+                        metadata = self._create_base_metadata(
+                            source_name=source_name,
+                            file_path=file_path,
+                            chunk_index=chunk_index,
+                            total_chunks=0,
+                            content=part,
+                            existing_metadata=existing_metadata,
+                        )
+                        metadata["chunk_type"] = "child"
+                        metadata["chunk_id"] = child_chunk_id  # Use pre-generated ID
+                        metadata["parent_chunk_id"] = parent_chunk_id
+                        metadata["is_parent_chunk"] = False
+                        metadata["table_part"] = j + 1
+                        metadata["table_total_parts"] = len(table_parts)
+                        metadata["sub_chunk_index"] = j
+                        metadata["contains_table"] = True
+
+                        final_chunks.append(Document(page_content=part, metadata=metadata))
+                        chunk_index += 1
+                else:
+                    # Only one part, treat as atomic
                     metadata = self._create_base_metadata(
                         source_name=source_name,
                         file_path=file_path,
                         chunk_index=chunk_index,
                         total_chunks=0,
-                        content=part,
+                        content=table_parts[0],
                         existing_metadata=existing_metadata,
                     )
-                    metadata["chunk_type"] = "table_part"
-                    metadata["table_part"] = j + 1
-                    metadata["table_total_parts"] = len(table_parts)
+                    metadata["chunk_type"] = "table"
+                    metadata["table_type"] = table_type
                     metadata["contains_table"] = True
+                    metadata["is_parent_chunk"] = False
+                    metadata["is_atomic"] = True
 
-                    final_chunks.append(Document(page_content=part, metadata=metadata))
+                    final_chunks.append(Document(page_content=table_parts[0], metadata=metadata))
                     chunk_index += 1
             else:
-                # Keep table as single chunk
+                # Keep table as single chunk (atomic)
                 metadata = self._create_base_metadata(
                     source_name=source_name,
                     file_path=file_path,
@@ -1014,6 +1151,8 @@ class TablePreservingStrategy(ChunkingStrategy):
                 metadata["chunk_type"] = "table"
                 metadata["table_type"] = table_type
                 metadata["contains_table"] = True
+                metadata["is_parent_chunk"] = False
+                metadata["is_atomic"] = True
 
                 final_chunks.append(Document(page_content=table_content, metadata=metadata))
                 chunk_index += 1

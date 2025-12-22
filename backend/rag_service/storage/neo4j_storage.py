@@ -18,6 +18,8 @@ Key Features:
 import os
 import logging
 import asyncio
+import atexit
+import warnings
 from typing import Optional, List, Dict, Any, Tuple, Literal
 import threading
 
@@ -30,6 +32,28 @@ EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "2560"))  # Qwen3-Embedding-4B di
 
 # Store drivers per thread AND event loop to handle different event loops
 _thread_local = threading.local()
+
+# Track all created drivers for cleanup
+_all_drivers = []
+_drivers_lock = threading.Lock()
+
+
+def _cleanup_drivers():
+    """Cleanup all Neo4j drivers on exit - sync version to avoid event loop issues."""
+    with _drivers_lock:
+        for driver in _all_drivers:
+            try:
+                # Use sync close if available, otherwise just let GC handle it
+                if hasattr(driver, 'close'):
+                    driver.close()
+            except Exception:
+                # Ignore errors during cleanup - the process is exiting anyway
+                pass
+        _all_drivers.clear()
+
+
+# Register cleanup handler
+atexit.register(_cleanup_drivers)
 
 
 def _get_neo4j_driver():
@@ -69,8 +93,14 @@ def _get_neo4j_driver():
         user = os.getenv("NEO4J_USER", "neo4j")
         password = os.getenv("NEO4J_PASSWORD", "")
 
-        _thread_local.neo4j_driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        driver = AsyncGraphDatabase.driver(uri, auth=(user, password))
+        _thread_local.neo4j_driver = driver
         _thread_local.event_loop_id = current_loop_id
+
+        # Track for cleanup
+        with _drivers_lock:
+            _all_drivers.append(driver)
+
         logger.info(f"Connected to Neo4j at {uri} (thread: {threading.current_thread().name}, loop_id: {current_loop_id})")
 
     return _thread_local.neo4j_driver

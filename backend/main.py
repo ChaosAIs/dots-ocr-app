@@ -31,6 +31,7 @@ if 'HF_HOME' not in os.environ:
 
 import json
 import time
+import hashlib
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
 from fastapi.responses import JSONResponse, FileResponse
@@ -96,6 +97,24 @@ from queue_service import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress noisy asyncio "Event loop is closed" errors during cleanup
+# These occur when async HTTP clients (neo4j, httpx) try to close after the event loop exits
+# The errors are non-critical and don't affect functionality
+_original_exception_handler = None
+
+
+def _custom_exception_handler(loop, context):
+    """Custom exception handler that filters out event loop closed errors."""
+    exception = context.get("exception")
+    if exception and isinstance(exception, RuntimeError) and "Event loop is closed" in str(exception):
+        # Silently ignore - this is expected during cleanup
+        return
+    # Call original handler for other exceptions
+    if _original_exception_handler:
+        _original_exception_handler(loop, context)
+    else:
+        loop.default_exception_handler(context)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -119,6 +138,12 @@ async def lifespan(app: FastAPI):
 
     # Set up the connection managers with the current event loop
     loop = asyncio.get_event_loop()
+
+    # Install custom exception handler to suppress "Event loop is closed" errors
+    global _original_exception_handler
+    _original_exception_handler = loop.get_exception_handler()
+    loop.set_exception_handler(_custom_exception_handler)
+
     connection_manager.set_event_loop(loop)
     document_status_manager.set_event_loop(loop)
     # Start the background broadcast workers
@@ -398,18 +423,30 @@ class DocumentStatusManager:
 
     async def subscribe(self, websocket: WebSocket, document_ids: list):
         """Subscribe a WebSocket to specific document updates"""
+        # Filter out None/empty values from document_ids
+        valid_ids = [doc_id for doc_id in document_ids if doc_id]
+        if not valid_ids:
+            logger.warning(f"WebSocket subscribe called with no valid document IDs (received: {document_ids})")
+            return
+
         with self.lock:
             if websocket not in self.subscriptions:
                 self.subscriptions[websocket] = set()
-            self.subscriptions[websocket].update(document_ids)
-        logger.info(f"WebSocket subscribed to {len(document_ids)} documents. Total subscriptions: {len(self.subscriptions[websocket])}")
+            self.subscriptions[websocket].update(valid_ids)
+        logger.info(f"WebSocket subscribed to {len(valid_ids)} documents. Total subscriptions: {len(self.subscriptions[websocket])}")
 
     async def unsubscribe(self, websocket: WebSocket, document_ids: list):
         """Unsubscribe a WebSocket from specific document updates"""
+        # Filter out None/empty values from document_ids
+        valid_ids = [doc_id for doc_id in document_ids if doc_id]
+        if not valid_ids:
+            logger.warning(f"WebSocket unsubscribe called with no valid document IDs (received: {document_ids})")
+            return
+
         with self.lock:
             if websocket in self.subscriptions:
-                self.subscriptions[websocket].difference_update(document_ids)
-        logger.info(f"WebSocket unsubscribed from {len(document_ids)} documents")
+                self.subscriptions[websocket].difference_update(valid_ids)
+        logger.info(f"WebSocket unsubscribed from {len(valid_ids)} documents")
 
     async def _do_broadcast(self, message: dict):
         """Send message only to clients subscribed to the document"""
@@ -1031,6 +1068,7 @@ def _process_vector_chunk_task(chunk_task) -> bool:
                 raise ValueError(f"Page record or file path not found for page_id: {chunk_task.page_id}")
 
             page_file_path = page_record.page_file_path
+            page_number = page_record.page_number
 
             # Get document info for source name
             doc = db.query(Document).filter(Document.id == chunk_task.document_id).first()
@@ -1052,8 +1090,35 @@ def _process_vector_chunk_task(chunk_task) -> bool:
         # Get the specific chunk
         chunk = chunks[chunk_task.chunk_index]
 
+        # Build a mapping from old UUID chunk_ids to new composite chunk_ids
+        # This is needed for parent/child relationships to work correctly
+        # Format matches main.py:979: {document_id}_{page_number}_{chunk_index}_{content_hash}
+        old_to_new_id_map = {}
+        for idx, c in enumerate(chunks):
+            old_id = c.metadata.get("chunk_id", "")
+            content_hash = hashlib.md5(c.page_content.encode()).hexdigest()[:16]
+            new_id = f"{chunk_task.document_id}_{page_number}_{idx}_{content_hash}"
+            old_to_new_id_map[old_id] = new_id
+
         # Update chunk metadata with the chunk_id from task
         chunk.metadata["chunk_id"] = chunk_task.chunk_id
+
+        # Update parent_chunk_id reference if this is a child chunk
+        old_parent_id = chunk.metadata.get("parent_chunk_id")
+        if old_parent_id:
+            if old_parent_id in old_to_new_id_map:
+                new_parent_id = old_to_new_id_map[old_parent_id]
+                chunk.metadata["parent_chunk_id"] = new_parent_id
+                logger.debug(f"[ParentChild] Updated parent_chunk_id: {old_parent_id} → {new_parent_id}")
+            else:
+                logger.warning(f"[ParentChild] parent_chunk_id {old_parent_id} not found in ID mapping")
+
+        # Update child_chunk_ids references if this is a parent chunk
+        old_child_ids = chunk.metadata.get("child_chunk_ids", [])
+        if old_child_ids:
+            new_child_ids = [old_to_new_id_map.get(cid, cid) for cid in old_child_ids]
+            chunk.metadata["child_chunk_ids"] = new_child_ids
+            logger.debug(f"[ParentChild] Updated child_chunk_ids: {len(old_child_ids)} children remapped")
 
         # Index to Qdrant vectorstore
         vectorstore = get_vectorstore()
@@ -1876,60 +1941,59 @@ async def upload_file(file: UploadFile = File(...)):
         file_size = os.path.getsize(file_path)
         upload_time = datetime.now().isoformat()
 
-        # Create database record
-        doc_id = None
-        try:
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc, created = repo.get_or_create(
-                    filename=file.filename,
-                    original_filename=file.filename,
-                    file_path=file_path,
-                    file_size=file_size,
+        # Create database record - this MUST succeed for upload to be valid
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc, created = repo.get_or_create(
+                filename=file.filename,
+                original_filename=file.filename,
+                file_path=file_path,
+                file_size=file_size,
+            )
+            doc_id = str(doc.id)
+            if not created:
+                logger.info(f"Document record already exists: {file.filename}")
+            else:
+                logger.info(f"Created new document record: {file.filename} with ID: {doc_id}")
+
+            # Detect page count (for PDFs) or set to 1 (for images)
+            try:
+                import fitz  # PyMuPDF
+                pdf_doc = fitz.open(file_path)
+                total_pages = len(pdf_doc)
+                pdf_doc.close()
+                logger.info(f"📄 Detected {total_pages} pages in PDF: {file.filename}")
+            except Exception:
+                total_pages = 1  # Single page for non-PDF files (images, etc.)
+                logger.info(f"🖼️ Non-PDF file, treating as single page: {file.filename}")
+
+            # Update document total_pages
+            doc.total_pages = total_pages
+            db.commit()  # Commit the total_pages update
+
+            # Auto-create document task with page tasks if queue system is enabled
+            if TASK_QUEUE_ENABLED and task_queue_manager:
+                # Create or reset page tasks for this document
+                task_created = task_queue_manager.create_document_task(
+                    document_id=doc.id,
+                    total_pages=total_pages,
+                    db=db
                 )
-                doc_id = str(doc.id)
-                if not created:
-                    logger.info(f"Document record already exists: {file.filename}")
-
-                # Detect page count (for PDFs) or set to 1 (for images)
-                try:
-                    import fitz  # PyMuPDF
-                    pdf_doc = fitz.open(file_path)
-                    total_pages = len(pdf_doc)
-                    pdf_doc.close()
-                    logger.info(f"📄 Detected {total_pages} pages in PDF: {file.filename}")
-                except Exception:
-                    total_pages = 1  # Single page for non-PDF files (images, etc.)
-                    logger.info(f"🖼️ Non-PDF file, treating as single page: {file.filename}")
-
-                # Update document total_pages
-                doc.total_pages = total_pages
-                db.commit()  # Commit the total_pages update
-
-                # Auto-create document task with page tasks if queue system is enabled
-                if TASK_QUEUE_ENABLED and task_queue_manager:
-                    # Create or reset page tasks for this document
-                    task_created = task_queue_manager.create_document_task(
-                        document_id=doc.id,
-                        total_pages=total_pages,
-                        db=db
-                    )
-                    if task_created:
-                        logger.info(f"✅ Created/verified {total_pages} page tasks for {file.filename}")
-                    else:
-                        logger.warning(f"⚠️ Failed to create page tasks for {file.filename}")
+                if task_created:
+                    logger.info(f"✅ Created/verified {total_pages} page tasks for {file.filename}")
                 else:
-                    logger.info(f"ℹ️ Task queue disabled or not initialized, skipping task creation for {file.filename}")
-        except Exception as e:
-            logger.warning(f"Could not create database record: {e}")
+                    logger.warning(f"⚠️ Failed to create page tasks for {file.filename}")
+            else:
+                logger.info(f"ℹ️ Task queue disabled or not initialized, skipping task creation for {file.filename}")
 
         response_data = {
             "status": "success",
+            "id": doc_id,  # Primary identifier - frontend expects 'id'
+            "document_id": doc_id,  # Keep for backward compatibility
             "filename": file.filename,
             "file_path": file_path,
             "file_size": file_size,
             "upload_time": upload_time,
-            "document_id": doc_id,
         }
 
         # Add resize information if image was resized
@@ -2026,6 +2090,10 @@ async def list_documents():
     try:
         documents = []
 
+        # Sync any files that exist in input directory but not in database
+        # This ensures all files have database records with valid IDs
+        _sync_files_to_database()
+
         # Get database records for faster lookup
         db_docs = {}
         try:
@@ -2067,7 +2135,16 @@ async def list_documents():
                 # Get database info if available
                 db_info = db_docs.get(filename, {})
 
+                # Get document_id - must have a valid ID after sync
+                document_id = db_info.get("id")
+                if not document_id:
+                    # If still no ID after sync, log warning and skip this file
+                    logger.warning(f"Skipping file {filename} - no database record found after sync")
+                    continue
+
                 documents.append({
+                    "id": document_id,  # Primary identifier - frontend expects 'id'
+                    "document_id": document_id,  # Keep for backward compatibility
                     "filename": filename,
                     "file_path": file_path,
                     "file_size": file_size,
@@ -2079,7 +2156,6 @@ async def list_documents():
                     "converted_pages": converted_pages,
                     "indexed": indexed,
                     # Database fields
-                    "document_id": db_info.get("id"),
                     "upload_status": db_info.get("upload_status", "uploaded" if os.path.exists(file_path) else "pending"),
                     "convert_status": db_info.get("convert_status", "converted" if markdown_exists else "pending"),
                     "index_status": db_info.get("index_status", "indexed" if indexed else "pending"),
