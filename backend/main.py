@@ -109,6 +109,14 @@ async def lifespan(app: FastAPI):
         logger.error(f"Database initialization failed: {e}")
         # Continue without database - will fall back to file-based status
 
+    # Initialize Qdrant metadata collection for document routing
+    try:
+        from rag_service.vectorstore import ensure_metadata_collection_exists
+        ensure_metadata_collection_exists()
+        logger.info("Document metadata vector collection initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize metadata vector collection: {e}")
+
     # Set up the connection managers with the current event loop
     loop = asyncio.get_event_loop()
     connection_manager.set_event_loop(loop)
@@ -3433,7 +3441,7 @@ async def reindex_failed_chunks(
         from rag_service.selective_reindexer import (
             reindex_failed_vector_pages,
             reindex_failed_graphrag_chunks,
-            reindex_metadata
+            reextract_failed_metadata
         )
 
         # Re-index vector failures (page-level)
@@ -3461,7 +3469,7 @@ async def reindex_failed_chunks(
                 repo = DocumentRepository(db)
                 doc = repo.get_by_filename(filename)
                 if doc:
-                    results["metadata"] = reindex_metadata(doc, file_name_without_ext, OUTPUT_DIR)
+                    results["metadata"] = reextract_failed_metadata(doc, file_name_without_ext, OUTPUT_DIR)
 
         return JSONResponse(content={
             "status": "success",

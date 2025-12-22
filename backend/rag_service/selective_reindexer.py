@@ -14,7 +14,7 @@ Key Features:
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
 
@@ -302,13 +302,17 @@ def reindex_failed_graphrag_chunks(
         return {"chunks_reindexed": 0, "entities_extracted": 0, "relationships_extracted": 0, "error": str(e)}
 
 
-def reindex_metadata(
+def reextract_failed_metadata(
     doc,
     source_name: str,
     output_dir: str
 ) -> Dict[str, Any]:
     """
-    Re-extract metadata for a document.
+    Re-extract metadata for a document after a previous failure.
+
+    This function is for recovery/re-processing scenarios only.
+    For first-time metadata extraction during normal processing,
+    use HierarchicalMetadataExtractor directly (see hierarchical_task_manager.py).
 
     Args:
         doc: Document model instance
@@ -316,7 +320,11 @@ def reindex_metadata(
         output_dir: Output directory path
 
     Returns:
-        Dictionary with re-indexing results
+        Dictionary with re-extraction results:
+        - status: "completed" or "failed"
+        - document_type: Extracted document type (if completed)
+        - subject_name: Extracted subject name (if completed)
+        - error: Error message (if failed)
     """
     from .graph_rag.metadata_extractor import HierarchicalMetadataExtractor
     from db.database import get_db_session
@@ -365,10 +373,19 @@ def reindex_metadata(
         # Save to database
         with get_db_session() as db:
             repo = DocumentRepository(db)
-            doc = repo.get_by_filename(doc.filename)
-            if doc:
-                repo.update_document_metadata(doc, metadata)
-                repo.update_metadata_extraction_status(doc, "completed")
+            doc_updated = repo.get_by_filename(doc.filename)
+            if doc_updated:
+                repo.update_document_metadata(doc_updated, metadata)
+                repo.update_metadata_extraction_status(doc_updated, "completed")
+
+                # Also update the metadata vector collection
+                from .vectorstore import upsert_document_metadata_embedding
+                upsert_document_metadata_embedding(
+                    document_id=str(doc_updated.id),
+                    source_name=source_name,
+                    filename=doc_updated.filename,
+                    metadata=metadata
+                )
 
         logger.info(
             f"[Selective Re-index] Metadata re-extraction complete: "

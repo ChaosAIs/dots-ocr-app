@@ -1385,51 +1385,109 @@ class HierarchicalTaskQueueManager:
         filename: str
     ) -> None:
         """
-        Run metadata extraction for a document.
+        Run first-time metadata extraction for a document.
 
-        This reuses the existing reindex_metadata() function from selective_reindexer
-        which extracts document metadata (type, subject, topics, entities, summary)
-        using the HierarchicalMetadataExtractor and stores it in PostgreSQL.
+        Extracts document metadata (type, subject, topics, entities, summary)
+        using HierarchicalMetadataExtractor and stores it in PostgreSQL.
+        This is called automatically when all vector chunks complete.
+
+        For re-extraction of failed metadata, use reextract_failed_metadata()
+        from selective_reindexer.py instead.
 
         Args:
             document_id: Document UUID
             source_name: Document source name (filename without extension)
             filename: Original filename with extension
         """
+        import asyncio
+        from db.document_repository import DocumentRepository
+
         logger.info(f"[Metadata] Starting extraction for {source_name}")
 
+        db = create_db_session()
         try:
-            # Reuse existing metadata extraction function from selective_reindexer
-            from rag_service.selective_reindexer import reindex_metadata
+            # Get document
+            doc = db.query(Document).filter(Document.id == document_id).first()
+            if not doc:
+                logger.warning(f"[Metadata] Document not found: {document_id}")
+                return
 
-            # Get the document object
-            db = create_db_session()
+            # Get chunks from Qdrant
+            from rag_service.vectorstore import get_all_chunks_for_source
+            chunks = get_all_chunks_for_source(source_name)
+
+            if not chunks:
+                logger.warning(f"[Metadata] No chunks found in Qdrant for {source_name}")
+                return
+
+            # Convert to extractor format
+            chunks_data = [
+                {
+                    "id": chunk.metadata.get("chunk_id"),
+                    "page_content": chunk.page_content,
+                    "metadata": chunk.metadata
+                }
+                for chunk in chunks
+            ]
+
+            logger.info(f"[Metadata] Extracting from {len(chunks_data)} chunks for {source_name}")
+
+            # Run extraction using HierarchicalMetadataExtractor directly
+            from rag_service.graph_rag.metadata_extractor import HierarchicalMetadataExtractor
+            extractor = HierarchicalMetadataExtractor()
+
+            # Run async extraction in a new event loop
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                doc = db.query(Document).filter(Document.id == document_id).first()
-                if not doc:
-                    logger.warning(f"[Metadata] Document not found: {document_id}")
-                    return
-
-                # Get output directory from environment
-                output_dir = os.getenv("OUTPUT_DIR", "./backend/output")
-
-                # Call existing reindex_metadata function
-                # This handles: getting chunks from Qdrant, extraction, and saving to DB
-                result = reindex_metadata(doc, source_name, output_dir)
-
-                if result.get("status") == "completed":
-                    logger.info(
-                        f"[Metadata] ✅ Saved for {source_name}: "
-                        f"type={result.get('document_type')} | "
-                        f"subject={result.get('subject_name')}"
+                metadata = loop.run_until_complete(
+                    extractor.extract_metadata(
+                        chunks=chunks_data,
+                        source_name=source_name,
+                        batch_size=10,
+                        progress_callback=None
                     )
-                else:
-                    logger.warning(f"[Metadata] Extraction returned: {result}")
-
+                )
             finally:
-                db.close()
+                loop.close()
+
+            # Save metadata to database
+            repo = DocumentRepository(db)
+            repo.update_document_metadata(
+                doc,
+                metadata,
+                message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
+            )
+            repo.update_metadata_extraction_status(doc, "completed")
+
+            # Embed metadata to vector collection for fast document routing
+            from rag_service.vectorstore import upsert_document_metadata_embedding
+            upsert_document_metadata_embedding(
+                document_id=str(document_id),
+                source_name=source_name,
+                filename=filename,
+                metadata=metadata
+            )
+
+            logger.info(
+                f"[Metadata] ✅ Saved for {source_name}: "
+                f"type={metadata.get('document_type')} | "
+                f"subject={metadata.get('subject_name')} | "
+                f"confidence={metadata.get('confidence', 0):.2f}"
+            )
 
         except ImportError as e:
             logger.warning(f"[Metadata] Extractor not available: {e}")
         except Exception as e:
             logger.error(f"[Metadata] Extraction failed for {source_name}: {e}", exc_info=True)
+
+            # Update status to failed
+            try:
+                repo = DocumentRepository(db)
+                doc = db.query(Document).filter(Document.id == document_id).first()
+                if doc:
+                    repo.update_metadata_extraction_status(doc, "failed", error=str(e))
+            except Exception as db_error:
+                logger.warning(f"[Metadata] Could not update failed status: {db_error}")
+        finally:
+            db.close()

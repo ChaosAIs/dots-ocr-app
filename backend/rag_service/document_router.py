@@ -5,7 +5,13 @@ Routes queries to the most relevant documents before vector search.
 This module solves the "drowning out" problem where large documents dominate
 search results by intelligently selecting which documents to search based on
 metadata matching between the query and document metadata.
+
+Routing Strategy (in order of preference):
+1. Vector Search (Primary): Fast semantic search on document metadata embeddings
+2. LLM Scoring (Fallback): When vector search returns insufficient results
+3. Rule-based Scoring (Final Fallback): When LLM is unavailable
 """
+import os
 import logging
 import json
 from typing import List, Dict, Any, Tuple, Optional
@@ -17,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 ENABLE_DOCUMENT_ROUTING = True  # Feature flag
-USE_LLM_SCORING = True  # Use LLM-based scoring instead of rule-based scoring
+USE_VECTOR_ROUTING = os.getenv("METADATA_VECTOR_ROUTING_ENABLED", "true").lower() == "true"
+USE_LLM_SCORING = True  # Use LLM-based scoring as fallback
 DOCUMENT_ROUTING_MIN_SCORE = 0.3  # Minimum absolute score threshold (for rule-based scoring)
 
 # Advanced filtering to prevent low-quality documents from polluting results
@@ -28,12 +35,16 @@ DOCUMENT_ROUTING_MAX_SCORE_GAP = 8.0  # Max score gap from top document
 LLM_SCORING_MIN_SCORE = 3.0  # Minimum LLM score (0-10 scale)
 LLM_SCORING_SCORE_RATIO = 0.4  # Must be at least 40% of top score
 
+# Vector routing thresholds
+VECTOR_ROUTING_MIN_RESULTS = int(os.getenv("METADATA_FALLBACK_MIN_RESULTS", "3"))
+
 
 class DocumentRouter:
     """Routes queries to relevant documents based on metadata matching."""
 
     def __init__(self, llm_service=None):
         self.llm_service = llm_service
+        self.use_vector_routing = USE_VECTOR_ROUTING
         self.use_llm_scoring = USE_LLM_SCORING and llm_service is not None
 
         # Rule-based scoring thresholds
@@ -45,7 +56,12 @@ class DocumentRouter:
         self.llm_min_score = LLM_SCORING_MIN_SCORE
         self.llm_score_ratio = LLM_SCORING_SCORE_RATIO
 
-        if self.use_llm_scoring:
+        # Vector routing thresholds
+        self.vector_min_results = VECTOR_ROUTING_MIN_RESULTS
+
+        if self.use_vector_routing:
+            logger.info("[Router] Using vector-based routing (primary) with LLM fallback")
+        elif self.use_llm_scoring:
             logger.info("[Router] Using LLM-based scoring for document routing")
         else:
             logger.info("[Router] Using rule-based scoring for document routing")
@@ -58,13 +74,18 @@ class DocumentRouter:
         """
         Route query to most relevant documents based on metadata matching.
 
+        Routing strategy:
+        1. Vector search on metadata embeddings (fast, primary)
+        2. LLM scoring fallback (if vector results < min threshold)
+        3. Rule-based scoring (if LLM unavailable)
+
         Args:
             query_metadata: Metadata extracted from query
                 - entities: List[str]
                 - topics: List[str]
                 - document_type_hints: List[str]
                 - intent: str
-            original_query: Original query text (required for LLM scoring)
+            original_query: Original query text (required for vector/LLM scoring)
 
         Returns:
             List of document source names to search (e.g., ["Felix Yang- Resume - 2025"])
@@ -74,8 +95,32 @@ class DocumentRouter:
             logger.info("[Router] Document routing disabled, searching all documents")
             return []
 
+        if not original_query:
+            logger.warning("[Router] No original query provided, searching all documents")
+            return []
+
         try:
-            # Get all documents with metadata
+            # Strategy 1: Try vector-based routing first (fastest)
+            if self.use_vector_routing:
+                vector_results = self._route_with_vector_search(query_metadata, original_query)
+
+                if len(vector_results) >= self.vector_min_results:
+                    logger.info(
+                        f"[Router] 🎯 Vector routing returned {len(vector_results)} document(s): "
+                        f"{vector_results}"
+                    )
+                    return vector_results
+                elif vector_results:
+                    # Got some results but below threshold - still use them but log
+                    logger.info(
+                        f"[Router] Vector routing returned {len(vector_results)} document(s) "
+                        f"(below threshold {self.vector_min_results}, using anyway): {vector_results}"
+                    )
+                    return vector_results
+                else:
+                    logger.info("[Router] Vector routing returned no results, falling back to LLM/rule-based")
+
+            # Strategy 2: Fallback to LLM or rule-based scoring
             documents = self._get_documents_with_metadata()
 
             if not documents:
@@ -94,7 +139,7 @@ class DocumentRouter:
             if relevant_docs:
                 sources = [source for source, score in relevant_docs]
                 logger.info(
-                    f"[Router] 🎯 Routed to {len(sources)} document(s): "
+                    f"[Router] 🎯 Routed to {len(sources)} document(s) (fallback scoring): "
                     f"{[(s, f'{sc:.2f}') for s, sc in relevant_docs]}"
                 )
                 return sources
@@ -105,6 +150,64 @@ class DocumentRouter:
         except Exception as e:
             logger.error(f"[Router] Error routing query: {e}", exc_info=True)
             return []  # Fallback to searching all documents
+
+    def _route_with_vector_search(
+        self,
+        query_metadata: Dict[str, Any],
+        original_query: str
+    ) -> List[str]:
+        """
+        Route query using vector search on metadata embeddings.
+
+        Args:
+            query_metadata: Metadata extracted from query
+            original_query: Original query text
+
+        Returns:
+            List of source names from vector search results
+        """
+        try:
+            from .vectorstore import (
+                search_document_metadata,
+                format_query_for_metadata_search
+            )
+
+            # Format query for metadata search
+            query_text = format_query_for_metadata_search(
+                query_text=original_query,
+                entities=query_metadata.get("entities", []),
+                topics=query_metadata.get("topics", []),
+                document_type_hints=query_metadata.get("document_type_hints", [])
+            )
+
+            logger.debug(f"[Router Vector] Formatted query: {query_text[:100]}...")
+
+            # Search metadata collection
+            results = search_document_metadata(query_text)
+
+            if not results:
+                logger.debug("[Router Vector] No results from metadata vector search")
+                return []
+
+            # Extract source names from results
+            sources = []
+            for result in results:
+                source_name = result.get("source_name")
+                if source_name:
+                    sources.append(source_name)
+                    logger.debug(
+                        f"[Router Vector] {source_name}: score={result.get('score', 0):.3f}, "
+                        f"type={result.get('document_type')}"
+                    )
+
+            return sources
+
+        except ImportError as e:
+            logger.warning(f"[Router Vector] Vector search not available: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"[Router Vector] Error in vector search: {e}", exc_info=True)
+            return []
     
     def _apply_hybrid_filtering(
         self,

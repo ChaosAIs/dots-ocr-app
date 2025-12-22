@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 # Collection names for document embeddings
 COLLECTION_NAME = "dots_ocr_documents"
+METADATA_COLLECTION_NAME = "document_metadatas"
+
+# Configuration for metadata vector search
+METADATA_SEARCH_TOP_K = int(os.getenv("METADATA_SEARCH_TOP_K", "15"))
+METADATA_SCORE_THRESHOLD = float(os.getenv("METADATA_SCORE_THRESHOLD", "0.4"))  # Lower threshold for better recall
+METADATA_FALLBACK_MIN_RESULTS = int(os.getenv("METADATA_FALLBACK_MIN_RESULTS", "3"))
 
 # Singleton instances
 _vectorstore: Optional[QdrantVectorStore] = None
@@ -597,3 +603,310 @@ def is_document_indexed(source_name: str) -> bool:
     except Exception as e:
         logger.error(f"Error checking if document '{source_name}' is indexed: {e}")
         return False
+
+
+# =============================================================================
+# Document Metadata Vector Collection Functions
+# =============================================================================
+
+def ensure_metadata_collection_exists(client: QdrantClient = None, embedding_dim: int = 2560):
+    """
+    Ensure the document metadata collection exists, create if not.
+
+    Args:
+        client: The Qdrant client. If None, will get the singleton.
+        embedding_dim: Dimension of the embedding vectors.
+    """
+    if client is None:
+        client = get_qdrant_client()
+
+    collections = client.get_collections().collections
+    collection_names = [c.name for c in collections]
+
+    if METADATA_COLLECTION_NAME not in collection_names:
+        logger.info(f"Creating metadata collection: {METADATA_COLLECTION_NAME}")
+        client.create_collection(
+            collection_name=METADATA_COLLECTION_NAME,
+            vectors_config=models.VectorParams(
+                size=embedding_dim,
+                distance=models.Distance.COSINE,
+            ),
+        )
+        logger.info(f"Metadata collection {METADATA_COLLECTION_NAME} created successfully")
+    else:
+        logger.debug(f"Metadata collection {METADATA_COLLECTION_NAME} already exists")
+
+
+def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
+    """
+    Format document metadata into a text string suitable for embedding.
+
+    Args:
+        metadata: Document metadata dictionary
+        source_name: Document source name
+
+    Returns:
+        Formatted text string for embedding
+    """
+    document_type = metadata.get("document_type", "document")
+    subject_name = metadata.get("subject_name", source_name)
+
+    # Join topics
+    topics = metadata.get("topics", [])
+    topics_str = ", ".join(topics[:10]) if topics else ""
+
+    # Join key entities
+    key_entities = metadata.get("key_entities", [])
+    entities_str = ", ".join([
+        e.get("name", "") for e in key_entities[:10]
+        if isinstance(e, dict) and e.get("name")
+    ]) if key_entities else ""
+
+    # Get summary (truncate if too long)
+    summary = metadata.get("summary", "")
+    if len(summary) > 500:
+        summary = summary[:500] + "..."
+
+    # Format the embedding text
+    parts = [f"{document_type}: {subject_name}"]
+
+    if topics_str:
+        parts.append(f"Topics: {topics_str}")
+
+    if entities_str:
+        parts.append(f"Entities: {entities_str}")
+
+    if summary:
+        parts.append(f"Summary: {summary}")
+
+    return ". ".join(parts)
+
+
+def upsert_document_metadata_embedding(
+    document_id: str,
+    source_name: str,
+    filename: str,
+    metadata: dict
+) -> bool:
+    """
+    Embed document metadata and upsert to the metadata collection.
+
+    Args:
+        document_id: Document UUID as string
+        source_name: Document source name (filename without extension)
+        filename: Original filename with extension
+        metadata: Document metadata dictionary
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        client = get_qdrant_client()
+        embeddings = get_embeddings()
+
+        # Ensure collection exists
+        ensure_metadata_collection_exists(client)
+
+        # Format metadata for embedding
+        embedding_text = format_metadata_for_embedding(metadata, source_name)
+        logger.debug(f"[MetadataVector] Embedding text for {source_name}: {embedding_text[:200]}...")
+
+        # Generate embedding
+        embedding_vector = embeddings.embed_query(embedding_text)
+
+        # Prepare payload
+        payload = {
+            "document_id": document_id,
+            "source_name": source_name,
+            "filename": filename,
+            "document_type": metadata.get("document_type", "unknown"),
+            "subject_name": metadata.get("subject_name", source_name),
+            "confidence": metadata.get("confidence", 0.0),
+            "topics": metadata.get("topics", []),
+            "embedding_text": embedding_text,  # Store for debugging
+        }
+
+        # Add date information if available
+        dates = metadata.get("dates", {})
+        if dates:
+            primary_date = dates.get("primary_date", {})
+            if primary_date:
+                payload["primary_date"] = primary_date.get("normalized")
+                payload["date_year"] = primary_date.get("year")
+                payload["date_month"] = primary_date.get("month")
+
+        # Upsert to collection (use document_id as point ID for idempotent updates)
+        client.upsert(
+            collection_name=METADATA_COLLECTION_NAME,
+            points=[
+                models.PointStruct(
+                    id=document_id,
+                    vector=embedding_vector,
+                    payload=payload
+                )
+            ]
+        )
+
+        logger.info(
+            f"[MetadataVector] Upserted metadata embedding for {source_name} "
+            f"(type={metadata.get('document_type')}, confidence={metadata.get('confidence', 0):.2f})"
+        )
+        return True
+
+    except Exception as e:
+        logger.error(f"[MetadataVector] Error upserting metadata for {source_name}: {e}", exc_info=True)
+        return False
+
+
+def delete_document_metadata_embedding(document_id: str) -> bool:
+    """
+    Delete document metadata embedding from the collection.
+
+    Args:
+        document_id: Document UUID as string
+
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        client = get_qdrant_client()
+
+        client.delete(
+            collection_name=METADATA_COLLECTION_NAME,
+            points_selector=models.PointIdsList(
+                points=[document_id]
+            )
+        )
+
+        logger.info(f"[MetadataVector] Deleted metadata embedding for document {document_id}")
+        return True
+
+    except Exception as e:
+        logger.error(f"[MetadataVector] Error deleting metadata for {document_id}: {e}")
+        return False
+
+
+def search_document_metadata(
+    query_text: str,
+    top_k: int = None,
+    score_threshold: float = None
+) -> List[dict]:
+    """
+    Search for relevant documents by querying the metadata vector collection.
+
+    Args:
+        query_text: Query text to search for (will be embedded)
+        top_k: Number of results to return (default: METADATA_SEARCH_TOP_K)
+        score_threshold: Minimum score threshold (default: METADATA_SCORE_THRESHOLD)
+
+    Returns:
+        List of dictionaries with document info and scores:
+        [{"document_id": str, "source_name": str, "score": float, "payload": dict}, ...]
+    """
+    if top_k is None:
+        top_k = METADATA_SEARCH_TOP_K
+    if score_threshold is None:
+        score_threshold = METADATA_SCORE_THRESHOLD
+
+    try:
+        client = get_qdrant_client()
+        embeddings = get_embeddings()
+
+        # Ensure collection exists
+        ensure_metadata_collection_exists(client)
+
+        # Check if collection has any points
+        collection_info = client.get_collection(METADATA_COLLECTION_NAME)
+        if collection_info.points_count == 0:
+            logger.warning("[MetadataVector] Metadata collection is empty")
+            return []
+
+        # Embed the query
+        query_vector = embeddings.embed_query(query_text)
+
+        # Search using query_points (qdrant-client >= 1.7.0)
+        results = client.query_points(
+            collection_name=METADATA_COLLECTION_NAME,
+            query=query_vector,
+            limit=top_k,
+            score_threshold=score_threshold,
+            with_payload=True
+        )
+
+        # Format results
+        formatted_results = []
+        for point in results.points:
+            formatted_results.append({
+                "document_id": str(point.id),
+                "source_name": point.payload.get("source_name"),
+                "filename": point.payload.get("filename"),
+                "score": point.score,
+                "document_type": point.payload.get("document_type"),
+                "subject_name": point.payload.get("subject_name"),
+                "confidence": point.payload.get("confidence", 0),
+                "payload": point.payload
+            })
+
+        logger.info(
+            f"[MetadataVector] Search returned {len(formatted_results)} results "
+            f"(query: '{query_text[:50]}...', threshold: {score_threshold})"
+        )
+
+        return formatted_results
+
+    except Exception as e:
+        logger.error(f"[MetadataVector] Error searching metadata: {e}", exc_info=True)
+        return []
+
+
+def format_query_for_metadata_search(
+    query_text: str,
+    entities: List[str] = None,
+    topics: List[str] = None,
+    document_type_hints: List[str] = None
+) -> str:
+    """
+    Format a user query into text suitable for metadata vector search.
+
+    Args:
+        query_text: Original user query
+        entities: Extracted entities from query
+        topics: Extracted topics from query
+        document_type_hints: Hints about document type
+
+    Returns:
+        Formatted query text for embedding
+    """
+    parts = []
+
+    # Add document type hints first (high priority)
+    if document_type_hints:
+        parts.append(f"Document type: {', '.join(document_type_hints)}")
+
+    # Add the original query
+    parts.append(query_text)
+
+    # Add topics
+    if topics:
+        parts.append(f"Topics: {', '.join(topics[:5])}")
+
+    # Add entities
+    if entities:
+        parts.append(f"Entities: {', '.join(entities[:5])}")
+
+    return ". ".join(parts)
+
+
+def get_metadata_collection_info() -> dict:
+    """Get information about the metadata collection."""
+    client = get_qdrant_client()
+    try:
+        info = client.get_collection(METADATA_COLLECTION_NAME)
+        return {
+            "name": METADATA_COLLECTION_NAME,
+            "points_count": info.points_count,
+            "status": info.status.value,
+        }
+    except Exception as e:
+        logger.error(f"Error getting metadata collection info: {e}")
+        return {"name": METADATA_COLLECTION_NAME, "error": str(e)}
