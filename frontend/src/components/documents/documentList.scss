@@ -137,6 +137,17 @@
       color: #495057;
     }
 
+    &.queued {
+      background-color: #fff3cd;
+      color: #856404;
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.7; }
+    }
+
     &.partial {
       background-color: #d1ecf1;
       color: #0c5460;

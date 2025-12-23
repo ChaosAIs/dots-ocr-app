@@ -516,13 +516,17 @@ class HierarchicalTaskQueueManager:
                     "updated_at": now.isoformat(),
                 }
 
-                # === Metadata Extraction Stats (derived from OCR - metadata is extracted during OCR) ===
-                # In the hierarchical queue, metadata extraction happens as part of OCR processing
-                # Set metadata_extraction status to match OCR status for frontend compatibility
-                doc.indexing_details["metadata_extraction"] = {
-                    "status": ocr_status,  # Metadata extraction follows OCR status
-                    "updated_at": now.isoformat(),
-                }
+                # === Metadata Extraction Stats ===
+                # In the hierarchical queue, metadata extraction happens AFTER vector indexing completes,
+                # NOT during OCR. Don't overwrite existing metadata_extraction status - preserve it.
+                if "metadata_extraction" not in doc.indexing_details:
+                    doc.indexing_details["metadata_extraction"] = {
+                        "status": "pending",
+                        "updated_at": now.isoformat(),
+                    }
+                else:
+                    # Only update timestamp, preserve the actual status set by extraction logic
+                    doc.indexing_details["metadata_extraction"]["updated_at"] = now.isoformat()
 
             # Update overall index_status based on all phases
             # The document is fully indexed only when all phases are complete

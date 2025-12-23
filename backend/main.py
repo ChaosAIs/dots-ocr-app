@@ -62,7 +62,7 @@ from rag_service.indexer import (
     reindex_document,
     index_document_now,
 )
-from rag_service.vectorstore import delete_documents_by_source, get_collection_info, clear_collection, is_document_indexed
+from rag_service.vectorstore import delete_documents_by_source, get_collection_info, clear_collection, is_document_indexed, delete_document_metadata_embedding
 
 # Import GraphRAG for source-level deletion and Neo4j initialization
 try:
@@ -1981,6 +1981,18 @@ async def upload_file(file: UploadFile = File(...)):
                 )
                 if task_created:
                     logger.info(f"✅ Created/verified {total_pages} page tasks for {file.filename}")
+                    # Broadcast upload event to notify frontend immediately
+                    # This allows frontend to show "Queued" status instead of "No Index"
+                    document_status_manager.broadcast_from_thread({
+                        "event_type": "document_uploaded",
+                        "type": "document_status",
+                        "document_id": doc_id,
+                        "filename": file.filename,
+                        "ocr_status": "pending",
+                        "vector_status": "pending",
+                        "graphrag_status": "pending",
+                        "total_pages": total_pages
+                    })
                 else:
                     logger.warning(f"⚠️ Failed to create page tasks for {file.filename}")
             else:
@@ -2162,6 +2174,10 @@ async def list_documents():
                     "indexed_chunks": db_info.get("indexed_chunks", 0),
                     "indexing_details": db_info.get("indexing_details"),  # Include granular indexing status
                     "ocr_details": db_info.get("ocr_details"),  # Include granular OCR status
+                    # Hierarchical task queue status - for immediate queue feedback
+                    "ocr_status": db_info.get("ocr_status"),
+                    "vector_status": db_info.get("vector_status"),
+                    "graphrag_status": db_info.get("graphrag_status"),
                 })
 
         return JSONResponse(content={
@@ -3226,6 +3242,19 @@ async def delete_document(filename: str):
                 error_msg = f"Failed to delete GraphRAG data: {str(e)}"
                 errors.append(error_msg)
                 logger.warning(error_msg)
+
+        # Delete document metadata from vector collection (must do before database delete to get doc ID)
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    delete_document_metadata_embedding(str(doc.id))
+                    logger.info(f"Deleted document metadata embedding for: {filename}")
+        except Exception as e:
+            error_msg = f"Failed to delete document metadata embedding: {str(e)}"
+            errors.append(error_msg)
+            logger.warning(error_msg)
 
         # Hard delete from database (removes document and status logs via cascade)
         try:

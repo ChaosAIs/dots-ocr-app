@@ -29,14 +29,21 @@ DOCUMENT_ROUTING_MIN_SCORE = 0.3  # Minimum absolute score threshold (for rule-b
 
 # Advanced filtering to prevent low-quality documents from polluting results
 DOCUMENT_ROUTING_SCORE_RATIO = 0.25   # Must be at least 25% of top score
-DOCUMENT_ROUTING_MAX_SCORE_GAP = 8.0  # Max score gap from top document
+DOCUMENT_ROUTING_MAX_SCORE_GAP = float(os.getenv("DOCUMENT_ROUTING_MAX_SCORE_GAP", "12.0"))  # Max score gap from top document
 
 # LLM scoring thresholds (when USE_LLM_SCORING=True)
 LLM_SCORING_MIN_SCORE = 3.0  # Minimum LLM score (0-10 scale)
 LLM_SCORING_SCORE_RATIO = 0.4  # Must be at least 40% of top score
 
-# Vector routing thresholds
+# Vector routing thresholds - ADAPTIVE
 VECTOR_ROUTING_MIN_RESULTS = int(os.getenv("METADATA_FALLBACK_MIN_RESULTS", "3"))
+# Relative score threshold: results must be >= X% of top result score
+# Higher = more strict (fewer documents), Lower = more permissive (more documents)
+# Default 0.5 allows documents scoring 50%+ of top result (more inclusive for similar docs)
+VECTOR_ROUTING_RELATIVE_THRESHOLD = float(os.getenv("METADATA_RELATIVE_THRESHOLD", "0.5"))
+
+# Verbose logging for metadata embedding comparison
+METADATA_VERBOSE_LOGGING = os.getenv("METADATA_VERBOSE_LOGGING", "false").lower() == "true"
 
 
 class DocumentRouter:
@@ -159,12 +166,17 @@ class DocumentRouter:
         """
         Route query using vector search on metadata embeddings.
 
+        Uses adaptive thresholding:
+        1. Get top results with base threshold
+        2. Apply relative score filtering (must be >= 70% of top score)
+        3. Deduplicate results
+
         Args:
             query_metadata: Metadata extracted from query
             original_query: Original query text
 
         Returns:
-            List of source names from vector search results
+            List of unique source names from vector search results
         """
         try:
             from .vectorstore import (
@@ -180,7 +192,16 @@ class DocumentRouter:
                 document_type_hints=query_metadata.get("document_type_hints", [])
             )
 
-            logger.debug(f"[Router Vector] Formatted query: {query_text[:100]}...")
+            # Log the full formatted query for debugging
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"[Router Vector] METADATA QUERY FORMATTING:")
+            logger.info(f"[Router Vector]   • Original query: \"{original_query}\"")
+            logger.info(f"[Router Vector]   • Entities: {query_metadata.get('entities', [])}")
+            logger.info(f"[Router Vector]   • Topics: {query_metadata.get('topics', [])}")
+            logger.info(f"[Router Vector]   • Doc type hints: {query_metadata.get('document_type_hints', [])}")
+            logger.info(f"[Router Vector]   • Formatted query ({len(query_text)} chars):")
+            logger.info(f"[Router Vector]     \"{query_text}\"")
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             # Search metadata collection
             results = search_document_metadata(query_text)
@@ -189,16 +210,218 @@ class DocumentRouter:
                 logger.debug("[Router Vector] No results from metadata vector search")
                 return []
 
-            # Extract source names from results
+            # ========== ENTITY MATCHING BOOST ==========
+            # Apply score boost when query entities match document entities/source names
+            # This compensates for embedding model limitations with specific terms
+            import re
+
+            def normalize_for_matching(text: str) -> str:
+                """Normalize text for fuzzy matching: lowercase, remove special chars, collapse spaces."""
+                text = text.lower().strip()
+                text = re.sub(r'[^a-z0-9\s]', '', text)  # Remove special chars except spaces
+                text = re.sub(r'\s+', ' ', text)  # Collapse multiple spaces
+                return text
+
+            query_entities = [normalize_for_matching(e) for e in query_metadata.get("entities", [])]
+            query_terms = [t for t in original_query.lower().split() if len(t) > 2]
+
+            ENTITY_MATCH_BOOST = float(os.getenv("ENTITY_MATCH_BOOST", "0.3"))
+
+            if query_entities or query_terms:
+                logger.info(f"[Router Vector] ENTITY MATCHING BOOST:")
+                logger.info(f"[Router Vector]   • Query entities (normalized): {query_entities}")
+                logger.info(f"[Router Vector]   • Boost factor: {ENTITY_MATCH_BOOST}")
+
+                for result in results:
+                    source_name_raw = result.get("source_name", "")
+                    source_name = normalize_for_matching(source_name_raw)
+                    # Also create a variant without spaces for matching "graph r1" with "graphr1"
+                    source_name_compact = source_name.replace(" ", "")
+
+                    # Get document entities from payload
+                    payload = result.get("payload", {})
+                    embedding_text = normalize_for_matching(payload.get("embedding_text", ""))
+
+                    original_score = result.get("score", 0)
+                    boost = 0.0
+                    match_reasons = []
+
+                    # Helper function to check if two strings share a significant prefix
+                    def shares_prefix(s1: str, s2: str, min_len: int = 4) -> bool:
+                        """Check if two strings share a common prefix of at least min_len chars."""
+                        max_prefix = min(len(s1), len(s2))
+                        for i in range(max_prefix, min_len - 1, -1):
+                            if s1[:i] == s2[:i]:
+                                return True
+                        return False
+
+                    # Check if any query entity appears in the document
+                    for entity in query_entities:
+                        entity_compact = entity.replace(" ", "")
+                        # Also get significant words from entity (3+ chars)
+                        entity_words = [w for w in entity.split() if len(w) >= 3]
+
+                        # Check source name (with various matching strategies)
+                        if entity in source_name or source_name in entity:
+                            boost = max(boost, ENTITY_MATCH_BOOST)
+                            match_reasons.append(f"entity '{entity}' in source")
+                        elif entity_compact in source_name_compact or source_name_compact in entity_compact:
+                            boost = max(boost, ENTITY_MATCH_BOOST)
+                            match_reasons.append(f"entity '{entity}' ~matches source")
+                        # Check if significant entity words appear in source (handles typos like "graphy" matching "graph")
+                        elif any(w in source_name_compact or source_name_compact in w for w in entity_words if len(w) >= 4):
+                            boost = max(boost, ENTITY_MATCH_BOOST * 0.9)
+                            match_reasons.append(f"entity word from '{entity}' in source")
+                        # Check prefix matching for entity words (handles "graphy" matching "graphr1" via "graph" prefix)
+                        elif any(shares_prefix(w, source_name_compact) for w in entity_words if len(w) >= 4):
+                            boost = max(boost, ENTITY_MATCH_BOOST * 0.85)
+                            match_reasons.append(f"entity '{entity}' prefix-matches source")
+                        # Check embedding text (contains entities, topics, summary)
+                        elif entity in embedding_text or entity_compact in embedding_text.replace(" ", ""):
+                            boost = max(boost, ENTITY_MATCH_BOOST * 0.8)
+                            match_reasons.append(f"entity '{entity}' in content")
+
+                    # Also check direct query terms against source name
+                    for term in query_terms:
+                        if len(term) > 3 and (term in source_name or term in source_name_compact):
+                            if boost == 0:  # Only apply term boost if no entity boost
+                                boost = max(boost, ENTITY_MATCH_BOOST * 0.5)
+                                match_reasons.append(f"term '{term}' in source")
+
+                    if boost > 0:
+                        result["score"] = min(1.0, original_score + boost)
+                        result["_boosted"] = True
+                        result["_boost_amount"] = boost
+                        logger.info(
+                            f"[Router Vector]   ↑ BOOSTED: {source_name_raw:40s} "
+                            f"{original_score:.4f} → {result['score']:.4f} (+{boost:.4f}) "
+                            f"[{', '.join(match_reasons)}]"
+                        )
+
+                # Re-sort by score after boosting
+                results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+            # ========== DOCUMENT TYPE FILTERING ==========
+            # If document_type_hints are provided, filter/penalize mismatched types
+            doc_type_hints = [t.lower() for t in query_metadata.get("document_type_hints", [])]
+            if doc_type_hints:
+                DOC_TYPE_MISMATCH_PENALTY = float(os.getenv("DOC_TYPE_MISMATCH_PENALTY", "0.5"))
+                logger.info(f"[Router Vector] DOCUMENT TYPE FILTERING:")
+                logger.info(f"[Router Vector]   • Required types: {doc_type_hints}")
+                logger.info(f"[Router Vector]   • Mismatch penalty: {DOC_TYPE_MISMATCH_PENALTY}")
+
+                for result in results:
+                    doc_type = (result.get("document_type") or "").lower()
+                    source_name = result.get("source_name", "")
+                    original_score = result.get("score", 0)
+
+                    # Check if document type matches any of the hints
+                    type_matches = any(
+                        hint in doc_type or doc_type in hint
+                        for hint in doc_type_hints
+                    )
+
+                    if not type_matches and doc_type:
+                        # Apply penalty for type mismatch
+                        result["score"] = original_score * DOC_TYPE_MISMATCH_PENALTY
+                        result["_type_penalized"] = True
+                        logger.info(
+                            f"[Router Vector]   ↓ PENALIZED: {source_name:40s} "
+                            f"type='{doc_type}' not in {doc_type_hints} "
+                            f"({original_score:.4f} → {result['score']:.4f})"
+                        )
+                    else:
+                        logger.debug(
+                            f"[Router Vector]   ✓ TYPE OK: {source_name:40s} type='{doc_type}'"
+                        )
+
+                # Re-sort after type penalty
+                results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+            # ========== ADAPTIVE THRESHOLD CALCULATION ==========
+            # Log all raw results first for debugging
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"[Router Vector] RESULTS AFTER BOOSTING: {len(results)} results")
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+            for i, r in enumerate(results):
+                # Get embedding text from payload for comparison
+                payload = r.get("payload", {})
+                embedding_text = payload.get("embedding_text", "N/A")
+
+                logger.info(
+                    f"[Router Vector]   [{i+1}] {r.get('source_name', 'N/A'):40s} "
+                    f"score={r.get('score', 0):.4f}  type={r.get('document_type', 'N/A')}"
+                )
+
+                # Show stored embedding text for comparison (verbose mode or debug)
+                if METADATA_VERBOSE_LOGGING:
+                    logger.info(f"[Router Vector]       Stored embedding ({len(embedding_text)} chars):")
+                    logger.info(f"[Router Vector]       \"{embedding_text}\"")
+                else:
+                    # Truncate for display in debug mode
+                    embedding_preview = embedding_text[:100] + "..." if len(embedding_text) > 100 else embedding_text
+                    logger.debug(f"[Router Vector]       Stored: \"{embedding_preview}\"")
+
+            # Calculate adaptive threshold
+            top_score = results[0].get("score", 0) if results else 0
+            relative_threshold = top_score * VECTOR_ROUTING_RELATIVE_THRESHOLD
+
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"[Router Vector] ADAPTIVE THRESHOLD CALCULATION:")
+            logger.info(f"[Router Vector]   • Top score:              {top_score:.4f}")
+            logger.info(f"[Router Vector]   • Relative threshold (%): {VECTOR_ROUTING_RELATIVE_THRESHOLD:.0%}")
+            logger.info(f"[Router Vector]   • Computed threshold:     {relative_threshold:.4f}")
+            logger.info(f"[Router Vector]   • Formula: {top_score:.4f} × {VECTOR_ROUTING_RELATIVE_THRESHOLD} = {relative_threshold:.4f}")
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+            # Extract and deduplicate source names with adaptive filtering
+            seen_sources = set()
             sources = []
+            filtered_count = 0
+            duplicate_count = 0
+
+            logger.info(f"[Router Vector] FILTERING RESULTS:")
             for result in results:
                 source_name = result.get("source_name")
-                if source_name:
-                    sources.append(source_name)
-                    logger.debug(
-                        f"[Router Vector] {source_name}: score={result.get('score', 0):.3f}, "
-                        f"type={result.get('document_type')}"
+                score = result.get("score", 0)
+
+                if not source_name:
+                    continue
+
+                # Skip if below relative threshold
+                if score < relative_threshold:
+                    filtered_count += 1
+                    logger.info(
+                        f"[Router Vector]   ✗ FILTERED: {source_name:40s} "
+                        f"score={score:.4f} < threshold={relative_threshold:.4f}"
                     )
+                    continue
+
+                # Deduplicate
+                if source_name in seen_sources:
+                    duplicate_count += 1
+                    logger.debug(
+                        f"[Router Vector]   ⊘ DUPLICATE: {source_name:40s} (already added)"
+                    )
+                    continue
+
+                seen_sources.add(source_name)
+                sources.append(source_name)
+                logger.info(
+                    f"[Router Vector]   ✓ ACCEPTED: {source_name:40s} "
+                    f"score={score:.4f} >= threshold={relative_threshold:.4f}"
+                )
+
+            # Summary
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"[Router Vector] FILTERING SUMMARY:")
+            logger.info(f"[Router Vector]   • Total raw results:    {len(results)}")
+            logger.info(f"[Router Vector]   • Accepted (unique):    {len(sources)}")
+            logger.info(f"[Router Vector]   • Filtered (low score): {filtered_count}")
+            logger.info(f"[Router Vector]   • Skipped (duplicates): {duplicate_count}")
+            logger.info(f"[Router Vector]   • Final sources: {sources}")
+            logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             return sources
 

@@ -732,43 +732,54 @@ def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
     """
     Format document metadata into a text string suitable for embedding.
 
+    IMPORTANT: Keep it SHORT and FOCUSED for better vector search accuracy!
+    - Source name and document type are the most distinctive identifiers
+    - Key entities provide specific names/terms for matching
+    - Topics categorize the document type
+    - Summary is EXCLUDED to avoid diluting the semantic signal with generic words
+
     Args:
         metadata: Document metadata dictionary
         source_name: Document source name
 
     Returns:
-        Formatted text string for embedding
+        Formatted text string for embedding (concise, ~200-300 chars)
     """
     document_type = metadata.get("document_type", "document")
     subject_name = metadata.get("subject_name", source_name)
 
-    # Join topics
-    topics = metadata.get("topics", [])
-    topics_str = ", ".join(topics[:10]) if topics else ""
-
-    # Join key entities
+    # Join key entities - limit to top 8 for conciseness
     key_entities = metadata.get("key_entities", [])
     entities_str = ", ".join([
-        e.get("name", "") for e in key_entities[:10]
+        e.get("name", "") for e in key_entities[:8]
         if isinstance(e, dict) and e.get("name")
     ]) if key_entities else ""
 
-    # Get summary (truncate if too long)
-    summary = metadata.get("summary", "")
-    if len(summary) > 500:
-        summary = summary[:500] + "..."
+    # Join topics - limit to top 5
+    topics = metadata.get("topics", [])
+    topics_str = ", ".join(topics[:5]) if topics else ""
 
-    # Format the embedding text
-    parts = [f"{document_type}: {subject_name}"]
+    # Format the embedding text - CONCISE for better semantic matching
+    # Format: "source_name. Key entities: ... document_type: subject. Topics: ..."
+    # NO SUMMARY - summaries contain generic words that dilute entity matching
+    parts = []
 
+    # 1. Source name FIRST (most distinctive)
+    parts.append(source_name)
+
+    # 2. Entities SECOND (key identifiers)
+    if entities_str:
+        parts.append(f"Key entities: {entities_str}")
+
+    # 3. Document type and subject
+    parts.append(f"{document_type}: {subject_name}")
+
+    # 4. Topics
     if topics_str:
         parts.append(f"Topics: {topics_str}")
 
-    if entities_str:
-        parts.append(f"Entities: {entities_str}")
-
-    if summary:
-        parts.append(f"Summary: {summary}")
+    # NOTE: Summary is intentionally excluded to keep embedding text focused
+    # Long summaries introduce generic words that confuse vector similarity
 
     return ". ".join(parts)
 
@@ -875,6 +886,146 @@ def delete_document_metadata_embedding(document_id: str) -> bool:
     except Exception as e:
         logger.error(f"[MetadataVector] Error deleting metadata for {document_id}: {e}")
         return False
+
+
+def delete_metadata_by_source_name(source_name: str) -> int:
+    """
+    Delete all document metadata entries with a specific source_name from the collection.
+
+    This is useful for cleaning up orphaned metadata records that weren't properly
+    deleted when the document was removed.
+
+    Args:
+        source_name: The source name to delete (e.g., document name without extension)
+
+    Returns:
+        Number of records deleted
+    """
+    try:
+        client = get_qdrant_client()
+
+        # First, scroll to find all points with this source_name
+        points_to_delete = []
+        offset = None
+
+        while True:
+            result = client.scroll(
+                collection_name=METADATA_COLLECTION_NAME,
+                scroll_filter=models.Filter(
+                    must=[
+                        models.FieldCondition(
+                            key="source_name",
+                            match=models.MatchValue(value=source_name)
+                        )
+                    ]
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False
+            )
+
+            points, offset = result
+            if not points:
+                break
+
+            points_to_delete.extend([p.id for p in points])
+
+            if offset is None:
+                break
+
+        if not points_to_delete:
+            logger.info(f"[MetadataVector] No metadata found for source_name: {source_name}")
+            return 0
+
+        # Delete all found points
+        client.delete(
+            collection_name=METADATA_COLLECTION_NAME,
+            points_selector=models.PointIdsList(points=points_to_delete)
+        )
+
+        logger.info(f"[MetadataVector] Deleted {len(points_to_delete)} metadata entries for source_name: {source_name}")
+        return len(points_to_delete)
+
+    except Exception as e:
+        logger.error(f"[MetadataVector] Error deleting metadata by source_name '{source_name}': {e}")
+        return 0
+
+
+def cleanup_orphaned_metadata(valid_document_ids: List[str]) -> dict:
+    """
+    Remove metadata records that don't have corresponding documents in the database.
+
+    Args:
+        valid_document_ids: List of valid document IDs from the database
+
+    Returns:
+        Dictionary with cleanup statistics
+    """
+    try:
+        client = get_qdrant_client()
+
+        # Get all metadata points
+        all_points = []
+        offset = None
+
+        while True:
+            result = client.scroll(
+                collection_name=METADATA_COLLECTION_NAME,
+                limit=100,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False
+            )
+
+            points, offset = result
+            if not points:
+                break
+
+            all_points.extend(points)
+
+            if offset is None:
+                break
+
+        # Find orphaned points (those not in valid_document_ids)
+        valid_ids_set = set(valid_document_ids)
+        orphaned_points = []
+
+        for point in all_points:
+            # Point ID is the document_id
+            point_id = str(point.id) if not isinstance(point.id, str) else point.id
+            if point_id not in valid_ids_set:
+                source_name = point.payload.get("source_name", "unknown") if point.payload else "unknown"
+                orphaned_points.append({
+                    "id": point_id,
+                    "source_name": source_name
+                })
+
+        if not orphaned_points:
+            logger.info("[MetadataVector] No orphaned metadata records found")
+            return {"total": len(all_points), "orphaned": 0, "deleted": 0}
+
+        # Delete orphaned points
+        orphaned_ids = [p["id"] for p in orphaned_points]
+        client.delete(
+            collection_name=METADATA_COLLECTION_NAME,
+            points_selector=models.PointIdsList(points=orphaned_ids)
+        )
+
+        logger.info(f"[MetadataVector] Cleaned up {len(orphaned_points)} orphaned metadata records")
+        for p in orphaned_points[:10]:  # Log first 10
+            logger.debug(f"[MetadataVector]   - Deleted orphaned: {p['source_name']} (id={p['id']})")
+
+        return {
+            "total": len(all_points),
+            "orphaned": len(orphaned_points),
+            "deleted": len(orphaned_points),
+            "orphaned_sources": list(set(p["source_name"] for p in orphaned_points))
+        }
+
+    except Exception as e:
+        logger.error(f"[MetadataVector] Error cleaning up orphaned metadata: {e}")
+        return {"error": str(e)}
 
 
 def search_document_metadata(

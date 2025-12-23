@@ -59,6 +59,7 @@
         "Actions": "Actions",
         "Converted": "Converted",
         "Pending": "Pending",
+        "Queued": "Queued",
         "NoIndex": "No Index",
         "Partial": "Partial",
         "Indexed": "Indexed",

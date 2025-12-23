@@ -460,7 +460,8 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
       total_pages = 0,
       converted_pages = 0,
       convert_status,
-      indexing_details
+      indexing_details,
+      ocr_status,  // Hierarchical task queue status
     } = rowData;
 
     // Check indexing phases
@@ -491,12 +492,16 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
     let statusText, statusClass;
 
     // Check conversion status first
-    if (!markdown_exists && convert_status === "converting") {
+    if (!markdown_exists && (convert_status === "converting" || ocr_status === "processing")) {
       // OCR conversion in progress
       statusText = t("DocumentList.Indexing");
       statusClass = "indexing";
+    } else if (!markdown_exists && (ocr_status === "pending" || convert_status === "pending")) {
+      // Queued for processing - show "Queued" instead of "No Index"
+      statusText = t("DocumentList.Queued");
+      statusClass = "queued";
     } else if (!markdown_exists) {
-      // Just uploaded, not converted yet
+      // Just uploaded, not converted yet (fallback)
       statusText = t("DocumentList.NoIndex");
       statusClass = "no-index";
     } else if (convert_status === "failed") {

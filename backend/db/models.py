@@ -311,6 +311,10 @@ class Document(Base):
             "upload_status": self.upload_status.value if self.upload_status else None,
             "convert_status": self.convert_status.value if self.convert_status else None,
             "index_status": self.index_status.value if self.index_status else None,
+            # Hierarchical task queue status fields
+            "ocr_status": self.ocr_status.value if self.ocr_status else None,
+            "vector_status": self.vector_status.value if self.vector_status else None,
+            "graphrag_status": self.graphrag_status.value if self.graphrag_status else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
