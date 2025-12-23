@@ -5,6 +5,7 @@ import { Card } from "primereact/card";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { Toast } from "primereact/toast";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
 import { ChatHistory } from "./ChatHistory";
 import { useTranslation } from "react-i18next";
@@ -905,7 +906,7 @@ export const AgenticChatBot = () => {
                 <>
                   <Card className={`message-content ${msg.isEdited ? 'edited' : ''}`}>
                     {msg.role === "assistant" ? (
-                      <ReactMarkdown>{msg.content}</ReactMarkdown>
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
                     ) : (
                       <p>{msg.content}</p>
                     )}
@@ -964,7 +965,7 @@ export const AgenticChatBot = () => {
               <i className="pi pi-android" />
             </div>
             <Card className="message-content streaming">
-              <ReactMarkdown>{streamingContent}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingContent}</ReactMarkdown>
               <span className="typing-indicator">▊</span>
             </Card>
           </div>
