@@ -328,21 +328,44 @@ RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
 # Query Enhancement with Metadata Extraction (for Document Routing)
 # =============================================================================
 
-QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are a search query analyzer for a document retrieval system. Enhance the user's query and extract metadata to help find the right documents.
+QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are an expert search query analyzer for a document retrieval system. Your task is to deeply analyze the user's query and enhance it for optimal document retrieval.
 
 User Query: {query}
 
+## THINK CAREFULLY - Analysis Steps:
+
+**Step 1: Understand the Intent**
+- What is the user really asking for?
+- What information would fully answer their question?
+- Are there implicit requirements not stated explicitly?
+
+**Step 2: Identify Key Elements**
+- Who/What: Specific entities (people, companies, products, dates)
+- Where: Locations or contexts mentioned
+- When: Time periods, dates, or temporal references
+- Why/How: The purpose or method being asked about
+
+**Step 3: Consider Related Concepts**
+- What synonyms or alternative terms might be in the documents?
+- What related topics should be included?
+- What document types would contain this information?
+
+**Step 4: Construct Enhanced Query**
+- Create a detailed, specific query that captures ALL aspects
+- Include relevant context and qualifiers
+- Add terms that improve recall without losing precision
+
 Return ONLY valid JSON in this exact format:
 {{{{
-  "enhanced_query": "enhanced query with more context and details",
+  "enhanced_query": "A detailed, comprehensive query that captures the full intent with specific terms and context",
   "entities": ["entity1", "entity2"],
   "topics": ["topic1", "topic2"],
   "document_type_hints": ["type1", "type2"],
-  "intent": "brief intent description"
+  "intent": "detailed description of what the user wants to find"
 }}}}
 
-CRITICAL Guidelines for document_type_hints:
-- Choose from these EXACT types based on what the user is looking for:
+## CRITICAL Guidelines for document_type_hints:
+Choose from these EXACT types based on what the user is looking for:
   * "receipt" - for meals, restaurant bills, purchases, transactions, expenses
   * "invoice" - for product purchases, orders, billing documents
   * "resume" - for CV, job applications, career history, skills
@@ -355,19 +378,27 @@ CRITICAL Guidelines for document_type_hints:
 - IMPORTANT: If query mentions someone's name + "resume" or "CV" → use "resume"
 - IMPORTANT: If query mentions "invoice", "order", "purchase" of products → use "invoice"
 
-Guidelines for entities:
+## Guidelines for entities:
 - Extract SPECIFIC named entities from the query (names, dates, products, places)
 - Include keywords that identify WHAT the user is looking for
+- Think about what exact terms would appear in the documents
 - For meal queries: include "meal", "receipt", year/date if mentioned
-- For resume queries: include person's name
+- For resume queries: include person's name and relevant skills/roles
 - DO NOT include generic words like "group", "list", "all"
 
-Guidelines for topics:
+## Guidelines for topics:
 - Subject areas and domains relevant to the query
-- For meals: "restaurant", "dining", "expense", "food"
-- For resumes: "career", "employment", "skills"
+- Think broadly about related topics that might be in documents
+- For meals: "restaurant", "dining", "expense", "food", "payment"
+- For resumes: "career", "employment", "skills", "experience", "education"
 
-Now analyze this query:
+## Guidelines for enhanced_query:
+- Make it DETAILED and SPECIFIC - include all relevant context
+- Add qualifiers and specific terms from the analysis
+- Think about what exact phrases might appear in documents
+- Include synonyms for key concepts
+
+Now THINK CAREFULLY and analyze this query:
 Query: {query}
 """
 

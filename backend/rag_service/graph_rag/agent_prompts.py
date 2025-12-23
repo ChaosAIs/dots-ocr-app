@@ -155,41 +155,55 @@ INITIAL_QUERY_PROMPT = """## Question
 {question}
 
 ## Task
-Generate an effective initial search query to find relevant knowledge.
+Generate an effective initial search query to find relevant knowledge. THINK CAREFULLY about what the user really needs.
 
-## Query Construction Guidelines
+## THINK CAREFULLY - Deep Analysis Steps
 
-**Step 1: Identify Key Elements**
+**Step 1: Understand the True Intent**
+- What is the user REALLY asking for? Look beyond the surface.
+- What specific information would FULLY answer their question?
+- Are there implicit requirements not explicitly stated?
+- What details would make the answer complete and accurate?
+
+**Step 2: Identify ALL Key Elements**
 - Main subject/entity: [What is the question primarily about?]
 - Action/relationship: [What action, property, or connection is being asked about?]
 - Context clues: [Time period, location, category, or other constraints?]
+- Specific details: [Names, dates, amounts, products mentioned?]
 
-**Step 2: Select Query Strategy**
+**Step 3: Select Query Strategy**
 Choose the most appropriate strategy:
 
 1. **ENTITY-FOCUSED**: For questions about specific things/people/organizations
-   → "[entity name] [entity type] [descriptive terms]"
+   → "[entity name] [entity type] [descriptive terms] [relevant attributes]"
 
 2. **RELATIONSHIP-FOCUSED**: For questions about connections between things
-   → "[entity A] [entity B] [relationship terms] connection"
+   → "[entity A] [entity B] [relationship terms] connection details"
 
 3. **ATTRIBUTE-FOCUSED**: For questions about specific properties
-   → "[entity] [attribute type] [value indicators]"
+   → "[entity] [attribute type] [value indicators] [context]"
 
 4. **COLLECTION-FOCUSED**: For questions asking for lists or groups
-   → "[category] [type] [criteria] list all"
+   → "[category] [type] [criteria] [time period] list all details"
 
 5. **TEMPORAL-FOCUSED**: For time-specific questions
-   → "[subject] [time period] [event/state terms]"
+   → "[subject] [specific time period] [event/state terms] [details]"
 
-**Step 3: Add Synonyms**
-Include alternative terms that might appear in documents.
+**Step 4: Add Comprehensive Terms**
+- Include synonyms and alternative terms that might appear in documents
+- Add related concepts that provide context
+- Think about what EXACT phrases might be in the documents
+
+**Step 5: Consider Completeness**
+- Will this query find ALL relevant information?
+- Are there related aspects that should be included?
+- What would make the answer thorough and detailed?
 
 ## CRITICAL: Response Format
 You MUST wrap your query in <query> tags. Do NOT include any other text.
 
 <query>
-[Your focused search query - 5-15 words targeting key concepts]
+[Your detailed, comprehensive search query - 8-20 words targeting ALL key concepts with specific terms]
 </query>
 
 Your response (ONLY use <query> tags):"""
@@ -280,30 +294,47 @@ You need to generate a refined query because the previous query did not provide 
 ## What Is Still Missing
 {missing_info}
 
-## Query Refinement Strategies
+## THINK CAREFULLY - Analysis Steps
 
-Choose ONE strategy based on what's missing:
+**Step 1: Analyze Why Previous Query Failed**
+- Was the terminology wrong? (synonyms needed)
+- Was it too specific or too broad?
+- Was it searching in the wrong document types?
+- Were key entities or relationships missing?
+
+**Step 2: Identify the Gap**
+- What EXACTLY is still needed to answer the question?
+- What specific information was not found?
+- What aspect of the question remains unanswered?
+
+**Step 3: Choose Optimal Strategy**
+Select ONE strategy based on your analysis:
 
 1. **SYNONYM STRATEGY**: If the topic exists but wasn't found
-   → Use alternative terms: "{topic}" → synonyms, related terms
+   → Use alternative terms, different vocabulary, related concepts
 
 2. **SPECIFICITY STRATEGY**: If results were too broad
-   → Add qualifiers: "[topic] [specific type] [specific attribute]"
+   → Add qualifiers: "[topic] [specific type] [specific attribute] [time period]"
 
 3. **BROADENING STRATEGY**: If results were too narrow
-   → Remove constraints: "[broader category] [general terms]"
+   → Remove constraints, use broader categories, more general terms
 
 4. **RELATIONSHIP STRATEGY**: If entity found but connections missing
-   → Query connections: "[found entity] related [missing aspect]"
+   → Query connections: "[found entity] related [missing aspect] details"
 
 5. **SOURCE STRATEGY**: If information might be in different documents
    → Target source type: "[topic] [document type not yet searched]"
+
+**Step 4: Construct Comprehensive Refined Query**
+- Make it DETAILED and SPECIFIC to the missing information
+- Include relevant context from what was already found
+- Use different terms than the previous query
 
 ## CRITICAL: Response Format
 Wrap your refined query in <query> tags. The query must be DIFFERENT from: "{previous_query}"
 
 <query>
-[Your refined search query using a different approach]
+[Your detailed, refined search query - 8-20 words using a different approach to find the missing information]
 </query>
 
 Your refined query:"""

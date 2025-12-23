@@ -483,6 +483,140 @@ def _is_no_data_response(response: str) -> bool:
     return False
 
 
+def _is_follow_up_query(query: str) -> bool:
+    """
+    Detect if a query is a follow-up question that references previous conversation.
+
+    Args:
+        query: The user's query
+
+    Returns:
+        True if the query appears to be a follow-up question
+    """
+    query_lower = query.lower().strip()
+
+    # Patterns that indicate follow-up questions
+    follow_up_patterns = [
+        # Reference to previous answer/response
+        "double check", "check again", "verify", "are you sure", "you are not correct",
+        "you're not correct", "that's not right", "that is not right", "incorrect",
+        "wrong", "mistake", "error", "re-check", "recheck",
+        # Pronouns referencing previous context
+        "what about it", "tell me more", "more details", "explain more",
+        "what else", "anything else", "is there more",
+        # Implicit references
+        "how much", "how many", "what is the total", "summarize it",
+        "can you clarify", "i don't understand", "what do you mean",
+        # Continuation
+        "and also", "also", "what about", "regarding that",
+        "on that note", "speaking of", "related to that",
+    ]
+
+    for pattern in follow_up_patterns:
+        if pattern in query_lower:
+            return True
+
+    # Very short queries are often follow-ups
+    if len(query.split()) <= 5 and any(word in query_lower for word in ["it", "this", "that", "them", "those"]):
+        return True
+
+    return False
+
+
+def _rewrite_query_with_llm(
+    original_query: str,
+    conversation_history: List[dict]
+) -> str:
+    """
+    Use LLM to rewrite a follow-up query by incorporating conversation context.
+
+    Args:
+        original_query: The user's original follow-up query
+        conversation_history: Previous conversation messages
+
+    Returns:
+        Rewritten query with full context
+    """
+    try:
+        # Build conversation context string (last 4 messages for context)
+        recent_history = conversation_history[-4:] if len(conversation_history) > 4 else conversation_history
+
+        context_str = ""
+        for msg in recent_history:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            # Truncate long messages
+            content = msg["content"][:500] + "..." if len(msg["content"]) > 500 else msg["content"]
+            context_str += f"{role}: {content}\n\n"
+
+        prompt = f"""You are an expert query rewriter. The user asked a follow-up question that references previous conversation context.
+
+CONVERSATION HISTORY:
+{context_str}
+
+CURRENT USER QUERY: {original_query}
+
+## THINK CAREFULLY - Analysis Steps:
+
+**Step 1: Understand the Context**
+- What was the previous conversation about?
+- What specific information was discussed?
+- What entities, topics, or documents were mentioned?
+
+**Step 2: Understand the Follow-up Intent**
+- What is the user REALLY asking for?
+- Are they asking for verification, more details, corrections, or clarification?
+- What specific aspect do they want to know about?
+
+**Step 3: Identify Key Elements to Include**
+- Specific entities (names, products, dates) from the conversation
+- Topics and subjects that were discussed
+- Document names or types that were referenced
+- Any specific values, amounts, or details mentioned
+
+**Step 4: Construct Comprehensive Query**
+- Create a detailed, self-contained query
+- Include ALL relevant context from the conversation
+- Be specific about what information is needed
+
+TASK: Rewrite the user's query to be a standalone, self-contained search query that includes all necessary context from the conversation.
+
+RULES:
+1. The rewritten query should be DETAILED and SPECIFIC
+2. Include ALL relevant entities, topics, dates, and document names from the conversation
+3. If the user is asking for verification/correction, clearly state what needs to be verified
+4. If the user is asking for more details, specify what details are needed
+5. Keep the rewritten query comprehensive but focused (under 100 words)
+6. Return ONLY the rewritten query, nothing else
+
+REWRITTEN QUERY:"""
+
+        # Use the query model for fast rewriting
+        llm_service = get_llm_service()
+        llm = llm_service.get_query_model(
+            temperature=0.1,
+            num_ctx=2048,
+            num_predict=150,
+        )
+
+        response = llm.invoke([HumanMessage(content=prompt)])
+        rewritten = response.content.strip()
+
+        # Clean up response
+        if rewritten.startswith('"') and rewritten.endswith('"'):
+            rewritten = rewritten[1:-1]
+
+        # Remove any "REWRITTEN QUERY:" prefix if present
+        if rewritten.lower().startswith("rewritten query:"):
+            rewritten = rewritten[16:].strip()
+
+        logger.info(f"[Query Rewrite] '{original_query[:50]}...' -> '{rewritten[:100]}...'")
+        return rewritten
+
+    except Exception as e:
+        logger.warning(f"[Query Rewrite] Failed to rewrite query: {e}")
+        return original_query
+
+
 def _build_enhanced_fallback_query(
     original_query: str,
     conversation_history: List[dict]
@@ -490,6 +624,9 @@ def _build_enhanced_fallback_query(
     """
     Build an enhanced query for fallback document search by combining
     the original query with context from conversation history.
+
+    For follow-up questions, uses LLM to rewrite the query with full context.
+    For other queries, extracts entities and time periods from history.
 
     Args:
         original_query: The user's original query
@@ -501,7 +638,12 @@ def _build_enhanced_fallback_query(
     if not conversation_history:
         return original_query
 
-    # Extract context from recent conversation history
+    # Check if this is a follow-up question that needs LLM rewriting
+    if _is_follow_up_query(original_query) and len(conversation_history) >= 2:
+        logger.info(f"[Query Enhancement] Detected follow-up query, using LLM rewriting")
+        return _rewrite_query_with_llm(original_query, conversation_history)
+
+    # For non-follow-up queries, extract context from recent conversation history
     context_parts = []
 
     # Look at last few user messages for additional context
@@ -1292,9 +1434,25 @@ def call_model(state: AgentState) -> AgentState:
             logger.info(f"[vLLM] Classification result: {intent}")
 
             if intent == "SEARCH":
+                # Extract conversation history from messages for context-aware search
+                conversation_history = []
+                for msg in messages:
+                    if isinstance(msg, HumanMessage):
+                        conversation_history.append({"role": "user", "content": msg.content})
+                    elif isinstance(msg, AIMessage):
+                        conversation_history.append({"role": "assistant", "content": msg.content})
+
+                # Enhance query with conversation context (excluding current query)
+                # The last message is the current query, so we use history up to that point
+                history_for_context = conversation_history[:-1] if len(conversation_history) > 1 else []
+                enhanced_query = _build_enhanced_fallback_query(user_query, history_for_context)
+
+                if enhanced_query != user_query:
+                    logger.info(f"[vLLM] Enhanced query with context: '{user_query[:30]}...' -> '{enhanced_query[:50]}...'")
+
                 # Search for context first
-                logger.info(f"[vLLM] Searching documents for query: {user_query[:50]}...")
-                context = search_documents.invoke({"query": user_query})
+                logger.info(f"[vLLM] Searching documents for query: {enhanced_query[:50]}...")
+                context = search_documents.invoke({"query": enhanced_query})
 
                 # Add context to the system message with explicit instructions
                 if context.startswith("[GraphRAG Final Answer]"):
