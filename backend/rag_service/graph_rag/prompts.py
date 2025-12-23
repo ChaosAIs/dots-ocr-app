@@ -252,7 +252,8 @@ INSTRUCTIONS:
 Extract the following metadata and respond in valid JSON format:
 
 1. **document_type**: Classify as one of:
-   - "receipt" - Receipt, invoice, or transaction record
+   - "receipt" - Meal receipts, restaurant bills, dining expenses, food purchases, grocery receipts
+   - "invoice" - Product invoices, equipment purchases, order confirmations, billing documents for goods/services
    - "resume" - CV, resume, or professional profile
    - "manual" - User manual, guide, or how-to document
    - "report" - Business report, analysis, or white paper
@@ -260,6 +261,11 @@ Extract the following metadata and respond in valid JSON format:
    - "technical_doc" - Technical documentation, API docs, or specifications
    - "book" - Book, ebook, or long-form publication
    - "other" - Anything else
+
+   **IMPORTANT Classification Rules**:
+   - If document mentions food, meals, restaurant, dining, or groceries → use "receipt"
+   - If document mentions product purchases (electronics, equipment, hardware, software) → use "invoice"
+   - Look at the document name for hints: "Meal-*" → receipt, "*Invoice*" → invoice
 
 2. **subject_name**: The PRIMARY subject of the document
    - **IMPORTANT**: Analyze BOTH the document name (provided above) AND the content to determine the most appropriate subject
@@ -291,7 +297,8 @@ Extract the following metadata and respond in valid JSON format:
    - For other documents: Include main topic, key dates, and important details
 
 7. **topics**: Array of 3-5 main topics/themes (lowercase, e.g., ["software development", "cloud computing"])
-   - For receipts, include terms like: "meal receipt", "restaurant expense", "credit card transaction", "purchase invoice", "ticket invoice", "grocery receipt", "utility bill", "transportation ticket", "event ticket", "parking receipt", "medical receipt", "service receipt", "rental receipt", "membership receipt", "subscription receipt", "donation receipt", "tax receipt", "warranty receipt", "guarantee receipt", "refund receipt", "return receipt", "cancellation receipt", "adjustment receipt", "correction receipt", "dispute receipt", "reversal receipt"
+   - For meal receipts (document_type="receipt"), include terms like: "meal receipt", "restaurant expense", "dining expense", "food purchase", "grocery receipt"
+   - For product invoices (document_type="invoice"), include terms like: "product invoice", "equipment purchase", "order invoice", "hardware purchase", "software purchase"
 
 8. **key_entities**: Array of 5-10 most important entities with scores
    Format: [{{"name": "Entity Name", "type": "person|organization|technology|location|date|financial|product", "score": 0-100}}]
@@ -321,7 +328,7 @@ RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
 # Query Enhancement with Metadata Extraction (for Document Routing)
 # =============================================================================
 
-QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are a search query analyzer. Enhance the user's query and extract metadata.
+QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are a search query analyzer for a document retrieval system. Enhance the user's query and extract metadata to help find the right documents.
 
 User Query: {query}
 
@@ -334,12 +341,31 @@ Return ONLY valid JSON in this exact format:
   "intent": "brief intent description"
 }}}}
 
-Guidelines:
-- Enhanced query: Expand abbreviations, add related terms, keep it natural
-- Entities: Named entities (people, organizations, products, technologies)
-- Topics: Subject areas and domains
-- Document type hints: Types of documents (resume, manual, report, article, technical_doc, receipt, invoice, etc.)
-- Intent: Brief description of what the user wants
+CRITICAL Guidelines for document_type_hints:
+- Choose from these EXACT types based on what the user is looking for:
+  * "receipt" - for meals, restaurant bills, purchases, transactions, expenses
+  * "invoice" - for product purchases, orders, billing documents
+  * "resume" - for CV, job applications, career history, skills
+  * "report" - for analysis, summaries, findings
+  * "manual" - for instructions, guides, how-to documents
+  * "article" - for news, blog posts, written content
+  * "technical_doc" - for API docs, specifications, technical references
+
+- IMPORTANT: If query mentions "meal", "food", "restaurant", "dining", "expense" → use "receipt"
+- IMPORTANT: If query mentions someone's name + "resume" or "CV" → use "resume"
+- IMPORTANT: If query mentions "invoice", "order", "purchase" of products → use "invoice"
+
+Guidelines for entities:
+- Extract SPECIFIC named entities from the query (names, dates, products, places)
+- Include keywords that identify WHAT the user is looking for
+- For meal queries: include "meal", "receipt", year/date if mentioned
+- For resume queries: include person's name
+- DO NOT include generic words like "group", "list", "all"
+
+Guidelines for topics:
+- Subject areas and domains relevant to the query
+- For meals: "restaurant", "dining", "expense", "food"
+- For resumes: "career", "employment", "skills"
 
 Now analyze this query:
 Query: {query}
