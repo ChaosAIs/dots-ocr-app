@@ -33,3 +33,9 @@ backend/queue_service/__pycache__/
 backend/services/__pycache__/
 backend/rag_service/chunking/__pycache__/
 backend/rag_service/utils/__pycache__/
+backend/services/__pycache__/
+backend/services/__pycache__/__init__.cpython-313.pyc
+backend/services/__pycache__/permission_service.cpython-313.pyc
+backend/services/__pycache__/sharing_api.cpython-313.pyc
+backend/services/__pycache__/workspace_api.cpython-313.pyc
+backend/services/__pycache__/workspace_service.cpython-313.pyc
