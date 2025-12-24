@@ -332,36 +332,56 @@ QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are an expert search query analy
 
 User Query: {query}
 
+## CRITICAL INSTRUCTION: CHECK CAREFULLY WITH DETAILS - DO NOT MISS ANY ITEMS
+
+You MUST be thorough and meticulous in your analysis. Missing important details will result in incomplete search results.
+
 ## THINK CAREFULLY - Analysis Steps:
 
-**Step 1: Understand the Intent**
+**Step 1: Understand the Intent (BE THOROUGH)**
 - What is the user really asking for?
 - What information would fully answer their question?
 - Are there implicit requirements not stated explicitly?
+- DOUBLE-CHECK: Have you captured the complete intent, not just part of it?
 
-**Step 2: Identify Key Elements**
-- Who/What: Specific entities (people, companies, products, dates)
-- Where: Locations or contexts mentioned
-- When: Time periods, dates, or temporal references
+**Step 2: Identify ALL Key Elements (DO NOT SKIP ANY)**
+- Who/What: Specific entities (people, companies, products, dates) - LIST ALL OF THEM
+- Where: Locations or contexts mentioned - CHECK FOR ANY PLACE REFERENCES
+- When: Time periods, dates, or temporal references - LOOK FOR ALL DATE/TIME MENTIONS
 - Why/How: The purpose or method being asked about
+- Quantities: Numbers, counts, amounts mentioned (e.g., "all", "every", "each", specific numbers)
+- Scope: Is user asking for a single item, multiple items, or comprehensive coverage?
+- RE-CHECK THE QUERY: Did you miss any nouns, proper names, dates, or numbers?
 
-**Step 3: Consider Related Concepts**
+**Step 3: Consider Related Concepts (EXPAND THOROUGHLY)**
 - What synonyms or alternative terms might be in the documents?
 - What related topics should be included?
 - What document types would contain this information?
+- What variations of entity names might exist? (nicknames, abbreviations, full names)
+- What related concepts might provide additional context?
 
-**Step 4: Construct Enhanced Query**
-- Create a detailed, specific query that captures ALL aspects
+**Step 4: Construct Enhanced Query (COMPREHENSIVE & COMPLETE)**
+- Create a detailed, specific query that captures ALL aspects - LEAVE NOTHING OUT
 - Include relevant context and qualifiers
 - Add terms that improve recall without losing precision
+- For queries asking for "all" or "every" - ensure the enhanced query reflects completeness
+- VERIFY: Does your enhanced query cover every element from Step 2?
+
+**Step 5: FINAL VERIFICATION CHECKLIST**
+Before submitting, verify:
+- [ ] Did I extract ALL entities mentioned in the query?
+- [ ] Did I capture ALL date/time references?
+- [ ] Did I identify the correct scope (single item vs. multiple items vs. all items)?
+- [ ] Does my enhanced_query include terms for EACH concept in the original query?
+- [ ] Will this query find ALL relevant documents, not just some?
 
 Return ONLY valid JSON in this exact format:
 {{{{
-  "enhanced_query": "A detailed, comprehensive query that captures the full intent with specific terms and context",
-  "entities": ["entity1", "entity2"],
-  "topics": ["topic1", "topic2"],
+  "enhanced_query": "A detailed, comprehensive query that captures the full intent with ALL specific terms, dates, entities, and context - nothing missing",
+  "entities": ["entity1", "entity2", "entity3"],
+  "topics": ["topic1", "topic2", "topic3"],
   "document_type_hints": ["type1", "type2"],
-  "intent": "detailed description of what the user wants to find"
+  "intent": "detailed description of what the user wants to find, including scope (single/multiple/all)"
 }}}}
 
 ## CRITICAL Guidelines for document_type_hints:
@@ -378,27 +398,36 @@ Choose from these EXACT types based on what the user is looking for:
 - IMPORTANT: If query mentions someone's name + "resume" or "CV" → use "resume"
 - IMPORTANT: If query mentions "invoice", "order", "purchase" of products → use "invoice"
 
-## Guidelines for entities:
-- Extract SPECIFIC named entities from the query (names, dates, products, places)
-- Include keywords that identify WHAT the user is looking for
+## Guidelines for entities (BE EXHAUSTIVE):
+- Extract EVERY SINGLE named entity from the query (names, dates, products, places)
+- Include ALL keywords that identify WHAT the user is looking for
 - Think about what exact terms would appear in the documents
 - For meal queries: include "meal", "receipt", year/date if mentioned
-- For resume queries: include person's name and relevant skills/roles
+- For resume queries: include person's name AND relevant skills/roles
+- For date ranges: include start date, end date, and all variations
+- For names: include full name, first name, last name separately
 - DO NOT include generic words like "group", "list", "all"
+- VERIFY: Go back to the original query and check if you missed any entity
 
-## Guidelines for topics:
+## Guidelines for topics (COMPREHENSIVE COVERAGE):
 - Subject areas and domains relevant to the query
-- Think broadly about related topics that might be in documents
-- For meals: "restaurant", "dining", "expense", "food", "payment"
-- For resumes: "career", "employment", "skills", "experience", "education"
+- Think BROADLY about related topics that might be in documents
+- For meals: "restaurant", "dining", "expense", "food", "payment", "bill", "cost"
+- For resumes: "career", "employment", "skills", "experience", "education", "work history"
+- Include both specific and general topic terms
+- Add industry-specific terminology if applicable
 
-## Guidelines for enhanced_query:
-- Make it DETAILED and SPECIFIC - include all relevant context
+## Guidelines for enhanced_query (DETAILED & COMPLETE):
+- Make it DETAILED and SPECIFIC - include ALL relevant context
 - Add qualifiers and specific terms from the analysis
 - Think about what exact phrases might appear in documents
 - Include synonyms for key concepts
+- For "all X" queries: use terms like "complete list", "every", "all occurrences"
+- For date ranges: specify the range explicitly
+- For multiple criteria: ensure ALL criteria are represented
+- FINAL CHECK: Read your enhanced_query and verify it covers everything in the original
 
-Now THINK CAREFULLY and analyze this query:
+Now THINK CAREFULLY, CHECK EVERY DETAIL, and analyze this query thoroughly:
 Query: {query}
 """
 
