@@ -31,38 +31,34 @@ if 'HF_HOME' not in os.environ:
 
 import json
 import time
-import hashlib
+import shutil
+import tempfile
+import threading
+import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+from uuid import UUID
+
+import logging
+
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import tempfile
-import shutil
-from datetime import datetime
-import asyncio
-import threading
-from typing import Dict, Set, Optional
-import uuid
-from uuid import UUID
-import logging
+from sqlalchemy.orm import Session
 
+# Import OCR and conversion components
 from dots_ocr_service.parser import DotsOCRParser
 from worker_pool import WorkerPool
 from doc_service.document_converter_manager import DocumentConverterManager
 from deepseek_ocr_service.deepseek_ocr_converter import DeepSeekOCRConverter
 from gemma_ocr_service.gemma3_ocr_converter import Gemma3OCRConverter
 from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
-from pathlib import Path
-import base64
 
 # Import RAG service for chatbot functionality
 from rag_service.chat_api import router as chat_router
-from rag_service.indexer import (
-    trigger_embedding_for_document,
-    reindex_document,
-    index_document_now,
-)
-from rag_service.vectorstore import delete_documents_by_source, get_collection_info, clear_collection, is_document_indexed, delete_document_metadata_embedding
+from rag_service.indexer import trigger_embedding_for_document, reindex_document
 
 # Import GraphRAG for source-level deletion and Neo4j initialization
 try:
@@ -74,7 +70,6 @@ except ImportError:
     GRAPH_RAG_QUERY_ENABLED = False
 
 # Import database services
-from sqlalchemy.orm import Session
 from db.database import init_db, get_db_session, get_db
 from db.document_repository import DocumentRepository
 from db.workspace_repository import WorkspaceRepository
@@ -100,13 +95,23 @@ from queue_service import (
     TaskQueuePage,
 )
 
+# Import services
+from services import (
+    DocumentService,
+    ConversionService,
+    ConversionManager,
+    ConnectionManager,
+    DocumentStatusManager,
+    IndexingService,
+    TaskQueueService,
+    PermissionService,
+)
+
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Suppress noisy asyncio "Event loop is closed" errors during cleanup
-# These occur when async HTTP clients (neo4j, httpx) try to close after the event loop exits
-# The errors are non-critical and don't affect functionality
 _original_exception_handler = None
 
 
@@ -114,167 +119,12 @@ def _custom_exception_handler(loop, context):
     """Custom exception handler that filters out event loop closed errors."""
     exception = context.get("exception")
     if exception and isinstance(exception, RuntimeError) and "Event loop is closed" in str(exception):
-        # Silently ignore - this is expected during cleanup
         return
-    # Call original handler for other exceptions
     if _original_exception_handler:
         _original_exception_handler(loop, context)
     else:
         loop.default_exception_handler(context)
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Lifespan context manager for startup and shutdown events."""
-    # ===== STARTUP =====
-    # Initialize database
-    try:
-        init_db()
-        logger.info("Database initialized successfully")
-    except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
-        # Continue without database - will fall back to file-based status
-
-    # Initialize Qdrant metadata collection for document routing
-    try:
-        from rag_service.vectorstore import ensure_metadata_collection_exists
-        ensure_metadata_collection_exists()
-        logger.info("Document metadata vector collection initialized")
-    except Exception as e:
-        logger.warning(f"Failed to initialize metadata vector collection: {e}")
-
-    # Set up the connection managers with the current event loop
-    loop = asyncio.get_event_loop()
-
-    # Install custom exception handler to suppress "Event loop is closed" errors
-    global _original_exception_handler
-    _original_exception_handler = loop.get_exception_handler()
-    loop.set_exception_handler(_custom_exception_handler)
-
-    connection_manager.set_event_loop(loop)
-    document_status_manager.set_event_loop(loop)
-    # Start the background broadcast workers
-    asyncio.create_task(connection_manager.start_broadcast_worker())
-    asyncio.create_task(document_status_manager.start_broadcast_worker())
-    logger.info("WebSocket broadcast workers started")
-
-    # Initialize Neo4j indexes (including vector indexes) if GraphRAG indexing or querying is enabled
-    if GRAPH_RAG_INDEX_ENABLED or GRAPH_RAG_QUERY_ENABLED:
-        try:
-            from rag_service.storage import Neo4jStorage
-            neo4j_storage = Neo4jStorage()
-            await neo4j_storage.ensure_indexes()
-            logger.info("Neo4j indexes initialized (including vector indexes)")
-        except Exception as e:
-            logger.warning(f"Failed to initialize Neo4j indexes: {e}")
-
-    # Initialize hierarchical task queue system if enabled
-    global task_queue_manager, task_scheduler, queue_worker_pool
-
-    if TASK_QUEUE_ENABLED:
-        logger.info("🚀 Initializing hierarchical task queue system...")
-
-        # Initialize hierarchical task queue manager
-        task_queue_manager = HierarchicalTaskQueueManager(
-            stale_timeout_seconds=STALE_TASK_TIMEOUT,
-            max_retries=int(os.getenv("MAX_TASK_RETRIES", "3"))
-        )
-
-        # Initialize hierarchical worker pool with phase-specific processors
-        queue_worker_pool = HierarchicalWorkerPool(
-            num_workers=NUM_WORKERS,
-            task_manager=task_queue_manager,
-            ocr_processor=_process_ocr_page_task,
-            vector_processor=_process_vector_chunk_task,
-            graphrag_processor=_process_graphrag_chunk_task,
-            poll_interval=WORKER_POLL_INTERVAL,
-            heartbeat_interval=HEARTBEAT_INTERVAL,
-            status_broadcast_callback=document_status_manager.broadcast_from_thread
-        )
-        queue_worker_pool.start()
-
-        # Initialize and start scheduler
-        task_scheduler = TaskScheduler(
-            task_manager=task_queue_manager,
-            check_interval_seconds=TASK_QUEUE_CHECK_INTERVAL
-        )
-        task_scheduler.start()
-
-        logger.info("✅ Hierarchical task queue system initialized successfully")
-    else:
-        logger.info("Task queue system disabled (set TASK_QUEUE_ENABLED=true to enable)")
-
-        # Fall back to old resume logic if queue is disabled
-        def _init_services():
-            # Sync existing files to database
-            _sync_files_to_database()
-
-            # Resume incomplete OCR conversion for documents with pending/converting/partial/failed status
-            auto_resume_ocr = os.getenv("AUTO_RESUME_OCR", "true").lower() in ("true", "1", "yes")
-            if auto_resume_ocr:
-                try:
-                    logger.info("Checking for incomplete OCR conversion tasks...")
-                    _resume_incomplete_ocr()
-                except Exception as e:
-                    logger.error(f"Error resuming incomplete OCR conversion: {e}")
-            else:
-                logger.info("Auto-resume OCR disabled (set AUTO_RESUME_OCR=true to enable)")
-
-            # Resume incomplete indexing for documents with pending/failed status
-            auto_resume_indexing = os.getenv("AUTO_RESUME_INDEXING", "true").lower() in ("true", "1", "yes")
-            if auto_resume_indexing:
-                try:
-                    logger.info("Checking for incomplete indexing tasks...")
-                    _resume_incomplete_indexing()
-                except Exception as e:
-                    logger.error(f"Error resuming incomplete indexing: {e}")
-            else:
-                logger.info("Auto-resume indexing disabled (set AUTO_RESUME_INDEXING=true to enable)")
-
-        import threading
-        init_thread = threading.Thread(target=_init_services, daemon=True)
-        init_thread.start()
-        logger.info("Services initialization started in background thread")
-
-    yield  # Application runs here
-
-    # ===== SHUTDOWN =====
-    logger.info("Application shutting down...")
-
-    # Stop task queue system if enabled
-    if TASK_QUEUE_ENABLED and task_scheduler and queue_worker_pool:
-        logger.info("Stopping task queue system...")
-        task_scheduler.stop()
-        queue_worker_pool.stop(wait=True)
-        logger.info("Task queue system stopped")
-
-
-# Initialize FastAPI app with lifespan handler
-app = FastAPI(
-    title="Dots OCR API",
-    description="API for document OCR parsing with layout detection",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Include routers
-app.include_router(auth_router)  # Authentication endpoints
-app.include_router(chat_session_router)  # Chat session management endpoints
-app.include_router(chat_router)  # RAG chatbot endpoints
-app.include_router(workspace_router)  # Workspace management endpoints
-app.include_router(sharing_router)  # Document sharing endpoints
-
-# Initialize parser
-parser = DotsOCRParser()
 
 # Define input and output directories
 INPUT_DIR = os.path.join(os.path.dirname(__file__), "input")
@@ -284,92 +134,18 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+# Get number of worker threads from environment (default: 4)
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 
-def resolve_file_path(relative_or_absolute_path: str, base_dir: str = None) -> str:
-    """
-    Resolve a file path to absolute path.
+# Task queue configuration
+TASK_QUEUE_ENABLED = os.getenv("TASK_QUEUE_ENABLED", "true").lower() in ("true", "1", "yes")
+TASK_QUEUE_CHECK_INTERVAL = int(os.getenv("TASK_QUEUE_CHECK_INTERVAL", "300"))
+WORKER_POLL_INTERVAL = int(os.getenv("WORKER_POLL_INTERVAL", "5"))
+HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))
+STALE_TASK_TIMEOUT = int(os.getenv("STALE_TASK_TIMEOUT", "300"))
 
-    If the path is already absolute and exists, return it as-is.
-    If the path is relative (e.g., "fyang/my_documents/file.png"),
-    prepend the base_dir (defaults to INPUT_DIR).
-
-    Args:
-        relative_or_absolute_path: The path from database (relative or legacy absolute)
-        base_dir: Base directory to prepend for relative paths (defaults to INPUT_DIR)
-
-    Returns:
-        Absolute path to the file
-    """
-    if base_dir is None:
-        base_dir = INPUT_DIR
-
-    # If path is already absolute and exists, use it
-    if os.path.isabs(relative_or_absolute_path):
-        if os.path.exists(relative_or_absolute_path):
-            return relative_or_absolute_path
-        # If absolute path doesn't exist, try extracting relative part
-        # This handles legacy paths like "/home/fy/.../input/fyang/file.png"
-        for known_base in [INPUT_DIR, OUTPUT_DIR]:
-            if known_base in relative_or_absolute_path:
-                relative_part = relative_or_absolute_path.split(known_base + os.sep)[-1]
-                candidate = os.path.join(base_dir, relative_part)
-                if os.path.exists(candidate):
-                    return candidate
-
-    # Relative path - prepend base directory
-    return os.path.join(base_dir, relative_or_absolute_path)
-
-
-def resolve_output_path(relative_or_absolute_path: str) -> str:
-    """
-    Resolve output path to absolute path.
-    Uses OUTPUT_DIR as the base directory.
-    """
-    return resolve_file_path(relative_or_absolute_path, OUTPUT_DIR)
-
-
-def to_relative_path(absolute_path: str, base_dir: str = None) -> str:
-    """
-    Convert an absolute path to a relative path for database storage.
-
-    Args:
-        absolute_path: The absolute path to convert
-        base_dir: Base directory to remove (defaults to INPUT_DIR, also tries OUTPUT_DIR)
-
-    Returns:
-        Relative path (e.g., "username/workspace/filename" instead of "/home/.../input/username/workspace/filename")
-    """
-    if not absolute_path:
-        return absolute_path
-
-    # If already relative, return as-is
-    if not os.path.isabs(absolute_path):
-        return absolute_path
-
-    # Try to strip known base directories
-    for known_base in [INPUT_DIR, OUTPUT_DIR]:
-        if absolute_path.startswith(known_base + os.sep):
-            return absolute_path[len(known_base) + 1:]  # +1 for the separator
-        elif absolute_path.startswith(known_base):
-            return absolute_path[len(known_base):].lstrip(os.sep)
-
-    # If custom base_dir provided, try that too
-    if base_dir:
-        if absolute_path.startswith(base_dir + os.sep):
-            return absolute_path[len(base_dir) + 1:]
-        elif absolute_path.startswith(base_dir):
-            return absolute_path[len(base_dir):].lstrip(os.sep)
-
-    # Couldn't convert - return original (should log a warning)
-    logger.warning(f"Could not convert absolute path to relative: {absolute_path}")
-    return absolute_path
-
-
-def to_relative_output_path(absolute_path: str) -> str:
-    """
-    Convert an absolute output path to a relative path for database storage.
-    """
-    return to_relative_path(absolute_path, OUTPUT_DIR)
+# Initialize parser
+parser = DotsOCRParser()
 
 # Initialize document converter manager for Word/Excel/TXT files
 doc_converter_manager = DocumentConverterManager(
@@ -400,11 +176,9 @@ deepseek_ocr_converter = DeepSeekOCRConverter(
 )
 
 # Reuse converters from DotsOCRParser to avoid duplicate model loading (CUDA OOM)
-# The parser already initializes Gemma3 and Qwen3 converters during __init__
 gemma3_ocr_converter = parser.gemma3_converter
 qwen3_ocr_converter = parser.qwen3_converter
 
-# Create fallback converters only if the parser's converters are None
 if gemma3_ocr_converter is None:
     logger.warning("Parser's gemma3_converter is None, creating standalone Gemma3OCRConverter")
     gemma3_ocr_converter = Gemma3OCRConverter()
@@ -412,325 +186,38 @@ if qwen3_ocr_converter is None:
     logger.warning("Parser's qwen3_converter is None, creating standalone Qwen3OCRConverter")
     qwen3_ocr_converter = Qwen3OCRConverter()
 
-# Get number of worker threads from environment (default: 4)
-NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
-
-# Task queue configuration
-TASK_QUEUE_ENABLED = os.getenv("TASK_QUEUE_ENABLED", "true").lower() in ("true", "1", "yes")
-TASK_QUEUE_CHECK_INTERVAL = int(os.getenv("TASK_QUEUE_CHECK_INTERVAL", "300"))  # 5 minutes
-WORKER_POLL_INTERVAL = int(os.getenv("WORKER_POLL_INTERVAL", "5"))  # 5 seconds
-HEARTBEAT_INTERVAL = int(os.getenv("HEARTBEAT_INTERVAL", "30"))  # 30 seconds
-STALE_TASK_TIMEOUT = int(os.getenv("STALE_TASK_TIMEOUT", "300"))  # 5 minutes
-
-# Global task queue instances (initialized in lifespan)
-task_queue_manager: Optional[HierarchicalTaskQueueManager] = None
-task_scheduler: Optional[TaskScheduler] = None
-queue_worker_pool: Optional[HierarchicalWorkerPool] = None
-
-
-# Conversion status tracking
-class ConversionManager:
-    """Manages document conversion tasks and their status"""
-
-    def __init__(self):
-        self.conversions: Dict[str, dict] = {}  # conversion_id -> status info
-        self.lock = threading.Lock()
-
-    def create_conversion(self, filename: str) -> str:
-        """Create a new conversion task and return its ID"""
-        conversion_id = str(uuid.uuid4())
-        with self.lock:
-            self.conversions[conversion_id] = {
-                "id": conversion_id,
-                "filename": filename,
-                "status": "pending",
-                "progress": 0,
-                "message": "Conversion queued",
-                "created_at": datetime.now().isoformat(),
-                "started_at": None,
-                "completed_at": None,
-                "error": None,
-            }
-        return conversion_id
-
-    def update_conversion(self, conversion_id: str, **kwargs):
-        """Update conversion status"""
-        with self.lock:
-            if conversion_id in self.conversions:
-                self.conversions[conversion_id].update(kwargs)
-
-    def get_conversion(self, conversion_id: str) -> dict:
-        """Get conversion status - returns a copy to avoid race conditions"""
-        with self.lock:
-            conversion = self.conversions.get(conversion_id, {})
-            # Return a copy to avoid race conditions with concurrent updates
-            return dict(conversion) if conversion else {}
-
-    def delete_conversion(self, conversion_id: str):
-        """Delete conversion record"""
-        with self.lock:
-            if conversion_id in self.conversions:
-                del self.conversions[conversion_id]
-
-
-# WebSocket connection manager for document status updates
-class DocumentStatusManager:
-    """Manages centralized WebSocket connections for all document status updates with subscription support"""
-
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()  # All connected clients
-        self.subscriptions: Dict[WebSocket, Set[str]] = {}  # websocket -> set of document_ids
-        self.lock = threading.Lock()
-        self._message_queue: asyncio.Queue = None
-        self._main_loop = None
-
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
-        """Set the main event loop for broadcasting messages from worker threads"""
-        self._main_loop = loop
-        self._message_queue = asyncio.Queue()
-
-    async def start_broadcast_worker(self):
-        """Start the background worker that processes broadcast messages"""
-        logger.info("📡 Document status broadcast worker started")
-        while True:
-            try:
-                message = await self._message_queue.get()
-                logger.info(f"📨 Broadcast worker received message: {message.get('event_type')} for {message.get('filename', message.get('document_id'))}")
-                await self._do_broadcast(message)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in document status broadcast worker: {e}")
-
-    async def connect(self, websocket: WebSocket):
-        """Register a new WebSocket connection"""
-        await websocket.accept()
-        with self.lock:
-            self.active_connections.add(websocket)
-            self.subscriptions[websocket] = set()  # Initialize empty subscription set
-        logger.info(f"Document status WebSocket connected. Total connections: {len(self.active_connections)}")
-
-    async def disconnect(self, websocket: WebSocket):
-        """Unregister a WebSocket connection"""
-        with self.lock:
-            self.active_connections.discard(websocket)
-            self.subscriptions.pop(websocket, None)  # Remove subscriptions
-        logger.info(f"Document status WebSocket disconnected. Total connections: {len(self.active_connections)}")
-
-    async def subscribe(self, websocket: WebSocket, document_ids: list):
-        """Subscribe a WebSocket to specific document updates"""
-        # Filter out None/empty values from document_ids
-        valid_ids = [doc_id for doc_id in document_ids if doc_id]
-        if not valid_ids:
-            logger.warning(f"WebSocket subscribe called with no valid document IDs (received: {document_ids})")
-            return
-
-        with self.lock:
-            if websocket not in self.subscriptions:
-                self.subscriptions[websocket] = set()
-            self.subscriptions[websocket].update(valid_ids)
-        logger.info(f"WebSocket subscribed to {len(valid_ids)} documents. Total subscriptions: {len(self.subscriptions[websocket])}")
-
-    async def unsubscribe(self, websocket: WebSocket, document_ids: list):
-        """Unsubscribe a WebSocket from specific document updates"""
-        # Filter out None/empty values from document_ids
-        valid_ids = [doc_id for doc_id in document_ids if doc_id]
-        if not valid_ids:
-            logger.warning(f"WebSocket unsubscribe called with no valid document IDs (received: {document_ids})")
-            return
-
-        with self.lock:
-            if websocket in self.subscriptions:
-                self.subscriptions[websocket].difference_update(valid_ids)
-        logger.info(f"WebSocket unsubscribed from {len(valid_ids)} documents")
-
-    async def _do_broadcast(self, message: dict):
-        """Send message only to clients subscribed to the document"""
-        document_id = message.get("document_id")
-
-        with self.lock:
-            connections = self.active_connections.copy()
-            subscriptions = self.subscriptions.copy()
-
-        logger.info(f"📡 Broadcasting to {len(connections)} connections, document_id={document_id}")
-        logger.info(f"📋 Subscriptions: {[(id(conn), list(subs)) for conn, subs in subscriptions.items()]}")
-
-        disconnected = []
-        sent_count = 0
-
-        for connection in connections:
-            try:
-                # Get subscriptions for this connection
-                subscribed_docs = subscriptions.get(connection, set())
-
-                logger.info(f"🔍 Checking connection {id(connection)}: subscribed_docs={list(subscribed_docs)}, document_id={document_id}")
-
-                # Send if:
-                # 1. Client is subscribed to this specific document, OR
-                # 2. Client has no subscriptions (backward compatibility - receives all)
-                if not subscribed_docs or (document_id and document_id in subscribed_docs):
-                    logger.info(f"✅ Sending message to connection {id(connection)}")
-                    await connection.send_json(message)
-                    sent_count += 1
-                else:
-                    logger.info(f"⏭️ Skipping connection {id(connection)} - not subscribed to {document_id}")
-
-            except Exception as e:
-                logger.error(f"Error sending document status message: {e}")
-                disconnected.append(connection)
-
-        # Clean up disconnected clients
-        if disconnected:
-            with self.lock:
-                for conn in disconnected:
-                    self.active_connections.discard(conn)
-                    self.subscriptions.pop(conn, None)
-
-        logger.info(f"📤 Broadcast sent to {sent_count}/{len(connections)} clients for document {document_id}")
-
-    async def broadcast(self, message: dict):
-        """Send message to all connected clients (async context)"""
-        await self._do_broadcast(message)
-
-    def broadcast_from_thread(self, message: dict):
-        """Thread-safe method to broadcast message from worker threads"""
-        if self._main_loop and self._message_queue:
-            logger.info(f"📤 Broadcasting document status: {message.get('event_type')} for {message.get('filename', message.get('document_id'))}")
-            asyncio.run_coroutine_threadsafe(
-                self._message_queue.put(message),
-                self._main_loop
-            )
-        else:
-            logger.error(f"❌ Cannot broadcast document status - event loop not initialized! main_loop={self._main_loop is not None}, message_queue={self._message_queue is not None}")
-
-
-# WebSocket connection manager
-class ConnectionManager:
-    """Manages WebSocket connections for progress updates"""
-
-    def __init__(self):
-        self.active_connections: Dict[str, Set[WebSocket]] = {}  # conversion_id -> set of websockets
-        self.lock = threading.Lock()
-        self._message_queue: asyncio.Queue = None
-        self._broadcast_task = None
-        self._main_loop = None
-
-    def set_event_loop(self, loop: asyncio.AbstractEventLoop):
-        """Set the main event loop for broadcasting messages from worker threads"""
-        self._main_loop = loop
-        self._message_queue = asyncio.Queue()
-
-    async def start_broadcast_worker(self):
-        """Start the background worker that processes broadcast messages"""
-        while True:
-            try:
-                conversion_id, message = await self._message_queue.get()
-                await self._do_broadcast(conversion_id, message)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Error in broadcast worker: {e}")
-
-    async def connect(self, conversion_id: str, websocket: WebSocket):
-        """Register a new WebSocket connection"""
-        await websocket.accept()
-        with self.lock:
-            if conversion_id not in self.active_connections:
-                self.active_connections[conversion_id] = set()
-            self.active_connections[conversion_id].add(websocket)
-
-    async def disconnect(self, conversion_id: str, websocket: WebSocket):
-        """Unregister a WebSocket connection"""
-        with self.lock:
-            if conversion_id in self.active_connections:
-                self.active_connections[conversion_id].discard(websocket)
-                if not self.active_connections[conversion_id]:
-                    del self.active_connections[conversion_id]
-
-    async def _do_broadcast(self, conversion_id: str, message: dict):
-        """Actually send message to all connected clients for a conversion"""
-        with self.lock:
-            connections = self.active_connections.get(conversion_id, set()).copy()
-
-        for connection in connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error sending message: {e}")
-                # Don't disconnect here to avoid async issues
-
-    async def broadcast(self, conversion_id: str, message: dict):
-        """Send message to all connected clients for a conversion (async context)"""
-        await self._do_broadcast(conversion_id, message)
-
-    def broadcast_from_thread(self, conversion_id: str, message: dict):
-        """Thread-safe method to broadcast message from worker threads"""
-        if self._main_loop and self._message_queue:
-            # Use call_soon_threadsafe to schedule the coroutine on the main loop
-            asyncio.run_coroutine_threadsafe(
-                self._message_queue.put((conversion_id, message)),
-                self._main_loop
-            )
-
-
+# Initialize services
+document_service = DocumentService(INPUT_DIR, OUTPUT_DIR)
 conversion_manager = ConversionManager()
 connection_manager = ConnectionManager()
 document_status_manager = DocumentStatusManager()
+indexing_service = IndexingService(OUTPUT_DIR, broadcast_callback=None)
 
-
-def _create_parser_progress_callback(conversion_id: str):
-    """Create a progress callback for the parser"""
-    def progress_callback(progress: int, message: str = ""):
-        """Callback for parser progress updates"""
-        try:
-            conversion_manager.update_conversion(
-                conversion_id,
-                progress=progress,
-                message=message,
-            )
-            # Use thread-safe broadcast method
-            connection_manager.broadcast_from_thread(conversion_id, {
-                "status": "processing",
-                "progress": progress,
-                "message": message,
-            })
-            logger.info(f"Conversion {conversion_id}: {progress}% - {message}")
-        except Exception as e:
-            logger.error(f"Error in parser progress callback: {str(e)}")
-
-    return progress_callback
-
-
+# Initialize worker pool with progress callback
 def _worker_progress_callback(conversion_id: str, status: str, result=None, error=None):
-    """Callback for worker pool progress updates"""
+    """Callback for worker pool progress updates."""
     try:
         if status == "completed":
-            # Check if the result indicates the file was skipped
             is_skipped = False
             skip_reason = None
-            source_name = None  # For embedding trigger
-            filename = None  # For database update
+            source_name = None
+            filename = None
 
             if result and isinstance(result, list) and len(result) > 0:
-                # Check if any result has 'skipped' flag
                 first_result = result[0]
                 if isinstance(first_result, dict) and first_result.get('skipped'):
                     is_skipped = True
                     skip_reason = first_result.get('skip_reason', 'Image was skipped')
 
-                # Extract source_name for embedding (folder name under output)
                 if isinstance(first_result, dict):
                     md_path = first_result.get('md_content_path') or first_result.get('md_content_nohf_path')
                     if md_path:
-                        # Get the parent folder name as source_name
                         source_name = Path(md_path).parent.name
-                    # Get original filename from file_path
                     file_path = first_result.get('file_path')
                     if file_path:
                         filename = Path(file_path).name
 
             if is_skipped:
-                # Send warning status instead of completed
                 conversion_manager.update_conversion(
                     conversion_id,
                     status="warning",
@@ -738,7 +225,6 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     message=f"⚠️ {skip_reason}",
                     completed_at=datetime.now().isoformat(),
                 )
-                # Use thread-safe broadcast method
                 connection_manager.broadcast_from_thread(conversion_id, {
                     "status": "warning",
                     "progress": 100,
@@ -746,7 +232,6 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     "results": result,
                 })
             else:
-                # Normal completion
                 conversion_manager.update_conversion(
                     conversion_id,
                     status="completed",
@@ -754,7 +239,6 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     message="Conversion completed successfully",
                     completed_at=datetime.now().isoformat(),
                 )
-                # Use thread-safe broadcast method
                 connection_manager.broadcast_from_thread(conversion_id, {
                     "status": "completed",
                     "progress": 100,
@@ -762,7 +246,6 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     "results": result,
                 })
 
-                # Update database status
                 if filename:
                     try:
                         with get_db_session() as db:
@@ -778,11 +261,8 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                     except Exception as e:
                         logger.warning(f"Could not update database status: {e}")
 
-                # Trigger embedding in background after successful conversion
                 if source_name:
                     logger.info(f"Triggering embedding for document: {source_name}")
-
-                    # Get document_id for broadcasting
                     doc_id = None
                     if filename:
                         try:
@@ -794,24 +274,17 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                         except Exception as e:
                             logger.warning(f"Could not get document_id: {e}")
 
-                    # Create a wrapper callback that broadcasts to both WebSocket managers
                     def dual_broadcast_callback(conv_id: str, message: dict):
-                        """Broadcast to both conversion WebSocket and document status WebSocket"""
-                        # Send to conversion WebSocket (for progress bars)
                         connection_manager.broadcast_from_thread(conv_id, message)
-
-                        # Also send to document status WebSocket when indexing completes
                         if doc_id and filename:
-                            status = message.get("status", "")
-                            # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
-                            if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
-                                event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
-                                logger.info(f"📤 Broadcasting document status: {event_type} for {filename} (status={status})")
+                            msg_status = message.get("status", "")
+                            if msg_status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
+                                event_type = "indexing_completed" if msg_status != "index_error" else "indexing_failed"
                                 document_status_manager.broadcast_from_thread({
                                     "event_type": event_type,
                                     "document_id": doc_id,
                                     "filename": filename,
-                                    "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
+                                    "index_status": "indexed" if msg_status != "index_error" else "failed",
                                     "progress": 100,
                                     "message": message.get("message", "Indexing completed"),
                                     "timestamp": datetime.now().isoformat()
@@ -834,7 +307,6 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                 error=error,
                 completed_at=datetime.now().isoformat(),
             )
-            # Use thread-safe broadcast method
             connection_manager.broadcast_from_thread(conversion_id, {
                 "status": "error",
                 "progress": 0,
@@ -842,8 +314,6 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
                 "error": error,
             })
 
-            # Update database status for error
-            # Try to get filename from conversion manager
             try:
                 conversion_info = conversion_manager.get_conversion(conversion_id)
                 if conversion_info:
@@ -863,20 +333,174 @@ def _worker_progress_callback(conversion_id: str, status: str, result=None, erro
         logger.error(f"Error in progress callback: {str(e)}")
 
 
-# Initialize worker pool
 worker_pool = WorkerPool(num_workers=NUM_WORKERS, progress_callback=_worker_progress_callback)
 
+# Initialize conversion service
+conversion_service = ConversionService(
+    input_dir=INPUT_DIR,
+    output_dir=OUTPUT_DIR,
+    parser=parser,
+    doc_converter_manager=doc_converter_manager,
+    deepseek_ocr_converter=deepseek_ocr_converter,
+    gemma3_ocr_converter=gemma3_ocr_converter,
+    qwen3_ocr_converter=qwen3_ocr_converter,
+    worker_pool=worker_pool,
+    conversion_manager=conversion_manager,
+    broadcast_callback=lambda cid, msg: connection_manager.broadcast_from_thread(cid, msg)
+)
+
+# Global task queue instances (initialized in lifespan)
+task_queue_manager: Optional[HierarchicalTaskQueueManager] = None
+task_scheduler: Optional[TaskScheduler] = None
+queue_worker_pool: Optional[HierarchicalWorkerPool] = None
+task_queue_service: Optional[TaskQueueService] = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for startup and shutdown events."""
+    global task_queue_manager, task_scheduler, queue_worker_pool, task_queue_service
+
+    # ===== STARTUP =====
+    try:
+        init_db()
+        logger.info("Database initialized successfully")
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
+
+    try:
+        from rag_service.vectorstore import ensure_metadata_collection_exists
+        ensure_metadata_collection_exists()
+        logger.info("Document metadata vector collection initialized")
+    except Exception as e:
+        logger.warning(f"Failed to initialize metadata vector collection: {e}")
+
+    loop = asyncio.get_event_loop()
+
+    global _original_exception_handler
+    _original_exception_handler = loop.get_exception_handler()
+    loop.set_exception_handler(_custom_exception_handler)
+
+    connection_manager.set_event_loop(loop)
+    document_status_manager.set_event_loop(loop)
+    asyncio.create_task(connection_manager.start_broadcast_worker())
+    asyncio.create_task(document_status_manager.start_broadcast_worker())
+    logger.info("WebSocket broadcast workers started")
+
+    if GRAPH_RAG_INDEX_ENABLED or GRAPH_RAG_QUERY_ENABLED:
+        try:
+            from rag_service.storage import Neo4jStorage
+            neo4j_storage = Neo4jStorage()
+            await neo4j_storage.ensure_indexes()
+            logger.info("Neo4j indexes initialized (including vector indexes)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize Neo4j indexes: {e}")
+
+    if TASK_QUEUE_ENABLED:
+        logger.info("🚀 Initializing hierarchical task queue system...")
+
+        task_queue_manager = HierarchicalTaskQueueManager(
+            stale_timeout_seconds=STALE_TASK_TIMEOUT,
+            max_retries=int(os.getenv("MAX_TASK_RETRIES", "3"))
+        )
+
+        task_queue_service = TaskQueueService(
+            input_dir=INPUT_DIR,
+            output_dir=OUTPUT_DIR,
+            parser=parser,
+            task_queue_manager=task_queue_manager,
+            document_status_broadcast=document_status_manager.broadcast_from_thread
+        )
+
+        queue_worker_pool = HierarchicalWorkerPool(
+            num_workers=NUM_WORKERS,
+            task_manager=task_queue_manager,
+            ocr_processor=task_queue_service.process_ocr_page_task,
+            vector_processor=task_queue_service.process_vector_chunk_task,
+            graphrag_processor=task_queue_service.process_graphrag_chunk_task,
+            poll_interval=WORKER_POLL_INTERVAL,
+            heartbeat_interval=HEARTBEAT_INTERVAL,
+            status_broadcast_callback=document_status_manager.broadcast_from_thread
+        )
+        queue_worker_pool.start()
+
+        task_scheduler = TaskScheduler(
+            task_manager=task_queue_manager,
+            check_interval_seconds=TASK_QUEUE_CHECK_INTERVAL
+        )
+        task_scheduler.start()
+
+        task_queue_service.task_scheduler = task_scheduler
+        task_queue_service.queue_worker_pool = queue_worker_pool
+
+        logger.info("✅ Hierarchical task queue system initialized successfully")
+    else:
+        logger.info("Task queue system disabled (set TASK_QUEUE_ENABLED=true to enable)")
+
+        def _init_services():
+            _sync_files_to_database()
+            auto_resume_ocr = os.getenv("AUTO_RESUME_OCR", "true").lower() in ("true", "1", "yes")
+            if auto_resume_ocr:
+                try:
+                    logger.info("Checking for incomplete OCR conversion tasks...")
+                    _resume_incomplete_ocr()
+                except Exception as e:
+                    logger.error(f"Error resuming incomplete OCR conversion: {e}")
+
+            auto_resume_indexing = os.getenv("AUTO_RESUME_INDEXING", "true").lower() in ("true", "1", "yes")
+            if auto_resume_indexing:
+                try:
+                    logger.info("Checking for incomplete indexing tasks...")
+                    _resume_incomplete_indexing()
+                except Exception as e:
+                    logger.error(f"Error resuming incomplete indexing: {e}")
+
+        import threading
+        init_thread = threading.Thread(target=_init_services, daemon=True)
+        init_thread.start()
+        logger.info("Services initialization started in background thread")
+
+    yield
+
+    # ===== SHUTDOWN =====
+    logger.info("Application shutting down...")
+
+    if TASK_QUEUE_ENABLED and task_scheduler and queue_worker_pool:
+        logger.info("Stopping task queue system...")
+        task_scheduler.stop()
+        queue_worker_pool.stop(wait=True)
+        logger.info("Task queue system stopped")
+
+
+# Initialize FastAPI app with lifespan handler
+app = FastAPI(
+    title="Dots OCR API",
+    description="API for document OCR parsing with layout detection",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(auth_router)
+app.include_router(chat_session_router)
+app.include_router(chat_router)
+app.include_router(workspace_router)
+app.include_router(sharing_router)
+
+
+# ===== Helper Functions =====
 
 def _sync_files_to_database():
-    """
-    Synchronize existing files in input directory with the database.
-
-    This function scans the input directory structure which follows the workspace pattern:
-    input/{normalized_username}/{workspace_folder}/{filename}
-
-    Note: This is a fallback sync mechanism. The primary document tracking is done via
-    the database when files are uploaded through the API with workspace context.
-    """
+    """Synchronize existing files in input directory with the database."""
     try:
         with get_db_session() as db:
             repo = DocumentRepository(db)
@@ -886,7 +510,6 @@ def _sync_files_to_database():
                 logger.info("Input directory does not exist, skipping sync")
                 return
 
-            # Walk through all directories to find files (supports workspace structure)
             for root, dirs, files in os.walk(INPUT_DIR):
                 for filename in files:
                     file_path = os.path.join(root, filename)
@@ -894,40 +517,32 @@ def _sync_files_to_database():
                     if not os.path.isfile(file_path):
                         continue
 
-                    # Skip hidden files and lock files
                     if filename.startswith('.'):
                         continue
 
-                    # Calculate relative path for database storage
                     relative_path = os.path.relpath(file_path, INPUT_DIR)
 
-                    # Check if already in database by relative file_path
                     existing_doc = repo.get_by_file_path(relative_path)
                     if existing_doc:
                         continue
 
-                    # Also check by filename for legacy compatibility
                     if repo.exists(filename):
                         continue
 
-                    # Get file info
                     file_size = os.path.getsize(file_path)
                     file_name_without_ext = os.path.splitext(filename)[0]
 
-                    # Determine output path based on input path structure
                     rel_dir = os.path.dirname(relative_path)
                     if rel_dir:
                         output_base = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext)
                     else:
                         output_base = os.path.join(OUTPUT_DIR, file_name_without_ext)
 
-                    # Check conversion status using the correct output path
-                    markdown_exists, _, _, converted_pages = _check_markdown_exists_at_path(output_base)
-                    total_pages = _get_pdf_page_count(file_path)
+                    markdown_exists, _, _, converted_pages = document_service.check_markdown_exists_at_path(output_base)
+                    total_pages = document_service.get_pdf_page_count(file_path)
                     if total_pages == 0 and markdown_exists:
                         total_pages = 1
 
-                    # Determine convert status
                     if not markdown_exists:
                         convert_status = ConvertStatus.PENDING
                     elif total_pages > 0 and converted_pages < total_pages:
@@ -935,20 +550,17 @@ def _sync_files_to_database():
                     else:
                         convert_status = ConvertStatus.CONVERTED
 
-                    # Check index status
-                    indexed = is_document_indexed(file_name_without_ext) if markdown_exists else False
+                    indexed = indexing_service.is_document_indexed(file_name_without_ext) if markdown_exists else False
                     index_status = IndexStatus.INDEXED if indexed else IndexStatus.PENDING
 
-                    # Create document record with relative file path
                     doc = repo.create(
                         filename=filename,
                         original_filename=filename,
-                        file_path=relative_path,  # Store relative path, not absolute
+                        file_path=relative_path,
                         file_size=file_size,
                         total_pages=total_pages,
                     )
 
-                    # Update statuses
                     if convert_status != ConvertStatus.PENDING:
                         repo.update_convert_status(doc, convert_status, converted_pages, output_base, "Synced from existing files")
 
@@ -956,890 +568,34 @@ def _sync_files_to_database():
                         repo.update_index_status(doc, index_status, message="Synced from existing index")
 
                     synced_count += 1
-                    logger.debug(f"Synced file: {file_path}")
 
             logger.info(f"Database sync complete: {synced_count} new documents synced")
     except Exception as e:
         logger.error(f"Error syncing files to database: {e}")
 
 
-# ===== Hierarchical Task Queue Processor Functions =====
-
-def _process_ocr_page_task(page_task) -> str:
-    """
-    Process OCR task for a single page (called by hierarchical queue workers).
-
-    This function checks if the page markdown exists. If not, it triggers the full document
-    conversion (OCR processes all pages at once). After markdown exists, it chunks the content
-    and creates chunk tasks for vector/graphrag processing.
-
-    Args:
-        page_task: PageTaskData with document_id, page_number, etc.
-
-    Returns:
-        str: Path to the generated page markdown file (_nohf.md)
-    """
-    from rag_service.markdown_chunker import chunk_markdown_with_summaries
-    import hashlib
-
-    try:
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_id(page_task.document_id)
-
-            if not doc:
-                raise ValueError(f"Document not found: {page_task.document_id}")
-
-            filename = doc.filename
-            base_name = os.path.splitext(filename)[0]
-            logger.info(f"🔄 Processing OCR for page {page_task.page_number} of document: {filename}")
-
-            # Get input file path from database (may be relative or legacy absolute)
-            db_file_path = doc.file_path
-            if not db_file_path:
-                # Fallback for legacy documents without file_path
-                db_file_path = filename
-
-            # Resolve to absolute path (handles both relative and legacy absolute paths)
-            input_path = resolve_file_path(db_file_path)
-
-            if not os.path.exists(input_path):
-                raise FileNotFoundError(f"Input file not found: {input_path} (db path: {db_file_path})")
-
-            # Determine output directory - use workspace-based structure
-            # Output path mirrors input path structure: output/{workspace_folder}/{filename_base}/
-            if doc.output_path:
-                # Resolve output_path (may be relative or legacy absolute)
-                page_output_dir = resolve_output_path(doc.output_path)
-            else:
-                # Derive output path from input file_path (which is relative)
-                # input file_path: {normalized_username}/{workspace_folder}/{filename}
-                # output path: output/{normalized_username}/{workspace_folder}/{filename_base}/
-                rel_dir = os.path.dirname(db_file_path)  # e.g., "username/workspace_folder"
-                page_output_dir = os.path.join(OUTPUT_DIR, rel_dir, base_name) if rel_dir else os.path.join(OUTPUT_DIR, base_name)
-
-            # Helper function to find the actual page markdown file
-            def find_page_markdown(page_num: int, total_pages: int) -> str:
-                """Find the actual markdown file for a given page number."""
-                # For single-page documents (images), use simple naming
-                if total_pages == 1:
-                    simple_path = os.path.join(page_output_dir, f"{base_name}_nohf.md")
-                    if os.path.exists(simple_path):
-                        return simple_path
-
-                # For multi-page documents (PDFs), use page-numbered naming
-                page_path = os.path.join(page_output_dir, f"{base_name}_page_{page_num}_nohf.md")
-                if os.path.exists(page_path):
-                    return page_path
-
-                # Fallback: try simple naming even for multi-page (in case of single-page PDF)
-                simple_path = os.path.join(page_output_dir, f"{base_name}_nohf.md")
-                if os.path.exists(simple_path):
-                    return simple_path
-
-                return None
-
-            # Get total pages for naming logic
-            total_pages = doc.total_pages or 1
-
-            # Check if page markdown already exists
-            page_output_path = find_page_markdown(page_task.page_number, total_pages)
-
-            if not page_output_path:
-                # Page markdown doesn't exist - need to trigger OCR conversion
-                # The parser will process all pages at once
-                logger.info(f"📄 Page markdown not found, triggering OCR for document: {filename}")
-
-                # Check if other pages already exist (partial conversion)
-                other_pages_exist = os.path.exists(page_output_dir) and any(
-                    f.endswith("_nohf.md") for f in os.listdir(page_output_dir)
-                )
-
-                if other_pages_exist:
-                    # Some pages already converted but this specific page is missing
-                    # This happens when OCR failed for specific pages during the original conversion
-                    logger.warning(
-                        f"⚠️ Page {page_task.page_number} is missing but other pages exist. "
-                        f"This page likely failed during original OCR conversion."
-                    )
-                    # Try to re-convert just this page by running OCR again
-                    # The parser will skip existing pages
-
-                # Check if conversion is already in progress (another worker may have started it)
-                # Use a simple file lock in the output directory
-                lock_file = os.path.join(page_output_dir, f".{base_name}.converting")
-
-                if os.path.exists(lock_file):
-                    # Conversion in progress - wait and check periodically
-                    logger.info(f"⏳ OCR conversion in progress by another worker, waiting...")
-                    for _ in range(120):  # Wait up to 10 minutes (120 * 5 seconds)
-                        time.sleep(5)
-                        page_output_path = find_page_markdown(page_task.page_number, total_pages)
-                        if page_output_path:
-                            logger.info(f"✅ Page markdown now available: {page_output_path}")
-                            break
-                        if not os.path.exists(lock_file):
-                            # Conversion finished but page still missing?
-                            break
-                    else:
-                        raise TimeoutError(f"Timeout waiting for page {page_task.page_number} OCR")
-                else:
-                    # Create lock file and start conversion
-                    try:
-                        os.makedirs(os.path.dirname(lock_file), exist_ok=True)
-                        with open(lock_file, 'w') as f:
-                            f.write(str(page_task.document_id))
-
-                        # Run OCR conversion for the entire document
-                        # The parser will skip pages that already have output files
-                        # Use the parent of page_output_dir since parser creates a subdirectory with base_name
-                        parser_output_dir = os.path.dirname(page_output_dir)
-                        logger.info(f"🚀 Starting OCR conversion for {filename} -> {parser_output_dir}")
-                        results = parser.parse_file(
-                            input_path,
-                            output_dir=parser_output_dir,
-                            prompt_mode="prompt_layout_all_en",
-                        )
-                        logger.info(f"✅ OCR conversion completed for {filename}: {len(results)} pages")
-
-                        # Update document output_path in database (store as relative path)
-                        doc.output_path = to_relative_output_path(page_output_dir)
-                        db.commit()
-
-                    finally:
-                        # Remove lock file
-                        if os.path.exists(lock_file):
-                            os.remove(lock_file)
-
-                # Try to find the markdown file again after OCR
-                page_output_path = find_page_markdown(page_task.page_number, total_pages)
-
-            # Verify page markdown exists now
-            if not page_output_path:
-                # List what files were actually created for debugging
-                if os.path.exists(page_output_dir):
-                    files = [f for f in os.listdir(page_output_dir) if f.endswith("_nohf.md")]
-                    logger.error(f"Found {len(files)} _nohf.md files in {page_output_dir}, but page {page_task.page_number} is missing")
-
-                # Check if this is a case of missing page in a partially converted document
-                if os.path.exists(page_output_dir):
-                    existing_files = [f for f in os.listdir(page_output_dir) if f.endswith("_nohf.md")]
-                    if len(existing_files) > 0:
-                        # Other pages exist - this specific page failed during OCR
-                        raise FileNotFoundError(
-                            f"Page {page_task.page_number} failed during OCR conversion. "
-                            f"Document has {len(existing_files)} pages converted, but this page is missing. "
-                            f"This may be due to OCR error for this specific page."
-                        )
-
-                raise FileNotFoundError(
-                    f"Page markdown not found after OCR. Expected patterns: "
-                    f"{base_name}_nohf.md or {base_name}_page_{page_task.page_number}_nohf.md"
-                )
-
-            # Read the page content and create chunks
-            logger.info(f"📚 Chunking page {page_task.page_number} content...")
-
-            # Get the page task record to get its UUID
-            page_record = db.query(TaskQueuePage).filter(
-                TaskQueuePage.id == page_task.id
-            ).first()
-
-            if page_record:
-                # Chunk the markdown content using adaptive chunking (same as vector/graphrag phases)
-                # This ensures chunk count matches between task creation and processing
-                result = chunk_markdown_with_summaries(
-                    page_output_path,
-                    source_name=f"{filename}_page_{page_task.page_number}"
-                )
-                chunks = result.chunks
-
-                if chunks:
-                    # Create chunk tasks for vector/graphrag processing
-                    chunk_data = []
-                    for idx, chunk in enumerate(chunks):
-                        # Generate unique chunk ID
-                        content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
-                        chunk_id = f"{page_task.document_id}_{page_task.page_number}_{idx}_{content_hash}"
-                        chunk_data.append((chunk_id, idx))
-
-                    # Create chunk task records
-                    if chunk_data and task_queue_manager:
-                        task_queue_manager.create_chunk_tasks(
-                            page_id=page_task.id,
-                            document_id=page_task.document_id,
-                            chunks=chunk_data,
-                            db=db
-                        )
-                        logger.info(f"📦 Created {len(chunk_data)} chunk tasks for page {page_task.page_number}")
-
-                    # Update page chunk count
-                    page_record.chunk_count = len(chunks)
-                    db.commit()
-
-            logger.info(f"✅ OCR completed for page {page_task.page_number} of {filename}")
-            return page_output_path
-
-    except Exception as e:
-        logger.error(f"❌ OCR page task failed for page {page_task.page_number} of doc {page_task.document_id}: {e}", exc_info=True)
-        raise
-
-
-def _process_vector_chunk_task(chunk_task) -> bool:
-    """
-    Process Vector indexing task for a single chunk (called by hierarchical queue workers).
-
-    This function indexes a single chunk to Qdrant.
-    Uses chunk_markdown_with_summaries which respects ADAPTIVE_CHUNKING_ENABLED setting
-    for domain-aware chunking strategies.
-
-    Args:
-        chunk_task: ChunkTaskData with chunk_id, document_id, page_id, chunk_index, etc.
-
-    Returns:
-        bool: True if indexing succeeded
-    """
-    from rag_service.markdown_chunker import chunk_markdown_with_summaries
-    from rag_service.vectorstore import get_vectorstore
-
-    try:
-        logger.info(f"🔄 Processing Vector index for chunk: {chunk_task.chunk_id}")
-
-        # Get the page file path from the page task record
-        with get_db_session() as db:
-            page_record = db.query(TaskQueuePage).filter(
-                TaskQueuePage.id == chunk_task.page_id
-            ).first()
-
-            if not page_record or not page_record.page_file_path:
-                raise ValueError(f"Page record or file path not found for page_id: {chunk_task.page_id}")
-
-            page_file_path = page_record.page_file_path
-            page_number = page_record.page_number
-
-            # Get document info for source name
-            doc = db.query(Document).filter(Document.id == chunk_task.document_id).first()
-            if not doc:
-                raise ValueError(f"Document not found: {chunk_task.document_id}")
-
-            source_name = os.path.splitext(doc.filename)[0]
-
-        # Re-chunk the page content using adaptive chunking (respects ADAPTIVE_CHUNKING_ENABLED)
-        result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
-        chunks = result.chunks
-
-        if not chunks or chunk_task.chunk_index >= len(chunks):
-            raise ValueError(
-                f"Chunk index {chunk_task.chunk_index} out of range. "
-                f"Page has {len(chunks) if chunks else 0} chunks."
-            )
-
-        # Get the specific chunk
-        chunk = chunks[chunk_task.chunk_index]
-
-        # Build a mapping from old UUID chunk_ids to new composite chunk_ids
-        # This is needed for parent/child relationships to work correctly
-        # Format matches main.py:979: {document_id}_{page_number}_{chunk_index}_{content_hash}
-        old_to_new_id_map = {}
-        for idx, c in enumerate(chunks):
-            old_id = c.metadata.get("chunk_id", "")
-            content_hash = hashlib.md5(c.page_content.encode()).hexdigest()[:16]
-            new_id = f"{chunk_task.document_id}_{page_number}_{idx}_{content_hash}"
-            old_to_new_id_map[old_id] = new_id
-
-        # Update chunk metadata with the chunk_id from task
-        chunk.metadata["chunk_id"] = chunk_task.chunk_id
-
-        # Update parent_chunk_id reference if this is a child chunk
-        old_parent_id = chunk.metadata.get("parent_chunk_id")
-        if old_parent_id:
-            if old_parent_id in old_to_new_id_map:
-                new_parent_id = old_to_new_id_map[old_parent_id]
-                chunk.metadata["parent_chunk_id"] = new_parent_id
-                logger.debug(f"[ParentChild] Updated parent_chunk_id: {old_parent_id} → {new_parent_id}")
-            else:
-                logger.warning(f"[ParentChild] parent_chunk_id {old_parent_id} not found in ID mapping")
-
-        # Update child_chunk_ids references if this is a parent chunk
-        old_child_ids = chunk.metadata.get("child_chunk_ids", [])
-        if old_child_ids:
-            new_child_ids = [old_to_new_id_map.get(cid, cid) for cid in old_child_ids]
-            chunk.metadata["child_chunk_ids"] = new_child_ids
-            logger.debug(f"[ParentChild] Updated child_chunk_ids: {len(old_child_ids)} children remapped")
-
-        # Inject document_id into chunk metadata for access control filtering
-        # This is REQUIRED for vector search to filter by document_id
-        chunk.metadata["document_id"] = str(chunk_task.document_id)
-
-        # Index to Qdrant vectorstore
-        vectorstore = get_vectorstore()
-        vectorstore.add_documents([chunk])
-
-        logger.info(f"✅ Vector index completed for chunk: {chunk_task.chunk_id}")
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Vector chunk task failed for chunk {chunk_task.chunk_id}: {e}", exc_info=True)
-        raise
-
-
-def _process_graphrag_chunk_task(chunk_task) -> tuple:
-    """
-    Process GraphRAG indexing task for a single chunk (called by hierarchical queue workers).
-
-    This function extracts entities and relationships from a chunk and stores in Neo4j.
-    Uses chunk_markdown_with_summaries which respects ADAPTIVE_CHUNKING_ENABLED setting
-    for domain-aware chunking strategies.
-
-    Args:
-        chunk_task: ChunkTaskData with chunk_id, document_id, page_id, chunk_index, etc.
-
-    Returns:
-        tuple: (entities_count, relationships_count)
-    """
-    from rag_service.markdown_chunker import chunk_markdown_with_summaries
-
-    try:
-        logger.info(f"🔄 Processing GraphRAG index for chunk: {chunk_task.chunk_id}")
-
-        # Check if GraphRAG indexing is enabled
-        if not GRAPH_RAG_INDEX_ENABLED:
-            logger.debug(f"GraphRAG indexing disabled, skipping chunk: {chunk_task.chunk_id}")
-            return (0, 0)
-
-        # Get the page file path from the page task record
-        with get_db_session() as db:
-            page_record = db.query(TaskQueuePage).filter(
-                TaskQueuePage.id == chunk_task.page_id
-            ).first()
-
-            if not page_record or not page_record.page_file_path:
-                raise ValueError(f"Page record or file path not found for page_id: {chunk_task.page_id}")
-
-            page_file_path = page_record.page_file_path
-
-            # Get document info for source name
-            doc = db.query(Document).filter(Document.id == chunk_task.document_id).first()
-            if not doc:
-                raise ValueError(f"Document not found: {chunk_task.document_id}")
-
-            source_name = os.path.splitext(doc.filename)[0]
-
-        # Re-chunk the page content using adaptive chunking (respects ADAPTIVE_CHUNKING_ENABLED)
-        result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
-        chunks = result.chunks
-
-        if not chunks or chunk_task.chunk_index >= len(chunks):
-            raise ValueError(
-                f"Chunk index {chunk_task.chunk_index} out of range. "
-                f"Page has {len(chunks) if chunks else 0} chunks."
-            )
-
-        # Get the specific chunk
-        chunk = chunks[chunk_task.chunk_index]
-
-        # Prepare chunk data for GraphRAG indexing
-        chunk_data = {
-            "id": chunk_task.chunk_id,
-            "page_content": chunk.page_content,
-            "metadata": chunk.metadata,
-        }
-
-        # Run GraphRAG indexing synchronously
-        entities_count = 0
-        relationships_count = 0
-
-        try:
-            from rag_service.graph_rag.graph_indexer import index_chunks_sync
-
-            # Index single chunk - returns tuple (entities, relationships)
-            entities_count, relationships_count = index_chunks_sync(
-                chunks=[chunk_data],
-                source_name=source_name,
-            )
-
-        except ImportError:
-            logger.warning("GraphRAG indexer not available")
-        except Exception as e:
-            logger.error(f"GraphRAG indexing failed for chunk {chunk_task.chunk_id}: {e}")
-            # Don't raise - allow task to complete with 0 entities
-
-        logger.info(f"✅ GraphRAG index completed for chunk: {chunk_task.chunk_id} (entities={entities_count}, relationships={relationships_count})")
-        return (entities_count, relationships_count)
-
-    except Exception as e:
-        logger.error(f"❌ GraphRAG chunk task failed for chunk {chunk_task.chunk_id}: {e}", exc_info=True)
-        raise
-
-
-# ===== Legacy Task Queue Processor Functions (for backward compatibility) =====
-
-def _process_ocr_task(document_id: UUID) -> dict:
-    """
-    Process OCR task for a document (called by queue workers).
-
-    This function:
-    1. Checks document status to determine if resume is needed
-    2. Processes document with checkpoint-based resume
-    3. Updates progress in documents.ocr_details
-    4. Broadcasts status updates via centralized WebSocket
-
-    Args:
-        document_id: Document UUID
-
-    Returns:
-        dict with result information
-    """
-    try:
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_id(document_id)
-
-            if not doc:
-                raise ValueError(f"Document not found: {document_id}")
-
-            filename = doc.filename
-            logger.info(f"🔄 Processing OCR task for document: {filename} (id={document_id})")
-
-            # Create conversion ID for tracking
-            conversion_id = conversion_manager.create_conversion(filename)
-
-            # Update status to CONVERTING
-            repo.update_convert_status(doc, ConvertStatus.CONVERTING, message="Processing OCR task from queue")
-
-            # Store conversion_id in ocr_details
-            if doc.ocr_details is None:
-                doc.ocr_details = {}
-            doc.ocr_details["conversion_id"] = conversion_id
-            db.commit()
-
-            # Broadcast OCR started event
-            document_status_manager.broadcast_from_thread({
-                "event_type": "ocr_started",
-                "document_id": str(document_id),
-                "filename": filename,
-                "convert_status": "converting",
-                "progress": 0,
-                "message": "OCR processing started",
-                "timestamp": datetime.now().isoformat()
-            })
-
-            # Create progress callback
-            progress_callback = _create_parser_progress_callback(conversion_id)
-
-            # Process document (this will resume from checkpoint if needed)
-            result = _convert_document_background(
-                filename=filename,
-                prompt_mode="prompt_layout_all_en",
-                conversion_id=conversion_id,
-                progress_callback=progress_callback
-            )
-
-            # Update document status to CONVERTED
-            repo.update_convert_status(doc, ConvertStatus.CONVERTED, message="OCR processing completed")
-            db.commit()
-
-            # Broadcast OCR completed event
-            document_status_manager.broadcast_from_thread({
-                "event_type": "ocr_completed",
-                "document_id": str(document_id),
-                "filename": filename,
-                "convert_status": "converted",
-                "progress": 100,
-                "message": "OCR processing completed",
-                "timestamp": datetime.now().isoformat()
-            })
-
-            logger.info(f"✅ OCR task completed for document: {filename}")
-
-            # Note: With hierarchical queue, indexing is automatically triggered via page/chunk tasks
-            # The old enqueue_task method is no longer used
-
-            return {"status": "success", "filename": filename, "result": result}
-
-    except Exception as e:
-        logger.error(f"❌ OCR task failed for document {document_id}: {e}", exc_info=True)
-
-        # Broadcast OCR failed event
-        try:
-            document_status_manager.broadcast_from_thread({
-                "event_type": "ocr_failed",
-                "document_id": str(document_id),
-                "convert_status": "failed",
-                "progress": 0,
-                "message": f"OCR processing failed: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            })
-        except:
-            pass
-
-        raise
-
-
-def _process_indexing_task(document_id: UUID) -> dict:
-    """
-    Process indexing task for a document (called by queue workers).
-
-    This function:
-    1. Checks document status to determine if resume is needed
-    2. Processes indexing with checkpoint-based resume (vector, metadata, GraphRAG)
-    3. Updates progress in documents.indexing_details
-    4. Broadcasts status updates via centralized WebSocket
-
-    Args:
-        document_id: Document UUID
-
-    Returns:
-        dict with result information
-    """
-    try:
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_id(document_id)
-
-            if not doc:
-                raise ValueError(f"Document not found: {document_id}")
-
-            filename = doc.filename
-            logger.info(f"🔄 Processing indexing task for document: {filename} (id={document_id})")
-
-            # Check if document is converted
-            if doc.convert_status != ConvertStatus.CONVERTED:
-                raise ValueError(f"Document not converted yet: {filename} (status={doc.convert_status.value})")
-
-            # Create conversion ID for WebSocket tracking
-            conversion_id = str(uuid.uuid4())
-
-            # Update status to INDEXING
-            repo.update_index_status(doc, IndexStatus.INDEXING, message="Processing indexing task from queue")
-
-            # Store conversion_id in indexing_details
-            if doc.indexing_details is None:
-                doc.indexing_details = {}
-            doc.indexing_details["conversion_id"] = conversion_id
-            db.commit()
-
-            # Broadcast indexing started event
-            document_status_manager.broadcast_from_thread({
-                "event_type": "indexing_started",
-                "document_id": str(document_id),
-                "filename": filename,
-                "index_status": "indexing",
-                "progress": 0,
-                "message": "Indexing started",
-                "timestamp": datetime.now().isoformat()
-            })
-
-            # Get source name (filename without extension)
-            file_name_without_ext = os.path.splitext(filename)[0]
-
-            # Create a wrapper callback that broadcasts to both WebSocket managers
-            def dual_broadcast_callback(conv_id: str, message: dict):
-                """Broadcast to both conversion WebSocket and document status WebSocket"""
-                # Send to conversion WebSocket (for progress bars)
-                connection_manager.broadcast_from_thread(conv_id, message)
-
-                # Also send to document status WebSocket when indexing completes
-                # Map the indexer's status messages to document status events
-                status = message.get("status", "")
-
-                # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
-                if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
-                    event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
-                    logger.info(f"📤 Broadcasting document status: {event_type} for {filename} (status={status})")
-                    document_status_manager.broadcast_from_thread({
-                        "event_type": event_type,
-                        "document_id": str(document_id),
-                        "filename": filename,
-                        "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
-                        "progress": 100,
-                        "message": message.get("message", "Indexing completed"),
-                        "timestamp": datetime.now().isoformat()
-                    })
-
-            # Trigger indexing (this will resume from checkpoint if needed)
-            # This runs in background and updates the database status when complete
-            # The background thread will initialize indexing_details structure
-            trigger_embedding_for_document(
-                source_name=file_name_without_ext,
-                output_dir=OUTPUT_DIR,
-                filename=filename,
-                conversion_id=conversion_id,
-                broadcast_callback=dual_broadcast_callback
-            )
-
-            # Note: Status update to INDEXED is handled by trigger_embedding_for_document
-            # after Phase 1 completes. We don't update it here to avoid race conditions.
-
-            logger.info(f"✅ Indexing task enqueued for document: {filename}")
-            return {"status": "success", "filename": filename}
-
-    except Exception as e:
-        logger.error(f"❌ Indexing task failed for document {document_id}: {e}", exc_info=True)
-
-        # Broadcast indexing failed event
-        try:
-            document_status_manager.broadcast_from_thread({
-                "event_type": "indexing_failed",
-                "document_id": str(document_id),
-                "index_status": "failed",
-                "progress": 0,
-                "message": f"Indexing failed: {str(e)}",
-                "timestamp": datetime.now().isoformat()
-            })
-        except:
-            pass
-
-        raise
-
-
 def _resume_incomplete_ocr():
-    """
-    Resume incomplete OCR conversion tasks on startup.
-    Finds documents with pending, converting, partial, or failed OCR status and triggers conversion in background.
-    """
-    try:
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-
-            # Find all documents that need OCR conversion
-            docs_to_convert = []
-
-            for doc in repo.get_all():
-                # Skip deleted documents
-                if doc.deleted_at:
-                    continue
-
-                # Check if document needs OCR conversion
-                needs_conversion = False
-
-                # Check convert_status
-                if doc.convert_status in [ConvertStatus.PENDING, ConvertStatus.CONVERTING, ConvertStatus.PARTIAL, ConvertStatus.FAILED]:
-                    # For PARTIAL: check if there are unconverted pages
-                    if doc.convert_status == ConvertStatus.PARTIAL:
-                        if doc.total_pages > 0 and doc.converted_pages < doc.total_pages:
-                            needs_conversion = True
-                            logger.info(f"Document {doc.filename} has partial conversion ({doc.converted_pages}/{doc.total_pages} pages)")
-                    else:
-                        needs_conversion = True
-                        logger.info(f"Document {doc.filename} needs conversion (status: {doc.convert_status.value})")
-
-                if needs_conversion:
-                    docs_to_convert.append(doc)
-
-            if not docs_to_convert:
-                logger.info("No incomplete OCR conversion tasks found")
-                return
-
-            logger.info(f"Found {len(docs_to_convert)} documents with incomplete OCR conversion")
-
-            # Trigger conversion for each document in background
-            for doc in docs_to_convert:
-                try:
-                    # Create conversion task and get conversion_id
-                    conversion_id = conversion_manager.create_conversion(doc.filename)
-
-                    logger.info(f"Resuming OCR conversion for: {doc.filename} (conversion_id: {conversion_id})")
-
-                    # Update status to processing
-                    conversion_manager.update_conversion(
-                        conversion_id,
-                        status="processing",
-                        progress=0,
-                        message="Resuming OCR conversion from startup...",
-                        started_at=datetime.now().isoformat()
-                    )
-
-                    # Update database status to CONVERTING
-                    repo.update_convert_status(doc, ConvertStatus.CONVERTING, message="Resuming conversion from startup")
-
-                    # Create progress callback for this conversion
-                    progress_callback = _create_parser_progress_callback(conversion_id)
-
-                    # Submit task to worker pool using the standard conversion function
-                    success = worker_pool.submit_task(
-                        conversion_id=conversion_id,
-                        func=_convert_document_background,
-                        args=(doc.filename, "prompt_layout_all_en"),
-                        kwargs={
-                            "conversion_id": conversion_id,
-                            "progress_callback": progress_callback,
-                        }
-                    )
-
-                    if success:
-                        logger.info(f"Triggered background OCR conversion for: {doc.filename}")
-                    else:
-                        logger.warning(f"Failed to submit OCR conversion task for {doc.filename} - already in progress or queue full")
-                        conversion_manager.update_conversion(
-                            conversion_id,
-                            status="failed",
-                            message="Failed to submit task - already in progress or queue full"
-                        )
-
-                except Exception as e:
-                    logger.error(f"Error resuming OCR conversion for {doc.filename}: {e}")
-
-            logger.info(f"Resume OCR conversion complete: {len(docs_to_convert)} documents queued for background conversion")
-
-    except Exception as e:
-        logger.error(f"Error in _resume_incomplete_ocr: {e}")
+    """Resume incomplete OCR conversion tasks on startup."""
+    if task_queue_service:
+        task_queue_service.resume_incomplete_ocr(conversion_manager, worker_pool)
 
 
 def _resume_incomplete_indexing():
-    """
-    Resume incomplete indexing tasks on startup.
-    Finds documents with pending or failed indexing status and triggers indexing in background.
+    """Resume incomplete indexing tasks on startup."""
+    if task_queue_service:
+        task_queue_service.resume_incomplete_indexing(conversion_manager, trigger_embedding_for_document)
 
-    Only resumes indexing for documents that:
-    1. Have been successfully converted (convert_status = CONVERTED)
-    2. Have incomplete indexing phases (vector/metadata/graphrag)
-    3. Are not already fully indexed (index_status != INDEXED)
-    """
-    try:
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
 
-            # Find all documents that need indexing
-            docs_to_index = []
+def _create_parser_progress_callback(conversion_id: str):
+    """Create a progress callback for the parser."""
+    return conversion_service.create_progress_callback(conversion_id)
 
-            for doc in repo.get_all():
-                # Skip deleted documents
-                if doc.deleted_at:
-                    continue
 
-                # Skip documents that haven't been converted yet
-                if not doc.convert_status or doc.convert_status == ConvertStatus.PENDING:
-                    continue
-
-                # IMPORTANT: Skip documents that are already fully indexed
-                # This prevents duplicate indexing on every startup
-                if doc.index_status == IndexStatus.INDEXED:
-                    # Check if all phases are complete
-                    indexing_details = doc.indexing_details or {}
-                    vector_status = indexing_details.get("vector_indexing", {}).get("status")
-                    metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
-                    graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
-
-                    # If all phases are complete, skip this document
-                    # Valid completed statuses: "completed", "success", or None (for legacy/optional phases)
-                    all_complete = (
-                        vector_status in ["completed", "success", None] and
-                        metadata_status in ["completed", "success", None] and
-                        graphrag_status in ["completed", "success", None]
-                    )
-
-                    if all_complete:
-                        logger.debug(f"Document {doc.filename} is already fully indexed, skipping")
-                        continue
-                    else:
-                        logger.debug(f"Document {doc.filename} has index_status=INDEXED but incomplete phases: vector={vector_status}, metadata={metadata_status}, graphrag={graphrag_status}")
-
-                # Check if document needs any indexing phase
-                needs_indexing = False
-                indexing_details = doc.indexing_details or {}
-
-                # Check vector indexing status (only if failed or explicitly pending)
-                vector_status = indexing_details.get("vector_indexing", {}).get("status")
-                if vector_status in ["pending", "failed"]:
-                    needs_indexing = True
-                    logger.info(f"Document {doc.filename} needs vector indexing (status: {vector_status})")
-
-                # Check metadata extraction status (only if failed or explicitly pending)
-                metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
-                if metadata_status in ["pending", "failed"]:
-                    needs_indexing = True
-                    logger.info(f"Document {doc.filename} needs metadata extraction (status: {metadata_status})")
-
-                # Check GraphRAG indexing status (only if failed or explicitly pending)
-                graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
-                if graphrag_status in ["pending", "failed"]:
-                    needs_indexing = True
-                    logger.info(f"Document {doc.filename} needs GraphRAG indexing (status: {graphrag_status})")
-
-                # If no indexing_details at all, check overall index_status
-                # Only resume if status is PENDING or FAILED (not PARTIAL or INDEXING)
-                if not indexing_details and doc.index_status in [IndexStatus.PENDING, IndexStatus.FAILED]:
-                    needs_indexing = True
-                    logger.info(f"Document {doc.filename} has no indexing details (overall status: {doc.index_status})")
-
-                if needs_indexing:
-                    docs_to_index.append(doc)
-
-            if not docs_to_index:
-                logger.info("No incomplete indexing tasks found")
-                return
-
-            logger.info(f"Found {len(docs_to_index)} documents with incomplete indexing")
-
-            # Trigger indexing for each document in background
-            for doc in docs_to_index:
-                try:
-                    file_name_without_ext = os.path.splitext(doc.filename)[0]
-
-                    # Create conversion task and get conversion_id
-                    conversion_id = conversion_manager.create_conversion(doc.filename)
-
-                    logger.info(f"Resuming indexing for: {doc.filename} (conversion_id: {conversion_id})")
-
-                    # Update status to indexing
-                    conversion_manager.update_conversion(
-                        conversion_id,
-                        status="indexing",
-                        progress=0,
-                        message="Resuming indexing from startup...",
-                        started_at=datetime.now().isoformat()
-                    )
-
-                    # Create a wrapper callback that broadcasts to both WebSocket managers
-                    doc_id = str(doc.id)
-                    doc_filename = doc.filename
-
-                    def dual_broadcast_callback(conv_id: str, message: dict):
-                        """Broadcast to both conversion WebSocket and document status WebSocket"""
-                        # Send to conversion WebSocket (for progress bars)
-                        connection_manager.broadcast_from_thread(conv_id, message)
-
-                        # Also send to document status WebSocket when indexing completes
-                        status = message.get("status", "")
-                        # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
-                        if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
-                            event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
-                            logger.info(f"📤 Broadcasting document status: {event_type} for {doc_filename} (status={status})")
-                            document_status_manager.broadcast_from_thread({
-                                "event_type": event_type,
-                                "document_id": doc_id,
-                                "filename": doc_filename,
-                                "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
-                                "progress": 100,
-                                "message": message.get("message", "Indexing completed"),
-                                "timestamp": datetime.now().isoformat()
-                            })
-
-                    # Trigger indexing in background (non-blocking)
-                    # This will handle all three phases: vector, metadata, GraphRAG
-                    trigger_embedding_for_document(
-                        source_name=file_name_without_ext,
-                        output_dir=OUTPUT_DIR,
-                        filename=doc.filename,
-                        conversion_id=conversion_id,
-                        broadcast_callback=dual_broadcast_callback
-                    )
-
-                    logger.info(f"Triggered background indexing for: {doc.filename}")
-
-                except Exception as e:
-                    logger.error(f"Error resuming indexing for {doc.filename}: {e}")
-
-            logger.info(f"Resume indexing complete: {len(docs_to_index)} documents queued for background indexing")
-
-    except Exception as e:
-        logger.error(f"Error in _resume_incomplete_indexing: {e}")
-
+# ===== API Endpoints =====
 
 @app.get("/")
 async def root():
-    """Root endpoint - API information"""
+    """Root endpoint - API information."""
     return {
         "name": "Dots OCR API",
         "version": "1.0.0",
@@ -1854,75 +610,36 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy",
-        "service": "Dots OCR API"
-    }
+    """Health check endpoint."""
+    return {"status": "healthy", "service": "Dots OCR API"}
 
 
 @app.get("/queue/stats")
 async def get_queue_stats():
-    """
-    Get task queue statistics.
-
-    Returns:
-        Queue statistics including pending, claimed, completed, and failed tasks
-    """
+    """Get task queue statistics."""
     if not task_queue_manager:
         raise HTTPException(status_code=503, detail="Task queue system not initialized")
-
-    stats = task_queue_manager.get_queue_stats()
-    return stats
+    return task_queue_manager.get_queue_stats()
 
 
 @app.post("/queue/maintenance")
 async def trigger_queue_maintenance():
-    """
-    Manually trigger queue maintenance.
-
-    This will:
-    1. Release stale tasks (workers that died)
-    2. Find and enqueue orphaned documents
-    3. Return updated queue statistics
-    """
-    if not task_scheduler:
-        raise HTTPException(status_code=503, detail="Task scheduler not initialized")
-
-    # Run maintenance in background thread to avoid blocking
-    def run_maintenance():
-        task_scheduler._periodic_maintenance()
-
-    thread = threading.Thread(target=run_maintenance, daemon=True)
-    thread.start()
-
-    return {
-        "status": "success",
-        "message": "Queue maintenance triggered"
-    }
+    """Manually trigger queue maintenance."""
+    if not task_queue_service:
+        raise HTTPException(status_code=503, detail="Task queue service not initialized")
+    return task_queue_service.trigger_maintenance()
 
 
 @app.get("/config")
 async def get_config():
-    """Get current configuration for both backend and frontend"""
-    # Get frontend configuration from environment variables
-    app_domain = os.getenv("APP_DOMAIN", "http://localhost:3000")
-    base_path = os.getenv("BASE_PATH", "")
-    iam_domain = os.getenv("IAM_DOMAIN", "http://localhost:5000")
-    client_id = os.getenv("CLIENT_ID", "dots-ocr-app")
-    iam_scope = os.getenv("IAM_SCOPE", "openid profile email")
-    api_domain = os.getenv("API_DOMAIN", "http://localhost:8080")
-
+    """Get current configuration for both backend and frontend."""
     return {
-        # Frontend configuration
-        "basePath": base_path,
-        "appDomain": app_domain,
-        "apiDomain": api_domain,
-        "iamDomain": iam_domain,
-        "clientId": client_id,
-        "iamScope": iam_scope,
-
-        # Backend OCR configuration
+        "basePath": os.getenv("BASE_PATH", ""),
+        "appDomain": os.getenv("APP_DOMAIN", "http://localhost:3000"),
+        "apiDomain": os.getenv("API_DOMAIN", "http://localhost:8080"),
+        "iamDomain": os.getenv("IAM_DOMAIN", "http://localhost:5000"),
+        "clientId": os.getenv("CLIENT_ID", "dots-ocr-app"),
+        "iamScope": os.getenv("IAM_SCOPE", "openid profile email"),
         "vllm_ip": parser.ip,
         "vllm_port": parser.port,
         "model_name": parser.model_name,
@@ -1937,145 +654,13 @@ async def get_config():
     }
 
 
-def _resize_image_if_needed(file_path: str, max_pixels: int = None) -> dict:
-    """
-    Resize image if it exceeds maximum pixel dimensions.
-
-    Args:
-        file_path: Path to the image file
-        max_pixels: Maximum number of pixels allowed. If None, reads from MAX_PIXELS env var.
-                   Default fallback is 8000000 (safer for vLLM servers with limited memory)
-
-    Returns:
-        dict with keys:
-            - resized: bool indicating if image was resized
-            - original_size: tuple of (width, height) before resize
-            - new_size: tuple of (width, height) after resize (None if not resized)
-            - message: str describing what happened
-    """
-    from PIL import Image
-    import math
-
-    # Get max_pixels from environment variable if not specified
-    if max_pixels is None:
-        max_pixels_env = os.getenv('MAX_PIXELS', '8000000')
-        if max_pixels_env.lower() == 'none':
-            max_pixels = 11289600  # Use absolute maximum if env is None
-        else:
-            max_pixels = int(max_pixels_env)
-
-    # Apply a safety margin (90% of max_pixels) to prevent edge cases
-    # This ensures the image is comfortably within limits after base64 encoding
-    safe_max_pixels = int(max_pixels * 0.9)
-
-    # Check if file is an image
-    file_ext = os.path.splitext(file_path)[1].lower()
-    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.tif', '.webp'}
-
-    if file_ext not in image_extensions:
-        return {
-            "resized": False,
-            "original_size": None,
-            "new_size": None,
-            "message": "Not an image file"
-        }
-
-    try:
-        # Open image and get dimensions
-        with Image.open(file_path) as img:
-            original_width, original_height = img.size
-            original_pixels = original_width * original_height
-
-            # Check if resize is needed
-            if original_pixels <= safe_max_pixels:
-                return {
-                    "resized": False,
-                    "original_size": (original_width, original_height),
-                    "new_size": None,
-                    "message": f"Image size OK ({original_width}x{original_height} = {original_pixels:,} pixels, limit: {safe_max_pixels:,})"
-                }
-
-            # Calculate new dimensions maintaining aspect ratio
-            scale_factor = math.sqrt(safe_max_pixels / original_pixels)
-            new_width = int(original_width * scale_factor)
-            new_height = int(original_height * scale_factor)
-
-            # Ensure dimensions are divisible by 28 (IMAGE_FACTOR) for better compatibility
-            new_width = (new_width // 28) * 28
-            new_height = (new_height // 28) * 28
-
-            # Ensure minimum size
-            if new_width < 28:
-                new_width = 28
-            if new_height < 28:
-                new_height = 28
-
-            # Convert to RGB if necessary (for PNG with transparency, etc.)
-            if img.mode in ('RGBA', 'LA', 'P'):
-                # Create white background
-                rgb_img = Image.new('RGB', img.size, (255, 255, 255))
-                if img.mode == 'P':
-                    img = img.convert('RGBA')
-                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ('RGBA', 'LA') else None)
-                img = rgb_img
-            elif img.mode != 'RGB':
-                img = img.convert('RGB')
-
-            # Resize image using high-quality LANCZOS resampling
-            resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-            # Save resized image (overwrite original)
-            # Use high quality settings but optimize for size
-            if file_ext in {'.jpg', '.jpeg'}:
-                resized_img.save(file_path, 'JPEG', quality=90, optimize=True)
-            elif file_ext == '.png':
-                # For PNG, convert to JPEG to reduce file size significantly
-                # This helps with base64 encoding and network transfer
-                new_file_path = os.path.splitext(file_path)[0] + '.jpg'
-                resized_img.save(new_file_path, 'JPEG', quality=90, optimize=True)
-                # Remove original PNG and rename JPG to original name
-                if new_file_path != file_path:
-                    os.remove(file_path)
-                    os.rename(new_file_path, file_path)
-            else:
-                # For other formats, save as JPEG
-                resized_img.save(file_path, 'JPEG', quality=90, optimize=True)
-
-            new_pixels = new_width * new_height
-            return {
-                "resized": True,
-                "original_size": (original_width, original_height),
-                "new_size": (new_width, new_height),
-                "message": f"Image resized from {original_width}x{original_height} ({original_pixels:,} pixels) to {new_width}x{new_height} ({new_pixels:,} pixels, limit: {safe_max_pixels:,})"
-            }
-
-    except Exception as e:
-        logger.error(f"Error resizing image {file_path}: {e}")
-        return {
-            "resized": False,
-            "original_size": None,
-            "new_size": None,
-            "message": f"Error resizing image: {str(e)}"
-        }
-
-
 @app.post("/upload")
 async def upload_file(
     file: UploadFile = File(...),
     workspace_id: Optional[str] = Form(default=None),
     request: Request = None
 ):
-    """
-    Upload a document file (PDF, image, DOC, EXCEL) to the input folder.
-    Automatically resizes images that are too large to prevent OCR errors.
-
-    Parameters:
-    - file: The file to upload
-    - workspace_id: Optional workspace ID to upload to (uses default if not specified)
-
-    Returns:
-    - JSON with upload status and file information
-    """
+    """Upload a document file (PDF, image, DOC, EXCEL) to the input folder."""
     try:
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file provided")
@@ -2083,18 +668,14 @@ async def upload_file(
         logger.info(f"📁 Upload: {file.filename}, workspace_id={workspace_id}")
         auth_header = request.headers.get("Authorization") if request else None
 
-        # Use a single database session for the entire operation
         with get_db_session() as db:
-            # Step 1: Determine upload path and get user/workspace info
             user_id = None
             owner_id = None
             resolved_workspace_id = None
             workspace_name = None
-            # Use relative paths for database storage
-            relative_path = file.filename  # Default fallback (just filename)
-            absolute_path = os.path.join(INPUT_DIR, file.filename)  # Default fallback for file system
+            relative_path = file.filename
+            absolute_path = os.path.join(INPUT_DIR, file.filename)
 
-            # Try to get user from token
             if auth_header and auth_header.startswith("Bearer "):
                 try:
                     from auth.jwt_utils import JWTUtils
@@ -2109,77 +690,59 @@ async def upload_file(
                         if user:
                             owner_id = user.id
                             username = user.username
-                            logger.info(f"   User authenticated: {username}")
 
-                            # Get workspace folder path
                             if workspace_id:
                                 try:
                                     ws_uuid = UUID(workspace_id)
-                                    from db.workspace_repository import WorkspaceRepository
                                     ws_repo = WorkspaceRepository(db)
                                     workspace = ws_repo.get_workspace_by_id(ws_uuid)
                                     if workspace and workspace.user_id == user_id:
                                         resolved_workspace_id = workspace.id
                                         workspace_name = workspace.name
                                         folder_path = workspace.folder_path
-                                        # Store relative path in database (e.g., "fyang/my_documents/file.png")
                                         relative_path = os.path.join(folder_path, file.filename)
-                                        # Use absolute path for file system operations
                                         absolute_path = os.path.join(INPUT_DIR, folder_path, file.filename)
-                                        logger.info(f"   Using workspace: {workspace_name}")
                                 except Exception as e:
-                                    logger.warning(f"   Invalid workspace_id: {e}")
+                                    logger.warning(f"Invalid workspace_id: {e}")
 
-                            # Fallback to default workspace if no valid workspace specified
                             if not resolved_workspace_id:
-                                from db.workspace_repository import WorkspaceRepository
                                 ws_repo = WorkspaceRepository(db)
                                 workspace = ws_repo.get_or_create_default_workspace(user_id, user.normalized_username)
                                 resolved_workspace_id = workspace.id
                                 workspace_name = workspace.name
                                 folder_path = workspace.folder_path
-                                # Store relative path in database
                                 relative_path = os.path.join(folder_path, file.filename)
-                                # Use absolute path for file system operations
                                 absolute_path = os.path.join(INPUT_DIR, folder_path, file.filename)
-                                logger.info(f"   Using default workspace: {workspace_name}")
                 except Exception as e:
-                    logger.warning(f"   Auth error: {e}")
+                    logger.warning(f"Auth error: {e}")
 
-            # Prevent directory traversal attacks
             if not os.path.abspath(absolute_path).startswith(os.path.abspath(INPUT_DIR)):
                 raise HTTPException(status_code=400, detail="Invalid file path")
 
-            # Step 2: Save the file
             os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
             with open(absolute_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
-            logger.info(f"   File saved: {absolute_path} (relative: {relative_path})")
 
-            # Resize image if needed
-            resize_info = _resize_image_if_needed(absolute_path)
+            resize_info = document_service.resize_image_if_needed(absolute_path)
             file_size = os.path.getsize(absolute_path)
             upload_time = datetime.now().isoformat()
 
-            # Step 3: Create document record (store relative path in database)
             repo = DocumentRepository(db)
             doc, created = repo.get_or_create(
                 filename=file.filename,
                 original_filename=file.filename,
-                file_path=relative_path,  # Store relative path, not absolute
+                file_path=relative_path,
                 file_size=file_size,
             )
             doc_id = str(doc.id)
 
-            # Set workspace and owner
             if resolved_workspace_id:
                 doc.workspace_id = resolved_workspace_id
             if owner_id:
                 doc.owner_id = owner_id
                 doc.visibility = 'private'
 
-            # Detect page count
             try:
                 import fitz
                 pdf_doc = fitz.open(absolute_path)
@@ -2191,13 +754,10 @@ async def upload_file(
             doc.total_pages = total_pages
             db.commit()
 
-            # Create owner permission if user is authenticated
             if owner_id:
-                from services.permission_service import PermissionService
                 perm_service = PermissionService(db)
                 perm_service.grant_owner_permission(user_id=owner_id, document_id=doc.id)
 
-            # Auto-create document task if queue system is enabled
             if TASK_QUEUE_ENABLED and task_queue_manager:
                 task_created = task_queue_manager.create_document_task(
                     document_id=doc.id,
@@ -2216,15 +776,12 @@ async def upload_file(
                         "total_pages": total_pages
                     })
 
-            logger.info(f"✅ Upload complete: {file.filename} (doc_id={doc_id}, workspace={workspace_name})")
-
-        # Build response (outside session - using only simple values)
         response_data = {
             "status": "success",
             "id": doc_id,
             "document_id": doc_id,
             "filename": file.filename,
-            "file_path": relative_path,  # Return relative path, not absolute
+            "file_path": relative_path,
             "file_size": file_size,
             "upload_time": upload_time,
         }
@@ -2249,195 +806,67 @@ async def upload_file(
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
 
 
-def _check_markdown_exists_at_path(output_dir: str) -> tuple:
-    """
-    Check if markdown file exists at a specific output directory path.
-    Handles both single markdown files and multi-page markdown files.
-
-    Args:
-        output_dir: Full path to the output directory (e.g., output/username/workspace/filename_base)
-
-    Returns:
-        (markdown_exists: bool, markdown_path: str or None, is_multipage: bool, converted_pages: int)
-    """
-    if not os.path.exists(output_dir):
-        return False, None, False, 0
-
-    base_name = os.path.basename(output_dir)
-
-    # Check for single markdown file (for single-page documents, images, Word, Excel, TXT)
-    markdown_path_nohf = os.path.join(output_dir, f"{base_name}_nohf.md")
-    if os.path.exists(markdown_path_nohf):
-        return True, markdown_path_nohf, False, 1
-
-    # Check for multi-page markdown files (for PDFs with multiple pages)
-    page_files = []
-    for file in os.listdir(output_dir):
-        if file.endswith("_nohf.md") and "_page_" in file:
-            page_files.append(file)
-
-    if page_files:
-        # Sort by page number
-        page_files.sort(key=lambda x: int(x.split("_page_")[1].split("_")[0]))
-        return True, os.path.join(output_dir, page_files[0]), True, len(page_files)
-
-    return False, None, False, 0
-
-
-def _check_markdown_exists(file_name_without_ext: str) -> tuple:
-    """
-    Check if markdown file exists for a document (legacy function using default OUTPUT_DIR).
-    Handles both single markdown files and multi-page markdown files.
-    Both OCR and doc_service converters use _nohf.md format.
-
-    Returns:
-    - (markdown_exists: bool, markdown_path: str or None, is_multipage: bool, converted_pages: int)
-    """
-    output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
-    return _check_markdown_exists_at_path(output_dir)
-
-
-def _get_pdf_page_count(file_path: str) -> int:
-    """
-    Get the total number of pages in a PDF file.
-
-    Returns:
-    - Total page count, or 0 if not a PDF or error occurs
-    """
-    try:
-        if not file_path.lower().endswith('.pdf'):
-            return 0
-
-        import fitz  # PyMuPDF
-        doc = fitz.open(file_path)
-        page_count = len(doc)
-        doc.close()
-        return page_count
-    except Exception as e:
-        logger.error(f"Error getting PDF page count for {file_path}: {str(e)}")
-        return 0
-
-
 @app.get("/documents")
 async def list_documents(
     workspace_id: str = None,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """
-    List documents in a workspace with their conversion status.
-
-    AUTHENTICATION REQUIRED - Only returns documents from workspaces owned by the current user.
-
-    Parameters:
-    - workspace_id: Required workspace ID to filter documents by
-
-    Returns:
-    - JSON with list of documents and their markdown conversion status
-    - Includes total_pages (for PDFs) and converted_pages to track partial conversions
-    - Includes database info (document_id, upload_status, convert_status, index_status)
-    """
+    """List documents in a workspace with their conversion status."""
     try:
-        documents = []
-
-        # Debug logging
-        logger.info(f"📋 /documents endpoint called by user {current_user.username} with workspace_id: {workspace_id}")
-
-        # Workspace ID is required for security - no longer allow listing all documents
         if not workspace_id:
-            raise HTTPException(
-                status_code=400,
-                detail="workspace_id is required"
-            )
+            raise HTTPException(status_code=400, detail="workspace_id is required")
 
-        # Parse and validate workspace ID
         try:
             ws_uuid = UUID(workspace_id)
         except ValueError:
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid workspace_id format"
-            )
+            raise HTTPException(status_code=400, detail="Invalid workspace_id format")
 
-        # Verify workspace ownership - user can only access their own workspaces
         workspace_repo = WorkspaceRepository(db)
         workspace = workspace_repo.get_workspace_by_id(ws_uuid)
 
         if not workspace:
-            raise HTTPException(
-                status_code=404,
-                detail="Workspace not found"
-            )
+            raise HTTPException(status_code=404, detail="Workspace not found")
 
         if workspace.user_id != current_user.id:
-            raise HTTPException(
-                status_code=403,
-                detail="Access denied - you don't have permission to access this workspace"
-            )
+            raise HTTPException(status_code=403, detail="Access denied")
 
-        logger.info(f"📋 User {current_user.username} accessing workspace '{workspace.name}' (ID: {ws_uuid})")
-
-        # Get documents from database - database is the source of truth
         doc_repo = DocumentRepository(db)
         all_docs = doc_repo.get_by_workspace(ws_uuid)
-        logger.info(f"📋 Found {len(all_docs)} documents for workspace {ws_uuid}")
 
-        # Build document list from database records
+        documents = []
         for doc in all_docs:
             db_info = doc.to_dict()
             filename = doc.filename
-            # Get relative path from database and resolve to absolute
             relative_file_path = db_info.get("file_path", filename)
-            absolute_file_path = resolve_file_path(relative_file_path)
+            absolute_file_path = document_service.resolve_file_path(relative_file_path)
 
-            # Get file info from filesystem if exists (for file_size)
             if os.path.isfile(absolute_file_path):
                 file_size = os.path.getsize(absolute_file_path)
             else:
                 file_size = db_info.get("file_size", 0)
 
-            # Check if markdown file exists (handles both single and multi-page)
             file_name_without_ext = os.path.splitext(filename)[0]
 
-            # Determine output directory - use output_path from DB if available, otherwise derive from file_path
             db_output_path = db_info.get("output_path")
             if db_output_path:
-                # Resolve output_path (may be relative or absolute)
-                output_dir = resolve_output_path(db_output_path)
-                logger.debug(f"📂 Document '{filename}': Using db_output_path={db_output_path} -> resolved output_dir={output_dir}")
+                output_dir = document_service.resolve_output_path(db_output_path)
             else:
-                # Derive from relative file_path
                 rel_dir = os.path.dirname(relative_file_path)
-                if rel_dir:
-                    output_dir = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext)
-                else:
-                    output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
-                logger.debug(f"📂 Document '{filename}': Derived output_dir={output_dir} from file_path={relative_file_path}")
+                output_dir = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext) if rel_dir else os.path.join(OUTPUT_DIR, file_name_without_ext)
 
-            # Use the path-aware function
-            markdown_exists, markdown_path, is_multipage, converted_pages = _check_markdown_exists_at_path(output_dir)
-            logger.debug(f"📂 Document '{filename}': markdown_exists={markdown_exists}, output_dir exists={os.path.exists(output_dir)}")
+            markdown_exists, markdown_path, is_multipage, converted_pages = document_service.check_markdown_exists_at_path(output_dir)
 
-            # Get total page count from database first
             total_pages = db_info.get("total_pages", 0)
             if total_pages == 0 and os.path.isfile(absolute_file_path):
-                total_pages = _get_pdf_page_count(absolute_file_path)
-
-            # For non-PDF files, set total_pages to 1 if converted, 0 otherwise
+                total_pages = document_service.get_pdf_page_count(absolute_file_path)
             if total_pages == 0 and markdown_exists:
                 total_pages = 1
 
-            document_id = db_info.get("id")
-
-            # Use database status directly - don't assume/guess status
-            # The database is the source of truth for index status
             db_index_status = db_info.get("index_status", "pending")
             db_convert_status = db_info.get("convert_status", "pending")
-
-            # Get indexing details for granular status
             indexing_details = db_info.get("indexing_details")
 
-            # Determine if fully indexed based on indexing_details
             indexed = False
             if indexing_details:
                 vector_status = indexing_details.get("vector_indexing", {}).get("status")
@@ -2450,10 +879,10 @@ async def list_documents(
                 indexed = True
 
             documents.append({
-                "id": document_id,
-                "document_id": document_id,
+                "id": db_info.get("id"),
+                "document_id": db_info.get("id"),
                 "filename": filename,
-                "file_path": relative_file_path,  # Return relative path to frontend
+                "file_path": relative_file_path,
                 "file_size": file_size,
                 "upload_time": db_info.get("created_at"),
                 "markdown_exists": markdown_exists,
@@ -2462,14 +891,12 @@ async def list_documents(
                 "total_pages": total_pages,
                 "converted_pages": converted_pages,
                 "indexed": indexed,
-                # Use database status directly - don't override with guesses
                 "upload_status": db_info.get("upload_status", "pending"),
                 "convert_status": db_convert_status,
                 "index_status": db_index_status,
                 "indexed_chunks": db_info.get("indexed_chunks", 0),
                 "indexing_details": indexing_details,
                 "ocr_details": db_info.get("ocr_details"),
-                # Hierarchical task queue status
                 "ocr_status": db_info.get("ocr_status"),
                 "vector_status": db_info.get("vector_status"),
                 "graphrag_status": db_info.get("graphrag_status"),
@@ -2489,451 +916,26 @@ async def list_documents(
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 
-def _convert_with_doc_service(filename: str, file_path: str = None, conversion_id: str = None, progress_callback=None):
-    """Background task to convert document using doc_service - executed by worker pool"""
-    # file_path is relative from database, resolve to absolute
-    if not file_path:
-        # Fallback for legacy - just use filename
-        relative_path = filename
-    else:
-        relative_path = file_path
-
-    # Resolve to absolute path
-    absolute_file_path = resolve_file_path(relative_path)
-    file_path_obj = Path(absolute_file_path)
-
-    logger.info(f"Starting doc_service conversion for {filename} at {absolute_file_path} (relative: {relative_path})")
-
-    # Send progress updates
-    if progress_callback:
-        progress_callback(10, "Starting document conversion...")
-
-    # Find the appropriate converter
-    converter = doc_converter_manager.find_converter_for_file(file_path_obj)
-    if not converter:
-        raise Exception(f"No converter found for file: {filename}")
-
-    if progress_callback:
-        progress_callback(30, "Converting document to markdown...")
-
-    # Create output directory structure matching input relative path structure
-    # Derive output path from input path: {user}/{workspace}/{file} -> output/{user}/{workspace}/{base}/
-    rel_dir = os.path.dirname(relative_path)
-    filename_without_ext = file_path_obj.stem
-
-    if rel_dir and rel_dir != '.':
-        output_subdir = Path(OUTPUT_DIR) / rel_dir / filename_without_ext
-    else:
-        output_subdir = Path(OUTPUT_DIR) / filename_without_ext
-
-    output_subdir.mkdir(parents=True, exist_ok=True)
-
-    # Use _nohf.md suffix to match OCR format for frontend grid compatibility
-    output_filename = filename_without_ext + "_nohf.md"
-    output_path = output_subdir / output_filename
-
-    # Convert the file
-    success = converter.convert_file(file_path_obj, output_path)
-
-    if not success:
-        raise Exception(f"Failed to convert {filename}")
-
-    if progress_callback:
-        progress_callback(90, "Conversion complete, finalizing...")
-
-    # Return results in a format similar to OCR parser
-    results = [{
-        "page_no": 0,
-        "md_content_path": str(output_path),
-        "file_path": absolute_file_path,
-        "converter_type": "doc_service",
-        "converter_name": converter.get_converter_info()["name"]
-    }]
-
-    logger.info(f"Doc_service conversion completed successfully for {filename}")
-    return results
-
-
-def _convert_document_background(filename: str, prompt_mode: str, file_path: str = None, conversion_id: str = None, progress_callback=None):
-    """Background task to convert document using OCR parser - executed by worker pool"""
-    # file_path is relative from database, resolve to absolute
-    if not file_path:
-        # Fallback for legacy - just use filename
-        relative_path = filename
-    else:
-        relative_path = file_path
-
-    # Resolve to absolute path
-    absolute_file_path = resolve_file_path(relative_path)
-
-    logger.info(f"Starting OCR conversion for {filename} at {absolute_file_path} (relative: {relative_path})")
-
-    # Determine output directory based on input relative path structure
-    rel_dir = os.path.dirname(relative_path)
-
-    if rel_dir and rel_dir != '.':
-        output_dir = os.path.join(OUTPUT_DIR, rel_dir)
-    else:
-        output_dir = OUTPUT_DIR
-
-    # Ensure output directory exists
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Parse the file using the OCR parser with progress callback
-    results = parser.parse_file(
-        absolute_file_path,  # Use resolved absolute path
-        output_dir=output_dir,
-        prompt_mode=prompt_mode,
-        progress_callback=progress_callback,
-    )
-
-    logger.info(f"OCR conversion completed successfully for {filename}")
-    return results
-
-
-def _convert_with_deepseek_ocr(filename: str, file_path: str = None, conversion_id: str = None, progress_callback=None):
-    """Background task to convert image using DeepSeek OCR - executed by worker pool"""
-    # file_path is relative from database, resolve to absolute
-    if not file_path:
-        # Fallback for legacy - just use filename
-        relative_path = filename
-    else:
-        relative_path = file_path
-
-    # Resolve to absolute path
-    absolute_file_path = resolve_file_path(relative_path)
-    file_path_obj = Path(absolute_file_path)
-
-    logger.info(f"Starting DeepSeek OCR conversion for {filename} at {absolute_file_path} (relative: {relative_path})")
-
-    # Send progress updates
-    if progress_callback:
-        progress_callback(10, "Starting DeepSeek OCR conversion...")
-
-    # Validate that this is an image file
-    if not deepseek_ocr_converter.is_supported_file(file_path_obj):
-        raise Exception(f"File type not supported by DeepSeek OCR: {filename}")
-
-    if progress_callback:
-        progress_callback(30, "Converting image to markdown with DeepSeek OCR...")
-
-    # Create output directory structure matching input relative path structure
-    rel_dir = os.path.dirname(relative_path)
-    filename_without_ext = file_path_obj.stem
-
-    if rel_dir and rel_dir != '.':
-        output_subdir = Path(OUTPUT_DIR) / rel_dir / filename_without_ext
-    else:
-        output_subdir = Path(OUTPUT_DIR) / filename_without_ext
-
-    output_subdir.mkdir(parents=True, exist_ok=True)
-
-    # Use _nohf.md suffix to match OCR format for frontend grid compatibility
-    output_filename = filename_without_ext + "_nohf.md"
-    output_path = output_subdir / output_filename
-
-    if progress_callback:
-        progress_callback(50, "Calling DeepSeek OCR API...")
-
-    # Convert the file
-    success = deepseek_ocr_converter.convert_file(file_path_obj, output_path)
-
-    if not success:
-        raise Exception(f"Failed to convert {filename} with DeepSeek OCR")
-
-    if progress_callback:
-        progress_callback(90, "Conversion complete, finalizing...")
-
-    # Return results in a format similar to OCR parser
-    results = [{
-        "page_no": 0,
-        "md_content_path": str(output_path),
-        "file_path": str(file_path),
-        "converter_type": "deepseek_ocr",
-        "converter_name": "DeepSeek OCR"
-    }]
-
-    logger.info(f"DeepSeek OCR conversion completed successfully for {filename}")
-    return results
-
-
-@app.post("/convert-doc")
-async def convert_document_with_doc_service(filename: str = Form(...)):
-    """
-    Convert Word/Excel/TXT documents using doc_service converters (non-blocking).
-
-    This endpoint is specifically for structured documents (Word, Excel, TXT files)
-    that don't require OCR processing.
-
-    Returns immediately with a conversion ID. Use WebSocket to track progress.
-    Multiple conversions can run concurrently using the worker pool.
-
-    Parameters:
-    - filename: The name of the file to convert (must be in input folder)
-
-    Returns:
-    - JSON with conversion_id for tracking progress
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        # Look up document in database to get the correct file path
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_filename(filename)
-
-            if doc and doc.file_path:
-                file_path = doc.file_path
-            else:
-                # Fallback for legacy documents or direct filename
-                file_path = os.path.join(INPUT_DIR, filename)
-
-        file_path_obj = Path(file_path)
-
-        # Check if file exists
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-
-        # Validate that this is a doc_service supported file
-        doc_service_extensions = ['.docx', '.doc', '.xlsx', '.xlsm', '.xlsb', '.xls', '.txt', '.csv', '.tsv', '.log', '.text']
-        file_extension = file_path_obj.suffix.lower()
-
-        if file_extension not in doc_service_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File type {file_extension} not supported by doc_service. Use /convert endpoint for PDF/images."
-            )
-
-        # Create conversion task
-        conversion_id = conversion_manager.create_conversion(filename)
-
-        # Update status to processing
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="processing",
-            started_at=datetime.now().isoformat(),
-            message="Document conversion queued..."
-        )
-
-        # Broadcast initial status
-        await connection_manager.broadcast(conversion_id, {
-            "status": "processing",
-            "progress": 5,
-            "message": "Document conversion queued...",
-        })
-
-        # Create progress callback for this conversion
-        progress_callback = _create_parser_progress_callback(conversion_id)
-
-        # Submit task to worker pool (using doc_service converter)
-        success = worker_pool.submit_task(
-            conversion_id=conversion_id,
-            func=_convert_with_doc_service,
-            args=(filename,),
-            kwargs={
-                "file_path": file_path,
-                "conversion_id": conversion_id,
-                "progress_callback": progress_callback,
-            }
-        )
-
-        if not success:
-            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
-
-        # Return immediately with conversion ID
-        return JSONResponse(content={
-            "status": "accepted",
-            "conversion_id": conversion_id,
-            "filename": filename,
-            "message": "Document conversion task started. Use WebSocket to track progress.",
-            "converter_type": "doc_service",
-            "queue_size": worker_pool.get_queue_size(),
-            "active_tasks": worker_pool.get_active_tasks_count(),
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error starting doc_service conversion: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
-
-
-@app.post("/convert-deepseek")
-async def convert_document_with_deepseek_ocr(filename: str = Form(...)):
-    """
-    Convert images using DeepSeek OCR service (non-blocking).
-
-    This endpoint is specifically for image files that will be converted using
-    the DeepSeek OCR model for high-quality OCR and markdown generation.
-
-    Returns immediately with a conversion ID. Use WebSocket to track progress.
-    Multiple conversions can run concurrently using the worker pool.
-
-    Parameters:
-    - filename: The name of the image file to convert (must be in input folder)
-
-    Returns:
-    - JSON with conversion_id for tracking progress
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        # Look up document in database to get the correct file path
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_filename(filename)
-
-            if doc and doc.file_path:
-                file_path = doc.file_path
-            else:
-                # Fallback for legacy documents or direct filename
-                file_path = os.path.join(INPUT_DIR, filename)
-
-        file_path_obj = Path(file_path)
-
-        # Check if file exists
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
-
-        # Validate that this is a DeepSeek OCR supported file (images only)
-        deepseek_ocr_extensions = deepseek_ocr_converter.get_supported_extensions()
-        file_extension = file_path_obj.suffix.lower()
-
-        if file_extension not in deepseek_ocr_extensions:
-            raise HTTPException(
-                status_code=400,
-                detail=f"File type {file_extension} not supported by DeepSeek OCR. Supported types: {', '.join(deepseek_ocr_extensions)}"
-            )
-
-        # Create conversion task
-        conversion_id = conversion_manager.create_conversion(filename)
-
-        # Update status to processing
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="processing",
-            started_at=datetime.now().isoformat(),
-            message="DeepSeek OCR conversion queued..."
-        )
-
-        # Broadcast initial status
-        await connection_manager.broadcast(conversion_id, {
-            "status": "processing",
-            "progress": 5,
-            "message": "DeepSeek OCR conversion queued...",
-        })
-
-        # Create progress callback for this conversion
-        progress_callback = _create_parser_progress_callback(conversion_id)
-
-        # Submit task to worker pool (using DeepSeek OCR converter)
-        success = worker_pool.submit_task(
-            conversion_id=conversion_id,
-            func=_convert_with_deepseek_ocr,
-            args=(filename,),
-            kwargs={
-                "file_path": file_path,
-                "conversion_id": conversion_id,
-                "progress_callback": progress_callback,
-            }
-        )
-
-        if not success:
-            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
-
-        # Return immediately with conversion ID
-        return JSONResponse(content={
-            "status": "accepted",
-            "conversion_id": conversion_id,
-            "filename": filename,
-            "message": "DeepSeek OCR conversion task started. Use WebSocket to track progress.",
-            "converter_type": "deepseek_ocr",
-            "queue_size": worker_pool.get_queue_size(),
-            "active_tasks": worker_pool.get_active_tasks_count(),
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error starting DeepSeek OCR conversion: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
-
-
 @app.post("/convert")
 async def convert_document(filename: str = Form(...), prompt_mode: str = Form("prompt_layout_all_en")):
-    """
-    Trigger document conversion using OCR parser (non-blocking).
-
-    This endpoint is for PDF and image files that require OCR processing.
-
-    Returns immediately with a conversion ID. Use WebSocket to track progress.
-    Multiple conversions can run concurrently using the worker pool.
-
-    Parameters:
-    - filename: The name of the file to convert (must be in input folder)
-    - prompt_mode: The prompt mode to use (default: prompt_layout_all_en)
-
-    Returns:
-    - JSON with conversion_id for tracking progress
-    """
+    """Trigger document conversion using OCR parser (non-blocking)."""
     try:
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Look up document in database to get the correct file path
         with get_db_session() as db:
             repo = DocumentRepository(db)
             doc = repo.get_by_filename(filename)
+            file_path = doc.file_path if doc and doc.file_path else os.path.join(INPUT_DIR, filename)
 
-            if doc and doc.file_path:
-                file_path = doc.file_path
-            else:
-                # Fallback for legacy documents or direct filename
-                file_path = os.path.join(INPUT_DIR, filename)
-
-        # Check if file exists
-        if not os.path.exists(file_path):
+        if not os.path.exists(document_service.resolve_file_path(file_path)):
             raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
-        # Create conversion task
-        conversion_id = conversion_manager.create_conversion(filename)
-
-        # Update status to processing
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="processing",
-            started_at=datetime.now().isoformat(),
-            message="Conversion queued, waiting for worker..."
-        )
-
-        # Broadcast initial status
-        await connection_manager.broadcast(conversion_id, {
-            "status": "processing",
-            "progress": 5,
-            "message": "Conversion queued, waiting for worker...",
-        })
-
-        # Create progress callback for this conversion
-        progress_callback = _create_parser_progress_callback(conversion_id)
-
-        # Submit task to worker pool
-        success = worker_pool.submit_task(
-            conversion_id=conversion_id,
-            func=_convert_document_background,
-            args=(filename, prompt_mode),
-            kwargs={
-                "file_path": file_path,
-                "conversion_id": conversion_id,
-                "progress_callback": progress_callback,
-            }
-        )
+        success, conversion_id = conversion_service.submit_ocr_task(filename, file_path, prompt_mode)
 
         if not success:
             raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
 
-        # Return immediately with conversion ID
         return JSONResponse(content={
             "status": "accepted",
             "conversion_id": conversion_id,
@@ -2950,217 +952,130 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
         raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
 
 
-@app.post("/retry-ocr")
-async def retry_failed_ocr(
-    filename: str = Form(...),
-    retry_type: str = Form("all"),  # "all", "pages", "images"
-    page_numbers: Optional[str] = Form(None)  # Comma-separated page numbers
-):
-    """
-    Retry OCR for failed pages or embedded images only.
-
-    This endpoint allows selective re-processing of only the failed components
-    without redoing the entire document conversion.
-
-    Parameters:
-    - filename: Document filename
-    - retry_type: Type of retry - "all" (retry all failures), "pages" (retry failed pages only),
-                  "images" (retry failed embedded images only)
-    - page_numbers: Optional comma-separated list of specific page numbers to retry (e.g., "0,5,10")
-
-    Returns:
-    - JSON with OCR summary and retry plan
-    """
+@app.post("/convert-doc")
+async def convert_document_with_doc_service(filename: str = Form(...)):
+    """Convert Word/Excel/TXT documents using doc_service converters (non-blocking)."""
     try:
-        # Parse page numbers if provided
-        specific_pages = None
-        if page_numbers:
-            try:
-                specific_pages = [int(p.strip()) for p in page_numbers.split(",")]
-            except ValueError:
-                raise HTTPException(status_code=400, detail="Invalid page_numbers format. Use comma-separated integers.")
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
 
         with get_db_session() as db:
             repo = DocumentRepository(db)
             doc = repo.get_by_filename(filename)
+            file_path = doc.file_path if doc and doc.file_path else os.path.join(INPUT_DIR, filename)
 
-            if not doc:
-                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+        file_path_obj = Path(document_service.resolve_file_path(file_path))
 
-            # Get OCR summary
-            ocr_summary = repo.get_ocr_summary(doc)
+        if not file_path_obj.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
-            # Determine what needs to be retried
-            retry_plan = {
-                "filename": filename,
-                "retry_type": retry_type,
-                "ocr_summary": ocr_summary,
-                "pages_to_retry": [],
-                "images_to_retry": {}
-            }
+        doc_service_extensions = ['.docx', '.doc', '.xlsx', '.xlsm', '.xlsb', '.xls', '.txt', '.csv', '.tsv', '.log', '.text']
+        if file_path_obj.suffix.lower() not in doc_service_extensions:
+            raise HTTPException(status_code=400, detail=f"File type not supported by doc_service")
 
-            if retry_type in ["pages", "all"]:
-                failed_pages = repo.get_failed_pages(doc)
-                if specific_pages:
-                    failed_pages = [p for p in failed_pages if p in specific_pages]
-                retry_plan["pages_to_retry"] = failed_pages
+        success, conversion_id = conversion_service.submit_doc_service_task(filename, file_path)
 
-            if retry_type in ["images", "all"]:
-                failed_images = repo.get_pages_with_failed_embedded_images(doc)
-                if specific_pages:
-                    failed_images = {p: imgs for p, imgs in failed_images.items() if p in specific_pages}
-                retry_plan["images_to_retry"] = failed_images
+        if not success:
+            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
 
-            # Check if there's anything to retry
-            if not retry_plan["pages_to_retry"] and not retry_plan["images_to_retry"]:
-                return JSONResponse(content={
-                    "status": "nothing_to_retry",
-                    "message": "No failed pages or images found to retry",
-                    "retry_plan": retry_plan
-                })
-
-            # TODO: Implement actual retry logic
-            # For now, just return the retry plan
-            return JSONResponse(content={
-                "status": "retry_planned",
-                "message": f"Retry plan created. Found {len(retry_plan['pages_to_retry'])} failed pages and "
-                          f"{sum(len(imgs) for imgs in retry_plan['images_to_retry'].values())} failed images.",
-                "retry_plan": retry_plan,
-                "note": "Actual retry implementation is pending. This endpoint currently only analyzes what needs to be retried."
-            })
+        return JSONResponse(content={
+            "status": "accepted",
+            "conversion_id": conversion_id,
+            "filename": filename,
+            "message": "Document conversion task started.",
+            "converter_type": "doc_service",
+            "queue_size": worker_pool.get_queue_size(),
+            "active_tasks": worker_pool.get_active_tasks_count(),
+        })
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in retry-ocr endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing retry request: {str(e)}")
+        logger.error(f"Error starting doc_service conversion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
 
 
-@app.get("/ocr-status/{filename}")
-async def get_ocr_status(filename: str):
-    """
-    Get detailed OCR status for a document.
-
-    Returns granular OCR status including page-level and embedded image-level tracking.
-
-    Parameters:
-    - filename: Document filename
-
-    Returns:
-    - JSON with detailed OCR status
-    """
+@app.post("/convert-deepseek")
+async def convert_document_with_deepseek_ocr(filename: str = Form(...)):
+    """Convert images using DeepSeek OCR service (non-blocking)."""
     try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
         with get_db_session() as db:
             repo = DocumentRepository(db)
             doc = repo.get_by_filename(filename)
+            file_path = doc.file_path if doc and doc.file_path else os.path.join(INPUT_DIR, filename)
 
-            if not doc:
-                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
+        file_path_obj = Path(document_service.resolve_file_path(file_path))
 
-            ocr_summary = repo.get_ocr_summary(doc)
+        if not file_path_obj.exists():
+            raise HTTPException(status_code=404, detail=f"File not found: {filename}")
 
-            return JSONResponse(content={
-                "filename": filename,
-                "ocr_summary": ocr_summary,
-                "ocr_details": doc.ocr_details
-            })
+        deepseek_ocr_extensions = deepseek_ocr_converter.get_supported_extensions()
+        if file_path_obj.suffix.lower() not in deepseek_ocr_extensions:
+            raise HTTPException(status_code=400, detail=f"File type not supported by DeepSeek OCR")
+
+        success, conversion_id = conversion_service.submit_deepseek_task(filename, file_path)
+
+        if not success:
+            raise HTTPException(status_code=409, detail=f"Conversion already in progress for: {filename}")
+
+        return JSONResponse(content={
+            "status": "accepted",
+            "conversion_id": conversion_id,
+            "filename": filename,
+            "message": "DeepSeek OCR conversion task started.",
+            "converter_type": "deepseek_ocr",
+            "queue_size": worker_pool.get_queue_size(),
+            "active_tasks": worker_pool.get_active_tasks_count(),
+        })
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error in ocr-status endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting OCR status: {str(e)}")
+        logger.error(f"Error starting DeepSeek OCR conversion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error starting conversion: {str(e)}")
 
 
 @app.get("/conversion-status/{conversion_id}")
 async def get_conversion_status(conversion_id: str):
-    """
-    Get the status of a conversion task.
-
-    Parameters:
-    - conversion_id: The conversion task ID
-
-    Returns:
-    - JSON with conversion status and progress
-    """
-    try:
-        conversion = conversion_manager.get_conversion(conversion_id)
-        if not conversion:
-            raise HTTPException(status_code=404, detail=f"Conversion not found: {conversion_id}")
-
-        return JSONResponse(content=conversion)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting conversion status: {str(e)}")
+    """Get the status of a conversion task."""
+    conversion = conversion_manager.get_conversion(conversion_id)
+    if not conversion:
+        raise HTTPException(status_code=404, detail=f"Conversion not found: {conversion_id}")
+    return JSONResponse(content=conversion)
 
 
 @app.get("/worker-pool-status")
 async def get_worker_pool_status():
-    """
-    Get the status of the worker pool.
-
-    Returns:
-    - JSON with queue size and active tasks count
-    """
-    try:
-        return JSONResponse(content={
-            "status": "ok",
-            "queue_size": worker_pool.get_queue_size(),
-            "active_tasks": worker_pool.get_active_tasks_count(),
-            "num_workers": NUM_WORKERS,
-        })
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting worker pool status: {str(e)}")
+    """Get the status of the worker pool."""
+    return JSONResponse(content={
+        "status": "ok",
+        "queue_size": worker_pool.get_queue_size(),
+        "active_tasks": worker_pool.get_active_tasks_count(),
+        "num_workers": NUM_WORKERS,
+    })
 
 
 @app.websocket("/ws/document-status")
 async def websocket_document_status(websocket: WebSocket):
-    """
-    Centralized WebSocket endpoint for all document status updates with subscription support.
-
-    Clients can subscribe to specific documents to receive only relevant updates.
-    This eliminates the need for polling and reduces unnecessary network traffic.
-
-    Client -> Server messages:
-    - {"action": "subscribe", "document_ids": ["uuid1", "uuid2", ...]}
-    - {"action": "unsubscribe", "document_ids": ["uuid1", "uuid2", ...]}
-    - {"action": "ping"} (keepalive)
-
-    Server -> Client messages:
-    - document_id: UUID of the document
-    - filename: Name of the document
-    - event_type: "ocr_started", "ocr_progress", "ocr_completed", "ocr_failed",
-                  "indexing_started", "indexing_progress", "indexing_completed", "indexing_failed"
-    - convert_status: Current OCR status
-    - index_status: Current indexing status
-    - progress: Progress percentage (0-100)
-    - message: Status message
-    - timestamp: ISO timestamp
-    """
+    """Centralized WebSocket endpoint for all document status updates."""
     try:
-        # Connect the WebSocket
         await document_status_manager.connect(websocket)
-
-        # Send initial connection confirmation
         await websocket.send_json({
             "event_type": "connected",
             "message": "Connected to document status updates",
             "timestamp": datetime.now().isoformat()
         })
 
-        # Keep connection alive and listen for client messages
         while True:
-            # Receive message from client
             data = await websocket.receive_text()
-
             try:
                 message = json.loads(data)
                 action = message.get("action")
 
                 if action == "subscribe":
-                    # Subscribe to specific documents
                     document_ids = message.get("document_ids", [])
                     if document_ids:
                         await document_status_manager.subscribe(websocket, document_ids)
@@ -3170,9 +1085,7 @@ async def websocket_document_status(websocket: WebSocket):
                             "count": len(document_ids),
                             "timestamp": datetime.now().isoformat()
                         })
-
                 elif action == "unsubscribe":
-                    # Unsubscribe from specific documents
                     document_ids = message.get("document_ids", [])
                     if document_ids:
                         await document_status_manager.unsubscribe(websocket, document_ids)
@@ -3182,19 +1095,13 @@ async def websocket_document_status(websocket: WebSocket):
                             "count": len(document_ids),
                             "timestamp": datetime.now().isoformat()
                         })
-
                 elif action == "ping":
-                    # Respond to keepalive ping
                     await websocket.send_json({
                         "event_type": "pong",
                         "timestamp": datetime.now().isoformat()
                     })
-
-                else:
-                    logger.warning(f"Unknown WebSocket action: {action}")
-
             except json.JSONDecodeError:
-                logger.warning(f"Invalid JSON received from WebSocket: {data}")
+                logger.warning(f"Invalid JSON received from WebSocket")
             except Exception as e:
                 logger.error(f"Error processing WebSocket message: {e}")
 
@@ -3207,106 +1114,90 @@ async def websocket_document_status(websocket: WebSocket):
 
 @app.websocket("/ws/conversion/{conversion_id}")
 async def websocket_conversion_progress(websocket: WebSocket, conversion_id: str):
-    """
-    WebSocket endpoint for real-time conversion progress updates.
-
-    Parameters:
-    - conversion_id: The conversion task ID
-
-    Sends:
-    - JSON messages with status, progress, and message
-    """
+    """WebSocket endpoint for real-time conversion progress updates."""
     try:
-        # Connect the WebSocket
         await connection_manager.connect(conversion_id, websocket)
-
-        # Send initial status
         conversion = conversion_manager.get_conversion(conversion_id)
         if conversion:
             await websocket.send_json(conversion)
 
-        # Keep connection alive and listen for disconnection
         while True:
-            # This will raise WebSocketDisconnect when client disconnects
             await websocket.receive_text()
-            # Optional: handle incoming messages if needed
 
     except WebSocketDisconnect:
         await connection_manager.disconnect(conversion_id, websocket)
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        logger.error(f"WebSocket error: {e}")
         await connection_manager.disconnect(conversion_id, websocket)
 
 
-@app.get("/markdown-files/{filename}")
-async def list_markdown_files(filename: str):
-    """
-    List all markdown files associated with a document.
-    Handles both single markdown files and multi-page markdown files.
-
-    Parameters:
-    - filename: The name of the file (without extension)
-
-    Returns:
-    - List of markdown files with their page numbers
-    """
+@app.get("/markdown/{filename}")
+async def get_markdown_content(filename: str, page_no: int = None):
+    """Get the markdown content of a converted document."""
     try:
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Look up document in database to get the correct output path
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
         with get_db_session() as db:
-            repo = DocumentRepository(db)
-            # Try with extension first, then without
-            doc = repo.get_by_filename(filename)
-            if not doc:
-                # Try common extensions
-                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
-                    doc = repo.get_by_filename(filename + ext)
-                    if doc:
-                        break
+            content, actual_page_no = document_service.get_markdown_content(filename, page_no, db)
 
-            if doc and doc.output_path:
-                # Resolve relative or legacy absolute path
-                output_dir = resolve_output_path(doc.output_path)
-            elif doc and doc.file_path:
-                # Derive from input file_path (which is relative)
-                rel_dir = os.path.dirname(doc.file_path)
-                output_dir = os.path.join(OUTPUT_DIR, rel_dir, filename) if rel_dir else os.path.join(OUTPUT_DIR, filename)
-            else:
-                # Fallback to legacy path
-                output_dir = os.path.join(OUTPUT_DIR, filename)
+        return JSONResponse(content={
+            "status": "success",
+            "filename": filename,
+            "page_no": actual_page_no,
+            "content": content,
+        })
 
-        if not os.path.exists(output_dir):
-            raise HTTPException(status_code=404, detail=f"No output directory for: {filename}")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading markdown file: {str(e)}")
 
-        markdown_files = []
 
-        # Check for single markdown file
-        single_md_path = os.path.join(output_dir, f"{filename}_nohf.md")
-        if os.path.exists(single_md_path):
-            markdown_files.append({
-                "filename": f"{filename}_nohf.md",
-                "path": single_md_path,
-                "page_no": None,
-                "is_multipage": False,
-            })
+@app.put("/markdown/{filename}")
+async def update_markdown_content(filename: str, request: Request, page_no: int = None):
+    """Update the markdown content of a converted document."""
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Check for multi-page markdown files
-        page_files = []
-        for file in os.listdir(output_dir):
-            if file.endswith("_nohf.md") and "_page_" in file:
-                page_no = int(file.split("_page_")[1].split("_")[0])
-                page_files.append({
-                    "filename": file,
-                    "path": os.path.join(output_dir, file),
-                    "page_no": page_no,
-                    "is_multipage": True,
-                })
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Sort by page number
-        page_files.sort(key=lambda x: x["page_no"])
-        markdown_files.extend(page_files)
+        body = await request.json()
+        content = body.get("content")
+
+        if content is None:
+            raise HTTPException(status_code=400, detail="No content provided")
+
+        document_service.update_markdown_content(filename, content, page_no)
+        indexing_service.reindex_document(filename)
+
+        return JSONResponse(content={
+            "status": "success",
+            "filename": filename,
+            "page_no": page_no,
+            "message": "Markdown content updated successfully",
+        })
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating markdown file: {str(e)}")
+
+
+@app.get("/markdown-files/{filename}")
+async def list_markdown_files(filename: str):
+    """List all markdown files associated with a document."""
+    try:
+        if not filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+
+        with get_db_session() as db:
+            markdown_files = document_service.list_markdown_files(filename, db)
 
         if not markdown_files:
             raise HTTPException(status_code=404, detail=f"No markdown files found for: {filename}")
@@ -3318,369 +1209,70 @@ async def list_markdown_files(filename: str):
             "total": len(markdown_files),
         })
 
-    except HTTPException:
-        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing markdown files: {str(e)}")
 
 
-@app.get("/markdown/{filename}")
-async def get_markdown_content(filename: str, page_no: int = None):
-    """
-    Get the markdown content of a converted document.
-    Supports both single markdown files and page-specific markdown files.
-    Both OCR and doc_service converters use _nohf.md format.
-
-    Parameters:
-    - filename: The name of the file (without extension)
-    - page_no: Optional page number for multi-page documents
-
-    Returns:
-    - The markdown file content
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
-        # Look up document in database to get the correct output path
-        output_dir = None
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            # Try with extension first, then without
-            doc = repo.get_by_filename(filename)
-            if not doc:
-                # Try common extensions
-                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
-                    doc = repo.get_by_filename(filename + ext)
-                    if doc:
-                        break
-
-            if doc and doc.output_path:
-                # Resolve relative or legacy absolute path
-                output_dir = resolve_output_path(doc.output_path)
-            elif doc and doc.file_path:
-                # Derive from input file_path (which is relative)
-                rel_dir = os.path.dirname(doc.file_path)
-                output_dir = os.path.join(OUTPUT_DIR, rel_dir, filename) if rel_dir else os.path.join(OUTPUT_DIR, filename)
-
-        # Fallback to legacy path
-        if not output_dir:
-            output_dir = os.path.join(OUTPUT_DIR, filename)
-
-        # Determine which markdown file to read
-        if page_no is not None:
-            # Read page-specific markdown file (multi-page PDFs)
-            markdown_path = os.path.join(output_dir, f"{filename}_page_{page_no}_nohf.md")
-        else:
-            # Read single markdown file (single-page documents, images, Word, Excel, TXT)
-            markdown_path = os.path.join(output_dir, f"{filename}_nohf.md")
-
-        if not os.path.exists(markdown_path):
-            raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
-
-        # Read and return the markdown content
-        with open(markdown_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Normalize any single-line tables in the content
-        from dots_ocr_service.utils.format_transformer import normalize_markdown_table, is_markdown_table
-
-        # Process the content line by line to find and normalize tables
-        lines = content.split('\n')
-        normalized_lines = []
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            # Check if this line contains a markdown table
-            if is_markdown_table(line):
-                # Normalize the table
-                normalized_table = normalize_markdown_table(line)
-                normalized_lines.append(normalized_table)
-            else:
-                normalized_lines.append(line)
-            i += 1
-
-        content = '\n'.join(normalized_lines)
-
-        return JSONResponse(content={
-            "status": "success",
-            "filename": filename,
-            "page_no": page_no,
-            "content": content,
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading markdown file: {str(e)}")
-
-
-@app.put("/markdown/{filename}")
-async def update_markdown_content(filename: str, request: Request, page_no: int = None):
-    """
-    Update the markdown content of a converted document.
-    Supports both single markdown files and page-specific markdown files.
-    Both OCR and doc_service converters use _nohf.md format.
-
-    Parameters:
-    - filename: The name of the file (without extension)
-    - page_no: Optional page number for multi-page documents
-    - request body: JSON with 'content' field containing the new markdown content
-
-    Returns:
-    - Success status
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
-        # Get the content from request body
-        body = await request.json()
-        content = body.get("content")
-
-        if content is None:
-            raise HTTPException(status_code=400, detail="No content provided")
-
-        # Determine which markdown file to write
-        if page_no is not None:
-            # Write to page-specific markdown file (multi-page PDFs)
-            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}_nohf.md")
-        else:
-            # Write to single markdown file (single-page documents, images, Word, Excel, TXT)
-            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
-
-        if not os.path.exists(markdown_path):
-            raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
-
-        # Write the updated content
-        with open(markdown_path, "w", encoding="utf-8") as f:
-            f.write(content)
-
-        # Trigger re-indexing in background after markdown update
-        logger.info(f"Triggering re-indexing for document after markdown update: {filename}")
-        reindex_document(filename, OUTPUT_DIR)
-
-        return JSONResponse(content={
-            "status": "success",
-            "filename": filename,
-            "page_no": page_no,
-            "message": "Markdown content updated successfully",
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error updating markdown file: {str(e)}")
-
-
-@app.get("/documents/in-progress")
-async def get_in_progress_documents():
-    """
-    Get all documents that are currently being processed (converting or indexing).
-
-    This endpoint is used by the frontend to:
-    1. Check for in-progress operations on page load/refresh
-    2. Resume polling/monitoring for those operations
-
-    Returns:
-    - JSON with list of documents that have:
-      - convert_status = 'converting' OR
-      - index_status = 'indexing'
-    """
-    try:
-        in_progress_docs = []
-
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            all_docs = repo.get_all()
-
-            for doc in all_docs:
-                # Check if document is in progress (converting or indexing)
-                is_converting = doc.convert_status == ConvertStatus.CONVERTING
-                is_indexing = doc.index_status == IndexStatus.INDEXING
-
-                # Also check granular indexing details for background processing
-                is_granular_indexing = False
-                all_phases_complete = False
-                if doc.indexing_details:
-                    vector_status = doc.indexing_details.get("vector_indexing", {}).get("status")
-                    metadata_status = doc.indexing_details.get("metadata_extraction", {}).get("status")
-                    graphrag_status = doc.indexing_details.get("graphrag_indexing", {}).get("status")
-
-                    # Consider "processing" or "pending" as in-progress
-                    is_granular_indexing = (
-                        vector_status in ["processing", "pending"] or
-                        metadata_status in ["processing", "pending"] or
-                        graphrag_status in ["processing", "pending"]
-                    )
-
-                    # Check if all phases are complete
-                    all_phases_complete = (
-                        vector_status == "completed" and
-                        metadata_status == "completed" and
-                        graphrag_status == "completed"
-                    )
-
-                # Fix data inconsistency: if all phases are complete but index_status is still "indexing",
-                # update it to "indexed"
-                if all_phases_complete and is_indexing:
-                    try:
-                        indexed_chunks = doc.indexed_chunks or 0
-                        repo.update_index_status(
-                            doc, IndexStatus.INDEXED, indexed_chunks,
-                            message="All indexing phases completed"
-                        )
-                        logger.info(f"Fixed index_status for {doc.filename}: all phases complete, updated to INDEXED")
-                        is_indexing = False  # No longer in progress
-                    except Exception as e:
-                        logger.warning(f"Could not fix index_status for {doc.filename}: {e}")
-
-                if is_converting or is_indexing or is_granular_indexing:
-                    doc_dict = doc.to_dict()
-
-                    # Add additional computed fields for frontend
-                    doc_dict["is_converting"] = is_converting
-                    doc_dict["is_indexing"] = is_indexing or is_granular_indexing
-
-                    in_progress_docs.append(doc_dict)
-
-        logger.info(f"Found {len(in_progress_docs)} in-progress documents")
-
-        return JSONResponse(content={
-            "status": "success",
-            "documents": in_progress_docs,
-            "total": len(in_progress_docs),
-        })
-
-    except Exception as e:
-        logger.error(f"Error getting in-progress documents: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting in-progress documents: {str(e)}")
-
-
 @app.delete("/documents/{filename}")
 async def delete_document(filename: str):
-    """
-    Delete a document and all its associated files.
-    Removes the uploaded file from input folder and all associated markdown/output files.
-
-    Parameters:
-    - filename: The name of the file to delete (with extension)
-
-    Returns:
-    - Success status with details of deleted files
-    """
+    """Delete a document and all its associated files."""
     try:
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
         if ".." in filename or "/" in filename or "\\" in filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
         deleted_files = []
         errors = []
+        file_name_without_ext = os.path.splitext(filename)[0]
 
-        # Delete the uploaded file from input folder
+        # Delete input file
         input_file_path = os.path.join(INPUT_DIR, filename)
         if os.path.exists(input_file_path):
             try:
                 os.remove(input_file_path)
                 deleted_files.append(input_file_path)
-                logger.info(f"Deleted input file: {input_file_path}")
             except Exception as e:
-                error_msg = f"Failed to delete input file {input_file_path}: {str(e)}"
-                errors.append(error_msg)
-                logger.error(error_msg)
-        else:
-            logger.warning(f"Input file not found: {input_file_path}")
+                errors.append(f"Failed to delete input file: {str(e)}")
 
-        # Delete the output folder and all its contents
-        file_name_without_ext = os.path.splitext(filename)[0]
+        # Delete output folder
         output_folder_path = os.path.join(OUTPUT_DIR, file_name_without_ext)
-
         if os.path.exists(output_folder_path) and os.path.isdir(output_folder_path):
             try:
-                import shutil
                 shutil.rmtree(output_folder_path)
                 deleted_files.append(output_folder_path)
-                logger.info(f"Deleted output folder: {output_folder_path}")
             except Exception as e:
-                error_msg = f"Failed to delete output folder {output_folder_path}: {str(e)}"
-                errors.append(error_msg)
-                logger.error(error_msg)
-        else:
-            logger.warning(f"Output folder not found: {output_folder_path}")
+                errors.append(f"Failed to delete output folder: {str(e)}")
 
-        # Delete the JSONL results file if it exists
+        # Delete JSONL file
         jsonl_file_path = os.path.join(OUTPUT_DIR, f"{file_name_without_ext}.jsonl")
         if os.path.exists(jsonl_file_path):
             try:
                 os.remove(jsonl_file_path)
                 deleted_files.append(jsonl_file_path)
-                logger.info(f"Deleted JSONL file: {jsonl_file_path}")
             except Exception as e:
-                error_msg = f"Failed to delete JSONL file {jsonl_file_path}: {str(e)}"
-                errors.append(error_msg)
-                logger.error(error_msg)
+                errors.append(f"Failed to delete JSONL file: {str(e)}")
 
-        # Delete vector embeddings from Qdrant (all collections)
-        try:
-            delete_documents_by_source(file_name_without_ext)
-            logger.info(f"Deleted vector embeddings for: {file_name_without_ext}")
-        except Exception as e:
-            error_msg = f"Failed to delete vector embeddings: {str(e)}"
-            errors.append(error_msg)
-            logger.error(error_msg)
+        # Delete embeddings
+        indexing_service.delete_document_embeddings(filename)
 
-        # Delete GraphRAG data (Neo4j stores entities/relationships with native embeddings)
-        if GRAPHRAG_DELETE_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
-            try:
-                delete_graphrag_by_source_sync(file_name_without_ext)
-                logger.info(f"Deleted GraphRAG data for: {file_name_without_ext}")
-            except Exception as e:
-                error_msg = f"Failed to delete GraphRAG data: {str(e)}"
-                errors.append(error_msg)
-                logger.warning(error_msg)
-
-        # Delete document metadata from vector collection (must do before database delete to get doc ID)
+        # Get doc_id before deleting from database
         try:
             with get_db_session() as db:
                 repo = DocumentRepository(db)
                 doc = repo.get_by_filename(filename)
                 if doc:
-                    delete_document_metadata_embedding(str(doc.id))
-                    logger.info(f"Deleted document metadata embedding for: {filename}")
-        except Exception as e:
-            error_msg = f"Failed to delete document metadata embedding: {str(e)}"
-            errors.append(error_msg)
-            logger.warning(error_msg)
-
-        # Hard delete from database (removes document and status logs via cascade)
-        try:
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
+                    indexing_service.delete_document_embeddings(filename, str(doc.id))
                     repo.hard_delete(doc)
-                    logger.info(f"Hard deleted database record for: {filename}")
         except Exception as e:
-            error_msg = f"Failed to delete database record: {str(e)}"
-            errors.append(error_msg)
-            logger.warning(error_msg)
+            errors.append(f"Failed to delete database record: {str(e)}")
 
-        # If no files were deleted and no errors occurred, the file didn't exist
         if not deleted_files and not errors:
             raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
 
-        # Return success even if some deletions failed
         response_data = {
             "status": "success" if not errors else "partial_success",
             "filename": filename,
@@ -3697,95 +1289,36 @@ async def delete_document(filename: str):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error deleting document: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
-
-
-# ===== Indexing Status Tracking =====
-# Persistent status tracker for batch indexing (survives page refresh)
-_batch_index_status = {
-    "status": "idle",  # idle, running, completed, error
-    "total_documents": 0,
-    "indexed_documents": 0,
-    "current_document": None,
-    "started_at": None,
-    "completed_at": None,
-    "errors": [],
-    "message": None,
-}
-_batch_index_lock = threading.Lock()
 
 
 @app.post("/documents/{filename}/index")
 async def index_single_document(filename: str):
-    """
-    Index a single document's markdown files into the vector database.
-    Re-indexes if already indexed.
-
-    Now supports WebSocket progress updates for real-time status tracking.
-
-    Parameters:
-    - filename: The name of the file to index (with extension)
-
-    Returns:
-    - Accepted status with conversion_id for WebSocket tracking
-    """
+    """Index a single document's markdown files into the vector database."""
     try:
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
         file_name_without_ext = os.path.splitext(filename)[0]
 
-        # Look up document in database to get the correct output path
         with get_db_session() as db:
             repo = DocumentRepository(db)
             doc = repo.get_by_filename(filename)
 
             if doc and doc.output_path:
-                # Resolve relative or legacy absolute path
-                doc_dir = resolve_output_path(doc.output_path)
+                doc_dir = document_service.resolve_output_path(doc.output_path)
             elif doc and doc.file_path:
-                # Derive from input file_path (which is relative)
                 rel_dir = os.path.dirname(doc.file_path)
                 doc_dir = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext) if rel_dir else os.path.join(OUTPUT_DIR, file_name_without_ext)
             else:
-                # Fallback to legacy path
                 doc_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
 
-        # Check if document directory exists
         if not os.path.exists(doc_dir):
-            raise HTTPException(
-                status_code=404,
-                detail=f"Document output folder not found: {file_name_without_ext}"
-            )
+            raise HTTPException(status_code=404, detail=f"Document output folder not found")
 
-        # Register the indexing task in conversion manager
-        # create_conversion() generates and returns the conversion_id
         conversion_id = conversion_manager.create_conversion(filename)
+        conversion_manager.update_conversion(conversion_id, status="indexing", progress=0, message="Starting indexing...")
 
-        # Update status to indexing
-        conversion_manager.update_conversion(
-            conversion_id,
-            status="indexing",
-            progress=0,
-            message="Starting indexing process..."
-        )
-
-        # Delete existing embeddings and re-index
-        try:
-            delete_documents_by_source(file_name_without_ext)
-            logger.info(f"Deleted existing embeddings for: {file_name_without_ext}")
-        except Exception as e:
-            logger.warning(f"Error deleting existing embeddings (may not exist): {e}")
-
-        # Broadcast initial status
-        await connection_manager.broadcast(conversion_id, {
-            "status": "indexing",
-            "progress": 10,
-            "message": "Preparing to index document...",
-        })
-
-        # Get document_id for broadcasting
         doc_id = None
         try:
             with get_db_session() as db:
@@ -3793,326 +1326,53 @@ async def index_single_document(filename: str):
                 doc = repo.get_by_filename(filename)
                 if doc:
                     doc_id = str(doc.id)
-        except Exception as e:
-            logger.warning(f"Could not get document_id: {e}")
+        except Exception:
+            pass
 
-        # Create a wrapper callback that broadcasts to both WebSocket managers
         def dual_broadcast_callback(conv_id: str, message: dict):
-            """Broadcast to both conversion WebSocket and document status WebSocket"""
-            # Send to conversion WebSocket (for progress bars)
             connection_manager.broadcast_from_thread(conv_id, message)
-
-            # Also send to document status WebSocket when indexing completes
             if doc_id:
-                status = message.get("status", "")
-                # Completion statuses: vector_indexed (Phase 1), metadata_extracted (Phase 1.5), graphrag_indexed (Phase 2)
-                if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
-                    event_type = "indexing_completed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "indexing_failed"
-                    logger.info(f"📤 Broadcasting document status: {event_type} for {filename} (status={status})")
+                msg_status = message.get("status", "")
+                if msg_status in ["vector_indexed", "metadata_extracted", "graphrag_indexed", "index_error"]:
+                    event_type = "indexing_completed" if msg_status != "index_error" else "indexing_failed"
                     document_status_manager.broadcast_from_thread({
                         "event_type": event_type,
                         "document_id": doc_id,
                         "filename": filename,
-                        "index_status": "indexed" if status in ["vector_indexed", "metadata_extracted", "graphrag_indexed"] else "failed",
+                        "index_status": "indexed" if msg_status != "index_error" else "failed",
                         "progress": 100,
                         "message": message.get("message", "Indexing completed"),
                         "timestamp": datetime.now().isoformat()
                     })
 
-        # Trigger two-phase indexing with WebSocket support
-        # This runs in background and sends progress updates via WebSocket
-        trigger_embedding_for_document(
-            source_name=file_name_without_ext,
-            output_dir=OUTPUT_DIR,
-            filename=filename,
-            conversion_id=conversion_id,
-            broadcast_callback=dual_broadcast_callback
-        )
+        indexing_service.index_single_document(filename, doc_dir, conversion_id, dual_broadcast_callback)
 
         return JSONResponse(content={
             "status": "accepted",
             "conversion_id": conversion_id,
             "filename": filename,
             "source_name": file_name_without_ext,
-            "message": "Indexing started in background. Connect to WebSocket for progress updates.",
+            "message": "Indexing started in background.",
         })
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error starting indexing: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error starting indexing: {str(e)}")
-
-
-@app.get("/documents/{filename}/status-logs")
-async def get_document_status_logs(filename: str):
-    """
-    Get status change logs for a document (audit trail).
-
-    Parameters:
-    - filename: The name of the file
-
-    Returns:
-    - List of status change logs with timestamps
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_filename(filename)
-            if not doc:
-                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
-
-            logs = repo.get_status_logs(doc.id)
-            return JSONResponse(content={
-                "status": "success",
-                "filename": filename,
-                "document_id": str(doc.id),
-                "logs": [log.to_dict() for log in logs],
-                "total": len(logs),
-            })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting status logs: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting status logs: {str(e)}")
-
-
-@app.get("/documents/{filename}/indexing-status")
-async def get_document_indexing_status(filename: str):
-    """
-    Get detailed indexing status for all phases (vector, metadata, GraphRAG).
-
-    Parameters:
-    - filename: The name of the file
-
-    Returns:
-    - Detailed indexing progress and status for each phase
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_filename(filename)
-            if not doc:
-                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
-
-            # Get indexing progress
-            progress = repo.get_indexing_progress(doc)
-
-            return JSONResponse(content={
-                "status": "success",
-                "filename": filename,
-                "document_id": str(doc.id),
-                "overall_status": doc.index_status.value if doc.index_status else "pending",
-                "indexing_progress": progress,
-                "indexing_details": doc.indexing_details,
-            })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting indexing status: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting indexing status: {str(e)}")
-
-
-@app.post("/documents/{filename}/reindex-failed")
-async def reindex_failed_chunks(
-    filename: str,
-    phases: str = Query("vector,graphrag,metadata", description="Comma-separated phases to reindex")
-):
-    """
-    Re-index only failed chunks/pages for specified phases.
-
-    This endpoint implements selective re-indexing:
-    - Vector failures: Re-index failed pages (re-read from markdown)
-    - GraphRAG failures: Re-index failed chunks (retrieve from Qdrant)
-    - Metadata failures: Re-extract metadata (use all chunks)
-
-    Parameters:
-    - filename: The name of the file
-    - phases: Comma-separated list of phases (vector, graphrag, metadata)
-
-    Returns:
-    - Re-indexing results for each phase
-    """
-    try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        # Validate filename
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
-        with get_db_session() as db:
-            repo = DocumentRepository(db)
-            doc = repo.get_by_filename(filename)
-            if not doc:
-                raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
-
-        file_name_without_ext = os.path.splitext(filename)[0]
-        phases_list = [p.strip() for p in phases.split(",")]
-
-        results = {}
-
-        # Import selective re-indexing functions
-        from rag_service.selective_reindexer import (
-            reindex_failed_vector_pages,
-            reindex_failed_graphrag_chunks,
-            reextract_failed_metadata
-        )
-
-        # Re-index vector failures (page-level)
-        if "vector" in phases_list:
-            logger.info(f"[Selective Re-index] Starting vector re-indexing for {filename}")
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
-                    results["vector"] = reindex_failed_vector_pages(doc, file_name_without_ext, OUTPUT_DIR)
-
-        # Re-index GraphRAG failures (chunk-level)
-        if "graphrag" in phases_list:
-            logger.info(f"[Selective Re-index] Starting GraphRAG re-indexing for {filename}")
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
-                    results["graphrag"] = reindex_failed_graphrag_chunks(doc, file_name_without_ext, OUTPUT_DIR)
-
-        # Re-extract metadata
-        if "metadata" in phases_list:
-            logger.info(f"[Selective Re-index] Starting metadata re-extraction for {filename}")
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
-                    results["metadata"] = reextract_failed_metadata(doc, file_name_without_ext, OUTPUT_DIR)
-
-        return JSONResponse(content={
-            "status": "success",
-            "message": "Selective re-indexing completed",
-            "filename": filename,
-            "phases": phases_list,
-            "results": results
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in selective re-indexing: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Error in selective re-indexing: {str(e)}")
 
 
 @app.post("/documents/index-all")
 async def index_all_documents():
-    """
-    Start batch indexing of all documents in the background.
-    Clears all existing embeddings and re-indexes all documents.
-
-    Returns:
-    - Accepted status with message
-    """
-    global _batch_index_status
-
-    with _batch_index_lock:
-        if _batch_index_status["status"] == "running":
-            return JSONResponse(
-                status_code=409,
-                content={
-                    "status": "conflict",
-                    "message": "Batch indexing is already in progress",
-                    "current_status": _batch_index_status,
-                }
-            )
-
-    def _batch_index_task():
-        global _batch_index_status
-
-        try:
-            with _batch_index_lock:
-                _batch_index_status = {
-                    "status": "running",
-                    "total_documents": 0,
-                    "indexed_documents": 0,
-                    "current_index": 0,  # 0-based index of document currently being processed
-                    "current_document": None,
-                    "started_at": datetime.now().isoformat(),
-                    "completed_at": None,
-                    "errors": [],
-                    "message": "Initializing batch indexing...",
-                }
-
-            # Clear all existing embeddings
-            logger.info("Clearing all vector embeddings for re-indexing...")
-            with _batch_index_lock:
-                _batch_index_status["message"] = "Clearing existing embeddings..."
-
-            try:
-                clear_collection()
-                logger.info("Cleared all vector embeddings")
-            except Exception as e:
-                logger.error(f"Error clearing collection: {e}")
-
-            # Find all document directories
-            output_path = Path(OUTPUT_DIR)
-            doc_dirs = [d for d in output_path.iterdir() if d.is_dir()]
-
-            with _batch_index_lock:
-                _batch_index_status["total_documents"] = len(doc_dirs)
-                _batch_index_status["message"] = f"Found {len(doc_dirs)} documents to index"
-
-            logger.info(f"Found {len(doc_dirs)} documents to index")
-
-            total_chunks = 0
-            for i, doc_dir in enumerate(doc_dirs):
-                source_name = doc_dir.name
-
-                with _batch_index_lock:
-                    _batch_index_status["current_document"] = source_name
-                    _batch_index_status["current_index"] = i  # 0-based index of current document
-                    _batch_index_status["message"] = f"Indexing: {source_name} ({i+1}/{len(doc_dirs)})"
-
-                try:
-                    chunks = index_document_now(source_name, OUTPUT_DIR)
-                    total_chunks += chunks
-                    logger.info(f"Indexed {source_name}: {chunks} chunks")
-
-                    # Update to reflect completed count after successful indexing
-                    with _batch_index_lock:
-                        _batch_index_status["indexed_documents"] = i + 1
-
-                except Exception as e:
-                    error_msg = f"Error indexing {source_name}: {str(e)}"
-                    logger.error(error_msg)
-                    with _batch_index_lock:
-                        _batch_index_status["errors"].append(error_msg)
-                        # Still move forward even on error
-                        _batch_index_status["indexed_documents"] = i + 1
-
-            with _batch_index_lock:
-                _batch_index_status["status"] = "completed"
-                _batch_index_status["completed_at"] = datetime.now().isoformat()
-                _batch_index_status["current_document"] = None
-                _batch_index_status["message"] = f"Completed: indexed {total_chunks} chunks from {len(doc_dirs)} documents"
-
-            logger.info(f"Batch indexing completed: {total_chunks} chunks from {len(doc_dirs)} documents")
-
-        except Exception as e:
-            logger.error(f"Batch indexing error: {str(e)}")
-            with _batch_index_lock:
-                _batch_index_status["status"] = "error"
-                _batch_index_status["completed_at"] = datetime.now().isoformat()
-                _batch_index_status["message"] = f"Error: {str(e)}"
-
-    # Start background thread
-    thread = threading.Thread(target=_batch_index_task, daemon=True)
-    thread.start()
+    """Start batch indexing of all documents in the background."""
+    if not indexing_service.start_batch_indexing():
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "conflict",
+                "message": "Batch indexing is already in progress",
+                "current_status": indexing_service.get_batch_index_status(),
+            }
+        )
 
     return JSONResponse(content={
         "status": "accepted",
@@ -4122,51 +1382,85 @@ async def index_all_documents():
 
 @app.get("/documents/index-status")
 async def get_index_status():
-    """
-    Get the current status of batch indexing.
+    """Get the current status of batch indexing."""
+    return JSONResponse(content=indexing_service.get_batch_index_status())
 
-    Returns:
-    - Current indexing status
-    """
-    global _batch_index_status
 
-    with _batch_index_lock:
-        return JSONResponse(content=_batch_index_status.copy())
+@app.get("/documents/in-progress")
+async def get_in_progress_documents():
+    """Get all documents that are currently being processed."""
+    try:
+        in_progress_docs = []
+
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            all_docs = repo.get_all()
+
+            for doc in all_docs:
+                is_converting = doc.convert_status == ConvertStatus.CONVERTING
+                is_indexing = doc.index_status == IndexStatus.INDEXING
+
+                is_granular_indexing = False
+                all_phases_complete = False
+                if doc.indexing_details:
+                    vector_status = doc.indexing_details.get("vector_indexing", {}).get("status")
+                    metadata_status = doc.indexing_details.get("metadata_extraction", {}).get("status")
+                    graphrag_status = doc.indexing_details.get("graphrag_indexing", {}).get("status")
+
+                    is_granular_indexing = (
+                        vector_status in ["processing", "pending"] or
+                        metadata_status in ["processing", "pending"] or
+                        graphrag_status in ["processing", "pending"]
+                    )
+
+                    all_phases_complete = (
+                        vector_status == "completed" and
+                        metadata_status == "completed" and
+                        graphrag_status == "completed"
+                    )
+
+                if all_phases_complete and is_indexing:
+                    try:
+                        indexed_chunks = doc.indexed_chunks or 0
+                        repo.update_index_status(doc, IndexStatus.INDEXED, indexed_chunks, message="All indexing phases completed")
+                        is_indexing = False
+                    except Exception:
+                        pass
+
+                if is_converting or is_indexing or is_granular_indexing:
+                    doc_dict = doc.to_dict()
+                    doc_dict["is_converting"] = is_converting
+                    doc_dict["is_indexing"] = is_indexing or is_granular_indexing
+                    in_progress_docs.append(doc_dict)
+
+        return JSONResponse(content={
+            "status": "success",
+            "documents": in_progress_docs,
+            "total": len(in_progress_docs),
+        })
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting in-progress documents: {str(e)}")
 
 
 @app.get("/image/{filename}")
 async def get_image(filename: str, page_no: int = None):
-    """
-    Get the JPG image of a converted document.
-    Supports both single image files and page-specific image files.
-
-    Parameters:
-    - filename: The name of the file (without extension)
-    - page_no: Optional page number for multi-page documents
-
-    Returns:
-    - The JPG image file
-    """
+    """Get the JPG image of a converted document."""
     try:
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
         if ".." in filename or "/" in filename or "\\" in filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Determine which image file to serve
         if page_no is not None:
-            # Serve page-specific image file
             image_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}.jpg")
         else:
-            # Try to find the single image file
             image_path = os.path.join(OUTPUT_DIR, filename, f"{filename}.jpg")
 
         if not os.path.exists(image_path):
             raise HTTPException(status_code=404, detail=f"Image file not found for: {filename}")
 
-        # Return the image file
         return FileResponse(
             image_path,
             media_type="image/jpeg",
@@ -4188,338 +1482,109 @@ async def parse_file(
     prompt_mode: str = Form("prompt_layout_all_en"),
     bbox: str = Form(None),
 ):
-    """
-    Parse a PDF or image file for document layout and text extraction.
-    
-    Parameters:
-    - file: The PDF or image file to parse
-    - prompt_mode: The prompt mode to use (default: prompt_layout_all_en)
-    - bbox: Optional bounding box as JSON string [x1, y1, x2, y2] for grounding OCR
-    
-    Returns:
-    - JSON with parsing results including layout info, images, and markdown content
-    """
+    """Parse a PDF or image file for document layout and text extraction."""
     temp_dir = None
     try:
-        # Validate file
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file provided")
-        
-        # Create temporary directory for input
+
         temp_dir = tempfile.mkdtemp()
         temp_file_path = os.path.join(temp_dir, file.filename)
-        
-        # Save uploaded file
+
         with open(temp_file_path, "wb") as buffer:
             content = await file.read()
             buffer.write(content)
-        
-        # Parse bbox if provided
+
         parsed_bbox = None
         if bbox:
             try:
                 parsed_bbox = json.loads(bbox)
                 if not isinstance(parsed_bbox, list) or len(parsed_bbox) != 4:
-                    raise ValueError("bbox must be a list of 4 numbers [x1, y1, x2, y2]")
+                    raise ValueError("bbox must be a list of 4 numbers")
             except json.JSONDecodeError:
-                raise HTTPException(status_code=400, detail="Invalid bbox format. Must be valid JSON")
-        
-        # Parse the file
+                raise HTTPException(status_code=400, detail="Invalid bbox format")
+
         results = parser.parse_file(
             temp_file_path,
             prompt_mode=prompt_mode,
             bbox=parsed_bbox,
         )
-        
-        # Prepare response
-        response_data = {
+
+        return JSONResponse(content={
             "status": "success",
             "filename": file.filename,
             "prompt_mode": prompt_mode,
             "results": results,
-        }
-        
-        return JSONResponse(content=response_data)
-    
+        })
+
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
-    
     finally:
-        # Clean up temporary directory
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-
-
-@app.post("/parse-batch")
-async def parse_batch(
-    files: list[UploadFile] = File(...),
-    prompt_mode: str = Form("prompt_layout_all_en"),
-):
-    """
-    Parse multiple PDF or image files in batch.
-    
-    Parameters:
-    - files: List of PDF or image files to parse
-    - prompt_mode: The prompt mode to use (default: prompt_layout_all_en)
-    
-    Returns:
-    - JSON with parsing results for all files
-    """
-    temp_dir = None
-    try:
-        if not files:
-            raise HTTPException(status_code=400, detail="No files provided")
-        
-        # Create temporary directory for input
-        temp_dir = tempfile.mkdtemp()
-        
-        batch_results = []
-        
-        for file in files:
-            if not file.filename:
-                continue
-            
-            temp_file_path = os.path.join(temp_dir, file.filename)
-            
-            # Save uploaded file
-            with open(temp_file_path, "wb") as buffer:
-                content = await file.read()
-                buffer.write(content)
-            
-            try:
-                # Parse the file
-                results = parser.parse_file(
-                    temp_file_path,
-                    prompt_mode=prompt_mode,
-                )
-                
-                batch_results.append({
-                    "filename": file.filename,
-                    "status": "success",
-                    "results": results,
-                })
-            except Exception as e:
-                batch_results.append({
-                    "filename": file.filename,
-                    "status": "error",
-                    "error": str(e),
-                })
-        
-        return JSONResponse(content={
-            "status": "completed",
-            "total_files": len(files),
-            "results": batch_results,
-        })
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing batch: {str(e)}")
-    
-    finally:
-        # Clean up temporary directory
         if temp_dir and os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
 
 @app.get("/uncompleted-pages/{filename}")
 async def get_uncompleted_pages(filename: str):
-    """
-    Get list of uncompleted pages for a document.
-
-    An uncompleted page is one that has a JPG file but no corresponding _nohf.md file.
-    This is useful for finding pages that failed during initial conversion.
-
-    Parameters:
-    - filename: The document filename (without extension) or with extension
-
-    Returns:
-    - JSON with list of page numbers that need re-conversion
-    """
+    """Get list of uncompleted pages for a document."""
     try:
-        # Remove extension if provided
         file_name_without_ext = os.path.splitext(filename)[0]
+        uncompleted = document_service.get_uncompleted_pages(file_name_without_ext)
 
         output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
-
-        if not os.path.exists(output_dir):
-            raise HTTPException(
-                status_code=404,
-                detail=f"Output directory not found for: {filename}"
-            )
-
-        # Find all JPG files and their corresponding _nohf.md files
-        uncompleted_pages = []
         all_pages = []
-
-        for file in os.listdir(output_dir):
-            # Match page JPG files like "document_page_11.jpg"
-            if file.endswith(".jpg") and "_page_" in file:
-                # Extract page number from filename
-                try:
-                    page_part = file.split("_page_")[1]
-                    page_no = int(page_part.split(".")[0])
-                    all_pages.append(page_no)
-
-                    # Check if corresponding _nohf.md file exists
-                    md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
-                    md_path = os.path.join(output_dir, md_filename)
-
-                    if not os.path.exists(md_path):
-                        uncompleted_pages.append({
-                            "page_no": page_no,
-                            "jpg_file": file,
-                            "expected_md_file": md_filename
-                        })
-                except (ValueError, IndexError):
-                    # Skip files that don't match the expected pattern
-                    continue
-
-        # Sort pages by page number
+        if os.path.exists(output_dir):
+            for file in os.listdir(output_dir):
+                if file.endswith(".jpg") and "_page_" in file:
+                    try:
+                        page_part = file.split("_page_")[1]
+                        page_no = int(page_part.split(".")[0])
+                        all_pages.append(page_no)
+                    except (ValueError, IndexError):
+                        continue
         all_pages.sort()
-        uncompleted_pages.sort(key=lambda x: x["page_no"])
 
         return JSONResponse(content={
             "status": "success",
             "filename": file_name_without_ext,
             "total_pages": len(all_pages),
-            "completed_pages": len(all_pages) - len(uncompleted_pages),
-            "uncompleted_count": len(uncompleted_pages),
-            "uncompleted_pages": uncompleted_pages
+            "completed_pages": len(all_pages) - len(uncompleted),
+            "uncompleted_count": len(uncompleted),
+            "uncompleted_pages": uncompleted
         })
 
-    except HTTPException:
-        raise
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error getting uncompleted pages: {str(e)}"
-        )
-
-
-def _get_image_analysis_backend():
-    """
-    Get the configured image analysis backend.
-    Returns tuple of (backend_name, converter_instance)
-    """
-    backend = (os.getenv("IMAGE_ANALYSIS_BACKEND", "qwen3") or "").strip().lower()
-
-    if backend == "deepseek":
-        return "deepseek", deepseek_ocr_converter
-    elif backend == "gemma3" or backend == "gemma":
-        return "gemma3", gemma3_ocr_converter
-    else:  # Default to qwen3
-        return "qwen3", qwen3_ocr_converter
-
-
-def _convert_page_directly(
-    jpg_path: Path,
-    output_path: Path,
-    backend_name: str,
-    converter
-) -> str:
-    """
-    Convert a page image directly to markdown using the specified converter.
-
-    Args:
-        jpg_path: Path to the JPG image file
-        output_path: Path to save the markdown file
-        backend_name: Name of the backend (qwen3, gemma3, deepseek)
-        converter: The converter instance to use
-
-    Returns:
-        The markdown content
-    """
-    logger.info(f"Converting {jpg_path} using {backend_name} backend")
-
-    if backend_name == "deepseek":
-        # DeepSeek has convert_file method
-        success = converter.convert_file(jpg_path, output_path)
-        if not success:
-            raise Exception(f"DeepSeek conversion failed for {jpg_path}")
-        with open(output_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    else:
-        # Qwen3 and Gemma3 use base64 image input
-        with open(jpg_path, 'rb') as f:
-            image_data = f.read()
-        image_base64 = base64.b64encode(image_data).decode('utf-8')
-
-        markdown_content = converter.convert_image_base64_to_markdown(image_base64)
-
-        # Save markdown to file
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-
-        return markdown_content
+        raise HTTPException(status_code=500, detail=f"Error getting uncompleted pages: {str(e)}")
 
 
 @app.post("/reconvert-page")
-async def reconvert_page(
-    filename: str = Form(...),
-    page_no: int = Form(...)
-):
-    """
-    Re-convert a specific page directly using the configured IMAGE_ANALYSIS_BACKEND.
-
-    This endpoint skips dots_ocr_service and directly uses qwen3, gemma, or deepseek
-    based on the IMAGE_ANALYSIS_BACKEND environment variable.
-
-    The page's JPG file (e.g., "document_page_11.jpg") is read and converted
-    directly to markdown, saved as "_nohf.md" format.
-
-    Parameters:
-    - filename: The document filename (without extension) or with extension
-    - page_no: The page number to re-convert (0-indexed)
-
-    Returns:
-    - JSON with conversion result
-    """
+async def reconvert_page(filename: str = Form(...), page_no: int = Form(...)):
+    """Re-convert a specific page directly using the configured IMAGE_ANALYSIS_BACKEND."""
     try:
-        # Remove extension if provided
         file_name_without_ext = os.path.splitext(filename)[0]
-
         output_dir = Path(OUTPUT_DIR) / file_name_without_ext
 
         if not output_dir.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"Output directory not found for: {filename}"
-            )
+            raise HTTPException(status_code=404, detail=f"Output directory not found")
 
-        # Find the JPG file for this page
         jpg_filename = f"{file_name_without_ext}_page_{page_no}.jpg"
         jpg_path = output_dir / jpg_filename
 
         if not jpg_path.exists():
-            raise HTTPException(
-                status_code=404,
-                detail=f"JPG file not found: {jpg_filename}"
-            )
+            raise HTTPException(status_code=404, detail=f"JPG file not found: {jpg_filename}")
 
-        # Get the configured backend
-        backend_name, converter = _get_image_analysis_backend()
+        backend_name, converter = conversion_service.get_image_analysis_backend()
 
-        # Define output markdown file
         md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
         md_path = output_dir / md_filename
 
-        logger.info(
-            f"Re-converting page {page_no} of {file_name_without_ext} "
-            f"using {backend_name} backend (skipping dots_ocr_service)"
-        )
+        markdown_content = conversion_service.convert_page_directly(jpg_path, md_path, backend_name, converter)
 
-        # Convert the page directly
-        markdown_content = _convert_page_directly(
-            jpg_path, md_path, backend_name, converter
-        )
-
-        # Trigger re-indexing in background after reconversion
-        logger.info(f"Triggering re-indexing for document after page reconvert: {file_name_without_ext}")
-        reindex_document(file_name_without_ext, OUTPUT_DIR)
+        indexing_service.reindex_document(file_name_without_ext)
 
         return JSONResponse(content={
             "status": "success",
@@ -4528,273 +1593,22 @@ async def reconvert_page(
             "backend_used": backend_name,
             "output_file": str(md_path),
             "content_length": len(markdown_content),
-            "message": f"Page {page_no} re-converted successfully using {backend_name}"
+            "message": f"Page {page_no} re-converted successfully"
         })
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error re-converting page: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error re-converting page: {str(e)}"
-        )
-
-
-@app.post("/reconvert-uncompleted")
-async def reconvert_all_uncompleted(
-    filename: str = Form(...)
-):
-    """
-    Re-convert all uncompleted pages for a document.
-
-    This endpoint finds all pages that have JPG but no _nohf.md file,
-    and converts them directly using the configured IMAGE_ANALYSIS_BACKEND.
-
-    Parameters:
-    - filename: The document filename (without extension) or with extension
-
-    Returns:
-    - JSON with list of re-converted pages and their status
-    """
-    try:
-        # Remove extension if provided
-        file_name_without_ext = os.path.splitext(filename)[0]
-
-        output_dir = Path(OUTPUT_DIR) / file_name_without_ext
-
-        if not output_dir.exists():
-            # Document hasn't been converted yet - trigger full conversion
-            # Find the input file with any extension
-            input_file = None
-            for f in os.listdir(INPUT_DIR):
-                if os.path.splitext(f)[0] == file_name_without_ext:
-                    input_file = f
-                    break
-
-            if not input_file:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Input file not found for: {filename}"
-                )
-
-            # Trigger conversion using the same logic as /convert endpoint
-            conversion_id = conversion_manager.create_conversion(input_file)
-
-            conversion_manager.update_conversion(
-                conversion_id,
-                status="processing",
-                started_at=datetime.now().isoformat(),
-                message="Conversion queued, waiting for worker..."
-            )
-
-            await connection_manager.broadcast(conversion_id, {
-                "status": "processing",
-                "progress": 5,
-                "message": "Conversion queued, waiting for worker...",
-            })
-
-            progress_callback = _create_parser_progress_callback(conversion_id)
-
-            success = worker_pool.submit_task(
-                conversion_id=conversion_id,
-                func=_convert_document_background,
-                args=(input_file, "prompt_layout_all_en"),
-                kwargs={
-                    "conversion_id": conversion_id,
-                    "progress_callback": progress_callback,
-                }
-            )
-
-            if not success:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Conversion already in progress for: {filename}"
-                )
-
-            logger.info(f"Triggered full conversion for new file: {input_file}")
-
-            return JSONResponse(content={
-                "status": "accepted",
-                "conversion_id": conversion_id,
-                "filename": file_name_without_ext,
-                "message": "New file - full conversion started. Use WebSocket to track progress.",
-                "queue_size": worker_pool.get_queue_size(),
-                "active_tasks": worker_pool.get_active_tasks_count(),
-            })
-
-        # Find uncompleted pages
-        uncompleted_pages = []
-        for file in os.listdir(output_dir):
-            if file.endswith(".jpg") and "_page_" in file:
-                try:
-                    page_part = file.split("_page_")[1]
-                    page_no = int(page_part.split(".")[0])
-
-                    md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
-                    md_path = output_dir / md_filename
-
-                    if not md_path.exists():
-                        uncompleted_pages.append(page_no)
-                except (ValueError, IndexError):
-                    continue
-
-        uncompleted_pages.sort()
-
-        if not uncompleted_pages:
-            return JSONResponse(content={
-                "status": "success",
-                "filename": file_name_without_ext,
-                "message": "No uncompleted pages found",
-                "converted_count": 0,
-                "results": []
-            })
-
-        # Get the configured backend
-        backend_name, converter = _get_image_analysis_backend()
-
-        logger.info(
-            f"Re-converting {len(uncompleted_pages)} uncompleted pages of "
-            f"{file_name_without_ext} using {backend_name} backend"
-        )
-
-        results = []
-        for page_no in uncompleted_pages:
-            jpg_filename = f"{file_name_without_ext}_page_{page_no}.jpg"
-            jpg_path = output_dir / jpg_filename
-            md_filename = f"{file_name_without_ext}_page_{page_no}_nohf.md"
-            md_path = output_dir / md_filename
-
-            try:
-                markdown_content = _convert_page_directly(
-                    jpg_path, md_path, backend_name, converter
-                )
-                results.append({
-                    "page_no": page_no,
-                    "status": "success",
-                    "content_length": len(markdown_content)
-                })
-                logger.info(f"Successfully re-converted page {page_no}")
-            except Exception as e:
-                results.append({
-                    "page_no": page_no,
-                    "status": "error",
-                    "error": str(e)
-                })
-                logger.error(f"Failed to re-convert page {page_no}: {str(e)}")
-
-        success_count = sum(1 for r in results if r["status"] == "success")
-
-        # Trigger re-indexing in background after reconversion (if any pages were converted)
-        if success_count > 0:
-            logger.info(f"Triggering re-indexing for document after uncompleted reconvert: {file_name_without_ext}")
-            reindex_document(file_name_without_ext, OUTPUT_DIR)
-
-        return JSONResponse(content={
-            "status": "success" if success_count == len(results) else "partial",
-            "filename": file_name_without_ext,
-            "backend_used": backend_name,
-            "total_uncompleted": len(uncompleted_pages),
-            "converted_count": success_count,
-            "failed_count": len(results) - success_count,
-            "results": results
-        })
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error re-converting uncompleted pages: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error re-converting uncompleted pages: {str(e)}"
-        )
-
-
-@app.post("/admin/update-document-owners")
-async def update_document_owners(username: str):
-    """
-    Admin endpoint to update all documents with a specific user as creator/updater.
-    This is useful for assigning ownership to existing documents.
-    NOTE: This endpoint is temporarily unprotected for migration purposes.
-    """
-    try:
-        from db.user_repository import UserRepository
-        from sqlalchemy import text
-
-        with get_db_session() as db:
-            user_repo = UserRepository(db)
-
-            # Find the target user
-            user = user_repo.get_user_by_username(username)
-            if not user:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"User '{username}' not found"
-                )
-
-            # Count documents that need updating
-            count_query = db.execute(
-                text('''
-                    SELECT COUNT(*)
-                    FROM documents
-                    WHERE created_by IS NULL OR updated_by IS NULL
-                ''')
-            )
-            count = count_query.scalar()
-
-            if count == 0:
-                return {
-                    "status": "success",
-                    "message": "No documents need updating",
-                    "updated_count": 0,
-                    "user": {
-                        "username": user.username,
-                        "id": str(user.id)
-                    }
-                }
-
-            # Update all documents that don't have created_by or updated_by set
-            result = db.execute(
-                text('''
-                    UPDATE documents
-                    SET created_by = :user_id, updated_by = :user_id
-                    WHERE created_by IS NULL OR updated_by IS NULL
-                '''),
-                {'user_id': user.id}
-            )
-
-            logger.info(f"Updated {result.rowcount} documents with user '{username}' (ID: {user.id})")
-
-            return {
-                "status": "success",
-                "message": f"Successfully updated {result.rowcount} documents",
-                "updated_count": result.rowcount,
-                "user": {
-                    "username": user.username,
-                    "id": str(user.id),
-                    "full_name": user.full_name
-                }
-            }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error updating document owners: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error updating document owners: {str(e)}"
-        )
+        raise HTTPException(status_code=500, detail=f"Error re-converting page: {str(e)}")
 
 
 if __name__ == "__main__":
     import uvicorn
     import sys
 
-    # Get host and port from environment or use defaults
     host = os.getenv("API_HOST", "0.0.0.0")
     port = int(os.getenv("API_PORT", 8000))
 
-    # Check for command-line arguments
     if len(sys.argv) > 1:
         for i, arg in enumerate(sys.argv[1:], 1):
             if arg == "--port" and i < len(sys.argv) - 1:
@@ -4808,4 +1622,3 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
-
