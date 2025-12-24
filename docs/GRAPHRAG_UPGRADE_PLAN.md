@@ -2,9 +2,20 @@
 
 ## Integrating Graph-R1 Knowledge Graph RAG into dots-ocr-app
 
-**Version:** 1.0  
-**Date:** 2024-12-10  
+**Version:** 1.0
+**Date:** 2024-12-10
 **Author:** AI Assistant
+
+---
+
+> **⚠️ NOTE: This is an outdated planning document.**
+>
+> The actual implementation differs from this plan in the following ways:
+> - **Entity/relationship embeddings** are stored natively in Neo4j (not in separate Qdrant collections)
+> - **Qdrant** only contains: `documents` (document chunks), `metadatas` (document metadata for routing)
+> - **Neo4j** stores entities and relationships with native vector indexes for semantic search
+>
+> For current architecture, see [GRAPHRAG_USAGE.md](./GRAPHRAG_USAGE.md).
 
 ---
 

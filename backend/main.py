@@ -3636,7 +3636,7 @@ async def delete_document(filename: str):
             errors.append(error_msg)
             logger.error(error_msg)
 
-        # Delete GraphRAG data (Neo4j, PostgreSQL GraphRAG tables, Qdrant entity/edge vectors)
+        # Delete GraphRAG data (Neo4j stores entities/relationships with native embeddings)
         if GRAPHRAG_DELETE_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
             try:
                 delete_graphrag_by_source_sync(file_name_without_ext)

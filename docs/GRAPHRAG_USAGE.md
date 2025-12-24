@@ -152,11 +152,15 @@ result = asyncio.run(query_graph())
 ┌─────────────────────────────────────────────────────────────┐
 │                      Storage Layer                           │
 ├─────────────────────────────────────────────────────────────┤
-│  PostgreSQL KV     Qdrant Vectors     Neo4j Graph           │
-│  (entities,        (embeddings)       (relationships)       │
-│   chunks, cache)                                             │
+│  PostgreSQL         Qdrant Vectors       Neo4j Graph        │
+│  (LLM cache)        (document chunks,    (entities,         │
+│                      metadata)           relationships,      │
+│                                          native embeddings)  │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**Note:** Neo4j stores entity/relationship embeddings natively using vector indexes,
+enabling efficient semantic search directly on the graph.
 
 ## Testing
 
