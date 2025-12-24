@@ -1215,66 +1215,114 @@ async def list_markdown_files(filename: str):
         raise HTTPException(status_code=500, detail=f"Error listing markdown files: {str(e)}")
 
 
-@app.delete("/documents/{filename}")
-async def delete_document(filename: str):
-    """Delete a document and all its associated files."""
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a document and all its associated files by document ID."""
     try:
-        if not filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
 
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
+        # Parse and validate document ID
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        # Get document from database
+        repo = DocumentRepository(db)
+        doc = repo.get_by_id(doc_uuid)
+
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Document not found: {document_id}")
+
+        # Check permission - user must own the document or have delete permission
+        if doc.owner_id and doc.owner_id != current_user.id:
+            perm_service = PermissionService(db)
+            if not perm_service.has_permission(current_user.id, doc.id, 'delete'):
+                raise HTTPException(status_code=403, detail="You don't have permission to delete this document")
+
+        filename = doc.filename
+        file_path = doc.file_path  # This contains the relative path like "username/workspace/filename"
+        output_path = doc.output_path
+        file_name_without_ext = os.path.splitext(filename)[0]
 
         deleted_files = []
         errors = []
-        file_name_without_ext = os.path.splitext(filename)[0]
 
-        # Delete input file
-        input_file_path = os.path.join(INPUT_DIR, filename)
+        # Delete input file using the actual file_path from database
+        if file_path:
+            input_file_path = os.path.join(INPUT_DIR, file_path)
+        else:
+            input_file_path = os.path.join(INPUT_DIR, filename)
+
         if os.path.exists(input_file_path):
             try:
                 os.remove(input_file_path)
                 deleted_files.append(input_file_path)
+                logger.info(f"Deleted input file: {input_file_path}")
             except Exception as e:
                 errors.append(f"Failed to delete input file: {str(e)}")
 
-        # Delete output folder
-        output_folder_path = os.path.join(OUTPUT_DIR, file_name_without_ext)
+        # Delete output folder - use output_path from database if available
+        if output_path:
+            output_folder_path = document_service.resolve_output_path(output_path)
+        else:
+            # Fallback: construct from file_path
+            if file_path:
+                rel_dir = os.path.dirname(file_path)
+                output_folder_path = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext) if rel_dir else os.path.join(OUTPUT_DIR, file_name_without_ext)
+            else:
+                output_folder_path = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
         if os.path.exists(output_folder_path) and os.path.isdir(output_folder_path):
             try:
                 shutil.rmtree(output_folder_path)
                 deleted_files.append(output_folder_path)
+                logger.info(f"Deleted output folder: {output_folder_path}")
             except Exception as e:
                 errors.append(f"Failed to delete output folder: {str(e)}")
 
         # Delete JSONL file
-        jsonl_file_path = os.path.join(OUTPUT_DIR, f"{file_name_without_ext}.jsonl")
+        jsonl_file_path = os.path.join(os.path.dirname(output_folder_path), f"{file_name_without_ext}.jsonl")
         if os.path.exists(jsonl_file_path):
             try:
                 os.remove(jsonl_file_path)
                 deleted_files.append(jsonl_file_path)
+                logger.info(f"Deleted JSONL file: {jsonl_file_path}")
             except Exception as e:
                 errors.append(f"Failed to delete JSONL file: {str(e)}")
 
-        # Delete embeddings
-        indexing_service.delete_document_embeddings(filename)
-
-        # Get doc_id before deleting from database
+        # Delete embeddings using document ID
         try:
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                doc = repo.get_by_filename(filename)
-                if doc:
-                    indexing_service.delete_document_embeddings(filename, str(doc.id))
-                    repo.hard_delete(doc)
+            indexing_service.delete_document_embeddings(filename, document_id)
+            logger.info(f"Deleted embeddings for document: {document_id}")
+        except Exception as e:
+            errors.append(f"Failed to delete embeddings: {str(e)}")
+
+        # Delete GraphRAG data if available
+        if GRAPHRAG_DELETE_AVAILABLE:
+            try:
+                # Use the source name (folder name) for GraphRAG deletion
+                source_name = file_name_without_ext
+                delete_graphrag_by_source_sync(source_name)
+                logger.info(f"Deleted GraphRAG data for source: {source_name}")
+            except Exception as e:
+                errors.append(f"Failed to delete GraphRAG data: {str(e)}")
+
+        # Delete document from database
+        try:
+            repo.hard_delete(doc)
+            logger.info(f"Deleted document from database: {document_id}")
         except Exception as e:
             errors.append(f"Failed to delete database record: {str(e)}")
 
-        if not deleted_files and not errors:
-            raise HTTPException(status_code=404, detail=f"Document not found: {filename}")
-
         response_data = {
             "status": "success" if not errors else "partial_success",
+            "document_id": document_id,
             "filename": filename,
             "deleted_files": deleted_files,
             "message": f"Deleted {len(deleted_files)} file(s)/folder(s)",
@@ -1289,7 +1337,68 @@ async def delete_document(filename: str):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error deleting document: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error deleting document: {str(e)}")
+
+
+@app.get("/documents/{document_id}/status-logs")
+async def get_document_status_logs(
+    document_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get status logs for a document by document ID."""
+    try:
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
+
+        # Parse and validate document ID
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        # Get document from database
+        repo = DocumentRepository(db)
+        doc = repo.get_by_id(doc_uuid)
+
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Document not found: {document_id}")
+
+        # Check permission - user must own the document or have read permission
+        if doc.owner_id and doc.owner_id != current_user.id:
+            perm_service = PermissionService(db)
+            if not perm_service.has_permission(current_user.id, doc.id, 'read'):
+                raise HTTPException(status_code=403, detail="You don't have permission to view this document")
+
+        # Get status logs
+        status_logs = repo.get_status_logs(doc_uuid)
+
+        logs_data = []
+        for log in status_logs:
+            logs_data.append({
+                "id": str(log.id),
+                "status_type": log.status_type,
+                "old_status": log.old_status,
+                "new_status": log.new_status,
+                "message": log.message,
+                "details": log.details,
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            })
+
+        return JSONResponse(content={
+            "status": "success",
+            "document_id": document_id,
+            "filename": doc.filename,
+            "logs": logs_data,
+            "total": len(logs_data),
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting status logs: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting status logs: {str(e)}")
 
 
 @app.post("/documents/{filename}/index")
@@ -1453,10 +1562,33 @@ async def get_image(filename: str, page_no: int = None):
         if ".." in filename or "/" in filename or "\\" in filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
+        # Look up document in database to get the correct output path
+        output_dir = None
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+            if not doc:
+                # Try common extensions
+                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                    doc = repo.get_by_filename(filename + ext)
+                    if doc:
+                        break
+
+            if doc and doc.output_path:
+                output_dir = document_service.resolve_output_path(doc.output_path)
+            elif doc and doc.file_path:
+                rel_dir = os.path.dirname(doc.file_path)
+                file_name_without_ext = os.path.splitext(doc.filename)[0]
+                output_dir = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext) if rel_dir else os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+        # Fallback to legacy path
+        if not output_dir:
+            output_dir = os.path.join(OUTPUT_DIR, filename)
+
         if page_no is not None:
-            image_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}.jpg")
+            image_path = os.path.join(output_dir, f"{filename}_page_{page_no}.jpg")
         else:
-            image_path = os.path.join(OUTPUT_DIR, filename, f"{filename}.jpg")
+            image_path = os.path.join(output_dir, f"{filename}.jpg")
 
         if not os.path.exists(image_path):
             raise HTTPException(status_code=404, detail=f"Image file not found for: {filename}")

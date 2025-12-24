@@ -405,7 +405,7 @@ export const DocumentList = forwardRef((props, ref) => {
         async (confirmed) => {
           if (confirmed) {
             try {
-              await documentService.deleteDocument(document.filename);
+              await documentService.deleteDocument(document.id);
               messageService.successToast(t("DocumentList.DeleteSuccess"));
               // Reload documents list
               loadDocuments();
@@ -433,7 +433,7 @@ export const DocumentList = forwardRef((props, ref) => {
       setSelectedDocument(document);
       setShowStatusLogs(true);
 
-      const response = await documentService.getDocumentStatusLogs(document.filename);
+      const response = await documentService.getDocumentStatusLogs(document.id);
       if (response.status === "success") {
         setStatusLogs(response.logs || []);
       } else {

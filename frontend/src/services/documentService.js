@@ -420,13 +420,13 @@ class DocumentService {
 
   /**
    * Delete a document and all its associated files
-   * @param {string} filename - The filename to delete (with extension)
+   * @param {string} documentId - The document ID (UUID) to delete
    * @returns {Promise} - Delete response
    */
-  async deleteDocument(filename) {
+  async deleteDocument(documentId) {
     try {
       const response = await http.delete(
-        `${this.apiDomain}/documents/${encodeURIComponent(filename)}`
+        `${this.apiDomain}/documents/${encodeURIComponent(documentId)}`
       );
       return response.data;
     } catch (error) {
@@ -486,13 +486,13 @@ class DocumentService {
 
   /**
    * Get status logs for a document (audit trail)
-   * @param {string} filename - The filename to get logs for
+   * @param {string} documentId - The document ID (UUID) to get logs for
    * @returns {Promise} - Status logs
    */
-  async getDocumentStatusLogs(filename) {
+  async getDocumentStatusLogs(documentId) {
     try {
       const response = await http.get(
-        `${this.apiDomain}/documents/${encodeURIComponent(filename)}/status-logs`
+        `${this.apiDomain}/documents/${encodeURIComponent(documentId)}/status-logs`
       );
       return response.data;
     } catch (error) {

@@ -5,7 +5,7 @@ import { InputText } from "primereact/inputtext";
 import { InputTextarea } from "primereact/inputtextarea";
 import { Dropdown } from "primereact/dropdown";
 import { Badge } from "primereact/badge";
-import { ConfirmDialog, confirmDialog } from "primereact/confirmdialog";
+import { confirmDialog } from "primereact/confirmdialog";
 import { useTranslation } from "react-i18next";
 import workspaceService from "../../services/workspaceService";
 import sharingService from "../../services/sharingService";
@@ -307,7 +307,6 @@ export const WorkspaceSidebar = ({
 
   return (
     <div className={`workspace-sidebar ${collapsed ? "collapsed" : ""}`}>
-      <ConfirmDialog />
 
       {/* Header */}
       <div className="sidebar-header">

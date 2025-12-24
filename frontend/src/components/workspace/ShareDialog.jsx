@@ -9,7 +9,7 @@ import { Calendar } from "primereact/calendar";
 import { DataTable } from "primereact/datatable";
 import { Column } from "primereact/column";
 import { Tag } from "primereact/tag";
-import { ConfirmDialog, confirmDialog } from "primereact/confirmdialog";
+import { confirmDialog } from "primereact/confirmdialog";
 import { useTranslation } from "react-i18next";
 import sharingService from "../../services/sharingService";
 import { messageService } from "../../core/message/messageService";
@@ -229,8 +229,6 @@ export const ShareDialog = ({
       className="share-dialog"
       modal
     >
-      <ConfirmDialog />
-
       {/* Tab navigation */}
       <div className="share-tabs">
         <Button
