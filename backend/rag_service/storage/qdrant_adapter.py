@@ -19,8 +19,8 @@ from ..local_qwen_embedding import LocalQwen3Embedding
 logger = logging.getLogger(__name__)
 
 # Collection names
-ENTITY_COLLECTION = "dots_ocr_entities"
-EDGE_COLLECTION = "dots_ocr_hyperedges"
+ENTITY_COLLECTION = "entities"
+EDGE_COLLECTION = "hyperedges"
 
 # Singleton instances
 _client: QdrantClient = None

@@ -18,6 +18,7 @@ from .indexer import get_indexed_count
 from db.database import get_db_session
 from chat_service.conversation_manager import ConversationManager
 from chat_service.context_analyzer import ContextAnalyzer
+from db.user_document_repository import UserDocumentRepository
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,35 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             except Exception as e:
                                 logger.error(f"Error sending progress update: {e}")
 
+                        # Get accessible document IDs for the current user
+                        # This ensures chat only searches documents the user has access to
+                        accessible_doc_ids = None
+                        logger.info(f"[Access Control] Checking document access for user_id: {user_id}")
+                        if user_id:
+                            try:
+                                user_doc_repo = UserDocumentRepository(db)
+                                accessible_doc_ids = user_doc_repo.get_user_accessible_document_ids(
+                                    user_id=UUID(user_id),
+                                    permission='read'
+                                )
+                                # IMPORTANT: If the set is empty, it means user has NO access to any documents
+                                # This should block all document searches
+                                if accessible_doc_ids is not None:
+                                    if len(accessible_doc_ids) == 0:
+                                        logger.warning(f"[Access Control] User {user_id} has NO document access permissions - chat will return no documents")
+                                    else:
+                                        logger.info(f"[Access Control] User {user_id} has access to {len(accessible_doc_ids)} documents: {list(accessible_doc_ids)[:5]}...")
+                                else:
+                                    logger.warning(f"[Access Control] get_user_accessible_document_ids returned None for user {user_id}")
+                            except Exception as e:
+                                import traceback
+                                logger.warning(f"[Access Control] Failed to get accessible documents for user {user_id}: {e}")
+                                logger.warning(f"[Access Control] Exception traceback: {traceback.format_exc()}")
+                                # If we can't get access list, use empty set to block all access (secure by default)
+                                accessible_doc_ids = set()
+                        else:
+                            logger.warning(f"[Access Control] No user_id provided - cannot enforce access control")
+
                         # Use enhanced message with resolved pronouns and pass session context
                         chunk_count = 0
                         logger.info(f"[Streaming] Starting to stream response for message: '{enhanced_message[:100]}...' (is_retry={is_retry})")
@@ -255,7 +285,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 history,
                                 progress_callback=progress_callback,
                                 session_context=session_context,
-                                is_retry=is_retry
+                                is_retry=is_retry,
+                                accessible_doc_ids=accessible_doc_ids
                             ):
                                 chunk_count += 1
                                 full_response += chunk

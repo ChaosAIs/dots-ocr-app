@@ -29,7 +29,7 @@ async def main():
     
     # Search for all chunks from this source
     results = vectorstore.client.scroll(
-        collection_name="dots_ocr_documents",
+        collection_name="documents",
         scroll_filter=models.Filter(
             must=[
                 models.FieldCondition(

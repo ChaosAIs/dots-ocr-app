@@ -136,7 +136,11 @@ class GraphRAG:
             logger.warning(f"[GraphRAG Query] Failed to embed query: {e}")
             return None
 
-    def _get_chunks_for_entities(self, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _get_chunks_for_entities(
+        self,
+        entities: List[Dict[str, Any]],
+        accessible_doc_ids: set = None
+    ) -> List[Dict[str, Any]]:
         """
         Retrieve source chunks from Qdrant for the given entities.
 
@@ -146,6 +150,8 @@ class GraphRAG:
 
         Args:
             entities: List of entity dictionaries with source_chunk_ids
+            accessible_doc_ids: Optional set of document IDs for access control filtering.
+                               If provided, only chunks with document_id in this set are returned.
 
         Returns:
             List of chunk dictionaries with page_content and metadata
@@ -168,9 +174,18 @@ class GraphRAG:
 
         logger.debug(f"[GraphRAG Query] Retrieving {len(chunk_ids)} chunks for entities")
 
-        # Retrieve chunks from Qdrant
+        # Convert accessible_doc_ids set to list for Qdrant filter
+        accessible_document_ids = None
+        if accessible_doc_ids is not None:
+            accessible_document_ids = [str(doc_id) for doc_id in accessible_doc_ids]
+            logger.debug(f"[GraphRAG Query] Applying access control: {len(accessible_document_ids)} document IDs")
+
+        # Retrieve chunks from Qdrant with access control
         try:
-            docs = get_chunks_by_ids(list(chunk_ids))
+            docs = get_chunks_by_ids(
+                list(chunk_ids),
+                accessible_document_ids=accessible_document_ids
+            )
             chunks = [
                 {
                     "page_content": doc.page_content,
@@ -189,7 +204,8 @@ class GraphRAG:
         self,
         query: str,
         top_k: int = 60,
-        source_names: List[str] = None
+        source_names: List[str] = None,
+        accessible_doc_ids: set = None
     ) -> List[Dict[str, Any]]:
         """
         Perform direct Qdrant vector search for the query.
@@ -201,6 +217,7 @@ class GraphRAG:
             query: User query string
             top_k: Number of chunks to retrieve
             source_names: Optional list of source names to filter results (for document routing)
+            accessible_doc_ids: Optional set of document IDs for user access control filtering
 
         Returns:
             List of chunk dictionaries with page_content and metadata
@@ -216,21 +233,43 @@ class GraphRAG:
             # Get vectorstore instance
             vectorstore = get_vectorstore()
 
-            # Build search kwargs with optional source filtering
+            # Build search kwargs with optional filtering
             search_kwargs = {"k": top_k}
+
+            # Build filter conditions
+            filter_conditions = []
 
             # Add source filter if specified (for document routing)
             if source_names and len(source_names) > 0:
-                search_kwargs["filter"] = models.Filter(
-                    should=[
-                        models.FieldCondition(
-                            key="metadata.source",
-                            match=models.MatchValue(value=source_name),
-                        )
-                        for source_name in source_names
-                    ]
+                filter_conditions.append(
+                    models.Filter(
+                        should=[
+                            models.FieldCondition(
+                                key="metadata.source",
+                                match=models.MatchValue(value=source_name),
+                            )
+                            for source_name in source_names
+                        ]
+                    )
                 )
                 logger.debug(f"[GraphRAG] Filtering vector search to sources: {source_names}")
+
+            # Add document ID filter for access control
+            if accessible_doc_ids is not None and len(accessible_doc_ids) > 0:
+                doc_id_strings = [str(doc_id) for doc_id in accessible_doc_ids]
+                filter_conditions.append(
+                    models.FieldCondition(
+                        key="metadata.document_id",
+                        match=models.MatchAny(any=doc_id_strings),
+                    )
+                )
+                logger.info(f"[GraphRAG] Access control: filtering to {len(doc_id_strings)} accessible document IDs")
+
+            # Combine filters with AND logic if we have multiple conditions
+            if len(filter_conditions) > 1:
+                search_kwargs["filter"] = models.Filter(must=filter_conditions)
+            elif len(filter_conditions) == 1:
+                search_kwargs["filter"] = filter_conditions[0]
 
             # Perform vector search using similarity_search with filter
             docs = vectorstore.similarity_search(query, **search_kwargs)
@@ -849,6 +888,11 @@ class GraphRAG:
 
         entities = []
 
+        # Convert accessible_doc_ids to list for Neo4j methods
+        accessible_doc_ids_list = None
+        if params.accessible_doc_ids is not None:
+            accessible_doc_ids_list = [str(doc_id) for doc_id in params.accessible_doc_ids]
+
         # Try vector search first
         if self._vector_search_enabled:
             query_embedding = await self._get_query_embedding(query)
@@ -860,6 +904,7 @@ class GraphRAG:
                         limit=params.top_k,
                         min_score=0.5,
                         source_names=params.source_names,
+                        accessible_doc_ids=accessible_doc_ids_list,
                     )
                     logger.debug(f"[GraphRAG Query] LOCAL mode - vector search found {len(entities)} entities")
                 except Exception as e:
@@ -873,9 +918,13 @@ class GraphRAG:
 
             for name in entity_names[:10]:  # Limit to top 10 names
                 try:
-                    found = await self._graph_storage.get_nodes_by_name(name, limit=5)
-                    # Filter by source_names if document routing is enabled
-                    if params.source_names and len(params.source_names) > 0:
+                    found = await self._graph_storage.get_nodes_by_name(
+                        name,
+                        limit=5,
+                        accessible_doc_ids=accessible_doc_ids_list
+                    )
+                    # Filter by source_names if document routing is enabled (fallback if no access control)
+                    if params.source_names and len(params.source_names) > 0 and not accessible_doc_ids_list:
                         found = [e for e in found if e.get("source_doc") in params.source_names]
                     for entity in found:
                         if entity not in entities:
@@ -887,14 +936,18 @@ class GraphRAG:
         entities = entities[:params.top_k]
         logger.debug(f"[GraphRAG Query] LOCAL mode - found {len(entities)} entities")
 
-        # Retrieve source chunks for the found entities
-        entity_chunks = self._get_chunks_for_entities(entities)
+        # Retrieve source chunks for the found entities (with access control)
+        entity_chunks = self._get_chunks_for_entities(
+            entities,
+            accessible_doc_ids=params.accessible_doc_ids
+        )
 
-        # ALWAYS include direct Qdrant vector search results (with optional source filtering)
+        # ALWAYS include direct Qdrant vector search results (with optional source and access control filtering)
         vector_chunks = await self._get_vector_search_chunks(
             query,
             params.top_k,
-            source_names=params.source_names
+            source_names=params.source_names,
+            accessible_doc_ids=params.accessible_doc_ids
         )
 
         # Combine and deduplicate chunks
@@ -928,6 +981,11 @@ class GraphRAG:
         entities = []
         relationships = []
 
+        # Convert accessible_doc_ids to list for Neo4j methods
+        accessible_doc_ids_list = None
+        if params.accessible_doc_ids is not None:
+            accessible_doc_ids_list = [str(doc_id) for doc_id in params.accessible_doc_ids]
+
         # Try vector search for relationships first
         if self._vector_search_enabled:
             query_embedding = await self._get_query_embedding(query)
@@ -939,6 +997,7 @@ class GraphRAG:
                         limit=params.top_k,
                         min_score=0.5,
                         source_names=params.source_names,
+                        accessible_doc_ids=accessible_doc_ids_list,
                     )
                     for rel in rel_results:
                         relationships.append({
@@ -959,9 +1018,13 @@ class GraphRAG:
 
             for name in entity_names[:5]:  # Limit traversal
                 try:
-                    found = await self._graph_storage.get_nodes_by_name(name, limit=3)
-                    # Filter by source_names if document routing is enabled
-                    if params.source_names and len(params.source_names) > 0:
+                    found = await self._graph_storage.get_nodes_by_name(
+                        name,
+                        limit=3,
+                        accessible_doc_ids=accessible_doc_ids_list
+                    )
+                    # Filter by source_names if document routing is enabled (fallback if no access control)
+                    if params.source_names and len(params.source_names) > 0 and not accessible_doc_ids_list:
                         found = [e for e in found if e.get("source_doc") in params.source_names]
                     for entity in found:
                         if entity not in entities:
@@ -970,8 +1033,15 @@ class GraphRAG:
                         entity_id = entity.get("id")
                         if entity_id:
                             edges = await self._graph_storage.get_node_edges(entity_id)
-                            # Filter edges by source_doc
-                            if params.source_names and len(params.source_names) > 0:
+                            # Filter edges by document_id if access control is enabled
+                            if accessible_doc_ids_list:
+                                edges = [
+                                    (src_id, tgt_id, edge_data)
+                                    for src_id, tgt_id, edge_data in edges
+                                    if edge_data.get("document_id") in accessible_doc_ids_list
+                                ]
+                            # Otherwise filter by source_doc
+                            elif params.source_names and len(params.source_names) > 0:
                                 edges = [
                                     (src_id, tgt_id, edge_data)
                                     for src_id, tgt_id, edge_data in edges
@@ -999,14 +1069,18 @@ class GraphRAG:
             f"{len(relationships)} relationships"
         )
 
-        # Retrieve source chunks for the found entities
-        entity_chunks = self._get_chunks_for_entities(entities)
+        # Retrieve source chunks for the found entities (with access control)
+        entity_chunks = self._get_chunks_for_entities(
+            entities,
+            accessible_doc_ids=params.accessible_doc_ids
+        )
 
-        # ALWAYS include direct Qdrant vector search results (with optional source filtering)
+        # ALWAYS include direct Qdrant vector search results (with optional source and access control filtering)
         vector_chunks = await self._get_vector_search_chunks(
             query,
             params.top_k,
-            source_names=params.source_names
+            source_names=params.source_names,
+            accessible_doc_ids=params.accessible_doc_ids
         )
 
         # Combine and deduplicate chunks
@@ -1039,6 +1113,11 @@ class GraphRAG:
         relationships = []
         seen_entity_ids = set()
 
+        # Convert accessible_doc_ids to list for Neo4j methods
+        accessible_doc_ids_list = None
+        if params.accessible_doc_ids is not None:
+            accessible_doc_ids_list = [str(doc_id) for doc_id in params.accessible_doc_ids]
+
         # Try vector search for both entities and relationships
         if self._vector_search_enabled:
             query_embedding = await self._get_query_embedding(query)
@@ -1052,6 +1131,7 @@ class GraphRAG:
                         limit=params.top_k // 2,
                         min_score=0.5,
                         source_names=params.source_names,
+                        accessible_doc_ids=accessible_doc_ids_list,
                     )
                     for entity in entity_results:
                         entity_id = entity.get("id")
@@ -1068,6 +1148,7 @@ class GraphRAG:
                         limit=params.top_k // 2,
                         min_score=0.5,
                         source_names=params.source_names,
+                        accessible_doc_ids=accessible_doc_ids_list,
                     )
                     for rel in rel_results:
                         relationships.append({
@@ -1087,8 +1168,15 @@ class GraphRAG:
             if entity_id:
                 try:
                     edges = await self._graph_storage.get_node_edges(entity_id)
-                    # Filter edges by source_doc if document routing is enabled
-                    if params.source_names and len(params.source_names) > 0:
+                    # Filter edges by document_id if access control is enabled
+                    if accessible_doc_ids_list:
+                        edges = [
+                            (src_id, tgt_id, edge_data)
+                            for src_id, tgt_id, edge_data in edges
+                            if edge_data.get("document_id") in accessible_doc_ids_list
+                        ]
+                    # Otherwise filter by source_doc if document routing is enabled
+                    elif params.source_names and len(params.source_names) > 0:
                         edges = [
                             (src_id, tgt_id, edge_data)
                             for src_id, tgt_id, edge_data in edges
@@ -1106,13 +1194,17 @@ class GraphRAG:
                         if rel not in relationships:
                             relationships.append(rel)
 
-                        # Add neighbor entity (only if from same source documents)
+                        # Add neighbor entity (only if from accessible documents)
                         neighbor_id = tgt_id if src_id == entity_id else src_id
                         if neighbor_id not in seen_entity_ids:
                             neighbor = await self._graph_storage.get_node(neighbor_id)
                             if neighbor:
-                                # Filter neighbor by source_doc
-                                if params.source_names and len(params.source_names) > 0:
+                                # Filter neighbor by document_id if access control is enabled
+                                if accessible_doc_ids_list:
+                                    if neighbor.get("document_id") not in accessible_doc_ids_list:
+                                        continue
+                                # Otherwise filter by source_doc
+                                elif params.source_names and len(params.source_names) > 0:
                                     if neighbor.get("source_doc") not in params.source_names:
                                         continue
                                 entities.append(neighbor)
@@ -1127,9 +1219,13 @@ class GraphRAG:
 
             for name in entity_names[:5]:
                 try:
-                    found = await self._graph_storage.get_nodes_by_name(name, limit=3)
-                    # Filter by source_names if document routing is enabled
-                    if params.source_names and len(params.source_names) > 0:
+                    found = await self._graph_storage.get_nodes_by_name(
+                        name,
+                        limit=3,
+                        accessible_doc_ids=accessible_doc_ids_list
+                    )
+                    # Filter by source_names if document routing is enabled (fallback if no access control)
+                    if params.source_names and len(params.source_names) > 0 and not accessible_doc_ids_list:
                         found = [e for e in found if e.get("source_doc") in params.source_names]
                     for entity in found:
                         entity_id = entity.get("id")
@@ -1139,8 +1235,26 @@ class GraphRAG:
                 except Exception as e:
                     logger.warning(f"[GraphRAG Query] Error in text search for '{name}': {e}")
 
-        # Filter entities and relationships by source_names if document routing is enabled
-        if params.source_names and len(params.source_names) > 0:
+        # Filter entities and relationships by document_id if access control is enabled
+        if accessible_doc_ids_list:
+            before_filter_e = len(entities)
+            before_filter_r = len(relationships)
+            entities = [
+                e for e in entities
+                if e.get("document_id") in accessible_doc_ids_list
+            ]
+            relationships = [
+                r for r in relationships
+                if r.get("document_id") in accessible_doc_ids_list
+            ]
+            if len(entities) < before_filter_e or len(relationships) < before_filter_r:
+                logger.info(
+                    f"[GraphRAG] Filtered by document_id: entities {before_filter_e} → {len(entities)}, "
+                    f"relationships {before_filter_r} → {len(relationships)} "
+                    f"(access control: {len(accessible_doc_ids_list)} docs)"
+                )
+        # Otherwise filter by source_names if document routing is enabled (fallback)
+        elif params.source_names and len(params.source_names) > 0:
             before_filter_e = len(entities)
             before_filter_r = len(relationships)
             entities = [
@@ -1167,14 +1281,18 @@ class GraphRAG:
             f"{len(relationships)} relationships"
         )
 
-        # Retrieve source chunks for the found entities
-        entity_chunks = self._get_chunks_for_entities(entities)
+        # Retrieve source chunks for the found entities (with access control)
+        entity_chunks = self._get_chunks_for_entities(
+            entities,
+            accessible_doc_ids=params.accessible_doc_ids
+        )
 
-        # ALWAYS include direct Qdrant vector search results (with optional source filtering)
+        # ALWAYS include direct Qdrant vector search results (with optional source and access control filtering)
         vector_chunks = await self._get_vector_search_chunks(
             query,
             params.top_k,
-            source_names=params.source_names
+            source_names=params.source_names,
+            accessible_doc_ids=params.accessible_doc_ids
         )
 
         # Combine and deduplicate chunks

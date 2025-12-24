@@ -12,19 +12,34 @@ class DocumentService {
   /**
    * Upload a document file
    * @param {File} file - The file to upload
+   * @param {string} workspaceId - Optional workspace ID to upload to
    * @returns {Promise} - Upload response
    */
-  async uploadDocument(file) {
+  async uploadDocument(file, workspaceId = null) {
     try {
       const formData = new FormData();
       formData.append("file", file);
+      if (workspaceId) {
+        formData.append("workspace_id", workspaceId);
+        console.log(`📁 Uploading ${file.name} to workspace: ${workspaceId}`);
+      } else {
+        console.log(`📁 Uploading ${file.name} without workspace (will use default)`);
+      }
+
+      // Debug: Log FormData contents
+      console.log(`📁 FormData contents for upload:`);
+      for (const [key, value] of formData.entries()) {
+        console.log(`   - ${key}: ${value instanceof File ? value.name : value}`);
+      }
 
       const fileUploadClient = createFileUploadClient();
+      console.log(`📁 Uploading to: ${this.apiDomain}/upload`);
       const response = await fileUploadClient.post(
         `${this.apiDomain}/upload`,
         formData
       );
 
+      console.log(`📁 Upload response:`, response.data);
       return response.data;
     } catch (error) {
       console.error("Error uploading document:", error);
@@ -34,11 +49,19 @@ class DocumentService {
 
   /**
    * Get list of all uploaded documents
+   * @param {string} workspaceId - Required workspace ID to filter by
    * @returns {Promise} - List of documents with their status
    */
-  async getDocuments() {
+  async getDocuments(workspaceId) {
+    // Workspace ID is required - return empty result if not provided
+    if (!workspaceId) {
+      console.log("DocumentService: No workspace ID provided, returning empty result");
+      return { status: "success", documents: [] };
+    }
+
     try {
-      const response = await http.get(`${this.apiDomain}/documents`);
+      const params = { workspace_id: workspaceId };
+      const response = await http.get(`${this.apiDomain}/documents`, { params });
       return response.data;
     } catch (error) {
       console.error("Error fetching documents:", error);

@@ -16,8 +16,8 @@ from .local_qwen_embedding import LocalQwen3Embedding
 logger = logging.getLogger(__name__)
 
 # Collection names for document embeddings
-COLLECTION_NAME = "dots_ocr_documents"
-METADATA_COLLECTION_NAME = "document_metadatas"
+COLLECTION_NAME = "documents"
+METADATA_COLLECTION_NAME = "metadatas"
 
 # Configuration for metadata vector search
 METADATA_SEARCH_TOP_K = int(os.getenv("METADATA_SEARCH_TOP_K", "15"))
@@ -101,17 +101,29 @@ def get_vectorstore() -> QdrantVectorStore:
 
 
 
-def get_chunks_by_ids(chunk_ids: List[str], source_names: List[str] = None) -> List[Document]:
+def get_chunks_by_ids(
+    chunk_ids: List[str],
+    source_names: List[str] = None,
+    accessible_document_ids: List[str] = None
+) -> List[Document]:
     """
     Get full chunk content by chunk IDs from the main document collection.
 
     Args:
         chunk_ids: List of chunk IDs to retrieve.
         source_names: Optional list of source names to filter.
+        accessible_document_ids: Optional list of document IDs for access control filtering.
+                                If provided, only chunks with document_id in this list are returned.
+                                If empty list, returns empty results.
 
     Returns:
         List of Document objects with full chunk content.
     """
+    # Access control: empty list means no access
+    if accessible_document_ids is not None and len(accessible_document_ids) == 0:
+        logger.warning("[Vectorstore] Access control: no accessible documents - returning empty chunks")
+        return []
+
     client = get_qdrant_client()
     try:
         # Build filter conditions
@@ -141,6 +153,16 @@ def get_chunks_by_ids(chunk_ids: List[str], source_names: List[str] = None) -> L
                     ]
                 )
             )
+
+        # Add access control filter by document_id
+        if accessible_document_ids is not None and len(accessible_document_ids) > 0:
+            must_conditions.append(
+                models.FieldCondition(
+                    key="metadata.document_id",
+                    match=models.MatchAny(any=accessible_document_ids),
+                )
+            )
+            logger.info(f"[Vectorstore] get_chunks_by_ids: filtering to {len(accessible_document_ids)} accessible document IDs")
 
         filter_condition = models.Filter(
             must=must_conditions if must_conditions else None,
@@ -314,7 +336,8 @@ def _create_per_source_retriever(
     source_names: List[str],
     k: int,
     fetch_k: int,
-    lambda_mult: float = None
+    lambda_mult: float = None,
+    document_ids: list = None
 ):
     """
     Create a custom retriever that retrieves chunks from each source separately,
@@ -328,19 +351,20 @@ def _create_per_source_retriever(
         k: Total number of chunks to retrieve
         fetch_k: Number of candidates to fetch per source for MMR
         lambda_mult: MMR diversity parameter
+        document_ids: Optional list of document IDs for access control filtering
 
     Returns:
         A custom retriever that ensures per-source representation
     """
     from langchain_core.retrievers import BaseRetriever
     from langchain_core.callbacks import CallbackManagerForRetrieverRun
-    from typing import List as TypingList
+    from typing import List as TypingList, Optional as TypingOptional
 
-    class PerSourceRetriever(BaseRetriever):
-        """Custom retriever that ensures all sources are represented."""
+    class PerDocumentRetriever(BaseRetriever):
+        """Custom retriever that ensures all documents are represented using document_id filter only."""
 
         vectorstore: QdrantVectorStore
-        source_names: TypingList[str]
+        document_ids: TypingList[str]  # Required - list of accessible document IDs
         k: int
         fetch_k: int
         lambda_mult: float
@@ -351,116 +375,101 @@ def _create_per_source_retriever(
         def _get_relevant_documents(
             self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
         ) -> TypingList[Document]:
-            """Retrieve documents with per-source selection."""
+            """Retrieve documents with per-document selection using document_id filter only."""
 
-            # Calculate chunks per source (distribute k evenly)
-            chunks_per_source = max(2, k // len(self.source_names))
-            fetch_per_source = max(10, self.fetch_k // len(self.source_names))
+            # Calculate chunks per document (distribute k evenly)
+            chunks_per_doc = max(2, self.k // len(self.document_ids))
+            fetch_per_doc = max(10, self.fetch_k // len(self.document_ids))
 
             logger.info(
-                f"[PerSourceRetriever] Retrieving {chunks_per_source} chunks from each of "
-                f"{len(self.source_names)} sources (total target: {k})"
+                f"[PerDocumentRetriever] Retrieving {chunks_per_doc} chunks from each of "
+                f"{len(self.document_ids)} documents (total target: {self.k})"
             )
 
             all_docs = []
             seen_chunk_ids = set()
 
-            # Retrieve from each source separately
-            for source_name in self.source_names:
+            # Retrieve from each document separately using document_id filter only
+            for doc_id in self.document_ids:
                 try:
-                    # Create filter for this specific source
-                    source_filter = models.Filter(
+                    # Create filter using only document_id
+                    doc_filter = models.Filter(
                         must=[
                             models.FieldCondition(
-                                key="metadata.source",
-                                match=models.MatchValue(value=source_name),
+                                key="metadata.document_id",
+                                match=models.MatchValue(value=doc_id),
                             )
                         ]
                     )
 
-                    # First, check how many chunks exist for this source
+                    # First, check how many chunks exist for this document
                     try:
                         test_docs = self.vectorstore.similarity_search(
                             query,
                             k=1,
-                            filter=source_filter
+                            filter=doc_filter
                         )
                         if not test_docs:
-                            logger.warning(
-                                f"[PerSourceRetriever] No chunks found for source: {source_name} "
-                                f"(source may not exist in vectorstore or has no matching chunks)"
+                            logger.debug(
+                                f"[PerDocumentRetriever] No chunks found for document_id: {doc_id}"
                             )
                             continue
                     except Exception as e:
-                        logger.warning(f"[PerSourceRetriever] Cannot access source {source_name}: {e}")
+                        logger.warning(f"[PerDocumentRetriever] Cannot access document {doc_id}: {e}")
                         continue
 
-                    # Search with MMR for this source only
+                    # Search with MMR for this document only
                     docs = self.vectorstore.max_marginal_relevance_search(
                         query,
-                        k=chunks_per_source,
-                        fetch_k=fetch_per_source,
-                        filter=source_filter,
+                        k=chunks_per_doc,
+                        fetch_k=fetch_per_doc,
+                        filter=doc_filter,
                         lambda_mult=self.lambda_mult if self.lambda_mult is not None else 0.5
                     )
 
-                    # Log details about retrieved chunks
+                    source_name = docs[0].metadata.get('source', doc_id[:8]) if docs else doc_id[:8]
                     logger.info(
-                        f"[PerSourceRetriever] Source '{source_name}': Retrieved {len(docs)} chunks"
+                        f"[PerDocumentRetriever] Document '{source_name}' ({doc_id[:8]}...): Retrieved {len(docs)} chunks"
                     )
 
-                    # Deduplicate by chunk_id and log chunk details
+                    # Deduplicate by chunk_id
                     added_count = 0
-                    for i, doc in enumerate(docs, 1):
+                    for doc in docs:
                         chunk_id = doc.metadata.get("chunk_id")
-                        heading = doc.metadata.get("heading_path", "")
-                        content_preview = doc.page_content[:100].replace('\n', ' ')
-
-                        logger.debug(
-                            f"[PerSourceRetriever]   Chunk {i}: {source_name} | "
-                            f"heading='{heading}' | preview='{content_preview}...'"
-                        )
-
                         if chunk_id and chunk_id not in seen_chunk_ids:
                             all_docs.append(doc)
                             seen_chunk_ids.add(chunk_id)
                             added_count += 1
                         elif not chunk_id:
-                            # No chunk_id, add anyway
                             all_docs.append(doc)
                             added_count += 1
-                        else:
-                            logger.debug(f"[PerSourceRetriever]   Skipped duplicate chunk_id: {chunk_id}")
 
-                    logger.info(
-                        f"[PerSourceRetriever] Source '{source_name}': Added {added_count}/{len(docs)} chunks "
-                        f"(after deduplication)"
+                    logger.debug(
+                        f"[PerDocumentRetriever] Document '{source_name}': Added {added_count}/{len(docs)} chunks"
                     )
 
                 except Exception as e:
-                    logger.error(f"[PerSourceRetriever] Error retrieving from source {source_name}: {e}")
-                    import traceback
-                    logger.error(traceback.format_exc())
+                    logger.error(f"[PerDocumentRetriever] Error retrieving from document {doc_id}: {e}")
                     continue
 
-            # If we got more than k chunks, trim to k (keep highest scoring)
+            # Trim to k if needed
             if len(all_docs) > self.k:
-                logger.info(
-                    f"[PerSourceRetriever] Got {len(all_docs)} chunks, trimming to {self.k}"
-                )
+                logger.info(f"[PerDocumentRetriever] Got {len(all_docs)} chunks, trimming to {self.k}")
                 all_docs = all_docs[:self.k]
 
             logger.info(
-                f"[PerSourceRetriever] Final result: {len(all_docs)} chunks from "
-                f"{len(set(doc.metadata.get('source', 'Unknown') for doc in all_docs))} sources"
+                f"[PerDocumentRetriever] Final result: {len(all_docs)} chunks from "
+                f"{len(set(doc.metadata.get('document_id', 'Unknown') for doc in all_docs))} documents"
             )
 
             return all_docs
 
-    # Create and return the custom retriever
-    return PerSourceRetriever(
+    # Convert document_ids to strings for the retriever
+    doc_id_strings = [str(doc_id) for doc_id in document_ids] if document_ids else []
+
+    return PerDocumentRetriever(
         vectorstore=vectorstore,
-        source_names=source_names,
+        document_ids=doc_id_strings,
         k=k,
         fetch_k=fetch_k,
         lambda_mult=lambda_mult if lambda_mult is not None else 0.5
@@ -470,60 +479,59 @@ def _create_per_source_retriever(
 def get_retriever_with_sources(
     k: int = 8,
     fetch_k: int = 30,
-    source_names: List[str] = None,
+    source_names: List[str] = None,  # Deprecated - kept for backward compatibility
     lambda_mult: float = None,
-    per_source_selection: bool = True
+    per_source_selection: bool = True,  # Renamed semantically to per_document_selection
+    document_ids: list = None
 ):
     """
-    Get a retriever from the vectorstore with optional source filtering.
+    Get a retriever from the vectorstore with document_id filtering.
+
+    IMPORTANT: This function now uses document_id as the primary filter.
+    source_names is deprecated and ignored.
 
     Args:
-        k: Number of documents to retrieve (total across all sources).
+        k: Number of documents to retrieve (total across all documents).
         fetch_k: Number of documents to fetch for MMR.
-        source_names: Optional list of source names to filter results.
+        source_names: DEPRECATED - ignored. Use document_ids instead.
         lambda_mult: MMR diversity parameter (0.0 = max diversity, 1.0 = max relevance).
                      If None, uses default (0.5).
-        per_source_selection: If True and source_names is provided, retrieve chunks
-                              from each source separately to ensure all sources are
-                              represented. If False, use global MMR across all sources.
+        per_source_selection: If True and document_ids provided, retrieve chunks
+                              from each document separately to ensure all documents
+                              are represented.
+        document_ids: List of document IDs to filter results (required for access control).
 
     Returns:
-        A LangChain retriever configured for MMR search, or a custom retriever
-        that ensures per-source representation.
+        A LangChain retriever configured for MMR search with document_id filtering.
     """
     vectorstore = get_vectorstore()
 
-    # If per-source selection is enabled and we have multiple sources, use custom retriever
-    if per_source_selection and source_names and len(source_names) > 1:
+    # If per-document selection is enabled and we have document_ids, use custom retriever
+    if per_source_selection and document_ids and len(document_ids) > 1:
         logger.info(
-            f"[Retriever] Using per-source selection for {len(source_names)} sources "
-            f"to ensure all sources are represented"
+            f"[Retriever] Using per-document selection for {len(document_ids)} documents "
+            f"to ensure all documents are represented"
         )
         return _create_per_source_retriever(
             vectorstore=vectorstore,
-            source_names=source_names,
+            source_names=None,  # Not used anymore
             k=k,
             fetch_k=fetch_k,
-            lambda_mult=lambda_mult
+            lambda_mult=lambda_mult,
+            document_ids=document_ids
         )
 
-    # Otherwise, use standard MMR retriever
+    # Otherwise, use standard MMR retriever with document_id filter only
     search_kwargs = {"k": k, "fetch_k": fetch_k}
 
-    # Add source filter if specified
-    if source_names and len(source_names) > 0:
-        # Use 'should' for multiple sources (OR logic) - match ANY of the specified sources
-        # But wrap in 'must' to ensure the filter is applied (not optional)
+    # Build filter using document_id only
+    if document_ids is not None and len(document_ids) > 0:
+        doc_id_strings = [str(doc_id) for doc_id in document_ids]
         search_kwargs["filter"] = models.Filter(
             must=[
-                models.Filter(
-                    should=[
-                        models.FieldCondition(
-                            key="metadata.source",
-                            match=models.MatchValue(value=source_name),
-                        )
-                        for source_name in source_names
-                    ]
+                models.FieldCondition(
+                    key="metadata.document_id",
+                    match=models.MatchAny(any=doc_id_strings),
                 )
             ]
         )
@@ -538,14 +546,20 @@ def get_retriever_with_sources(
     )
 
 
-def get_retriever(k: int = 8, fetch_k: int = 30, source_filter: str = None):
+def get_retriever(
+    k: int = 8,
+    fetch_k: int = 30,
+    source_filter: str = None,  # DEPRECATED - ignored
+    document_ids: list = None
+):
     """
-    Get a retriever from the vectorstore.
+    Get a retriever from the vectorstore using document_id filter only.
 
     Args:
         k: Number of documents to retrieve.
         fetch_k: Number of documents to fetch for MMR.
-        source_filter: Optional source name to filter results (e.g., document folder name).
+        source_filter: DEPRECATED - ignored. Use document_ids instead.
+        document_ids: List of document IDs to filter results (for access control).
 
     Returns:
         A LangChain retriever configured for MMR search.
@@ -553,16 +567,23 @@ def get_retriever(k: int = 8, fetch_k: int = 30, source_filter: str = None):
     vectorstore = get_vectorstore()
     search_kwargs = {"k": k, "fetch_k": fetch_k}
 
-    # Add source filter if specified
-    if source_filter:
-        search_kwargs["filter"] = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="metadata.source",
-                    match=models.MatchValue(value=source_filter),
-                )
-            ]
+    # Build filter using document_id only
+    filter_conditions = []
+
+    # Add document ID filter for access control
+    if document_ids is not None and len(document_ids) > 0:
+        # Convert UUIDs to strings if necessary
+        doc_id_strings = [str(doc_id) for doc_id in document_ids]
+        filter_conditions.append(
+            models.FieldCondition(
+                key="metadata.document_id",
+                match=models.MatchAny(any=doc_id_strings),
+            )
         )
+
+    # Apply filter if any conditions exist
+    if filter_conditions:
+        search_kwargs["filter"] = models.Filter(must=filter_conditions)
 
     return vectorstore.as_retriever(
         search_type="mmr",
@@ -1031,7 +1052,8 @@ def cleanup_orphaned_metadata(valid_document_ids: List[str]) -> dict:
 def search_document_metadata(
     query_text: str,
     top_k: int = None,
-    score_threshold: float = None
+    score_threshold: float = None,
+    accessible_document_ids: List[str] = None
 ) -> List[dict]:
     """
     Search for relevant documents by querying the metadata vector collection.
@@ -1040,6 +1062,10 @@ def search_document_metadata(
         query_text: Query text to search for (will be embedded)
         top_k: Number of results to return (default: METADATA_SEARCH_TOP_K)
         score_threshold: Minimum score threshold (default: METADATA_SCORE_THRESHOLD)
+        accessible_document_ids: List of document IDs the user can access (for access control).
+                                 If provided, only documents with these IDs will be returned.
+                                 If empty list, returns empty results.
+                                 If None, returns all matching documents.
 
     Returns:
         List of dictionaries with document info and scores:
@@ -1049,6 +1075,11 @@ def search_document_metadata(
         top_k = METADATA_SEARCH_TOP_K
     if score_threshold is None:
         score_threshold = METADATA_SCORE_THRESHOLD
+
+    # Access control: empty list means no access
+    if accessible_document_ids is not None and len(accessible_document_ids) == 0:
+        logger.warning("[MetadataVector] Access control: no accessible documents - returning empty")
+        return []
 
     try:
         client = get_qdrant_client()
@@ -1066,10 +1097,24 @@ def search_document_metadata(
         # Embed the query
         query_vector = embeddings.embed_query(query_text)
 
+        # Build filter for access control
+        query_filter = None
+        if accessible_document_ids is not None and len(accessible_document_ids) > 0:
+            # Filter by document_id (the point ID in metadata collection is the document UUID)
+            query_filter = models.Filter(
+                must=[
+                    models.HasIdCondition(
+                        has_id=accessible_document_ids
+                    )
+                ]
+            )
+            logger.info(f"[MetadataVector] Access control: filtering to {len(accessible_document_ids)} document IDs")
+
         # Search using query_points (qdrant-client >= 1.7.0)
         results = client.query_points(
             collection_name=METADATA_COLLECTION_NAME,
             query=query_vector,
+            query_filter=query_filter,
             limit=top_k,
             score_threshold=score_threshold,
             with_payload=True

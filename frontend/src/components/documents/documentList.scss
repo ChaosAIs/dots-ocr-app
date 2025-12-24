@@ -4,6 +4,51 @@
   border-radius: 8px;
   margin-top: 20px;
 
+  // Workspace info header at the top
+  .workspace-info-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 20px;
+    margin: -20px -20px 20px -20px;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 8px 8px 0 0;
+    color: white;
+
+    .workspace-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background-color: rgba(255, 255, 255, 0.2);
+
+      i {
+        font-size: 1.5rem;
+        color: white;
+      }
+    }
+
+    .workspace-details {
+      flex: 1;
+
+      .workspace-name {
+        margin: 0;
+        font-size: 1.25rem;
+        font-weight: 600;
+        color: white;
+      }
+
+      .workspace-description {
+        margin: 4px 0 0 0;
+        font-size: 0.875rem;
+        color: rgba(255, 255, 255, 0.85);
+        line-height: 1.4;
+      }
+    }
+  }
+
   .document-list-header {
     display: flex;
     justify-content: space-between;
@@ -19,7 +64,11 @@
     .header-actions {
       display: flex;
       align-items: center;
-      gap: 15px;
+      gap: 12px;
+
+      .upload-btn {
+        font-weight: 500;
+      }
     }
 
     .batch-index-status {

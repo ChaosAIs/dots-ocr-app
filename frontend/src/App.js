@@ -14,6 +14,7 @@ import AppProgress from "./core/loading/components/appProgress";
 import { ConfirmDialog } from "primereact/confirmdialog";
 
 import { AuthProvider } from "./core/auth/components/authProvider";
+import { WorkspaceProvider } from "./contexts/WorkspaceContext";
 import { BrowserRouter, useLocation } from "react-router-dom";
 import { AppRoutes } from "./routes/routes";
 import { NavBar } from "./components/base/navbar";
@@ -48,18 +49,21 @@ function App() {
                 Note: Any nested components inside "AuthProvider",
                 it can call useContext(AuthContext) to get reference of authService.
             */}
-        {/* As for "basename", it is the base URL for all locations.
-              If your app is served from a sub-directory on your server,
-              you’ll want to set this to the sub-directory.
-              A properly formatted basename should have a leading slash,
-              but no trailing slash.
-            */}
-        <BrowserRouter basename={`${APP_CONFIG.basePath.length > 0 ? APP_CONFIG.basePath : "/"}`}>
-          <ConditionalNavBar />
-          <div className="body-area">
-            <AppRoutes />
-          </div>
-        </BrowserRouter>
+        <WorkspaceProvider>
+          {/* WorkspaceProvider provides centralized workspace state management */}
+          {/* As for "basename", it is the base URL for all locations.
+                If your app is served from a sub-directory on your server,
+                you'll want to set this to the sub-directory.
+                A properly formatted basename should have a leading slash,
+                but no trailing slash.
+              */}
+          <BrowserRouter basename={`${APP_CONFIG.basePath.length > 0 ? APP_CONFIG.basePath : "/"}`}>
+            <ConditionalNavBar />
+            <div className="body-area">
+              <AppRoutes />
+            </div>
+          </BrowserRouter>
+        </WorkspaceProvider>
       </AuthProvider>
     </div>
   );

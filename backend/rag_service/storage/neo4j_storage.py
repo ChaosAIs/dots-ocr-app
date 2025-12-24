@@ -202,6 +202,7 @@ class Neo4jStorage(BaseGraphStorage):
         key_score: int = 50,
         embedding: List[float] = None,
         metadata: Dict[str, Any] = None,
+        document_id: str = None,
     ) -> str:
         """
         Upsert an entity with document-level deduplication and optional embedding.
@@ -218,10 +219,15 @@ class Neo4jStorage(BaseGraphStorage):
             key_score: Importance score
             embedding: Optional embedding vector for semantic search
             metadata: Optional metadata dict (e.g., date properties for date entities)
+            document_id: Document ID for access control filtering (required)
 
         Returns:
             Entity ID used in the graph
         """
+        # Add document_id to metadata for access control filtering
+        if document_id:
+            metadata = metadata or {}
+            metadata["document_id"] = document_id
         driver = self._get_driver()
 
         # Create a consistent entity ID based on name, type, and source document
@@ -344,6 +350,7 @@ class Neo4jStorage(BaseGraphStorage):
         source_chunk_id: str,
         weight: float = 1.0,
         embedding: List[float] = None,
+        document_id: str = None,
     ) -> None:
         """
         Upsert a relationship with document-level deduplication and optional embedding.
@@ -362,6 +369,7 @@ class Neo4jStorage(BaseGraphStorage):
             source_chunk_id: Source chunk ID
             weight: Relationship weight
             embedding: Optional embedding vector for semantic search
+            document_id: Document ID for access control filtering (required)
         """
         driver = self._get_driver()
 
@@ -374,7 +382,7 @@ class Neo4jStorage(BaseGraphStorage):
 
         async with driver.session() as session:
             if embedding:
-                # Use MERGE with embedding
+                # Use MERGE with embedding and document_id
                 await session.run(
                     """
                     MATCH (src:Entity {id: $src_id, workspace_id: $workspace_id})
@@ -386,7 +394,8 @@ class Neo4jStorage(BaseGraphStorage):
                         r.weight = $weight,
                         r.source_doc = $source_doc,
                         r.source_chunk_ids = [$source_chunk_id],
-                        r.embedding = $embedding
+                        r.embedding = $embedding,
+                        r.document_id = $document_id
                     ON MATCH SET
                         r.description = CASE
                             WHEN r.description CONTAINS $description THEN r.description
@@ -404,7 +413,8 @@ class Neo4jStorage(BaseGraphStorage):
                             WHEN $source_chunk_id IN r.source_chunk_ids THEN r.source_chunk_ids
                             ELSE r.source_chunk_ids + $source_chunk_id
                         END,
-                        r.embedding = $embedding
+                        r.embedding = $embedding,
+                        r.document_id = $document_id
                     """,
                     src_id=src_id,
                     tgt_id=tgt_id,
@@ -415,9 +425,10 @@ class Neo4jStorage(BaseGraphStorage):
                     source_doc=source_doc,
                     source_chunk_id=source_chunk_id,
                     embedding=embedding,
+                    document_id=document_id,
                 )
             else:
-                # Use MERGE without embedding
+                # Use MERGE without embedding but with document_id
                 await session.run(
                     """
                     MATCH (src:Entity {id: $src_id, workspace_id: $workspace_id})
@@ -428,7 +439,8 @@ class Neo4jStorage(BaseGraphStorage):
                         r.keywords = $keywords,
                         r.weight = $weight,
                         r.source_doc = $source_doc,
-                        r.source_chunk_ids = [$source_chunk_id]
+                        r.source_chunk_ids = [$source_chunk_id],
+                        r.document_id = $document_id
                     ON MATCH SET
                         r.description = CASE
                             WHEN r.description CONTAINS $description THEN r.description
@@ -445,7 +457,8 @@ class Neo4jStorage(BaseGraphStorage):
                         r.source_chunk_ids = CASE
                             WHEN $source_chunk_id IN r.source_chunk_ids THEN r.source_chunk_ids
                             ELSE r.source_chunk_ids + $source_chunk_id
-                        END
+                        END,
+                        r.document_id = $document_id
                     """,
                     src_id=src_id,
                     tgt_id=tgt_id,
@@ -455,6 +468,7 @@ class Neo4jStorage(BaseGraphStorage):
                     weight=weight,
                     source_doc=source_doc,
                     source_chunk_id=source_chunk_id,
+                    document_id=document_id,
                 )
 
         logger.debug(f"Upserted relationship: {src_name} -> {tgt_name} for doc: {source_doc}")
@@ -583,7 +597,8 @@ class Neo4jStorage(BaseGraphStorage):
         self,
         name: str,
         limit: int = 10,
-        fuzzy: bool = True
+        fuzzy: bool = True,
+        accessible_doc_ids: List[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Get nodes by name (single name search with fuzzy matching).
@@ -592,6 +607,9 @@ class Neo4jStorage(BaseGraphStorage):
             name: Entity name to search for
             limit: Maximum number of results to return
             fuzzy: If True, use CONTAINS for fuzzy matching (default True)
+            accessible_doc_ids: Optional list of document IDs for access control filtering.
+                               If provided, only entities with document_id in this list are returned.
+                               If empty list, returns empty results.
 
         Returns:
             List of node properties
@@ -599,35 +617,78 @@ class Neo4jStorage(BaseGraphStorage):
         if not name or not name.strip():
             return []
 
+        # Access control: empty list means no access
+        if accessible_doc_ids is not None and len(accessible_doc_ids) == 0:
+            logger.warning("[Neo4j] Access control: no accessible documents - returning empty nodes")
+            return []
+
         name_lower = name.lower().strip()
         driver = self._get_driver()
         async with driver.session() as session:
-            if fuzzy:
-                # Fuzzy match using CONTAINS (case-insensitive)
-                result = await session.run(
-                    """
-                    MATCH (e:Entity {workspace_id: $workspace_id})
-                    WHERE toLower(e.name) CONTAINS $name_lower
-                    RETURN properties(e) as props
-                    LIMIT $limit
-                    """,
-                    workspace_id=self.workspace_id,
-                    name_lower=name_lower,
-                    limit=limit,
-                )
+            # Build WHERE clause based on access control
+            has_access_control = accessible_doc_ids is not None and len(accessible_doc_ids) > 0
+
+            if has_access_control:
+                logger.info(f"[Neo4j] Node search: filtering to {len(accessible_doc_ids)} accessible document IDs")
+
+                if fuzzy:
+                    # Fuzzy match with access control
+                    result = await session.run(
+                        """
+                        MATCH (e:Entity {workspace_id: $workspace_id})
+                        WHERE toLower(e.name) CONTAINS $name_lower
+                          AND e.document_id IN $accessible_doc_ids
+                        RETURN properties(e) as props
+                        LIMIT $limit
+                        """,
+                        workspace_id=self.workspace_id,
+                        name_lower=name_lower,
+                        accessible_doc_ids=accessible_doc_ids,
+                        limit=limit,
+                    )
+                else:
+                    # Exact match with access control
+                    result = await session.run(
+                        """
+                        MATCH (e:Entity {workspace_id: $workspace_id})
+                        WHERE toLower(e.name) = $name_lower
+                          AND e.document_id IN $accessible_doc_ids
+                        RETURN properties(e) as props
+                        LIMIT $limit
+                        """,
+                        workspace_id=self.workspace_id,
+                        name_lower=name_lower,
+                        accessible_doc_ids=accessible_doc_ids,
+                        limit=limit,
+                    )
             else:
-                # Exact match (case-insensitive)
-                result = await session.run(
-                    """
-                    MATCH (e:Entity {workspace_id: $workspace_id})
-                    WHERE toLower(e.name) = $name_lower
-                    RETURN properties(e) as props
-                    LIMIT $limit
-                    """,
-                    workspace_id=self.workspace_id,
-                    name_lower=name_lower,
-                    limit=limit,
-                )
+                # No access control (original behavior)
+                if fuzzy:
+                    # Fuzzy match using CONTAINS (case-insensitive)
+                    result = await session.run(
+                        """
+                        MATCH (e:Entity {workspace_id: $workspace_id})
+                        WHERE toLower(e.name) CONTAINS $name_lower
+                        RETURN properties(e) as props
+                        LIMIT $limit
+                        """,
+                        workspace_id=self.workspace_id,
+                        name_lower=name_lower,
+                        limit=limit,
+                    )
+                else:
+                    # Exact match (case-insensitive)
+                    result = await session.run(
+                        """
+                        MATCH (e:Entity {workspace_id: $workspace_id})
+                        WHERE toLower(e.name) = $name_lower
+                        RETURN properties(e) as props
+                        LIMIT $limit
+                        """,
+                        workspace_id=self.workspace_id,
+                        name_lower=name_lower,
+                        limit=limit,
+                    )
 
             nodes = []
             async for record in result:
@@ -746,6 +807,7 @@ class Neo4jStorage(BaseGraphStorage):
         limit: int = 10,
         min_score: float = 0.7,
         source_names: List[str] = None,
+        accessible_doc_ids: List[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for entities using vector similarity.
@@ -755,34 +817,56 @@ class Neo4jStorage(BaseGraphStorage):
             limit: Maximum number of results
             min_score: Minimum similarity score (0-1)
             source_names: Optional list of source document names to filter by
+            accessible_doc_ids: Optional list of document IDs for access control filtering.
+                               If provided, only entities with document_id in this list are returned.
+                               If empty list, returns empty results.
 
         Returns:
             List of entity dictionaries with similarity scores
         """
+        # Access control: empty list means no access
+        if accessible_doc_ids is not None and len(accessible_doc_ids) == 0:
+            logger.warning("[Neo4j] Access control: no accessible documents - returning empty entities")
+            return []
+
         driver = self._get_driver()
         async with driver.session() as session:
             try:
-                # If source filtering is required, use KNN pre-filtered search
-                # (Neo4j vector indexes don't support pre-filtering, so we filter first then compute similarity)
-                if source_names and len(source_names) > 0:
-                    query = """
+                # Build WHERE clause based on filters
+                # Priority: accessible_doc_ids > source_names
+                has_access_control = accessible_doc_ids is not None and len(accessible_doc_ids) > 0
+                has_source_filter = source_names is not None and len(source_names) > 0
+
+                if has_access_control or has_source_filter:
+                    # Use pre-filtered search (Neo4j vector indexes don't support pre-filtering)
+                    where_clauses = ["e.workspace_id = $workspace_id", "e.embedding IS NOT NULL"]
+                    params = {
+                        "embedding": query_embedding,
+                        "workspace_id": self.workspace_id,
+                        "min_score": min_score,
+                        "limit": limit,
+                    }
+
+                    # Add access control filter (takes priority)
+                    if has_access_control:
+                        where_clauses.append("e.document_id IN $accessible_doc_ids")
+                        params["accessible_doc_ids"] = accessible_doc_ids
+                        logger.info(f"[Neo4j] Entity search: filtering to {len(accessible_doc_ids)} accessible document IDs")
+
+                    # Add source filter if no access control
+                    if has_source_filter and not has_access_control:
+                        where_clauses.append("e.source_doc IN $source_names")
+                        params["source_names"] = source_names
+
+                    query = f"""
                         MATCH (e:Entity)
-                        WHERE e.workspace_id = $workspace_id
-                          AND e.source_doc IN $source_names
-                          AND e.embedding IS NOT NULL
+                        WHERE {' AND '.join(where_clauses)}
                         WITH e, vector.similarity.cosine(e.embedding, $embedding) AS score
                         WHERE score >= $min_score
                         RETURN properties(e) as props, score
                         ORDER BY score DESC
                         LIMIT $limit
                         """
-                    params = {
-                        "embedding": query_embedding,
-                        "workspace_id": self.workspace_id,
-                        "source_names": source_names,
-                        "min_score": min_score,
-                        "limit": limit,
-                    }
                 else:
                     # Use vector index for unfiltered search
                     query = """
@@ -805,7 +889,7 @@ class Neo4jStorage(BaseGraphStorage):
                     entity = dict(record["props"])
                     entity["_score"] = record["score"]
                     entities.append(entity)
-                    if not (source_names and len(source_names) > 0) and len(entities) >= limit:
+                    if not (has_access_control or has_source_filter) and len(entities) >= limit:
                         break
                 return entities
             except Exception as e:
@@ -818,6 +902,7 @@ class Neo4jStorage(BaseGraphStorage):
         limit: int = 10,
         min_score: float = 0.7,
         source_names: List[str] = None,
+        accessible_doc_ids: List[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Search for relationships using vector similarity.
@@ -827,21 +912,50 @@ class Neo4jStorage(BaseGraphStorage):
             limit: Maximum number of results
             min_score: Minimum similarity score (0-1)
             source_names: Optional list of source document names to filter by
+            accessible_doc_ids: Optional list of document IDs for access control filtering.
+                               If provided, only relationships with document_id in this list are returned.
+                               If empty list, returns empty results.
 
         Returns:
             List of relationship dictionaries with similarity scores
         """
+        # Access control: empty list means no access
+        if accessible_doc_ids is not None and len(accessible_doc_ids) == 0:
+            logger.warning("[Neo4j] Access control: no accessible documents - returning empty relationships")
+            return []
+
         driver = self._get_driver()
         async with driver.session() as session:
             try:
-                # If source filtering is required, use KNN pre-filtered search
-                # (Neo4j vector indexes don't support pre-filtering, so we filter first then compute similarity)
-                if source_names and len(source_names) > 0:
-                    query = """
+                # Build WHERE clause based on filters
+                # Priority: accessible_doc_ids > source_names
+                has_access_control = accessible_doc_ids is not None and len(accessible_doc_ids) > 0
+                has_source_filter = source_names is not None and len(source_names) > 0
+
+                if has_access_control or has_source_filter:
+                    # Use pre-filtered search (Neo4j vector indexes don't support pre-filtering)
+                    where_clauses = ["src.workspace_id = $workspace_id", "r.embedding IS NOT NULL"]
+                    params = {
+                        "embedding": query_embedding,
+                        "workspace_id": self.workspace_id,
+                        "min_score": min_score,
+                        "limit": limit,
+                    }
+
+                    # Add access control filter (takes priority)
+                    if has_access_control:
+                        where_clauses.append("r.document_id IN $accessible_doc_ids")
+                        params["accessible_doc_ids"] = accessible_doc_ids
+                        logger.info(f"[Neo4j] Relationship search: filtering to {len(accessible_doc_ids)} accessible document IDs")
+
+                    # Add source filter if no access control
+                    if has_source_filter and not has_access_control:
+                        where_clauses.append("r.source_doc IN $source_names")
+                        params["source_names"] = source_names
+
+                    query = f"""
                         MATCH (src:Entity)-[r:RELATES_TO]->(tgt:Entity)
-                        WHERE src.workspace_id = $workspace_id
-                          AND r.source_doc IN $source_names
-                          AND r.embedding IS NOT NULL
+                        WHERE {' AND '.join(where_clauses)}
                         WITH r, src, tgt, vector.similarity.cosine(r.embedding, $embedding) AS score
                         WHERE score >= $min_score
                         RETURN properties(r) as props,
@@ -853,13 +967,6 @@ class Neo4jStorage(BaseGraphStorage):
                         ORDER BY score DESC
                         LIMIT $limit
                         """
-                    params = {
-                        "embedding": query_embedding,
-                        "workspace_id": self.workspace_id,
-                        "source_names": source_names,
-                        "min_score": min_score,
-                        "limit": limit,
-                    }
                 else:
                     # Use vector index for unfiltered search
                     query = """

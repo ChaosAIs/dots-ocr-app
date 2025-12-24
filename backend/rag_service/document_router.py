@@ -76,7 +76,9 @@ class DocumentRouter:
     def route_query(
         self,
         query_metadata: Dict[str, Any],
-        original_query: Optional[str] = None
+        original_query: Optional[str] = None,
+        accessible_source_names: Optional[set] = None,  # DEPRECATED - use accessible_document_ids
+        accessible_document_ids: Optional[List[str]] = None
     ) -> List[str]:
         """
         Route query to most relevant documents based on metadata matching.
@@ -93,23 +95,51 @@ class DocumentRouter:
                 - document_type_hints: List[str]
                 - intent: str
             original_query: Original query text (required for vector/LLM scoring)
+            accessible_source_names: DEPRECATED - use accessible_document_ids instead.
+            accessible_document_ids: List of document IDs the user can access (for access control).
+                                     If provided, only documents with these IDs will be considered.
+                                     If empty list, no documents are accessible.
 
         Returns:
-            List of document source names to search (e.g., ["Felix Yang- Resume - 2025"])
-            Empty list means search all documents
+            List of document IDs to search (UUIDs as strings).
+            Empty list means no accessible documents.
         """
+        # Access control: Use document_ids if provided, otherwise fall back to source_names
+        if accessible_document_ids is not None:
+            if len(accessible_document_ids) == 0:
+                logger.warning("[Router] Access control: user has NO accessible documents - returning empty")
+                return []
+            else:
+                logger.info(f"[Router] Access control: limiting to {len(accessible_document_ids)} accessible document IDs")
+        elif accessible_source_names is not None:
+            # Deprecated path - log warning
+            logger.warning("[Router] Using deprecated accessible_source_names - please switch to accessible_document_ids")
+            if len(accessible_source_names) == 0:
+                logger.warning("[Router] Access control: user has NO accessible documents - returning empty")
+                return []
+            else:
+                logger.info(f"[Router] Access control: limiting to {len(accessible_source_names)} accessible sources")
+
         if not ENABLE_DOCUMENT_ROUTING:
-            logger.info("[Router] Document routing disabled, searching all documents")
+            logger.info("[Router] Document routing disabled, returning all accessible documents")
+            # If access control is active, return accessible document IDs
+            if accessible_document_ids is not None:
+                return list(accessible_document_ids)
             return []
 
         if not original_query:
-            logger.warning("[Router] No original query provided, searching all documents")
+            logger.warning("[Router] No original query provided, returning all accessible documents")
+            if accessible_document_ids is not None:
+                return list(accessible_document_ids)
             return []
 
         try:
             # Strategy 1: Try vector-based routing first (fastest)
             if self.use_vector_routing:
-                vector_results = self._route_with_vector_search(query_metadata, original_query)
+                vector_results = self._route_with_vector_search(
+                    query_metadata, original_query,
+                    accessible_document_ids=accessible_document_ids
+                )
 
                 if len(vector_results) >= self.vector_min_results:
                     logger.info(
@@ -131,7 +161,21 @@ class DocumentRouter:
             documents = self._get_documents_with_metadata()
 
             if not documents:
-                logger.warning("[Router] No documents with metadata found, searching all")
+                logger.warning("[Router] No documents with metadata found, returning accessible documents")
+                if accessible_document_ids is not None:
+                    return list(accessible_document_ids)
+                return []
+
+            # Filter documents by access control if provided
+            if accessible_document_ids is not None:
+                accessible_ids_set = set(accessible_document_ids)
+                original_count = len(documents)
+                documents = [doc for doc in documents if str(doc.get("id", "")) in accessible_ids_set]
+                if len(documents) < original_count:
+                    logger.info(f"[Router] Access control filtered documents: {original_count} -> {len(documents)}")
+
+            if not documents:
+                logger.warning("[Router] No accessible documents with metadata found after access control filter")
                 return []
 
             # Score and rank documents
@@ -152,31 +196,41 @@ class DocumentRouter:
                 return sources
             else:
                 logger.info("[Router] No documents met filtering criteria, searching all")
+                if accessible_source_names is not None:
+                    return list(accessible_source_names)
                 return []
 
         except Exception as e:
             logger.error(f"[Router] Error routing query: {e}", exc_info=True)
+            if accessible_document_ids is not None:
+                return list(accessible_document_ids)
             return []  # Fallback to searching all documents
 
     def _route_with_vector_search(
         self,
         query_metadata: Dict[str, Any],
-        original_query: str
+        original_query: str,
+        accessible_source_names: Optional[set] = None,  # DEPRECATED
+        accessible_document_ids: Optional[List[str]] = None
     ) -> List[str]:
         """
         Route query using vector search on metadata embeddings.
 
         Uses adaptive thresholding:
         1. Get top results with base threshold
-        2. Apply relative score filtering (must be >= 70% of top score)
+        2. Apply relative score filtering (must be >= X% of top score)
         3. Deduplicate results
+        4. Filter by accessible document IDs (if provided)
 
         Args:
             query_metadata: Metadata extracted from query
             original_query: Original query text
+            accessible_source_names: DEPRECATED - use accessible_document_ids
+            accessible_document_ids: List of document IDs the user can access.
+                                     If provided, only documents with these IDs will be returned.
 
         Returns:
-            List of unique source names from vector search results
+            List of document IDs (UUIDs as strings) from vector search results
         """
         try:
             from .vectorstore import (
@@ -203,8 +257,11 @@ class DocumentRouter:
             logger.info(f"[Router Vector]     \"{query_text}\"")
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-            # Search metadata collection
-            results = search_document_metadata(query_text)
+            # Search metadata collection with access control filtering at Qdrant level
+            results = search_document_metadata(
+                query_text,
+                accessible_document_ids=accessible_document_ids
+            )
 
             if not results:
                 logger.debug("[Router Vector] No results from metadata vector search")
@@ -375,18 +432,31 @@ class DocumentRouter:
             logger.info(f"[Router Vector]   • Formula: {top_score:.4f} × {VECTOR_ROUTING_RELATIVE_THRESHOLD} = {relative_threshold:.4f}")
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-            # Extract and deduplicate source names with adaptive filtering
-            seen_sources = set()
-            sources = []
+            # Extract and deduplicate document IDs with adaptive filtering
+            seen_doc_ids = set()
+            document_ids = []
             filtered_count = 0
             duplicate_count = 0
 
+            # Build set of accessible document IDs for fast lookup
+            accessible_ids_set = set(accessible_document_ids) if accessible_document_ids else None
+
             logger.info(f"[Router Vector] FILTERING RESULTS:")
             for result in results:
-                source_name = result.get("source_name")
+                # Get document_id from payload (same as point ID in metadata collection)
+                doc_id = result.get("payload", {}).get("document_id") or result.get("document_id")
+                source_name = result.get("source_name", "unknown")
                 score = result.get("score", 0)
 
-                if not source_name:
+                if not doc_id:
+                    logger.debug(f"[Router Vector]   ⊘ SKIP: {source_name} - no document_id")
+                    continue
+
+                # Apply access control FIRST - skip if not in accessible list
+                if accessible_ids_set is not None and doc_id not in accessible_ids_set:
+                    logger.debug(
+                        f"[Router Vector]   ✗ NO ACCESS: {source_name} ({doc_id[:8]}...)"
+                    )
                     continue
 
                 # Skip if below relative threshold
@@ -399,17 +469,17 @@ class DocumentRouter:
                     continue
 
                 # Deduplicate
-                if source_name in seen_sources:
+                if doc_id in seen_doc_ids:
                     duplicate_count += 1
                     logger.debug(
                         f"[Router Vector]   ⊘ DUPLICATE: {source_name:40s} (already added)"
                     )
                     continue
 
-                seen_sources.add(source_name)
-                sources.append(source_name)
+                seen_doc_ids.add(doc_id)
+                document_ids.append(doc_id)
                 logger.info(
-                    f"[Router Vector]   ✓ ACCEPTED: {source_name:40s} "
+                    f"[Router Vector]   ✓ ACCEPTED: {source_name:40s} ({doc_id[:8]}...) "
                     f"score={score:.4f} >= threshold={relative_threshold:.4f}"
                 )
 
@@ -417,13 +487,15 @@ class DocumentRouter:
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             logger.info(f"[Router Vector] FILTERING SUMMARY:")
             logger.info(f"[Router Vector]   • Total raw results:    {len(results)}")
-            logger.info(f"[Router Vector]   • Accepted (unique):    {len(sources)}")
+            logger.info(f"[Router Vector]   • Accepted (unique):    {len(document_ids)}")
             logger.info(f"[Router Vector]   • Filtered (low score): {filtered_count}")
             logger.info(f"[Router Vector]   • Skipped (duplicates): {duplicate_count}")
-            logger.info(f"[Router Vector]   • Final sources: {sources}")
+            if accessible_ids_set:
+                logger.info(f"[Router Vector]   • Access control:       {len(accessible_ids_set)} accessible IDs")
+            logger.info(f"[Router Vector]   • Final document_ids: {document_ids}")
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-            return sources
+            return document_ids
 
         except ImportError as e:
             logger.warning(f"[Router Vector] Vector search not available: {e}")

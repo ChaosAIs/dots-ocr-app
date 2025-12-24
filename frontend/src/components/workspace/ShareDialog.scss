@@ -1,0 +1,204 @@
+.share-dialog {
+  .share-dialog-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+
+    i {
+      font-size: 1.2rem;
+      color: var(--primary-color);
+    }
+  }
+
+  .share-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--surface-border);
+    padding-bottom: 12px;
+
+    .tab-button {
+      background: transparent;
+      border: none;
+      color: var(--text-color-secondary);
+      padding: 8px 16px;
+      border-radius: 6px;
+      transition: all 0.2s;
+
+      &:hover {
+        background: var(--surface-hover);
+        color: var(--text-color);
+      }
+
+      &.active {
+        background: var(--primary-color-light, rgba(99, 102, 241, 0.1));
+        color: var(--primary-color);
+      }
+
+      .p-button-icon {
+        margin-right: 6px;
+      }
+    }
+  }
+
+  .share-form {
+    .field {
+      margin-bottom: 1.25rem;
+
+      label {
+        display: block;
+        margin-bottom: 0.5rem;
+        font-weight: 500;
+        color: var(--text-color);
+      }
+
+      .field-help {
+        display: block;
+        margin-top: 0.5rem;
+        color: var(--text-color-secondary);
+        font-size: 0.85rem;
+      }
+    }
+
+    .recipients-chips {
+      width: 100%;
+
+      .p-chips-multiple-container {
+        width: 100%;
+        min-height: 42px;
+      }
+    }
+
+    .permissions-select {
+      width: 100%;
+    }
+
+    .message-input {
+      width: 100%;
+    }
+
+    .expires-calendar {
+      width: 100%;
+    }
+  }
+
+  .manage-shares {
+    min-height: 200px;
+
+    .loading-indicator {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      color: var(--text-color-secondary);
+
+      .pi-spinner {
+        font-size: 2rem;
+        margin-bottom: 10px;
+      }
+    }
+
+    .empty-message {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      color: var(--text-color-secondary);
+
+      i {
+        font-size: 3rem;
+        margin-bottom: 10px;
+        opacity: 0.5;
+      }
+
+      p {
+        margin: 0;
+      }
+    }
+
+    .shares-table {
+      .share-user {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+
+        .pi-user {
+          font-size: 1.2rem;
+          color: var(--text-color-secondary);
+        }
+
+        .user-info {
+          display: flex;
+          flex-direction: column;
+
+          .user-name {
+            font-weight: 500;
+          }
+
+          .user-email {
+            font-size: 0.85rem;
+            color: var(--text-color-secondary);
+          }
+        }
+      }
+
+      .permissions-list {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+
+        .permission-tag {
+          font-size: 0.75rem;
+          padding: 2px 8px;
+        }
+      }
+
+      .share-actions {
+        display: flex;
+        justify-content: flex-end;
+
+        .p-button {
+          width: 32px;
+          height: 32px;
+          padding: 0;
+        }
+      }
+    }
+  }
+
+  .dialog-footer {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+}
+
+// Permission tag colors
+.p-tag {
+  &.p-tag-info {
+    background: var(--blue-100);
+    color: var(--blue-700);
+  }
+
+  &.p-tag-warning {
+    background: var(--yellow-100);
+    color: var(--yellow-700);
+  }
+
+  &.p-tag-danger {
+    background: var(--red-100);
+    color: var(--red-700);
+  }
+
+  &.p-tag-success {
+    background: var(--green-100);
+    color: var(--green-700);
+  }
+
+  &.p-tag-primary {
+    background: var(--primary-100, rgba(99, 102, 241, 0.2));
+    color: var(--primary-700, #4338ca);
+  }
+}

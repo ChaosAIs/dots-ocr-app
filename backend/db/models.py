@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from uuid import UUID
 
-from sqlalchemy import Column, String, Integer, BigInteger, DateTime, Text, ForeignKey, Enum, Boolean
+from sqlalchemy import Column, String, Integer, BigInteger, DateTime, Text, ForeignKey, Enum, Boolean, ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
 from sqlalchemy.orm import declarative_base, relationship
 from sqlalchemy.sql import func
@@ -25,6 +25,29 @@ class UserStatus(str, enum.Enum):
     ACTIVE = "active"
     INACTIVE = "inactive"
     SUSPENDED = "suspended"
+
+
+# ===== Document Permission Enums =====
+
+class DocumentPermission(str, enum.Enum):
+    READ = "read"
+    UPDATE = "update"
+    DELETE = "delete"
+    SHARE = "share"
+    FULL = "full"
+
+
+class PermissionOrigin(str, enum.Enum):
+    OWNER = "owner"
+    SHARED = "shared"
+    ADMIN_GRANTED = "admin_granted"
+    PUBLIC = "public"
+
+
+class DocumentVisibility(str, enum.Enum):
+    PRIVATE = "private"
+    SHARED = "shared"
+    PUBLIC = "public"
 
 
 # ===== Document Management Enums =====
@@ -67,6 +90,7 @@ class User(Base):
 
     id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
     username = Column(String(100), nullable=False, unique=True, index=True)
+    normalized_username = Column(String(100), nullable=False, unique=True, index=True)  # Sanitized for folder paths
     email = Column(String(255), nullable=False, unique=True, index=True)
     password_hash = Column(String(255), nullable=False)
     full_name = Column(String(255))
@@ -106,6 +130,7 @@ class User(Base):
         return {
             "id": str(self.id),
             "username": self.username,
+            "normalized_username": self.normalized_username,
             "email": self.email,
             "full_name": self.full_name,
             "role": self.role.value if self.role else None,
@@ -113,6 +138,65 @@ class User(Base):
             "profile_data": self.profile_data,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
             "email_verified": self.email_verified,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ===== Workspace Management Models =====
+
+class Workspace(Base):
+    """Workspace model for organizing user documents into folders."""
+    __tablename__ = "workspaces"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    # Owner reference
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+
+    # Workspace identity
+    name = Column(String(100), nullable=False)  # Display name: "Project Alpha"
+    folder_name = Column(String(50), nullable=False)  # Physical folder name: "project_alpha"
+    folder_path = Column(String(200), nullable=False)  # Full relative path: "john_doe/project_alpha"
+
+    # Metadata
+    description = Column(Text, nullable=True)
+    color = Column(String(7), default='#6366f1')  # Hex color for UI
+    icon = Column(String(50), default='folder')  # Icon identifier
+
+    # Flags
+    is_default = Column(Boolean, default=False)  # User's default workspace
+    is_system = Column(Boolean, default=False)  # System workspace (e.g., "Shared With Me")
+
+    # Cached stats
+    document_count = Column(Integer, default=0)  # Cached for performance
+
+    # Display
+    display_order = Column(Integer, default=0)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    user = relationship("User", backref="workspaces")
+    documents = relationship("Document", back_populates="workspace")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "name": self.name,
+            "folder_name": self.folder_name,
+            "folder_path": self.folder_path,
+            "description": self.description,
+            "color": self.color,
+            "icon": self.icon,
+            "is_default": self.is_default,
+            "is_system": self.is_system,
+            "document_count": self.document_count,
+            "display_order": self.display_order,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -244,6 +328,11 @@ class Document(Base):
     output_path = Column(String(1000), nullable=True)
     file_size = Column(BigInteger, nullable=False)
     mime_type = Column(String(100), nullable=True)
+
+    # Workspace and ownership (added for access control)
+    workspace_id = Column(PGUUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="SET NULL"), nullable=True)
+    owner_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    visibility = Column(String(20), default='private')  # private, shared, public
     total_pages = Column(Integer, default=0)
     converted_pages = Column(Integer, default=0)
     indexed_chunks = Column(Integer, default=0)
@@ -291,6 +380,11 @@ class Document(Base):
     # Relationship to status logs
     status_logs = relationship("DocumentStatusLog", back_populates="document", cascade="all, delete-orphan")
 
+    # Workspace and owner relationships
+    workspace = relationship("Workspace", back_populates="documents")
+    owner = relationship("User", foreign_keys=[owner_id], backref="owned_documents")
+    user_permissions = relationship("UserDocument", back_populates="document", cascade="all, delete-orphan")
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -301,6 +395,10 @@ class Document(Base):
             "output_path": self.output_path,
             "file_size": self.file_size,
             "mime_type": self.mime_type,
+            # Workspace and ownership
+            "workspace_id": str(self.workspace_id) if self.workspace_id else None,
+            "owner_id": str(self.owner_id) if self.owner_id else None,
+            "visibility": self.visibility,
             "total_pages": self.total_pages,
             "converted_pages": self.converted_pages,
             "indexed_chunks": self.indexed_chunks,
@@ -391,3 +489,78 @@ class DocumentStatusLog(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
+
+# ===== Document Permissions Models =====
+
+class UserDocument(Base):
+    """Bridge table for user document permissions and access control."""
+    __tablename__ = "user_documents"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    # Core references
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    document_id = Column(PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
+
+    # Permission details - using PostgreSQL enum types
+    permissions = Column(
+        ARRAY(Enum(DocumentPermission, name="document_permission", create_type=False, values_callable=lambda x: [e.value for e in x])),
+        nullable=False,
+        default=['read']
+    )
+    origin = Column(
+        Enum(PermissionOrigin, name="permission_origin", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default='shared'
+    )
+    is_owner = Column(Boolean, nullable=False, default=False)
+
+    # Sharing metadata
+    shared_by = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    shared_at = Column(DateTime(timezone=True), nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    share_message = Column(Text, nullable=True)
+
+    # Notification
+    is_new = Column(Boolean, default=True)
+    viewed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # Access tracking
+    last_accessed_at = Column(DateTime(timezone=True), nullable=True)
+    access_count = Column(Integer, default=0)
+
+    # Audit
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    user = relationship("User", foreign_keys=[user_id], backref="document_permissions")
+    document = relationship("Document", back_populates="user_permissions")
+    shared_by_user = relationship("User", foreign_keys=[shared_by])
+
+    def has_permission(self, permission: str) -> bool:
+        """Check if user has a specific permission."""
+        if self.is_owner or 'full' in self.permissions:
+            return True
+        return permission in self.permissions
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary."""
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "document_id": str(self.document_id),
+            "permissions": self.permissions,
+            "origin": self.origin,
+            "is_owner": self.is_owner,
+            "shared_by": str(self.shared_by) if self.shared_by else None,
+            "shared_at": self.shared_at.isoformat() if self.shared_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "share_message": self.share_message,
+            "is_new": self.is_new,
+            "viewed_at": self.viewed_at.isoformat() if self.viewed_at else None,
+            "last_accessed_at": self.last_accessed_at.isoformat() if self.last_accessed_at else None,
+            "access_count": self.access_count,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

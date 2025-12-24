@@ -9,6 +9,7 @@ import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
 import { ChatHistory } from "./ChatHistory";
 import { useTranslation } from "react-i18next";
+import { useAuth } from "../../core/auth/components/authProvider";
 import "./AgenticChatBot.scss";
 
 // Get WebSocket URL from environment or use default
@@ -16,6 +17,7 @@ const WS_BASE_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8080";
 
 export const AgenticChatBot = () => {
   const { t } = useTranslation();
+  const { user } = useAuth();
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -441,6 +443,7 @@ export const AgenticChatBot = () => {
       wsRef.current.send(
         JSON.stringify({
           message: userMessage.content,
+          user_id: user?.id,
         })
       );
     } else {
@@ -523,11 +526,12 @@ export const AgenticChatBot = () => {
       wsRef.current.send(
         JSON.stringify({
           message: messageContent,
+          user_id: user?.id,
           is_retry: true,
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -687,11 +691,12 @@ export const AgenticChatBot = () => {
       wsRef.current.send(
         JSON.stringify({
           message: newContent,
+          user_id: user?.id,
           is_retry: true,
         })
       );
 
-      console.log(`[Retry] Sending edited message with is_retry=true: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({

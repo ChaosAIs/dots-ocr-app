@@ -61,7 +61,9 @@ class IterativeReasoningEngine:
         graphrag_enabled: bool = False,
         max_steps: int = None,
         source_names: Optional[List[str]] = None,
-        workspace_id: str = "default"
+        workspace_id: str = "default",
+        accessible_doc_ids: Optional[set] = None,
+        routed_document_ids: Optional[List[str]] = None
     ):
         """
         Initialize the iterative reasoning engine.
@@ -69,19 +71,37 @@ class IterativeReasoningEngine:
         Args:
             graphrag_enabled: Whether to use GraphRAG or vector-only retrieval
             max_steps: Maximum reasoning iterations (defaults to ITERATIVE_REASONING_DEFAULT_MAX_STEPS)
-            source_names: Optional list of source documents to filter
+            source_names: DEPRECATED - use routed_document_ids instead
             workspace_id: Workspace ID for multi-tenant isolation
+            accessible_doc_ids: Optional set of document IDs the user can access (for access control)
+            routed_document_ids: List of document IDs from router (already filtered by access control).
+                                 When provided, this takes precedence over accessible_doc_ids.
         """
         self.graphrag_enabled = graphrag_enabled
         self.max_steps = max_steps or DEFAULT_MAX_STEPS
-        self.source_names = source_names
+        self.source_names = source_names  # DEPRECATED
         self.workspace_id = workspace_id
+        self.accessible_doc_ids = accessible_doc_ids
+        self.routed_document_ids = routed_document_ids
 
-        # Initialize retriever
+        # Determine which document IDs to use for filtering
+        # Priority: routed_document_ids > accessible_doc_ids
+        effective_doc_ids = None
+        if routed_document_ids is not None and len(routed_document_ids) > 0:
+            # Use routed document IDs (already filtered by router + access control)
+            effective_doc_ids = set(routed_document_ids)
+            logger.info(f"[IterativeReasoning] Using {len(routed_document_ids)} routed document IDs for filtering")
+        elif accessible_doc_ids is not None:
+            # Fallback to full accessible doc IDs
+            effective_doc_ids = accessible_doc_ids
+            logger.info(f"[IterativeReasoning] Using {len(accessible_doc_ids)} accessible document IDs for filtering")
+
+        # Initialize retriever with effective document IDs
         self.retriever = UnifiedRetriever(
             graphrag_enabled=graphrag_enabled,
-            source_names=source_names,
-            workspace_id=workspace_id
+            source_names=None,  # DEPRECATED - not used
+            workspace_id=workspace_id,
+            accessible_doc_ids=effective_doc_ids
         )
 
         # LLM service (initialized lazily)
@@ -124,7 +144,7 @@ class IterativeReasoningEngine:
         logger.info(f"[IterativeReasoning] Question: {question}")
         logger.info(f"[IterativeReasoning] Max steps: {self.max_steps}")
         logger.info(f"[IterativeReasoning] GraphRAG enabled: {self.graphrag_enabled}")
-        logger.info(f"[IterativeReasoning] Source filter: {self.source_names}")
+        logger.info(f"[IterativeReasoning] Routed document IDs: {len(self.routed_document_ids) if self.routed_document_ids else 'None'}")
         logger.info(f"[IterativeReasoning] Retriever type: {type(self.retriever).__name__}")
         logger.info(f"[IterativeReasoning] Retriever.graphrag_enabled: {self.retriever.graphrag_enabled}")
         logger.info("-" * 70)

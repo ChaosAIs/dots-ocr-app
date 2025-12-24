@@ -5,7 +5,7 @@ Migration script to embed existing document metadata to the vector collection.
 This script:
 1. Queries all documents with document_metadata from PostgreSQL
 2. Generates embeddings for each document's metadata
-3. Upserts to the document_metadatas Qdrant collection
+3. Upserts to the metadatas Qdrant collection
 
 Usage:
     cd backend

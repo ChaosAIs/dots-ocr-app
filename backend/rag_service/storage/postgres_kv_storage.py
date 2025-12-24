@@ -6,7 +6,7 @@ Provides async KV storage operations on PostgreSQL tables for:
 
 Note: Other tables (graphrag_doc_full, graphrag_chunks, graphrag_entities,
 graphrag_hyperedges) were removed as they are redundant:
-- Chunks are stored in Qdrant (dots_ocr_documents collection)
+- Chunks are stored in Qdrant (documents collection)
 - Entities and relationships are stored in Neo4j
 """
 

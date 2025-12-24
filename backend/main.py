@@ -33,7 +33,7 @@ import json
 import time
 import hashlib
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request, Query
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, WebSocket, WebSocketDisconnect, Request, Query, Depends
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 import tempfile
@@ -74,15 +74,22 @@ except ImportError:
     GRAPH_RAG_QUERY_ENABLED = False
 
 # Import database services
-from db.database import init_db, get_db_session
+from sqlalchemy.orm import Session
+from db.database import init_db, get_db_session, get_db
 from db.document_repository import DocumentRepository
-from db.models import Document, UploadStatus, ConvertStatus, IndexStatus
+from db.workspace_repository import WorkspaceRepository
+from db.models import Document, UploadStatus, ConvertStatus, IndexStatus, User
 
 # Import authentication
 from auth.auth_api import router as auth_router
+from auth.dependencies import get_current_active_user
 
 # Import chat session management
 from chat_service.chat_session_api import router as chat_session_router
+
+# Import workspace and sharing APIs
+from services.workspace_api import router as workspace_router
+from services.sharing_api import router as sharing_router
 
 # Import task queue system (hierarchical)
 from queue_service import (
@@ -263,6 +270,8 @@ app.add_middleware(
 app.include_router(auth_router)  # Authentication endpoints
 app.include_router(chat_session_router)  # Chat session management endpoints
 app.include_router(chat_router)  # RAG chatbot endpoints
+app.include_router(workspace_router)  # Workspace management endpoints
+app.include_router(sharing_router)  # Document sharing endpoints
 
 # Initialize parser
 parser = DotsOCRParser()
@@ -274,6 +283,93 @@ OUTPUT_DIR = os.path.join(os.path.dirname(__file__), "output")
 # Create directories if they don't exist
 os.makedirs(INPUT_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def resolve_file_path(relative_or_absolute_path: str, base_dir: str = None) -> str:
+    """
+    Resolve a file path to absolute path.
+
+    If the path is already absolute and exists, return it as-is.
+    If the path is relative (e.g., "fyang/my_documents/file.png"),
+    prepend the base_dir (defaults to INPUT_DIR).
+
+    Args:
+        relative_or_absolute_path: The path from database (relative or legacy absolute)
+        base_dir: Base directory to prepend for relative paths (defaults to INPUT_DIR)
+
+    Returns:
+        Absolute path to the file
+    """
+    if base_dir is None:
+        base_dir = INPUT_DIR
+
+    # If path is already absolute and exists, use it
+    if os.path.isabs(relative_or_absolute_path):
+        if os.path.exists(relative_or_absolute_path):
+            return relative_or_absolute_path
+        # If absolute path doesn't exist, try extracting relative part
+        # This handles legacy paths like "/home/fy/.../input/fyang/file.png"
+        for known_base in [INPUT_DIR, OUTPUT_DIR]:
+            if known_base in relative_or_absolute_path:
+                relative_part = relative_or_absolute_path.split(known_base + os.sep)[-1]
+                candidate = os.path.join(base_dir, relative_part)
+                if os.path.exists(candidate):
+                    return candidate
+
+    # Relative path - prepend base directory
+    return os.path.join(base_dir, relative_or_absolute_path)
+
+
+def resolve_output_path(relative_or_absolute_path: str) -> str:
+    """
+    Resolve output path to absolute path.
+    Uses OUTPUT_DIR as the base directory.
+    """
+    return resolve_file_path(relative_or_absolute_path, OUTPUT_DIR)
+
+
+def to_relative_path(absolute_path: str, base_dir: str = None) -> str:
+    """
+    Convert an absolute path to a relative path for database storage.
+
+    Args:
+        absolute_path: The absolute path to convert
+        base_dir: Base directory to remove (defaults to INPUT_DIR, also tries OUTPUT_DIR)
+
+    Returns:
+        Relative path (e.g., "username/workspace/filename" instead of "/home/.../input/username/workspace/filename")
+    """
+    if not absolute_path:
+        return absolute_path
+
+    # If already relative, return as-is
+    if not os.path.isabs(absolute_path):
+        return absolute_path
+
+    # Try to strip known base directories
+    for known_base in [INPUT_DIR, OUTPUT_DIR]:
+        if absolute_path.startswith(known_base + os.sep):
+            return absolute_path[len(known_base) + 1:]  # +1 for the separator
+        elif absolute_path.startswith(known_base):
+            return absolute_path[len(known_base):].lstrip(os.sep)
+
+    # If custom base_dir provided, try that too
+    if base_dir:
+        if absolute_path.startswith(base_dir + os.sep):
+            return absolute_path[len(base_dir) + 1:]
+        elif absolute_path.startswith(base_dir):
+            return absolute_path[len(base_dir):].lstrip(os.sep)
+
+    # Couldn't convert - return original (should log a warning)
+    logger.warning(f"Could not convert absolute path to relative: {absolute_path}")
+    return absolute_path
+
+
+def to_relative_output_path(absolute_path: str) -> str:
+    """
+    Convert an absolute output path to a relative path for database storage.
+    """
+    return to_relative_path(absolute_path, OUTPUT_DIR)
 
 # Initialize document converter manager for Word/Excel/TXT files
 doc_converter_manager = DocumentConverterManager(
@@ -772,20 +868,45 @@ worker_pool = WorkerPool(num_workers=NUM_WORKERS, progress_callback=_worker_prog
 
 
 def _sync_files_to_database():
-    """Synchronize existing files in input directory with the database."""
+    """
+    Synchronize existing files in input directory with the database.
+
+    This function scans the input directory structure which follows the workspace pattern:
+    input/{normalized_username}/{workspace_folder}/{filename}
+
+    Note: This is a fallback sync mechanism. The primary document tracking is done via
+    the database when files are uploaded through the API with workspace context.
+    """
     try:
         with get_db_session() as db:
             repo = DocumentRepository(db)
             synced_count = 0
 
-            if os.path.exists(INPUT_DIR):
-                for filename in os.listdir(INPUT_DIR):
-                    file_path = os.path.join(INPUT_DIR, filename)
+            if not os.path.exists(INPUT_DIR):
+                logger.info("Input directory does not exist, skipping sync")
+                return
+
+            # Walk through all directories to find files (supports workspace structure)
+            for root, dirs, files in os.walk(INPUT_DIR):
+                for filename in files:
+                    file_path = os.path.join(root, filename)
 
                     if not os.path.isfile(file_path):
                         continue
 
-                    # Check if already in database
+                    # Skip hidden files and lock files
+                    if filename.startswith('.'):
+                        continue
+
+                    # Calculate relative path for database storage
+                    relative_path = os.path.relpath(file_path, INPUT_DIR)
+
+                    # Check if already in database by relative file_path
+                    existing_doc = repo.get_by_file_path(relative_path)
+                    if existing_doc:
+                        continue
+
+                    # Also check by filename for legacy compatibility
                     if repo.exists(filename):
                         continue
 
@@ -793,8 +914,15 @@ def _sync_files_to_database():
                     file_size = os.path.getsize(file_path)
                     file_name_without_ext = os.path.splitext(filename)[0]
 
-                    # Check conversion status
-                    markdown_exists, _, _, converted_pages = _check_markdown_exists(file_name_without_ext)
+                    # Determine output path based on input path structure
+                    rel_dir = os.path.dirname(relative_path)
+                    if rel_dir:
+                        output_base = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext)
+                    else:
+                        output_base = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+                    # Check conversion status using the correct output path
+                    markdown_exists, _, _, converted_pages = _check_markdown_exists_at_path(output_base)
                     total_pages = _get_pdf_page_count(file_path)
                     if total_pages == 0 and markdown_exists:
                         total_pages = 1
@@ -811,24 +939,24 @@ def _sync_files_to_database():
                     indexed = is_document_indexed(file_name_without_ext) if markdown_exists else False
                     index_status = IndexStatus.INDEXED if indexed else IndexStatus.PENDING
 
-                    # Create document record
+                    # Create document record with relative file path
                     doc = repo.create(
                         filename=filename,
                         original_filename=filename,
-                        file_path=file_path,
+                        file_path=relative_path,  # Store relative path, not absolute
                         file_size=file_size,
                         total_pages=total_pages,
                     )
 
                     # Update statuses
                     if convert_status != ConvertStatus.PENDING:
-                        output_path = os.path.join(OUTPUT_DIR, file_name_without_ext)
-                        repo.update_convert_status(doc, convert_status, converted_pages, output_path, "Synced from existing files")
+                        repo.update_convert_status(doc, convert_status, converted_pages, output_base, "Synced from existing files")
 
                     if index_status == IndexStatus.INDEXED:
                         repo.update_index_status(doc, index_status, message="Synced from existing index")
 
                     synced_count += 1
+                    logger.debug(f"Synced file: {file_path}")
 
             logger.info(f"Database sync complete: {synced_count} new documents synced")
     except Exception as e:
@@ -866,16 +994,29 @@ def _process_ocr_page_task(page_task) -> str:
             base_name = os.path.splitext(filename)[0]
             logger.info(f"🔄 Processing OCR for page {page_task.page_number} of document: {filename}")
 
-            # Get input file path
-            input_path = os.path.join(INPUT_DIR, filename)
-            if not os.path.exists(input_path):
-                raise FileNotFoundError(f"Input file not found: {input_path}")
+            # Get input file path from database (may be relative or legacy absolute)
+            db_file_path = doc.file_path
+            if not db_file_path:
+                # Fallback for legacy documents without file_path
+                db_file_path = filename
 
-            # Check expected page markdown file path (matches parser output format)
-            # Parser uses different naming for single-page vs multi-page documents:
-            # - Single page (images): {base_name}_nohf.md
-            # - Multi-page (PDFs): {base_name}_page_{N}_nohf.md
-            page_output_dir = os.path.join(OUTPUT_DIR, base_name)
+            # Resolve to absolute path (handles both relative and legacy absolute paths)
+            input_path = resolve_file_path(db_file_path)
+
+            if not os.path.exists(input_path):
+                raise FileNotFoundError(f"Input file not found: {input_path} (db path: {db_file_path})")
+
+            # Determine output directory - use workspace-based structure
+            # Output path mirrors input path structure: output/{workspace_folder}/{filename_base}/
+            if doc.output_path:
+                # Resolve output_path (may be relative or legacy absolute)
+                page_output_dir = resolve_output_path(doc.output_path)
+            else:
+                # Derive output path from input file_path (which is relative)
+                # input file_path: {normalized_username}/{workspace_folder}/{filename}
+                # output path: output/{normalized_username}/{workspace_folder}/{filename_base}/
+                rel_dir = os.path.dirname(db_file_path)  # e.g., "username/workspace_folder"
+                page_output_dir = os.path.join(OUTPUT_DIR, rel_dir, base_name) if rel_dir else os.path.join(OUTPUT_DIR, base_name)
 
             # Helper function to find the actual page markdown file
             def find_page_markdown(page_num: int, total_pages: int) -> str:
@@ -925,8 +1066,8 @@ def _process_ocr_page_task(page_task) -> str:
                     # The parser will skip existing pages
 
                 # Check if conversion is already in progress (another worker may have started it)
-                # Use a simple file lock
-                lock_file = os.path.join(OUTPUT_DIR, f".{base_name}.converting")
+                # Use a simple file lock in the output directory
+                lock_file = os.path.join(page_output_dir, f".{base_name}.converting")
 
                 if os.path.exists(lock_file):
                     # Conversion in progress - wait and check periodically
@@ -951,13 +1092,19 @@ def _process_ocr_page_task(page_task) -> str:
 
                         # Run OCR conversion for the entire document
                         # The parser will skip pages that already have output files
-                        logger.info(f"🚀 Starting OCR conversion for {filename}")
+                        # Use the parent of page_output_dir since parser creates a subdirectory with base_name
+                        parser_output_dir = os.path.dirname(page_output_dir)
+                        logger.info(f"🚀 Starting OCR conversion for {filename} -> {parser_output_dir}")
                         results = parser.parse_file(
                             input_path,
-                            output_dir=OUTPUT_DIR,
+                            output_dir=parser_output_dir,
                             prompt_mode="prompt_layout_all_en",
                         )
                         logger.info(f"✅ OCR conversion completed for {filename}: {len(results)} pages")
+
+                        # Update document output_path in database (store as relative path)
+                        doc.output_path = to_relative_output_path(page_output_dir)
+                        db.commit()
 
                     finally:
                         # Remove lock file
@@ -1909,13 +2056,18 @@ def _resize_image_if_needed(file_path: str, max_pixels: int = None) -> dict:
 
 
 @app.post("/upload")
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...),
+    workspace_id: Optional[str] = Form(default=None),
+    request: Request = None
+):
     """
     Upload a document file (PDF, image, DOC, EXCEL) to the input folder.
     Automatically resizes images that are too large to prevent OCR errors.
 
     Parameters:
     - file: The file to upload
+    - workspace_id: Optional workspace ID to upload to (uses default if not specified)
 
     Returns:
     - JSON with upload status and file information
@@ -1924,65 +2076,131 @@ async def upload_file(file: UploadFile = File(...)):
         if not file.filename:
             raise HTTPException(status_code=400, detail="No file provided")
 
-        # Save uploaded file to input directory
-        file_path = os.path.join(INPUT_DIR, file.filename)
+        logger.info(f"📁 Upload: {file.filename}, workspace_id={workspace_id}")
+        auth_header = request.headers.get("Authorization") if request else None
 
-        # Prevent directory traversal attacks
-        if not os.path.abspath(file_path).startswith(os.path.abspath(INPUT_DIR)):
-            raise HTTPException(status_code=400, detail="Invalid file path")
-
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-
-        # Resize image if needed
-        resize_info = _resize_image_if_needed(file_path)
-
-        file_size = os.path.getsize(file_path)
-        upload_time = datetime.now().isoformat()
-
-        # Create database record - this MUST succeed for upload to be valid
+        # Use a single database session for the entire operation
         with get_db_session() as db:
+            # Step 1: Determine upload path and get user/workspace info
+            user_id = None
+            owner_id = None
+            resolved_workspace_id = None
+            workspace_name = None
+            # Use relative paths for database storage
+            relative_path = file.filename  # Default fallback (just filename)
+            absolute_path = os.path.join(INPUT_DIR, file.filename)  # Default fallback for file system
+
+            # Try to get user from token
+            if auth_header and auth_header.startswith("Bearer "):
+                try:
+                    from auth.jwt_utils import JWTUtils
+                    from db.user_repository import UserRepository
+
+                    token = auth_header.split(" ")[1]
+                    payload = JWTUtils.verify_access_token(token)
+                    if payload:
+                        user_id = UUID(payload["sub"])
+                        user_repo = UserRepository(db)
+                        user = user_repo.get_user_by_id(user_id)
+                        if user:
+                            owner_id = user.id
+                            username = user.username
+                            logger.info(f"   User authenticated: {username}")
+
+                            # Get workspace folder path
+                            if workspace_id:
+                                try:
+                                    ws_uuid = UUID(workspace_id)
+                                    from db.workspace_repository import WorkspaceRepository
+                                    ws_repo = WorkspaceRepository(db)
+                                    workspace = ws_repo.get_workspace_by_id(ws_uuid)
+                                    if workspace and workspace.user_id == user_id:
+                                        resolved_workspace_id = workspace.id
+                                        workspace_name = workspace.name
+                                        folder_path = workspace.folder_path
+                                        # Store relative path in database (e.g., "fyang/my_documents/file.png")
+                                        relative_path = os.path.join(folder_path, file.filename)
+                                        # Use absolute path for file system operations
+                                        absolute_path = os.path.join(INPUT_DIR, folder_path, file.filename)
+                                        logger.info(f"   Using workspace: {workspace_name}")
+                                except Exception as e:
+                                    logger.warning(f"   Invalid workspace_id: {e}")
+
+                            # Fallback to default workspace if no valid workspace specified
+                            if not resolved_workspace_id:
+                                from db.workspace_repository import WorkspaceRepository
+                                ws_repo = WorkspaceRepository(db)
+                                workspace = ws_repo.get_or_create_default_workspace(user_id, user.normalized_username)
+                                resolved_workspace_id = workspace.id
+                                workspace_name = workspace.name
+                                folder_path = workspace.folder_path
+                                # Store relative path in database
+                                relative_path = os.path.join(folder_path, file.filename)
+                                # Use absolute path for file system operations
+                                absolute_path = os.path.join(INPUT_DIR, folder_path, file.filename)
+                                logger.info(f"   Using default workspace: {workspace_name}")
+                except Exception as e:
+                    logger.warning(f"   Auth error: {e}")
+
+            # Prevent directory traversal attacks
+            if not os.path.abspath(absolute_path).startswith(os.path.abspath(INPUT_DIR)):
+                raise HTTPException(status_code=400, detail="Invalid file path")
+
+            # Step 2: Save the file
+            os.makedirs(os.path.dirname(absolute_path), exist_ok=True)
+            with open(absolute_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+            logger.info(f"   File saved: {absolute_path} (relative: {relative_path})")
+
+            # Resize image if needed
+            resize_info = _resize_image_if_needed(absolute_path)
+            file_size = os.path.getsize(absolute_path)
+            upload_time = datetime.now().isoformat()
+
+            # Step 3: Create document record (store relative path in database)
             repo = DocumentRepository(db)
             doc, created = repo.get_or_create(
                 filename=file.filename,
                 original_filename=file.filename,
-                file_path=file_path,
+                file_path=relative_path,  # Store relative path, not absolute
                 file_size=file_size,
             )
             doc_id = str(doc.id)
-            if not created:
-                logger.info(f"Document record already exists: {file.filename}")
-            else:
-                logger.info(f"Created new document record: {file.filename} with ID: {doc_id}")
 
-            # Detect page count (for PDFs) or set to 1 (for images)
+            # Set workspace and owner
+            if resolved_workspace_id:
+                doc.workspace_id = resolved_workspace_id
+            if owner_id:
+                doc.owner_id = owner_id
+                doc.visibility = 'private'
+
+            # Detect page count
             try:
-                import fitz  # PyMuPDF
-                pdf_doc = fitz.open(file_path)
+                import fitz
+                pdf_doc = fitz.open(absolute_path)
                 total_pages = len(pdf_doc)
                 pdf_doc.close()
-                logger.info(f"📄 Detected {total_pages} pages in PDF: {file.filename}")
             except Exception:
-                total_pages = 1  # Single page for non-PDF files (images, etc.)
-                logger.info(f"🖼️ Non-PDF file, treating as single page: {file.filename}")
+                total_pages = 1
 
-            # Update document total_pages
             doc.total_pages = total_pages
-            db.commit()  # Commit the total_pages update
+            db.commit()
 
-            # Auto-create document task with page tasks if queue system is enabled
+            # Create owner permission if user is authenticated
+            if owner_id:
+                from services.permission_service import PermissionService
+                perm_service = PermissionService(db)
+                perm_service.grant_owner_permission(user_id=owner_id, document_id=doc.id)
+
+            # Auto-create document task if queue system is enabled
             if TASK_QUEUE_ENABLED and task_queue_manager:
-                # Create or reset page tasks for this document
                 task_created = task_queue_manager.create_document_task(
                     document_id=doc.id,
                     total_pages=total_pages,
                     db=db
                 )
                 if task_created:
-                    logger.info(f"✅ Created/verified {total_pages} page tasks for {file.filename}")
-                    # Broadcast upload event to notify frontend immediately
-                    # This allows frontend to show "Queued" status instead of "No Index"
                     document_status_manager.broadcast_from_thread({
                         "event_type": "document_uploaded",
                         "type": "document_status",
@@ -1993,40 +2211,31 @@ async def upload_file(file: UploadFile = File(...)):
                         "graphrag_status": "pending",
                         "total_pages": total_pages
                     })
-                else:
-                    logger.warning(f"⚠️ Failed to create page tasks for {file.filename}")
-            else:
-                logger.info(f"ℹ️ Task queue disabled or not initialized, skipping task creation for {file.filename}")
 
+            logger.info(f"✅ Upload complete: {file.filename} (doc_id={doc_id}, workspace={workspace_name})")
+
+        # Build response (outside session - using only simple values)
         response_data = {
             "status": "success",
-            "id": doc_id,  # Primary identifier - frontend expects 'id'
-            "document_id": doc_id,  # Keep for backward compatibility
+            "id": doc_id,
+            "document_id": doc_id,
             "filename": file.filename,
-            "file_path": file_path,
+            "file_path": relative_path,  # Return relative path, not absolute
             "file_size": file_size,
             "upload_time": upload_time,
         }
 
-        # Add resize information if image was resized
+        if resolved_workspace_id:
+            response_data["workspace_id"] = str(resolved_workspace_id)
+            response_data["workspace_name"] = workspace_name
+        if owner_id:
+            response_data["owner_id"] = str(owner_id)
+
         if resize_info["resized"]:
             response_data["resized"] = True
             response_data["original_size"] = resize_info["original_size"]
             response_data["new_size"] = resize_info["new_size"]
             response_data["resize_message"] = resize_info["message"]
-            logger.info(f"📏 Image resized: {resize_info['message']}")
-            logger.info(f"   Original: {resize_info['original_size'][0]}x{resize_info['original_size'][1]} = {resize_info['original_size'][0] * resize_info['original_size'][1]:,} pixels")
-            logger.info(f"   New: {resize_info['new_size'][0]}x{resize_info['new_size'][1]} = {resize_info['new_size'][0] * resize_info['new_size'][1]:,} pixels")
-            logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
-        elif resize_info['original_size'] is not None:
-            # Image file that didn't need resizing
-            orig_w, orig_h = resize_info['original_size']
-            logger.info(f"📏 Image size OK: {orig_w}x{orig_h} = {orig_w * orig_h:,} pixels")
-            logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
-        else:
-            # Non-image file (PDF, Excel, Word, etc.)
-            logger.info(f"📄 File uploaded: {file.filename}")
-            logger.info(f"   File size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
 
         return JSONResponse(content=response_data)
 
@@ -2036,9 +2245,44 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
 
 
+def _check_markdown_exists_at_path(output_dir: str) -> tuple:
+    """
+    Check if markdown file exists at a specific output directory path.
+    Handles both single markdown files and multi-page markdown files.
+
+    Args:
+        output_dir: Full path to the output directory (e.g., output/username/workspace/filename_base)
+
+    Returns:
+        (markdown_exists: bool, markdown_path: str or None, is_multipage: bool, converted_pages: int)
+    """
+    if not os.path.exists(output_dir):
+        return False, None, False, 0
+
+    base_name = os.path.basename(output_dir)
+
+    # Check for single markdown file (for single-page documents, images, Word, Excel, TXT)
+    markdown_path_nohf = os.path.join(output_dir, f"{base_name}_nohf.md")
+    if os.path.exists(markdown_path_nohf):
+        return True, markdown_path_nohf, False, 1
+
+    # Check for multi-page markdown files (for PDFs with multiple pages)
+    page_files = []
+    for file in os.listdir(output_dir):
+        if file.endswith("_nohf.md") and "_page_" in file:
+            page_files.append(file)
+
+    if page_files:
+        # Sort by page number
+        page_files.sort(key=lambda x: int(x.split("_page_")[1].split("_")[0]))
+        return True, os.path.join(output_dir, page_files[0]), True, len(page_files)
+
+    return False, None, False, 0
+
+
 def _check_markdown_exists(file_name_without_ext: str) -> tuple:
     """
-    Check if markdown file exists for a document.
+    Check if markdown file exists for a document (legacy function using default OUTPUT_DIR).
     Handles both single markdown files and multi-page markdown files.
     Both OCR and doc_service converters use _nohf.md format.
 
@@ -2046,26 +2290,7 @@ def _check_markdown_exists(file_name_without_ext: str) -> tuple:
     - (markdown_exists: bool, markdown_path: str or None, is_multipage: bool, converted_pages: int)
     """
     output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
-
-    # Check for single markdown file (for single-page documents, images, Word, Excel, TXT)
-    markdown_path_nohf = os.path.join(output_dir, f"{file_name_without_ext}_nohf.md")
-    if os.path.exists(markdown_path_nohf):
-        return True, markdown_path_nohf, False, 1
-
-    # Check for multi-page markdown files (for PDFs with multiple pages)
-    if os.path.exists(output_dir):
-        # Look for page-specific markdown files
-        page_files = []
-        for file in os.listdir(output_dir):
-            if file.endswith("_nohf.md") and "_page_" in file:
-                page_files.append(file)
-
-        if page_files:
-            # Sort by page number
-            page_files.sort(key=lambda x: int(x.split("_page_")[1].split("_")[0]))
-            return True, os.path.join(output_dir, page_files[0]), True, len(page_files)
-
-    return False, None, False, 0
+    return _check_markdown_exists_at_path(output_dir)
 
 
 def _get_pdf_page_count(file_path: str) -> int:
@@ -2090,9 +2315,18 @@ def _get_pdf_page_count(file_path: str) -> int:
 
 
 @app.get("/documents")
-async def list_documents():
+async def list_documents(
+    workspace_id: str = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
     """
-    List all uploaded documents with their conversion status.
+    List documents in a workspace with their conversion status.
+
+    AUTHENTICATION REQUIRED - Only returns documents from workspaces owned by the current user.
+
+    Parameters:
+    - workspace_id: Required workspace ID to filter documents by
 
     Returns:
     - JSON with list of documents and their markdown conversion status
@@ -2102,83 +2336,141 @@ async def list_documents():
     try:
         documents = []
 
-        # Sync any files that exist in input directory but not in database
-        # This ensures all files have database records with valid IDs
-        _sync_files_to_database()
+        # Debug logging
+        logger.info(f"📋 /documents endpoint called by user {current_user.username} with workspace_id: {workspace_id}")
 
-        # Get database records for faster lookup
-        db_docs = {}
+        # Workspace ID is required for security - no longer allow listing all documents
+        if not workspace_id:
+            raise HTTPException(
+                status_code=400,
+                detail="workspace_id is required"
+            )
+
+        # Parse and validate workspace ID
         try:
-            with get_db_session() as db:
-                repo = DocumentRepository(db)
-                for doc in repo.get_all():
-                    db_docs[doc.filename] = doc.to_dict()
-        except Exception as e:
-            logger.warning(f"Could not fetch database records: {e}")
+            ws_uuid = UUID(workspace_id)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid workspace_id format"
+            )
 
-        # List all files in input directory
-        if os.path.exists(INPUT_DIR):
-            for filename in os.listdir(INPUT_DIR):
-                file_path = os.path.join(INPUT_DIR, filename)
+        # Verify workspace ownership - user can only access their own workspaces
+        workspace_repo = WorkspaceRepository(db)
+        workspace = workspace_repo.get_workspace_by_id(ws_uuid)
 
-                # Skip directories
-                if not os.path.isfile(file_path):
-                    continue
+        if not workspace:
+            raise HTTPException(
+                status_code=404,
+                detail="Workspace not found"
+            )
 
-                # Get file info
-                file_size = os.path.getsize(file_path)
-                file_stat = os.stat(file_path)
-                upload_time = datetime.fromtimestamp(file_stat.st_mtime).isoformat()
+        if workspace.user_id != current_user.id:
+            raise HTTPException(
+                status_code=403,
+                detail="Access denied - you don't have permission to access this workspace"
+            )
 
-                # Check if markdown file exists (handles both single and multi-page)
-                file_name_without_ext = os.path.splitext(filename)[0]
-                markdown_exists, markdown_path, is_multipage, converted_pages = _check_markdown_exists(file_name_without_ext)
+        logger.info(f"📋 User {current_user.username} accessing workspace '{workspace.name}' (ID: {ws_uuid})")
 
-                # Get total page count for PDFs
-                total_pages = _get_pdf_page_count(file_path)
+        # Get documents from database - database is the source of truth
+        doc_repo = DocumentRepository(db)
+        all_docs = doc_repo.get_by_workspace(ws_uuid)
+        logger.info(f"📋 Found {len(all_docs)} documents for workspace {ws_uuid}")
 
-                # For non-PDF files, set total_pages to 1 if converted, 0 otherwise
-                if total_pages == 0 and markdown_exists:
-                    total_pages = 1
+        # Build document list from database records
+        for doc in all_docs:
+            db_info = doc.to_dict()
+            filename = doc.filename
+            # Get relative path from database and resolve to absolute
+            relative_file_path = db_info.get("file_path", filename)
+            absolute_file_path = resolve_file_path(relative_file_path)
 
-                # Check if document is indexed in vector database
-                indexed = is_document_indexed(file_name_without_ext) if markdown_exists else False
+            # Get file info from filesystem if exists (for file_size)
+            if os.path.isfile(absolute_file_path):
+                file_size = os.path.getsize(absolute_file_path)
+            else:
+                file_size = db_info.get("file_size", 0)
 
-                # Get database info if available
-                db_info = db_docs.get(filename, {})
+            # Check if markdown file exists (handles both single and multi-page)
+            file_name_without_ext = os.path.splitext(filename)[0]
 
-                # Get document_id - must have a valid ID after sync
-                document_id = db_info.get("id")
-                if not document_id:
-                    # If still no ID after sync, log warning and skip this file
-                    logger.warning(f"Skipping file {filename} - no database record found after sync")
-                    continue
+            # Determine output directory - use output_path from DB if available, otherwise derive from file_path
+            db_output_path = db_info.get("output_path")
+            if db_output_path:
+                # Resolve output_path (may be relative or absolute)
+                output_dir = resolve_output_path(db_output_path)
+                logger.debug(f"📂 Document '{filename}': Using db_output_path={db_output_path} -> resolved output_dir={output_dir}")
+            else:
+                # Derive from relative file_path
+                rel_dir = os.path.dirname(relative_file_path)
+                if rel_dir:
+                    output_dir = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext)
+                else:
+                    output_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
+                logger.debug(f"📂 Document '{filename}': Derived output_dir={output_dir} from file_path={relative_file_path}")
 
-                documents.append({
-                    "id": document_id,  # Primary identifier - frontend expects 'id'
-                    "document_id": document_id,  # Keep for backward compatibility
-                    "filename": filename,
-                    "file_path": file_path,
-                    "file_size": file_size,
-                    "upload_time": db_info.get("created_at") or upload_time,
-                    "markdown_exists": markdown_exists,
-                    "markdown_path": markdown_path if markdown_exists else None,
-                    "is_multipage": is_multipage,
-                    "total_pages": total_pages,
-                    "converted_pages": converted_pages,
-                    "indexed": indexed,
-                    # Database fields
-                    "upload_status": db_info.get("upload_status", "uploaded" if os.path.exists(file_path) else "pending"),
-                    "convert_status": db_info.get("convert_status", "converted" if markdown_exists else "pending"),
-                    "index_status": db_info.get("index_status", "indexed" if indexed else "pending"),
-                    "indexed_chunks": db_info.get("indexed_chunks", 0),
-                    "indexing_details": db_info.get("indexing_details"),  # Include granular indexing status
-                    "ocr_details": db_info.get("ocr_details"),  # Include granular OCR status
-                    # Hierarchical task queue status - for immediate queue feedback
-                    "ocr_status": db_info.get("ocr_status"),
-                    "vector_status": db_info.get("vector_status"),
-                    "graphrag_status": db_info.get("graphrag_status"),
-                })
+            # Use the path-aware function
+            markdown_exists, markdown_path, is_multipage, converted_pages = _check_markdown_exists_at_path(output_dir)
+            logger.debug(f"📂 Document '{filename}': markdown_exists={markdown_exists}, output_dir exists={os.path.exists(output_dir)}")
+
+            # Get total page count from database first
+            total_pages = db_info.get("total_pages", 0)
+            if total_pages == 0 and os.path.isfile(absolute_file_path):
+                total_pages = _get_pdf_page_count(absolute_file_path)
+
+            # For non-PDF files, set total_pages to 1 if converted, 0 otherwise
+            if total_pages == 0 and markdown_exists:
+                total_pages = 1
+
+            document_id = db_info.get("id")
+
+            # Use database status directly - don't assume/guess status
+            # The database is the source of truth for index status
+            db_index_status = db_info.get("index_status", "pending")
+            db_convert_status = db_info.get("convert_status", "pending")
+
+            # Get indexing details for granular status
+            indexing_details = db_info.get("indexing_details")
+
+            # Determine if fully indexed based on indexing_details
+            indexed = False
+            if indexing_details:
+                vector_status = indexing_details.get("vector_indexing", {}).get("status")
+                metadata_status = indexing_details.get("metadata_extraction", {}).get("status")
+                graphrag_status = indexing_details.get("graphrag_indexing", {}).get("status")
+                indexed = (vector_status == "completed" and
+                          metadata_status == "completed" and
+                          graphrag_status == "completed")
+            elif db_index_status == "indexed":
+                indexed = True
+
+            documents.append({
+                "id": document_id,
+                "document_id": document_id,
+                "filename": filename,
+                "file_path": relative_file_path,  # Return relative path to frontend
+                "file_size": file_size,
+                "upload_time": db_info.get("created_at"),
+                "markdown_exists": markdown_exists,
+                "markdown_path": markdown_path if markdown_exists else None,
+                "is_multipage": is_multipage,
+                "total_pages": total_pages,
+                "converted_pages": converted_pages,
+                "indexed": indexed,
+                # Use database status directly - don't override with guesses
+                "upload_status": db_info.get("upload_status", "pending"),
+                "convert_status": db_convert_status,
+                "index_status": db_index_status,
+                "indexed_chunks": db_info.get("indexed_chunks", 0),
+                "indexing_details": indexing_details,
+                "ocr_details": db_info.get("ocr_details"),
+                # Hierarchical task queue status
+                "ocr_status": db_info.get("ocr_status"),
+                "vector_status": db_info.get("vector_status"),
+                "graphrag_status": db_info.get("graphrag_status"),
+                "workspace_id": db_info.get("workspace_id"),
+            })
 
         return JSONResponse(content={
             "status": "success",
@@ -2186,16 +2478,27 @@ async def list_documents():
             "total": len(documents),
         })
 
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.error(f"Error listing documents: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error listing documents: {str(e)}")
 
 
-def _convert_with_doc_service(filename: str, conversion_id: str = None, progress_callback=None):
+def _convert_with_doc_service(filename: str, file_path: str = None, conversion_id: str = None, progress_callback=None):
     """Background task to convert document using doc_service - executed by worker pool"""
-    file_path = os.path.join(INPUT_DIR, filename)
-    file_path_obj = Path(file_path)
+    # file_path is relative from database, resolve to absolute
+    if not file_path:
+        # Fallback for legacy - just use filename
+        relative_path = filename
+    else:
+        relative_path = file_path
 
-    logger.info(f"Starting doc_service conversion for {filename}")
+    # Resolve to absolute path
+    absolute_file_path = resolve_file_path(relative_path)
+    file_path_obj = Path(absolute_file_path)
+
+    logger.info(f"Starting doc_service conversion for {filename} at {absolute_file_path} (relative: {relative_path})")
 
     # Send progress updates
     if progress_callback:
@@ -2209,10 +2512,16 @@ def _convert_with_doc_service(filename: str, conversion_id: str = None, progress
     if progress_callback:
         progress_callback(30, "Converting document to markdown...")
 
-    # Create output directory structure matching OCR parser format
-    # output/{filename_without_ext}/{filename_without_ext}_nohf.md
+    # Create output directory structure matching input relative path structure
+    # Derive output path from input path: {user}/{workspace}/{file} -> output/{user}/{workspace}/{base}/
+    rel_dir = os.path.dirname(relative_path)
     filename_without_ext = file_path_obj.stem
-    output_subdir = Path(OUTPUT_DIR) / filename_without_ext
+
+    if rel_dir and rel_dir != '.':
+        output_subdir = Path(OUTPUT_DIR) / rel_dir / filename_without_ext
+    else:
+        output_subdir = Path(OUTPUT_DIR) / filename_without_ext
+
     output_subdir.mkdir(parents=True, exist_ok=True)
 
     # Use _nohf.md suffix to match OCR format for frontend grid compatibility
@@ -2232,7 +2541,7 @@ def _convert_with_doc_service(filename: str, conversion_id: str = None, progress
     results = [{
         "page_no": 0,
         "md_content_path": str(output_path),
-        "file_path": file_path,
+        "file_path": absolute_file_path,
         "converter_type": "doc_service",
         "converter_name": converter.get_converter_info()["name"]
     }]
@@ -2241,16 +2550,35 @@ def _convert_with_doc_service(filename: str, conversion_id: str = None, progress
     return results
 
 
-def _convert_document_background(filename: str, prompt_mode: str, conversion_id: str = None, progress_callback=None):
+def _convert_document_background(filename: str, prompt_mode: str, file_path: str = None, conversion_id: str = None, progress_callback=None):
     """Background task to convert document using OCR parser - executed by worker pool"""
-    file_path = os.path.join(INPUT_DIR, filename)
+    # file_path is relative from database, resolve to absolute
+    if not file_path:
+        # Fallback for legacy - just use filename
+        relative_path = filename
+    else:
+        relative_path = file_path
 
-    logger.info(f"Starting OCR conversion for {filename}")
+    # Resolve to absolute path
+    absolute_file_path = resolve_file_path(relative_path)
+
+    logger.info(f"Starting OCR conversion for {filename} at {absolute_file_path} (relative: {relative_path})")
+
+    # Determine output directory based on input relative path structure
+    rel_dir = os.path.dirname(relative_path)
+
+    if rel_dir and rel_dir != '.':
+        output_dir = os.path.join(OUTPUT_DIR, rel_dir)
+    else:
+        output_dir = OUTPUT_DIR
+
+    # Ensure output directory exists
+    os.makedirs(output_dir, exist_ok=True)
 
     # Parse the file using the OCR parser with progress callback
     results = parser.parse_file(
-        file_path,
-        output_dir=OUTPUT_DIR,
+        absolute_file_path,  # Use resolved absolute path
+        output_dir=output_dir,
         prompt_mode=prompt_mode,
         progress_callback=progress_callback,
     )
@@ -2259,12 +2587,20 @@ def _convert_document_background(filename: str, prompt_mode: str, conversion_id:
     return results
 
 
-def _convert_with_deepseek_ocr(filename: str, conversion_id: str = None, progress_callback=None):
+def _convert_with_deepseek_ocr(filename: str, file_path: str = None, conversion_id: str = None, progress_callback=None):
     """Background task to convert image using DeepSeek OCR - executed by worker pool"""
-    file_path = os.path.join(INPUT_DIR, filename)
-    file_path_obj = Path(file_path)
+    # file_path is relative from database, resolve to absolute
+    if not file_path:
+        # Fallback for legacy - just use filename
+        relative_path = filename
+    else:
+        relative_path = file_path
 
-    logger.info(f"Starting DeepSeek OCR conversion for {filename}")
+    # Resolve to absolute path
+    absolute_file_path = resolve_file_path(relative_path)
+    file_path_obj = Path(absolute_file_path)
+
+    logger.info(f"Starting DeepSeek OCR conversion for {filename} at {absolute_file_path} (relative: {relative_path})")
 
     # Send progress updates
     if progress_callback:
@@ -2277,10 +2613,15 @@ def _convert_with_deepseek_ocr(filename: str, conversion_id: str = None, progres
     if progress_callback:
         progress_callback(30, "Converting image to markdown with DeepSeek OCR...")
 
-    # Create output directory structure matching OCR parser format
-    # output/{filename_without_ext}/{filename_without_ext}_nohf.md
+    # Create output directory structure matching input relative path structure
+    rel_dir = os.path.dirname(relative_path)
     filename_without_ext = file_path_obj.stem
-    output_subdir = Path(OUTPUT_DIR) / filename_without_ext
+
+    if rel_dir and rel_dir != '.':
+        output_subdir = Path(OUTPUT_DIR) / rel_dir / filename_without_ext
+    else:
+        output_subdir = Path(OUTPUT_DIR) / filename_without_ext
+
     output_subdir.mkdir(parents=True, exist_ok=True)
 
     # Use _nohf.md suffix to match OCR format for frontend grid compatibility
@@ -2333,11 +2674,17 @@ async def convert_document_with_doc_service(filename: str = Form(...)):
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
+        # Look up document in database to get the correct file path
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
 
-        file_path = os.path.join(INPUT_DIR, filename)
+            if doc and doc.file_path:
+                file_path = doc.file_path
+            else:
+                # Fallback for legacy documents or direct filename
+                file_path = os.path.join(INPUT_DIR, filename)
+
         file_path_obj = Path(file_path)
 
         # Check if file exists
@@ -2381,6 +2728,7 @@ async def convert_document_with_doc_service(filename: str = Form(...)):
             func=_convert_with_doc_service,
             args=(filename,),
             kwargs={
+                "file_path": file_path,
                 "conversion_id": conversion_id,
                 "progress_callback": progress_callback,
             }
@@ -2428,11 +2776,17 @@ async def convert_document_with_deepseek_ocr(filename: str = Form(...)):
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
+        # Look up document in database to get the correct file path
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
 
-        file_path = os.path.join(INPUT_DIR, filename)
+            if doc and doc.file_path:
+                file_path = doc.file_path
+            else:
+                # Fallback for legacy documents or direct filename
+                file_path = os.path.join(INPUT_DIR, filename)
+
         file_path_obj = Path(file_path)
 
         # Check if file exists
@@ -2476,6 +2830,7 @@ async def convert_document_with_deepseek_ocr(filename: str = Form(...)):
             func=_convert_with_deepseek_ocr,
             args=(filename,),
             kwargs={
+                "file_path": file_path,
                 "conversion_id": conversion_id,
                 "progress_callback": progress_callback,
             }
@@ -2523,11 +2878,16 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
+        # Look up document in database to get the correct file path
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
 
-        file_path = os.path.join(INPUT_DIR, filename)
+            if doc and doc.file_path:
+                file_path = doc.file_path
+            else:
+                # Fallback for legacy documents or direct filename
+                file_path = os.path.join(INPUT_DIR, filename)
 
         # Check if file exists
         if not os.path.exists(file_path):
@@ -2560,6 +2920,7 @@ async def convert_document(filename: str = Form(...), prompt_mode: str = Form("p
             func=_convert_document_background,
             args=(filename, prompt_mode),
             kwargs={
+                "file_path": file_path,
                 "conversion_id": conversion_id,
                 "progress_callback": progress_callback,
             }
@@ -2889,11 +3250,28 @@ async def list_markdown_files(filename: str):
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
+        # Look up document in database to get the correct output path
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            # Try with extension first, then without
+            doc = repo.get_by_filename(filename)
+            if not doc:
+                # Try common extensions
+                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                    doc = repo.get_by_filename(filename + ext)
+                    if doc:
+                        break
 
-        output_dir = os.path.join(OUTPUT_DIR, filename)
+            if doc and doc.output_path:
+                # Resolve relative or legacy absolute path
+                output_dir = resolve_output_path(doc.output_path)
+            elif doc and doc.file_path:
+                # Derive from input file_path (which is relative)
+                rel_dir = os.path.dirname(doc.file_path)
+                output_dir = os.path.join(OUTPUT_DIR, rel_dir, filename) if rel_dir else os.path.join(OUTPUT_DIR, filename)
+            else:
+                # Fallback to legacy path
+                output_dir = os.path.join(OUTPUT_DIR, filename)
 
         if not os.path.exists(output_dir):
             raise HTTPException(status_code=404, detail=f"No output directory for: {filename}")
@@ -2964,13 +3342,38 @@ async def get_markdown_content(filename: str, page_no: int = None):
         if ".." in filename or "/" in filename or "\\" in filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
+        # Look up document in database to get the correct output path
+        output_dir = None
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            # Try with extension first, then without
+            doc = repo.get_by_filename(filename)
+            if not doc:
+                # Try common extensions
+                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                    doc = repo.get_by_filename(filename + ext)
+                    if doc:
+                        break
+
+            if doc and doc.output_path:
+                # Resolve relative or legacy absolute path
+                output_dir = resolve_output_path(doc.output_path)
+            elif doc and doc.file_path:
+                # Derive from input file_path (which is relative)
+                rel_dir = os.path.dirname(doc.file_path)
+                output_dir = os.path.join(OUTPUT_DIR, rel_dir, filename) if rel_dir else os.path.join(OUTPUT_DIR, filename)
+
+        # Fallback to legacy path
+        if not output_dir:
+            output_dir = os.path.join(OUTPUT_DIR, filename)
+
         # Determine which markdown file to read
         if page_no is not None:
             # Read page-specific markdown file (multi-page PDFs)
-            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_page_{page_no}_nohf.md")
+            markdown_path = os.path.join(output_dir, f"{filename}_page_{page_no}_nohf.md")
         else:
             # Read single markdown file (single-page documents, images, Word, Excel, TXT)
-            markdown_path = os.path.join(OUTPUT_DIR, filename, f"{filename}_nohf.md")
+            markdown_path = os.path.join(output_dir, f"{filename}_nohf.md")
 
         if not os.path.exists(markdown_path):
             raise HTTPException(status_code=404, detail=f"Markdown file not found for: {filename}")
@@ -3327,12 +3730,23 @@ async def index_single_document(filename: str):
         if not filename:
             raise HTTPException(status_code=400, detail="No filename provided")
 
-        # Validate filename to prevent directory traversal
-        if ".." in filename or "/" in filename or "\\" in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
         file_name_without_ext = os.path.splitext(filename)[0]
-        doc_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
+
+        # Look up document in database to get the correct output path
+        with get_db_session() as db:
+            repo = DocumentRepository(db)
+            doc = repo.get_by_filename(filename)
+
+            if doc and doc.output_path:
+                # Resolve relative or legacy absolute path
+                doc_dir = resolve_output_path(doc.output_path)
+            elif doc and doc.file_path:
+                # Derive from input file_path (which is relative)
+                rel_dir = os.path.dirname(doc.file_path)
+                doc_dir = os.path.join(OUTPUT_DIR, rel_dir, file_name_without_ext) if rel_dir else os.path.join(OUTPUT_DIR, file_name_without_ext)
+            else:
+                # Fallback to legacy path
+                doc_dir = os.path.join(OUTPUT_DIR, file_name_without_ext)
 
         # Check if document directory exists
         if not os.path.exists(doc_dir):

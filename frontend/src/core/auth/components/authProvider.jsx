@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useContext } from "react";
 // import AuthService from "../authService"; // Temporarily disabled IAM SSO
 // import TempAuthService from "../tempAuthService"; // Using temporary auth service
 import authService from "../../../services/authService"; // Using real auth service
@@ -14,6 +14,21 @@ import authService from "../../../services/authService"; // Using real auth serv
  * Note: This looks like define an service interface.
  */
 export const AuthContext = React.createContext({});
+
+/**
+ * Hook to use auth context - provides easy access to auth state and methods
+ */
+export const useAuth = () => {
+  const context = useContext(AuthContext);
+  if (!context) {
+    throw new Error("useAuth must be used within an AuthProvider");
+  }
+  return {
+    ...context,
+    // Normalize isAuthenticated to be a boolean value for easier use
+    isAuthenticated: context.isAuthenticated ? context.isAuthenticated() : false,
+  };
+};
 
 /**
  * Consume the interfaces/properties defined in Authentication context.

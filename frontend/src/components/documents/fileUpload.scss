@@ -4,8 +4,22 @@
   border-radius: 8px;
   margin-bottom: 20px;
 
+  // When used inside a dialog, adjust styles
+  .p-dialog-content & {
+    padding: 0;
+    background-color: transparent;
+    margin-bottom: 0;
+  }
+
   .file-upload-header {
     margin-bottom: 20px;
+
+    // Hide title when inside a dialog (dialog has its own header)
+    .p-dialog-content & {
+      h2 {
+        display: none;
+      }
+    }
 
     h2 {
       margin: 0 0 10px 0;
@@ -17,6 +31,30 @@
       margin: 0;
       color: #666;
       font-size: 14px;
+    }
+
+    .workspace-info {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      padding: 8px 12px;
+      background-color: #fff;
+      border-radius: 6px;
+      border: 1px solid #e0e0e0;
+      font-size: 13px;
+
+      i {
+        font-size: 16px;
+      }
+
+      span {
+        color: #555;
+      }
+
+      strong {
+        color: #333;
+      }
     }
   }
 

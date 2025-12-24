@@ -22,6 +22,29 @@ from gemma_ocr_service.gemma3_ocr_converter import Gemma3OCRConverter
 from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
 
 
+def _to_relative_output_path(absolute_path: str) -> str:
+    """
+    Convert an absolute output path to a relative path for database storage.
+    Strips the OUTPUT_DIR prefix from the path.
+    """
+    if not absolute_path:
+        return absolute_path
+
+    # If already relative, return as-is
+    if not os.path.isabs(absolute_path):
+        return absolute_path
+
+    # Get OUTPUT_DIR from environment or use default
+    output_dir = os.getenv("OUTPUT_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "output"))
+
+    # Strip the OUTPUT_DIR prefix
+    if absolute_path.startswith(output_dir + os.sep):
+        return absolute_path[len(output_dir) + 1:]
+    elif absolute_path.startswith(output_dir):
+        return absolute_path[len(output_dir):].lstrip(os.sep)
+
+    return absolute_path
+
 
 class DotsOCRParser:
     """
@@ -906,8 +929,9 @@ class DotsOCRParser:
             from db.database import get_db_session
             from db.document_repository import DocumentRepository
 
-            # Determine page file path
-            page_file_path = os.path.join(save_dir, f"{filename}_page_{page_number}_nohf.md")
+            # Determine page file path (store as relative path for portability)
+            absolute_page_path = os.path.join(save_dir, f"{filename}_page_{page_number}_nohf.md")
+            page_file_path = _to_relative_output_path(absolute_page_path)
 
             # Count embedded images in the result
             embedded_images_count = 0

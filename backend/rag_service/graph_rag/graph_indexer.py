@@ -189,9 +189,11 @@ class GraphRAGIndexer:
         for i, chunk in enumerate(chunks):
             chunk_id = chunk.get("id", f"chunk_{i}")
             content = chunk.get("page_content", "")
+            chunk_metadata = chunk.get("metadata", {})
 
-            # Extract page number from metadata
-            page_number = chunk.get("metadata", {}).get("page")
+            # Extract page number and document_id from metadata
+            page_number = chunk_metadata.get("page")
+            document_id = chunk_metadata.get("document_id")  # Required for access control
 
             # Skip empty chunks
             if not content.strip():
@@ -279,6 +281,7 @@ class GraphRAGIndexer:
                         key_score=entity.key_score,
                         embedding=embedding,
                         metadata=entity.metadata,  # Pass entity metadata (includes date properties)
+                        document_id=document_id,  # Required for access control filtering
                     )
                     # Track entity type for relationship resolution
                     entity_type_map[entity.name.lower().strip()] = entity.entity_type
@@ -317,6 +320,7 @@ class GraphRAGIndexer:
                         source_chunk_id=chunk_id,
                         weight=rel.weight,
                         embedding=embedding,
+                        document_id=document_id,  # Required for access control filtering
                     )
 
                 total_relationships += len(relationships)
@@ -387,6 +391,9 @@ class GraphRAGIndexer:
         """
         Delete all GraphRAG data for a source document from Neo4j.
 
+        Note: Entity/relationship embeddings are stored natively in Neo4j (not Qdrant),
+        so deletion from Neo4j automatically removes the embeddings.
+
         Args:
             source_name: Source document name
         """
@@ -398,9 +405,10 @@ class GraphRAGIndexer:
         logger.info(f"[GraphRAG] Deleting data for document: {source_name}")
 
         # Delete from Neo4j graph using document-based deletion
+        # This removes entities, relationships, AND their embeddings (stored in Neo4j)
         try:
             count = await self._graph_storage.delete_by_document(source_name)
-            logger.info(f"[GraphRAG] Deleted {count} entities for document: {source_name}")
+            logger.info(f"[GraphRAG] Deleted {count} entities from Neo4j for document: {source_name}")
         except Exception as e:
             logger.warning(f"[GraphRAG] Error deleting from Neo4j: {e}")
 

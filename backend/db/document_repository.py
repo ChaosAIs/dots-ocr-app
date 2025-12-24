@@ -62,9 +62,21 @@ class DocumentRepository:
             and_(Document.id == doc_id, Document.deleted_at.is_(None))
         ).first()
 
+    def get_by_file_path(self, file_path: str) -> Optional[Document]:
+        """Get document by file path."""
+        return self.db.query(Document).filter(
+            and_(Document.file_path == file_path, Document.deleted_at.is_(None))
+        ).first()
+
     def get_all(self) -> List[Document]:
         """Get all active documents."""
         return self.db.query(Document).filter(Document.deleted_at.is_(None)).order_by(Document.created_at.desc()).all()
+
+    def get_by_workspace(self, workspace_id: UUID) -> List[Document]:
+        """Get all active documents in a specific workspace."""
+        return self.db.query(Document).filter(
+            and_(Document.deleted_at.is_(None), Document.workspace_id == workspace_id)
+        ).order_by(Document.created_at.desc()).all()
 
     def get_all_with_metadata(self) -> List[Document]:
         """Get all active documents that have metadata extracted."""
@@ -243,6 +255,24 @@ class DocumentRepository:
         return self.db.query(Document).filter(
             and_(Document.filename == filename, Document.deleted_at.is_(None))
         ).count() > 0
+
+    def get_by_source_name(self, source_name: str) -> Optional[Document]:
+        """
+        Get document by source name (filename without extension).
+        The source_name from markdown is the folder name, which matches filename without extension.
+
+        Args:
+            source_name: The source name (e.g., "my_document" for "my_document.pdf")
+
+        Returns:
+            Document if found, None otherwise
+        """
+        return self.db.query(Document).filter(
+            and_(
+                Document.filename.like(f"{source_name}.%"),
+                Document.deleted_at.is_(None)
+            )
+        ).first()
 
     def is_indexed(self, source_name: str) -> bool:
         """

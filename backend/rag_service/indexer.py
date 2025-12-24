@@ -90,6 +90,29 @@ def get_output_dir() -> str:
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")
 
 
+def _to_relative_output_path(absolute_path: str) -> str:
+    """
+    Convert an absolute output path to a relative path for database storage.
+    Strips the OUTPUT_DIR prefix from the path.
+    """
+    if not absolute_path:
+        return absolute_path
+
+    # If already relative, return as-is
+    if not os.path.isabs(absolute_path):
+        return absolute_path
+
+    output_dir = get_output_dir()
+
+    # Strip the OUTPUT_DIR prefix
+    if absolute_path.startswith(output_dir + os.sep):
+        return absolute_path[len(output_dir) + 1:]
+    elif absolute_path.startswith(output_dir):
+        return absolute_path[len(output_dir):].lstrip(os.sep)
+
+    return absolute_path
+
+
 def _is_document_fully_indexed_in_db(source_name: str) -> bool:
     """
     Check if a document is FULLY indexed in the database with granular status checking.
@@ -319,10 +342,32 @@ class MarkdownFileHandler(FileSystemEventHandler):
             result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
             if result.chunks:
+                # Get document_id from database - REQUIRED for access control filtering
+                document_id = None
+                if DB_AVAILABLE:
+                    try:
+                        with get_db_session() as db:
+                            repo = DocumentRepository(db)
+                            doc = repo.get_by_source_name(source_name)
+                            if doc:
+                                document_id = str(doc.id)
+                                logger.info(f"[Phase 1] Found document_id {document_id} for source {source_name}")
+                    except Exception as db_e:
+                        logger.error(f"[Phase 1] Could not get document_id for {source_name}: {db_e}")
+
+                # document_id is REQUIRED - fail if not found
+                if not document_id:
+                    logger.error(f"[Phase 1] CRITICAL: No document_id found for {source_name}. Chunks will not be indexed.")
+                    return
+
+                # Inject document_id into each chunk's metadata for access control filtering
+                for chunk in result.chunks:
+                    chunk.metadata["document_id"] = document_id
+
                 # Add chunks to Qdrant vectorstore
                 vectorstore = get_vectorstore()
                 vectorstore.add_documents(result.chunks)
-                logger.info(f"[Phase 1] Indexed {len(result.chunks)} chunks from {source_name} to Qdrant")
+                logger.info(f"[Phase 1] Indexed {len(result.chunks)} chunks from {source_name} to Qdrant (document_id: {document_id})")
 
                 # Mark as indexed in tracking
                 with _index_lock:
@@ -448,10 +493,33 @@ def index_existing_documents(output_dir: str = None):
                 result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
                 if result.chunks:
+                    # Get document_id from database - REQUIRED for access control filtering
+                    document_id = None
+                    if DB_AVAILABLE:
+                        try:
+                            with get_db_session() as db:
+                                repo = DocumentRepository(db)
+                                doc = repo.get_by_source_name(source_name)
+                                if doc:
+                                    document_id = str(doc.id)
+                                    logger.debug(f"[Phase 1] Found document_id {document_id} for source {source_name}")
+                        except Exception as db_e:
+                            logger.error(f"[Phase 1] Could not get document_id for {source_name}: {db_e}")
+
+                    # document_id is REQUIRED - skip if not found
+                    if not document_id:
+                        logger.error(f"[Phase 1] CRITICAL: No document_id found for {source_name}. Skipping chunk indexing.")
+                        continue
+
+                    # Inject document_id into each chunk's metadata for access control filtering
+                    for chunk in result.chunks:
+                        chunk.metadata["document_id"] = document_id
+
                     vectorstore = get_vectorstore()
                     vectorstore.add_documents(result.chunks)
                     total_chunks += len(result.chunks)
                     total_files += 1
+                    logger.info(f"[Phase 1] Indexed {len(result.chunks)} chunks from {source_name} (document_id: {document_id})")
 
                     # Collect chunks for Phase 2 (grouped by source)
                     if GRAPHRAG_AVAILABLE and GRAPH_RAG_INDEX_ENABLED:
@@ -938,22 +1006,30 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
         logger.warning(f"Document directory does not exist: {doc_dir}")
         return 0, []
 
-    # Get document from database for granular status tracking
+    # Get document from database for granular status tracking and document_id for metadata
+    # document_id is REQUIRED for access control filtering in vector search
     doc = None
     repo = None
+    document_id = None
     if DB_AVAILABLE and filename_with_ext:
         try:
             with get_db_session() as db:
                 repo = DocumentRepository(db)
                 doc = repo.get_by_filename(filename_with_ext)
                 if doc:
+                    document_id = str(doc.id)  # Store document_id for chunk metadata
                     # Initialize indexing_details structure
                     repo.init_indexing_details(doc)
                     # Mark vector indexing as started (with timestamp for orphan detection)
                     repo.start_vector_indexing(doc)
-                    logger.info(f"[Phase 1] Started vector indexing for: {filename_with_ext}")
+                    logger.info(f"[Phase 1] Started vector indexing for: {filename_with_ext} (document_id: {document_id})")
         except Exception as e:
-            logger.warning(f"Could not get document from database: {e}")
+            logger.error(f"Could not get document from database: {e}")
+
+    # document_id is REQUIRED - fail early if not found
+    if not document_id:
+        logger.error(f"[Phase 1] CRITICAL: No document_id found for {source_name}. Cannot index without document_id.")
+        return 0, []
 
     # Get list of successfully indexed pages to skip (if requested)
     successful_pages = set()
@@ -1003,6 +1079,11 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
             result = chunk_markdown_with_summaries(file_path, source_name, generate_summaries=True)
 
             if result.chunks:
+                # Inject document_id into each chunk's metadata for access control filtering
+                # document_id is guaranteed to exist (validated at function start)
+                for chunk in result.chunks:
+                    chunk.metadata["document_id"] = document_id
+
                 # Extract chunk IDs for status tracking
                 chunk_ids = [chunk.metadata.get("chunk_id", f"{source_name}_{i}") for i, chunk in enumerate(result.chunks)]
 
@@ -1021,7 +1102,7 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
                             if doc:
                                 repo.update_vector_indexing_status(
                                     doc,
-                                    page_file_path=file_path,
+                                    page_file_path=_to_relative_output_path(file_path),
                                     chunk_ids=chunk_ids,
                                     status="success",
                                     page_number=page_number
@@ -1063,7 +1144,7 @@ def _index_chunks_to_qdrant(source_name: str, output_dir: str = None, filename_w
                         if doc:
                             repo.update_vector_indexing_status(
                                 doc,
-                                page_file_path=file_path,
+                                page_file_path=_to_relative_output_path(file_path),
                                 chunk_ids=chunk_ids,
                                 status="failed",
                                 error=str(e),

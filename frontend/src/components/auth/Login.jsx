@@ -6,11 +6,12 @@ import { Password } from 'primereact/password';
 import { Button } from 'primereact/button';
 import { Checkbox } from 'primereact/checkbox';
 import { Toast } from 'primereact/toast';
-import authService from '../../services/authService';
+import { useAuth } from '../../core/auth/components/authProvider';
 import './Login.scss';
 
 export const Login = () => {
     const navigate = useNavigate();
+    const { login } = useAuth();
     const toast = React.useRef(null);
     
     const [formData, setFormData] = useState({
@@ -45,7 +46,8 @@ export const Login = () => {
         setLoading(true);
 
         try {
-            const result = await authService.login(formData.username, formData.password);
+            // Use the context's login function to update React state properly
+            const result = await login(formData.username, formData.password);
 
             if (result.success) {
                 toast.current.show({

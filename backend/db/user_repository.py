@@ -2,6 +2,7 @@
 User repository for database operations.
 """
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional, List
 from uuid import UUID
@@ -18,15 +19,75 @@ logger = logging.getLogger(__name__)
 
 class UserRepository:
     """Repository for user database operations."""
-    
+
     # Account locking configuration
     MAX_FAILED_ATTEMPTS = 5
     LOCKOUT_DURATION_MINUTES = 30
-    
+
     def __init__(self, db: Session):
         """Initialize repository with database session."""
         self.db = db
-    
+
+    @staticmethod
+    def normalize_name(name: str) -> str:
+        """
+        Normalize a name for filesystem-safe usage.
+
+        - Converts to lowercase
+        - Replaces spaces with underscores
+        - Removes special characters (keeps only alphanumeric and underscores)
+        - Limits to 100 characters
+        - Returns 'user' if result is empty
+
+        Args:
+            name: The name to normalize
+
+        Returns:
+            Normalized, filesystem-safe name
+        """
+        if not name:
+            return 'user'
+
+        # Convert to lowercase and replace spaces
+        normalized = name.lower().replace(' ', '_')
+        # Remove special characters (keep alphanumeric and underscores)
+        normalized = re.sub(r'[^a-z0-9_]', '', normalized)
+        # Limit length
+        normalized = normalized[:100]
+        # Ensure not empty
+        if not normalized:
+            normalized = 'user'
+        return normalized
+
+    def _ensure_unique_normalized_username(self, normalized: str, exclude_user_id: Optional[UUID] = None) -> str:
+        """
+        Ensure normalized username is unique by appending a counter if needed.
+
+        Args:
+            normalized: The base normalized username
+            exclude_user_id: User ID to exclude from uniqueness check (for updates)
+
+        Returns:
+            Unique normalized username
+        """
+        original = normalized
+        counter = 1
+
+        while True:
+            query = self.db.query(User).filter(User.normalized_username == normalized)
+            if exclude_user_id:
+                query = query.filter(User.id != exclude_user_id)
+
+            if not query.first():
+                return normalized
+
+            normalized = f"{original}_{counter}"
+            counter += 1
+
+            # Safety limit
+            if counter > 1000:
+                raise ValueError(f"Unable to generate unique normalized username for: {original}")
+
     def create_user(
         self,
         username: str,
@@ -38,9 +99,14 @@ class UserRepository:
     ) -> User:
         """Create a new user."""
         password_hash = PasswordUtils.hash_password(password)
-        
+
+        # Generate normalized username
+        normalized_username = self.normalize_name(username)
+        normalized_username = self._ensure_unique_normalized_username(normalized_username)
+
         user = User(
             username=username,
+            normalized_username=normalized_username,
             email=email,
             password_hash=password_hash,
             full_name=full_name,
@@ -48,12 +114,12 @@ class UserRepository:
             status=UserStatus.ACTIVE,
             created_by=created_by
         )
-        
+
         self.db.add(user)
         self.db.commit()
         self.db.refresh(user)
-        
-        logger.info(f"Created user: {username} (ID: {user.id})")
+
+        logger.info(f"Created user: {username} (normalized: {normalized_username}, ID: {user.id})")
         return user
     
     def get_user_by_id(self, user_id: UUID) -> Optional[User]:

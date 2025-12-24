@@ -7,10 +7,14 @@ import { Dialog } from "primereact/dialog";
 import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
+import { useWorkspace, WorkspaceEvents } from "../../contexts/WorkspaceContext";
 import MarkdownViewer from "./markdownViewer";
+import { DocumentFileUpload } from "./fileUpload";
 import "./documentList.scss";
 
-export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
+export const DocumentList = forwardRef((props, ref) => {
+  // Get workspace from context
+  const { currentWorkspace, currentWorkspaceId, subscribe } = useWorkspace();
   const { t, i18n, ready } = useTranslation();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -20,6 +24,7 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
   const [showStatusLogs, setShowStatusLogs] = useState(false); // status logs dialog
   const [statusLogs, setStatusLogs] = useState([]); // status logs data
   const [statusLogsLoading, setStatusLogsLoading] = useState(false);
+  const [showUploadDialog, setShowUploadDialog] = useState(false); // upload dialog
   const [tableKey, setTableKey] = useState(0); // Force DataTable re-render
   // Ref to store the latest loadDocuments function for WebSocket handler
   const loadDocumentsRef = useRef(null);
@@ -33,38 +38,8 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
   // Ref to store currently subscribed document IDs
   const subscribedDocIdsRef = useRef(new Set());
 
-  // Debug: Log whenever documents state changes
-  useEffect(() => {
-    console.log("🔄 Documents state changed! New count:", documents.length);
-    console.log("📊 Document statuses:", documents.map(d => ({
-      filename: d.filename,
-      index_status: d.index_status
-    })));
-  }, [documents]);
-
-  // Load documents on component mount and when refreshTrigger changes
-  useEffect(() => {
-    loadDocuments();
-    checkBatchIndexStatus(); // Check if batch indexing is in progress on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshTrigger]);
-
-  // Poll for batch index status when running
-  useEffect(() => {
-    let intervalId = null;
-    if (batchIndexStatus?.status === "running") {
-      intervalId = setInterval(() => {
-        checkBatchIndexStatus();
-      }, 2000); // Poll every 2 seconds
-    }
-    return () => {
-      if (intervalId) {
-        clearInterval(intervalId);
-      }
-    };
-  }, [batchIndexStatus?.status]);
-
   // Subscribe to document updates via WebSocket
+  // IMPORTANT: This must be defined before useEffects that depend on it
   const subscribeToDocuments = useCallback((documentIds) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       console.warn("⚠️ Cannot subscribe - WebSocket not connected");
@@ -94,6 +69,155 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
     // Update subscribed set
     newDocIds.forEach(id => subscribedDocIdsRef.current.add(id));
   }, []);
+
+  // Check batch index status - defined early since useEffects depend on it
+  const checkBatchIndexStatus = useCallback(async () => {
+    try {
+      const status = await documentService.getIndexStatus();
+      setBatchIndexStatus(status);
+    } catch (error) {
+      console.error("Error checking batch index status:", error);
+    }
+  }, []);
+
+  // Load documents - defined early since useEffects depend on it
+  const loadDocuments = useCallback(async () => {
+    console.log("🔄 loadDocuments() called - fetching documents from API...", currentWorkspaceId ? `workspace: ${currentWorkspaceId}` : "all workspaces");
+    try {
+      setLoading(true);
+      const response = await documentService.getDocuments(currentWorkspaceId);
+      console.log("📦 API response received:", response);
+      if (response.status === "success") {
+        // Sort documents by upload_time in descending order (newest first)
+        const sortedDocuments = (response.documents || []).sort((a, b) => {
+          const dateA = new Date(a.upload_time);
+          const dateB = new Date(b.upload_time);
+          return dateB - dateA; // Descending order
+        });
+        console.log("✅ Setting documents state with", sortedDocuments.length, "documents");
+        console.log("📄 Documents:", sortedDocuments.map(d => ({
+          filename: d.filename,
+          index_status: d.index_status,
+          markdown_exists: d.markdown_exists
+        })));
+        // Force new array reference to trigger DataTable re-render
+        setDocuments([...sortedDocuments]);
+        // Force DataTable to re-render by changing key
+        setTableKey(prev => prev + 1);
+        console.log("🔄 Forced DataTable re-render");
+
+        // Find in-progress documents and subscribe to them
+        const inProgressDocs = sortedDocuments.filter(doc =>
+          doc.convert_status === "converting" || doc.index_status === "indexing"
+        );
+
+        if (inProgressDocs.length > 0) {
+          const docIds = inProgressDocs.map(d => d.id);
+          console.log(`📊 Found ${inProgressDocs.length} in-progress documents - subscribing...`);
+          subscribeToDocuments(docIds);
+        } else {
+          console.log("✅ No in-progress documents found");
+        }
+      } else {
+        console.warn("⚠️ API response status is not 'success':", response.status);
+      }
+    } catch (error) {
+      messageService.errorToast(t("DocumentList.FailedToLoad"));
+      console.error("❌ Error loading documents:", error);
+    } finally {
+      setLoading(false);
+      console.log("✅ loadDocuments() completed");
+    }
+  }, [t, subscribeToDocuments, currentWorkspaceId]);
+
+  // Debug: Log whenever documents state changes
+  useEffect(() => {
+    console.log("🔄 Documents state changed! New count:", documents.length);
+    console.log("📊 Document statuses:", documents.map(d => ({
+      filename: d.filename,
+      index_status: d.index_status
+    })));
+  }, [documents]);
+
+  // Load documents on component mount or when workspace changes
+  useEffect(() => {
+    console.log("📋 DocumentList: Workspace changed to:", currentWorkspaceId);
+    // Only load when we have a valid workspace ID (not null and not undefined)
+    // null means workspace not selected yet, undefined means context not initialized
+    if (currentWorkspaceId) {
+      loadDocuments();
+      checkBatchIndexStatus();
+    } else {
+      // Clear documents when no workspace is selected
+      console.log("📋 DocumentList: No workspace selected, clearing documents");
+      setDocuments([]);
+    }
+  }, [currentWorkspaceId, loadDocuments, checkBatchIndexStatus]);
+
+  // Subscribe to workspace events for document refresh
+  // The event data contains the workspaceId to use for filtering
+  useEffect(() => {
+    const unsubscribe = subscribe(WorkspaceEvents.DOCUMENTS_REFRESH_NEEDED, async (data) => {
+      console.log("📋 DocumentList: Received DOCUMENTS_REFRESH_NEEDED event:", data);
+      // Use the workspaceId from event data since state might not be updated yet
+      const wsId = data?.workspaceId;
+      console.log("📋 DocumentList: Loading documents for workspace:", wsId);
+
+      // Only load if we have a valid workspace ID
+      if (!wsId) {
+        console.log("📋 DocumentList: No workspace ID in event, clearing documents");
+        setDocuments([]);
+        return;
+      }
+
+      try {
+        setLoading(true);
+        const response = await documentService.getDocuments(wsId);
+        console.log("📦 API response received:", response);
+        if (response.status === "success") {
+          const sortedDocuments = (response.documents || []).sort((a, b) => {
+            const dateA = new Date(a.upload_time);
+            const dateB = new Date(b.upload_time);
+            return dateB - dateA;
+          });
+          console.log("✅ Setting documents state with", sortedDocuments.length, "documents");
+          setDocuments([...sortedDocuments]);
+          setTableKey(prev => prev + 1);
+
+          // Subscribe to in-progress documents
+          const inProgressDocs = sortedDocuments.filter(doc =>
+            doc.convert_status === "converting" || doc.index_status === "indexing"
+          );
+          if (inProgressDocs.length > 0) {
+            const docIds = inProgressDocs.map(d => d.id);
+            subscribeToDocuments(docIds);
+          }
+        }
+      } catch (error) {
+        messageService.errorToast(t("DocumentList.FailedToLoad"));
+        console.error("❌ Error loading documents:", error);
+      } finally {
+        setLoading(false);
+      }
+    });
+
+    return () => unsubscribe();
+  }, [subscribe, subscribeToDocuments, t]);
+
+  // Poll for batch index status when running
+  useEffect(() => {
+    let intervalId = null;
+    if (batchIndexStatus?.status === "running") {
+      intervalId = setInterval(() => {
+        checkBatchIndexStatus();
+      }, 2000); // Poll every 2 seconds
+    }
+    return () => {
+      if (intervalId) {
+        clearInterval(intervalId);
+      }
+    };
+  }, [batchIndexStatus?.status, checkBatchIndexStatus]);
 
   // Expose subscribeToDocuments method to parent component via ref
   useImperativeHandle(ref, () => ({
@@ -245,64 +369,6 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
     // The i18n.language property will trigger a re-render
   }, [i18n.language]);
 
-  const checkBatchIndexStatus = async () => {
-    try {
-      const status = await documentService.getIndexStatus();
-      setBatchIndexStatus(status);
-    } catch (error) {
-      console.error("Error checking batch index status:", error);
-    }
-  };
-
-  const loadDocuments = useCallback(async () => {
-    console.log("🔄 loadDocuments() called - fetching documents from API...");
-    try {
-      setLoading(true);
-      const response = await documentService.getDocuments();
-      console.log("📦 API response received:", response);
-      if (response.status === "success") {
-        // Sort documents by upload_time in descending order (newest first)
-        const sortedDocuments = (response.documents || []).sort((a, b) => {
-          const dateA = new Date(a.upload_time);
-          const dateB = new Date(b.upload_time);
-          return dateB - dateA; // Descending order
-        });
-        console.log("✅ Setting documents state with", sortedDocuments.length, "documents");
-        console.log("📄 Documents:", sortedDocuments.map(d => ({
-          filename: d.filename,
-          index_status: d.index_status,
-          markdown_exists: d.markdown_exists
-        })));
-        // Force new array reference to trigger DataTable re-render
-        setDocuments([...sortedDocuments]);
-        // Force DataTable to re-render by changing key
-        setTableKey(prev => prev + 1);
-        console.log("🔄 Forced DataTable re-render");
-
-        // Find in-progress documents and subscribe to them
-        const inProgressDocs = sortedDocuments.filter(doc =>
-          doc.convert_status === "converting" || doc.index_status === "indexing"
-        );
-
-        if (inProgressDocs.length > 0) {
-          const docIds = inProgressDocs.map(d => d.id);
-          console.log(`📊 Found ${inProgressDocs.length} in-progress documents - subscribing...`);
-          subscribeToDocuments(docIds);
-        } else {
-          console.log("✅ No in-progress documents found");
-        }
-      } else {
-        console.warn("⚠️ API response status is not 'success':", response.status);
-      }
-    } catch (error) {
-      messageService.errorToast(t("DocumentList.FailedToLoad"));
-      console.error("❌ Error loading documents:", error);
-    } finally {
-      setLoading(false);
-      console.log("✅ loadDocuments() completed");
-    }
-  }, [t, subscribeToDocuments]);
-
   // Update ref whenever loadDocuments changes
   useEffect(() => {
     loadDocumentsRef.current = loadDocuments;
@@ -382,6 +448,22 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
     }
   };
 
+  // Handle upload success - subscribe to new documents and refresh list
+  const handleUploadSuccess = useCallback((uploadedDocIds) => {
+    console.log(`📋 DocumentList: Upload success with ${uploadedDocIds?.length || 0} document IDs:`, uploadedDocIds);
+
+    // Subscribe to newly uploaded documents for status updates
+    if (uploadedDocIds && uploadedDocIds.length > 0) {
+      subscribeToDocuments(uploadedDocIds);
+    }
+
+    // Refresh the document list
+    loadDocuments();
+
+    // Close the upload dialog
+    setShowUploadDialog(false);
+  }, [subscribeToDocuments, loadDocuments]);
+
 
 
 
@@ -445,6 +527,24 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
     );
   };
 
+  // Helper function to map workspace icon names to PrimeIcons classes (same as sidebar)
+  const getWorkspaceIconClass = (iconName) => {
+    const iconMap = {
+      folder: "pi-folder",
+      briefcase: "pi-briefcase",
+      book: "pi-book",
+      home: "pi-home",
+      star: "pi-star",
+      heart: "pi-heart",
+      tag: "pi-tag",
+      bookmark: "pi-bookmark",
+      flag: "pi-flag",
+      inbox: "pi-inbox",
+      share: "pi-share-alt"
+    };
+    return iconMap[iconName] || "pi-folder";
+  };
+
   const fileSizeBodyTemplate = (rowData) => {
     return documentService.formatFileSize(rowData.file_size);
   };
@@ -460,8 +560,8 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
       total_pages = 0,
       converted_pages = 0,
       convert_status,
+      index_status,  // Database index status
       indexing_details,
-      ocr_status,  // Hierarchical task queue status
     } = rowData;
 
     // Check indexing phases
@@ -486,39 +586,31 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
     const graphragFailed = graphragStatus === "failed";
 
     const anyIndexingProcessing = vectorProcessing || metadataProcessing || graphragProcessing;
-    const anyIndexingPending = (vectorPending || metadataPending || graphragPending) && markdown_exists;
+    // Check if document is converted based on DB status or markdown_exists
+    const isConverted = markdown_exists || convert_status === "converted";
+    const anyIndexingPending = (vectorPending || metadataPending || graphragPending) && isConverted;
 
     // Determine status based on all phases
     let statusText, statusClass;
 
-    // Check conversion status first
-    if (!markdown_exists && (convert_status === "converting" || ocr_status === "processing")) {
-      // OCR conversion in progress
-      statusText = t("DocumentList.Indexing");
-      statusClass = "indexing";
-    } else if (!markdown_exists && (ocr_status === "pending" || convert_status === "pending")) {
-      // Queued for processing - show "Queued" instead of "No Index"
-      statusText = t("DocumentList.Queued");
-      statusClass = "queued";
-    } else if (!markdown_exists) {
-      // Just uploaded, not converted yet (fallback)
-      statusText = t("DocumentList.NoIndex");
-      statusClass = "no-index";
-    } else if (convert_status === "failed") {
-      statusText = t("DocumentList.ConversionFailed");
+    // First check if fully indexed based on indexing_details or index_status
+    // This takes priority over markdown_exists check since database is source of truth
+    if (vectorComplete && metadataComplete && graphragComplete) {
+      // All phases complete - fully indexed
+      statusText = t("DocumentList.FullyIndexed");
+      statusClass = "indexed";
+    } else if (index_status === "indexed" && !anyIndexingProcessing) {
+      // Database says indexed (legacy or simple case)
+      statusText = t("DocumentList.FullyIndexed");
+      statusClass = "indexed";
+    } else if (vectorFailed || metadataFailed || graphragFailed) {
+      // Any indexing phase failed
+      statusText = t("DocumentList.IndexingFailed");
       statusClass = "failed";
     } else if (total_pages > 0 && converted_pages > 0 && converted_pages < total_pages) {
       // Only show partial if conversion was started (converted_pages > 0)
       statusText = `${t("DocumentList.Partial")} (${converted_pages}/${total_pages})`;
       statusClass = "partial";
-    } else if (vectorFailed || metadataFailed || graphragFailed) {
-      // Any indexing phase failed
-      statusText = t("DocumentList.IndexingFailed");
-      statusClass = "failed";
-    } else if (vectorComplete && metadataComplete && graphragComplete) {
-      // All phases complete
-      statusText = t("DocumentList.FullyIndexed");
-      statusClass = "indexed";
     } else if (anyIndexingProcessing) {
       // Any indexing phase is currently processing
       if (graphragProcessing) {
@@ -537,11 +629,16 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
       // Converted but indexing not started or pending
       statusText = t("DocumentList.Indexing");
       statusClass = "indexing";
-    } else if (markdown_exists) {
-      // Converted but not indexed yet (fallback - shouldn't normally reach here)
+    } else if (!isConverted && (convert_status === "converting" || convert_status === "pending")) {
+      // OCR conversion in progress or queued
+      statusText = convert_status === "converting" ? t("DocumentList.Indexing") : t("DocumentList.Queued");
+      statusClass = convert_status === "converting" ? "indexing" : "queued";
+    } else if (isConverted) {
+      // Converted but not indexed yet (fallback)
       statusText = t("DocumentList.Converted");
       statusClass = "converted";
     } else {
+      // Not converted yet (fallback)
       statusText = t("DocumentList.NoIndex");
       statusClass = "no-index";
     }
@@ -617,11 +714,35 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
 
   return (
     <div className="document-list-container">
+      {/* Workspace Info Header */}
+      {currentWorkspace && (
+        <div className="workspace-info-header">
+          <div className="workspace-icon" style={{ backgroundColor: currentWorkspace.color || '#6366f1' }}>
+            <i className={`pi ${getWorkspaceIconClass(currentWorkspace.icon)}`} />
+          </div>
+          <div className="workspace-details">
+            <h3 className="workspace-name">{currentWorkspace.name}</h3>
+            {currentWorkspace.description && (
+              <p className="workspace-description">{currentWorkspace.description}</p>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="document-list-header">
         <h2>{t("DocumentList.Title")}</h2>
         <div className="header-actions">
           {/* Auto-processing status indicator */}
           {renderBatchIndexStatus()}
+          <Button
+            icon="pi pi-upload"
+            label={t("DocumentList.Upload")}
+            className="p-button-primary upload-btn"
+            onClick={() => setShowUploadDialog(true)}
+            disabled={!currentWorkspaceId}
+            tooltip={!currentWorkspaceId ? t("DocumentList.SelectWorkspaceFirst") : t("DocumentList.UploadDocuments")}
+            tooltipPosition="top"
+          />
           <Button
             icon="pi pi-refresh"
             className="p-button-rounded p-button-text"
@@ -715,6 +836,17 @@ export const DocumentList = forwardRef(({ refreshTrigger }, ref) => {
             <Column field="message" header={t("DocumentList.Message")} />
           </DataTable>
         )}
+      </Dialog>
+
+      {/* Upload Documents Dialog */}
+      <Dialog
+        header={t("FileUpload.Title")}
+        visible={showUploadDialog}
+        style={{ width: "50vw", maxWidth: "700px" }}
+        onHide={() => setShowUploadDialog(false)}
+        className="upload-dialog"
+      >
+        <DocumentFileUpload onUploadSuccess={handleUploadSuccess} />
       </Dialog>
     </div>
   );

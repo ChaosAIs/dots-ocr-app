@@ -11,12 +11,41 @@ Key Features:
 - Supports selective re-indexing by phase (vector, metadata, GraphRAG)
 """
 
+import os
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from langchain_core.documents import Document
 
 logger = logging.getLogger(__name__)
+
+
+def _get_output_dir() -> str:
+    """Get the output directory from environment or default."""
+    return os.getenv("OUTPUT_DIR", os.path.join(os.path.dirname(os.path.dirname(__file__)), "output"))
+
+
+def _to_relative_output_path(absolute_path: str) -> str:
+    """
+    Convert an absolute output path to a relative path for database storage.
+    Strips the OUTPUT_DIR prefix from the path.
+    """
+    if not absolute_path:
+        return absolute_path
+
+    # If already relative, return as-is
+    if not os.path.isabs(absolute_path):
+        return absolute_path
+
+    output_dir = _get_output_dir()
+
+    # Strip the OUTPUT_DIR prefix
+    if absolute_path.startswith(output_dir + os.sep):
+        return absolute_path[len(output_dir) + 1:]
+    elif absolute_path.startswith(output_dir):
+        return absolute_path[len(output_dir):].lstrip(os.sep)
+
+    return absolute_path
 
 
 def get_chunks_from_markdown_files(
@@ -193,7 +222,7 @@ def reindex_failed_vector_pages(
                 if doc:
                     repo.update_vector_indexing_status(
                         doc,
-                        page_file_path=file_path,
+                        page_file_path=_to_relative_output_path(file_path),
                         chunk_ids=chunk_ids,
                         status="success",
                         page_number=page_number
@@ -216,7 +245,7 @@ def reindex_failed_vector_pages(
                         page_number = page_chunks[0].metadata.get("page") if page_chunks else None
                         repo.update_vector_indexing_status(
                             doc,
-                            page_file_path=file_path,
+                            page_file_path=_to_relative_output_path(file_path),
                             chunk_ids=chunk_ids,
                             status="failed",
                             error=str(e),

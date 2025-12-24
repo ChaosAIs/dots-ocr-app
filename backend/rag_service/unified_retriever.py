@@ -52,7 +52,8 @@ class UnifiedRetriever:
         self,
         graphrag_enabled: bool = False,
         source_names: Optional[List[str]] = None,
-        workspace_id: str = "default"
+        workspace_id: str = "default",
+        accessible_doc_ids: Optional[Set] = None
     ):
         """
         Initialize the unified retriever.
@@ -61,12 +62,18 @@ class UnifiedRetriever:
             graphrag_enabled: Whether to use GraphRAG (Neo4j + Qdrant) or vector-only (Qdrant)
             source_names: Optional list of source document names to filter results
             workspace_id: Workspace ID for multi-tenant isolation
+            accessible_doc_ids: Optional set of document IDs the user can access (for access control)
         """
         self.graphrag_enabled = graphrag_enabled
         self.source_names = source_names or []
         self.workspace_id = workspace_id
+        self.accessible_doc_ids = accessible_doc_ids
         self._graphrag = None
         self._initialized = False
+
+        # Log access control info
+        if accessible_doc_ids is not None:
+            logger.info(f"[UnifiedRetriever] Access control enabled: {len(accessible_doc_ids)} accessible documents")
 
     async def _init_graphrag(self):
         """Lazily initialize GraphRAG if enabled."""
@@ -153,25 +160,47 @@ class UnifiedRetriever:
 
         try:
             from .vectorstore import get_vectorstore, get_parent_chunks_for_children
+            from qdrant_client import models
 
             vectorstore = get_vectorstore()
 
-            # Build search kwargs with optional source filtering
+            # Build search kwargs with optional source filtering and access control
             search_kwargs = {"k": top_k}
+
+            # Build filter conditions
+            filter_conditions = []
 
             # Add source filter if specified
             if self.source_names and len(self.source_names) > 0:
-                from qdrant_client import models
-                search_kwargs["filter"] = models.Filter(
-                    should=[
-                        models.FieldCondition(
-                            key="metadata.source",
-                            match=models.MatchValue(value=source_name),
-                        )
-                        for source_name in self.source_names
-                    ]
+                filter_conditions.append(
+                    models.Filter(
+                        should=[
+                            models.FieldCondition(
+                                key="metadata.source",
+                                match=models.MatchValue(value=source_name),
+                            )
+                            for source_name in self.source_names
+                        ]
+                    )
                 )
                 logger.debug(f"[UnifiedRetriever] Filtering to sources: {self.source_names}")
+
+            # Add document ID filter for access control
+            if self.accessible_doc_ids is not None and len(self.accessible_doc_ids) > 0:
+                doc_id_strings = [str(doc_id) for doc_id in self.accessible_doc_ids]
+                filter_conditions.append(
+                    models.FieldCondition(
+                        key="metadata.document_id",
+                        match=models.MatchAny(any=doc_id_strings),
+                    )
+                )
+                logger.info(f"[UnifiedRetriever] Access control: filtering to {len(doc_id_strings)} accessible document IDs")
+
+            # Combine filters with AND logic if we have multiple conditions
+            if len(filter_conditions) > 1:
+                search_kwargs["filter"] = models.Filter(must=filter_conditions)
+            elif len(filter_conditions) == 1:
+                search_kwargs["filter"] = filter_conditions[0]
 
             # Perform vector search
             docs = vectorstore.similarity_search(query, **search_kwargs)
@@ -310,6 +339,11 @@ class UnifiedRetriever:
             params.top_k = top_k
             if self.source_names:
                 params.source_names = self.source_names
+
+            # Add accessible document IDs for access control filtering
+            if self.accessible_doc_ids is not None and len(self.accessible_doc_ids) > 0:
+                params.accessible_doc_ids = self.accessible_doc_ids
+                logger.info(f"[UnifiedRetriever] Graph retrieval: filtering to {len(self.accessible_doc_ids)} accessible document IDs")
 
             # Determine retrieval mode
             if mode == "local":

@@ -2,7 +2,7 @@
 -- Date: 2024-12-14
 -- Description: Remove graphrag_doc_full, graphrag_chunks, graphrag_entities, graphrag_hyperedges
 --              These tables are redundant because:
---              - Chunks are stored in Qdrant (dots_ocr_documents collection)
+--              - Chunks are stored in Qdrant (documents collection)
 --              - Entities and relationships are stored in Neo4j
 --              Keep graphrag_llm_cache for potential future LLM response caching
 

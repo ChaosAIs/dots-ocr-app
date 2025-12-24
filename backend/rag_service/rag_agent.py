@@ -62,6 +62,9 @@ MAX_INPUT_TOKEN_LIMIT = int(os.getenv("MAX_INPUT_TOKEN_LIMIT", "4096"))
 # Global progress callback for tool functions
 _progress_callback = None
 
+# Global accessible document IDs for access control in tool functions
+_accessible_doc_ids = None
+
 
 def _estimate_token_count(text: str) -> int:
     """
@@ -1056,7 +1059,7 @@ def search_documents(query: str) -> str:
     1. LLM analyzes query complexity and determines optimal max_steps for Graph-RAG
     2. LLM extracts metadata (entities, topics, intent) for document routing
     3. Route to relevant documents based on metadata matching
-    4. Vector search on filtered document chunks
+    4. Vector search on filtered document chunks (filtered by user access control)
     5. GraphRAG context with dynamic max_steps for entity/relationship enrichment
 
     Args:
@@ -1066,6 +1069,26 @@ def search_documents(query: str) -> str:
         Relevant document chunks as a formatted string.
     """
     try:
+        # Get accessible document IDs from global context (set by stream_agent_response)
+        global _accessible_doc_ids
+        accessible_doc_ids = _accessible_doc_ids
+
+        # Log access control status
+        # SECURITY: If accessible_doc_ids is empty set, user has NO document access - return early
+        if accessible_doc_ids is not None:
+            if len(accessible_doc_ids) == 0:
+                logger.warning("[Search] Access control: user has NO accessible documents - blocking search")
+                return "You don't have access to any documents. Please contact your administrator to grant document access permissions."
+            else:
+                logger.info(f"[Search] Access control: filtering to {len(accessible_doc_ids)} accessible documents")
+        else:
+            # accessible_doc_ids is None - this could mean:
+            # 1. No user_id was provided (anonymous/unauthenticated)
+            # 2. An error occurred while fetching permissions
+            # For security, we should block access in this case
+            logger.warning("[Search] Access control: accessible_doc_ids is None - blocking search for security")
+            return "Unable to verify your document access permissions. Please try again or contact your administrator."
+
         # Check if iterative reasoning is enabled
         iterative_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
 
@@ -1099,18 +1122,31 @@ def search_documents(query: str) -> str:
         logger.info(f"[Search] Extracted entities: {query_metadata.get('entities', [])}")
         logger.info(f"[Search] Extracted topics: {query_metadata.get('topics', [])}")
 
-        # Step 2: Route to relevant documents based on metadata
+        # Step 2: Convert accessible_doc_ids to list for document router
+        # The router now works with document_ids directly (simplified from source names)
+        accessible_document_ids = None
+        if accessible_doc_ids is not None:
+            # Convert set/frozenset to list of strings
+            accessible_document_ids = [str(doc_id) for doc_id in accessible_doc_ids]
+            logger.info(f"[Access Control] Passing {len(accessible_document_ids)} accessible document IDs to router")
+
+        # Step 2.5: Route to relevant documents based on metadata (with access control)
         _send_progress("Routing to relevant documents...", 30)
 
         from .document_router import DocumentRouter
         from .llm_service import get_llm_service
         llm_service = get_llm_service()
         router = DocumentRouter(llm_service=llm_service)
-        relevant_sources = router.route_query(query_metadata, original_query=query)
+        # Pass accessible_document_ids directly - router now returns document IDs
+        routed_document_ids = router.route_query(
+            query_metadata,
+            original_query=query,
+            accessible_document_ids=accessible_document_ids
+        )
 
-        if relevant_sources:
+        if routed_document_ids:
             logger.info(
-                f"[Search] Document router selected {len(relevant_sources)} sources: {relevant_sources}"
+                f"[Search] Document router selected {len(routed_document_ids)} document IDs: {routed_document_ids}"
             )
 
         # Step 3: Use Iterative Reasoning Engine (unified for GraphRAG and vector-only)
@@ -1118,8 +1154,10 @@ def search_documents(query: str) -> str:
             return _search_with_iterative_reasoning(
                 query=query,
                 max_steps=max_steps,
-                relevant_sources=relevant_sources,
-                graphrag_enabled=GRAPHRAG_AVAILABLE and GRAPH_RAG_QUERY_ENABLED
+                relevant_sources=None,  # Deprecated - use routed_document_ids
+                graphrag_enabled=GRAPHRAG_AVAILABLE and GRAPH_RAG_QUERY_ENABLED,
+                accessible_doc_ids=accessible_doc_ids,
+                routed_document_ids=routed_document_ids
             )
         else:
             # Fallback to legacy single-shot search
@@ -1127,7 +1165,9 @@ def search_documents(query: str) -> str:
                 query=query,
                 enhanced_query=enhanced_query,
                 max_steps=max_steps,
-                relevant_sources=relevant_sources
+                relevant_sources=None,  # Deprecated - use routed_document_ids
+                accessible_doc_ids=accessible_doc_ids,
+                routed_document_ids=routed_document_ids
             )
 
     except Exception as e:
@@ -1138,8 +1178,10 @@ def search_documents(query: str) -> str:
 def _search_with_iterative_reasoning(
     query: str,
     max_steps: int,
-    relevant_sources: List[str],
-    graphrag_enabled: bool
+    relevant_sources: List[str] = None,  # DEPRECATED - use routed_document_ids
+    graphrag_enabled: bool = False,
+    accessible_doc_ids: Optional[set] = None,
+    routed_document_ids: Optional[List[str]] = None
 ) -> str:
     """
     Search using the unified Iterative Reasoning Engine.
@@ -1149,8 +1191,10 @@ def _search_with_iterative_reasoning(
     Args:
         query: User's search query
         max_steps: Maximum reasoning iterations
-        relevant_sources: List of source documents to filter (from routing)
+        relevant_sources: DEPRECATED - use routed_document_ids
         graphrag_enabled: Whether GraphRAG (Neo4j) is available and enabled
+        accessible_doc_ids: Optional set of document IDs the user can access (for access control)
+        routed_document_ids: List of document IDs from router (filtered by access control)
 
     Returns:
         Formatted search results string
@@ -1164,13 +1208,16 @@ def _search_with_iterative_reasoning(
     logger.info(f"[Search]   - GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILABLE}")
     logger.info(f"[Search]   - GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
     logger.info(f"[Search]   - graphrag_enabled parameter={graphrag_enabled}")
+    logger.info(f"[Search]   - routed_document_ids count={len(routed_document_ids) if routed_document_ids else 'None'}")
     logger.info(f"[Search] Using Iterative Reasoning Engine (graphrag={graphrag_enabled}, max_steps={max_steps})")
 
-    # Create reasoning engine
+    # Create reasoning engine with routed document IDs
     engine = IterativeReasoningEngine(
         graphrag_enabled=graphrag_enabled,
         max_steps=max_steps,
-        source_names=relevant_sources if relevant_sources else None
+        source_names=None,  # DEPRECATED - not used
+        accessible_doc_ids=accessible_doc_ids,
+        routed_document_ids=routed_document_ids
     )
 
     # Define async reasoning function
@@ -1270,7 +1317,9 @@ def _search_legacy(
     query: str,
     enhanced_query: str,
     max_steps: int,
-    relevant_sources: List[str]
+    relevant_sources: List[str] = None,  # DEPRECATED - use routed_document_ids
+    accessible_doc_ids: Optional[set] = None,
+    routed_document_ids: Optional[List[str]] = None
 ) -> str:
     """
     Legacy single-shot search (fallback when iterative reasoning is disabled).
@@ -1279,24 +1328,34 @@ def _search_legacy(
         query: Original user query
         enhanced_query: LLM-enhanced query
         max_steps: Max steps for GraphRAG (if enabled)
-        relevant_sources: Source filter from routing
+        relevant_sources: DEPRECATED - use routed_document_ids
+        accessible_doc_ids: Optional set of document IDs the user can access (for access control)
+        routed_document_ids: List of document IDs from router (filtered by access control)
 
     Returns:
         Formatted search results string
     """
     logger.info("[Search] Using legacy single-shot search")
 
-    # Step 3: Create retriever with optional source filtering
-    if relevant_sources:
+    # Use routed_document_ids directly - these are already filtered by access control
+    doc_id_list = routed_document_ids if routed_document_ids else None
+    if doc_id_list:
+        logger.info(f"[Search] Legacy search filtering to {len(doc_id_list)} routed documents")
+
+    # Step 3: Create retriever with document_id filtering only
+    if doc_id_list:
         retriever = get_retriever_with_sources(
             k=18,
             fetch_k=50,
-            source_names=relevant_sources,
+            source_names=None,  # Not used - using document_ids only
             lambda_mult=0.5,
-            per_source_selection=True
+            per_source_selection=True,
+            document_ids=doc_id_list
         )
     else:
-        retriever = get_retriever(k=15, fetch_k=50)
+        # No routing - use all accessible documents
+        fallback_doc_ids = list(accessible_doc_ids) if accessible_doc_ids else None
+        retriever = get_retriever(k=15, fetch_k=50, document_ids=fallback_doc_ids)
 
     # Step 4: Search with enhanced query
     _send_progress("Searching document chunks...", 50)
@@ -1630,7 +1689,8 @@ async def stream_agent_response(
     conversation_history: List[dict] = None,
     progress_callback=None,
     session_context: Optional[Dict[str, Any]] = None,
-    is_retry: bool = False
+    is_retry: bool = False,
+    accessible_doc_ids: Optional[set] = None
 ):
     """
     Stream the agent response for a query.
@@ -1641,13 +1701,24 @@ async def stream_agent_response(
         progress_callback: Optional async callback function(message: str, percent: int) for progress updates.
         session_context: Optional session metadata with entities, topics, and conversation context.
         is_retry: If True, user clicked retry button - always trigger new document search.
+        accessible_doc_ids: Optional set of document IDs the user has access to (for access control filtering).
 
     Yields:
         Chunks of the response text.
     """
-    # Store progress callback in a global variable so tools can access it
-    global _progress_callback
+    # Store progress callback and accessible doc IDs in global variables so tools can access them
+    global _progress_callback, _accessible_doc_ids
     _progress_callback = progress_callback
+    _accessible_doc_ids = accessible_doc_ids
+
+    # Log access control info
+    if accessible_doc_ids is not None:
+        if len(accessible_doc_ids) == 0:
+            logger.warning(f"[Access Control] User has NO accessible documents - searches will be blocked")
+        else:
+            logger.info(f"[Access Control] Filtering search to {len(accessible_doc_ids)} accessible documents")
+    else:
+        logger.warning("[Access Control] accessible_doc_ids is None - searches will be blocked for security")
 
     # Classify query with conversation context and retry flag
     query_classification = _classify_query_with_context(query, conversation_history, is_retry=is_retry)
