@@ -3,6 +3,7 @@ Workspace service for managing workspaces with file system synchronization.
 """
 import logging
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Optional, List, Tuple
@@ -315,26 +316,94 @@ class WorkspaceService:
         # Delete from database
         return self.workspace_repo.delete_workspace(workspace_id)
 
+    def _generate_unique_filename(self, target_path: Path, original_filename: str) -> str:
+        """
+        Generate a unique filename if the file already exists in target directory.
+
+        Args:
+            target_path: Target directory path
+            original_filename: Original filename to check
+
+        Returns:
+            Unique filename (may be same as original if no conflict)
+        """
+        file_path = target_path / original_filename
+        if not file_path.exists():
+            return original_filename
+
+        # Split filename into name and extension
+        stem = Path(original_filename).stem
+        suffix = Path(original_filename).suffix
+
+        # Check if stem already ends with a number pattern like "_1", "_2", etc.
+        match = re.match(r'^(.+)_(\d+)$', stem)
+        if match:
+            base_name = match.group(1)
+            counter = int(match.group(2))
+        else:
+            base_name = stem
+            counter = 0
+
+        # Find next available number
+        while True:
+            counter += 1
+            new_filename = f"{base_name}_{counter}{suffix}"
+            new_path = target_path / new_filename
+            if not new_path.exists():
+                logger.info(f"Generated unique filename: {original_filename} -> {new_filename}")
+                return new_filename
+
     def _delete_document_files(self, document: Document) -> None:
-        """Delete document's physical files."""
+        """Delete document's physical files (input and output)."""
+        # Delete input file
         if document.file_path:
-            file_path = Path(document.file_path)
+            # file_path is relative to storage_base_path (e.g., "username/workspace/filename")
+            file_path = self.storage_base_path / document.file_path
             if file_path.exists():
                 try:
                     file_path.unlink()
+                    logger.info(f"Deleted input file: {file_path}")
                 except OSError as e:
                     logger.error(f"Failed to delete file {file_path}: {e}")
 
+        # Delete output folder
         if document.output_path:
-            output_path = Path(document.output_path)
+            # output_path is relative to output_base_path
+            output_path = self.output_base_path / document.output_path
             if output_path.exists():
                 try:
                     if output_path.is_dir():
                         shutil.rmtree(output_path)
                     else:
                         output_path.unlink()
+                    logger.info(f"Deleted output path: {output_path}")
                 except OSError as e:
                     logger.error(f"Failed to delete output {output_path}: {e}")
+        elif document.file_path:
+            # Fallback: construct output path from file_path
+            # e.g., "username/workspace/filename.pdf" -> "username/workspace/filename"
+            file_name_without_ext = Path(document.filename).stem
+            rel_dir = str(Path(document.file_path).parent)
+            if rel_dir and rel_dir != '.':
+                output_path = self.output_base_path / rel_dir / file_name_without_ext
+            else:
+                output_path = self.output_base_path / file_name_without_ext
+
+            if output_path.exists() and output_path.is_dir():
+                try:
+                    shutil.rmtree(output_path)
+                    logger.info(f"Deleted output folder (fallback): {output_path}")
+                except OSError as e:
+                    logger.error(f"Failed to delete output folder {output_path}: {e}")
+
+            # Also try to delete JSONL file
+            jsonl_path = output_path.parent / f"{file_name_without_ext}.jsonl"
+            if jsonl_path.exists():
+                try:
+                    jsonl_path.unlink()
+                    logger.info(f"Deleted JSONL file: {jsonl_path}")
+                except OSError as e:
+                    logger.error(f"Failed to delete JSONL file {jsonl_path}: {e}")
 
     def _move_documents_to_workspace(
         self,
@@ -342,20 +411,89 @@ class WorkspaceService:
         target_workspace: Workspace,
         user: User
     ) -> None:
-        """Move documents to another workspace."""
+        """Move documents to another workspace with conflict resolution."""
         target_path = self.get_workspace_storage_path(target_workspace)
         target_path.mkdir(parents=True, exist_ok=True)
 
+        # Also prepare output target path
+        target_output_path = self.output_base_path / target_workspace.folder_path
+        target_output_path.mkdir(parents=True, exist_ok=True)
+
         for doc in documents:
-            if doc.file_path:
-                old_file_path = Path(doc.file_path)
+            original_filename = doc.filename
+            original_file_path = doc.file_path  # Store before updating
+            original_output_path = doc.output_path  # Store before updating
+            new_filename = original_filename
+
+            if original_file_path:
+                # file_path is relative to storage_base_path
+                old_file_path = self.storage_base_path / original_file_path
                 if old_file_path.exists():
-                    new_file_path = target_path / old_file_path.name
+                    # Check for filename conflicts and generate unique name if needed
+                    new_filename = self._generate_unique_filename(target_path, original_filename)
+                    new_file_path = target_path / new_filename
                     try:
                         shutil.move(str(old_file_path), str(new_file_path))
-                        doc.file_path = str(new_file_path)
+                        # Store as relative path
+                        doc.file_path = str(Path(target_workspace.folder_path) / new_filename)
+                        # Update document filename if it was renamed
+                        if new_filename != original_filename:
+                            doc.filename = new_filename
+                            logger.info(f"Renamed document due to conflict: {original_filename} -> {new_filename}")
+                        logger.info(f"Moved input file from {old_file_path} to {new_file_path}")
                     except OSError as e:
                         logger.error(f"Failed to move file {old_file_path}: {e}")
+                        continue  # Skip output folder move if input file move failed
+
+            # Determine output folder name (use new filename stem if renamed)
+            file_name_without_ext = Path(new_filename).stem
+            original_stem = Path(original_filename).stem
+
+            # Also move output folder if exists
+            if original_output_path:
+                old_output_path = self.output_base_path / original_output_path
+                if old_output_path.exists() and old_output_path.is_dir():
+                    # Check for output folder conflicts
+                    new_output_folder_name = file_name_without_ext
+                    new_output_path = target_output_path / new_output_folder_name
+                    if new_output_path.exists():
+                        # Generate unique output folder name
+                        counter = 1
+                        while new_output_path.exists():
+                            new_output_folder_name = f"{file_name_without_ext}_{counter}"
+                            new_output_path = target_output_path / new_output_folder_name
+                            counter += 1
+                    try:
+                        shutil.move(str(old_output_path), str(new_output_path))
+                        # Store as relative path
+                        doc.output_path = str(Path(target_workspace.folder_path) / new_output_folder_name)
+                        logger.info(f"Moved output folder from {old_output_path} to {new_output_path}")
+                    except OSError as e:
+                        logger.error(f"Failed to move output folder {old_output_path}: {e}")
+            elif original_file_path:
+                # Try fallback output path using original file path
+                # Construct output path from the original source directory
+                source_rel_dir = str(Path(original_file_path).parent)
+                if source_rel_dir and source_rel_dir != '.':
+                    old_output_path = self.output_base_path / source_rel_dir / original_stem
+                else:
+                    old_output_path = self.output_base_path / original_stem
+
+                if old_output_path.exists() and old_output_path.is_dir():
+                    new_output_folder_name = file_name_without_ext
+                    new_output_path = target_output_path / new_output_folder_name
+                    if new_output_path.exists():
+                        counter = 1
+                        while new_output_path.exists():
+                            new_output_folder_name = f"{file_name_without_ext}_{counter}"
+                            new_output_path = target_output_path / new_output_folder_name
+                            counter += 1
+                    try:
+                        shutil.move(str(old_output_path), str(new_output_path))
+                        doc.output_path = str(Path(target_workspace.folder_path) / new_output_folder_name)
+                        logger.info(f"Moved output folder (fallback) from {old_output_path} to {new_output_path}")
+                    except OSError as e:
+                        logger.error(f"Failed to move output folder {old_output_path}: {e}")
 
             doc.workspace_id = target_workspace.id
 
@@ -392,20 +530,56 @@ class WorkspaceService:
             return None
 
         old_workspace_id = document.workspace_id
-        old_file_path = Path(document.file_path) if document.file_path else None
 
-        # Move physical file
-        if old_file_path and old_file_path.exists():
-            target_folder = self.get_workspace_storage_path(target_workspace)
-            target_folder.mkdir(parents=True, exist_ok=True)
-            new_file_path = target_folder / old_file_path.name
+        # Move physical input file
+        if document.file_path:
+            # file_path is relative to storage_base_path
+            old_file_path = self.storage_base_path / document.file_path
+            if old_file_path.exists():
+                target_folder = self.get_workspace_storage_path(target_workspace)
+                target_folder.mkdir(parents=True, exist_ok=True)
+                new_file_path = target_folder / old_file_path.name
 
-            try:
-                shutil.move(str(old_file_path), str(new_file_path))
-                document.file_path = str(new_file_path)
-            except OSError as e:
-                logger.error(f"Failed to move file: {e}")
-                return None
+                try:
+                    shutil.move(str(old_file_path), str(new_file_path))
+                    # Store as relative path
+                    document.file_path = str(Path(target_workspace.folder_path) / old_file_path.name)
+                    logger.info(f"Moved input file from {old_file_path} to {new_file_path}")
+                except OSError as e:
+                    logger.error(f"Failed to move file: {e}")
+                    return None
+
+        # Move physical output folder
+        file_name_without_ext = Path(document.filename).stem
+        target_output_folder = self.output_base_path / target_workspace.folder_path
+        target_output_folder.mkdir(parents=True, exist_ok=True)
+
+        if document.output_path:
+            old_output_path = self.output_base_path / document.output_path
+            if old_output_path.exists() and old_output_path.is_dir():
+                new_output_path = target_output_folder / file_name_without_ext
+                try:
+                    shutil.move(str(old_output_path), str(new_output_path))
+                    document.output_path = str(Path(target_workspace.folder_path) / file_name_without_ext)
+                    logger.info(f"Moved output folder from {old_output_path} to {new_output_path}")
+                except OSError as e:
+                    logger.error(f"Failed to move output folder: {e}")
+        elif document.file_path:
+            # Try fallback output path
+            rel_dir = str(Path(document.file_path).parent)
+            if rel_dir and rel_dir != '.':
+                old_output_path = self.output_base_path / rel_dir / file_name_without_ext
+            else:
+                old_output_path = self.output_base_path / file_name_without_ext
+
+            if old_output_path.exists() and old_output_path.is_dir():
+                new_output_path = target_output_folder / file_name_without_ext
+                try:
+                    shutil.move(str(old_output_path), str(new_output_path))
+                    document.output_path = str(Path(target_workspace.folder_path) / file_name_without_ext)
+                    logger.info(f"Moved output folder (fallback) from {old_output_path} to {new_output_path}")
+                except OSError as e:
+                    logger.error(f"Failed to move output folder: {e}")
 
         # Update database
         document.workspace_id = target_workspace_id

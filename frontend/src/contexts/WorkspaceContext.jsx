@@ -197,16 +197,24 @@ export const WorkspaceProvider = ({ children }) => {
    */
   const deleteWorkspace = useCallback(async (workspaceId, deleteDocuments = false) => {
     try {
+      const deletedWorkspace = workspaces.find(ws => ws.id === workspaceId);
+      const wasCurrentWorkspace = currentWorkspace?.id === workspaceId;
+
       await workspaceService.deleteWorkspace(workspaceId, deleteDocuments);
       console.log("📁 WorkspaceContext: Deleted workspace:", workspaceId);
 
-      const deletedWorkspace = workspaces.find(ws => ws.id === workspaceId);
-      setWorkspaces(prev => prev.filter(ws => ws.id !== workspaceId));
+      // Refresh workspaces list from server to get any newly created default workspace
+      const response = await workspaceService.getWorkspaces(true);
+      const freshWorkspaces = response.workspaces || [];
+      setWorkspaces(freshWorkspaces);
+      console.log("📁 WorkspaceContext: Refreshed workspaces after deletion:", freshWorkspaces.length);
 
-      // If deleted workspace was selected, select the default
-      if (currentWorkspace?.id === workspaceId) {
-        const defaultWs = workspaces.find(ws => ws.is_default && ws.id !== workspaceId);
-        selectWorkspace(defaultWs || workspaces[0]);
+      // If deleted workspace was selected, select a new one from the fresh list
+      if (wasCurrentWorkspace && freshWorkspaces.length > 0) {
+        const defaultWs = freshWorkspaces.find(ws => ws.is_default);
+        const newWorkspace = defaultWs || freshWorkspaces[0];
+        console.log("📁 WorkspaceContext: Selecting new workspace after deletion:", newWorkspace?.name);
+        selectWorkspace(newWorkspace);
       }
 
       emit(WorkspaceEvents.WORKSPACE_DELETED, deletedWorkspace);

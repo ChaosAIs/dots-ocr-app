@@ -14,7 +14,7 @@ import "./documentList.scss";
 
 export const DocumentList = forwardRef((props, ref) => {
   // Get workspace from context
-  const { currentWorkspace, currentWorkspaceId, subscribe } = useWorkspace();
+  const { currentWorkspace, currentWorkspaceId, subscribe, loadWorkspaces } = useWorkspace();
   const { t, i18n, ready } = useTranslation();
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -409,6 +409,8 @@ export const DocumentList = forwardRef((props, ref) => {
               messageService.successToast(t("DocumentList.DeleteSuccess"));
               // Reload documents list
               loadDocuments();
+              // Refresh workspace list to update document counts in sidebar
+              loadWorkspaces();
             } catch (error) {
               messageService.errorToast(t("DocumentList.DeleteFailed"));
               console.error("Error deleting document:", error);
@@ -460,9 +462,12 @@ export const DocumentList = forwardRef((props, ref) => {
     // Refresh the document list
     loadDocuments();
 
+    // Refresh workspace list to update document counts in sidebar
+    loadWorkspaces();
+
     // Close the upload dialog
     setShowUploadDialog(false);
-  }, [subscribeToDocuments, loadDocuments]);
+  }, [subscribeToDocuments, loadDocuments, loadWorkspaces]);
 
 
 
@@ -472,6 +477,8 @@ export const DocumentList = forwardRef((props, ref) => {
     const {
       markdown_exists,
       convert_status,
+      index_status,
+      indexing_details,
       total_pages = 0,
       converted_pages = 0
     } = rowData;
@@ -481,7 +488,24 @@ export const DocumentList = forwardRef((props, ref) => {
     const conversionPartial = convert_status === "partial" ||
                               (total_pages > 0 && converted_pages > 0 && converted_pages < total_pages);
     const conversionConverting = convert_status === "converting";
+    const conversionPending = convert_status === "pending";
     const conversionFullyCompleted = markdown_exists && !conversionFailed && !conversionPartial && !conversionConverting;
+
+    // Check if document is still being processed (converting or indexing)
+    const isConverting = conversionConverting || conversionPending;
+
+    // Check indexing status
+    const vectorStatus = indexing_details?.vector_indexing?.status;
+    const metadataStatus = indexing_details?.metadata_extraction?.status;
+    const graphragStatus = indexing_details?.graphrag_indexing?.status;
+
+    const isIndexing = index_status === "indexing" ||
+                       vectorStatus === "processing" ||
+                       metadataStatus === "processing" ||
+                       graphragStatus === "processing";
+
+    // Hide delete button if document is still being processed
+    const canDelete = !isConverting && !isIndexing;
 
     return (
       <div className="action-buttons">
@@ -516,13 +540,16 @@ export const DocumentList = forwardRef((props, ref) => {
           />
         )}
 
-        <Button
-          icon="pi pi-trash"
-          className="p-button-rounded p-button-danger"
-          onClick={() => handleDelete(rowData)}
-          tooltip={t("DocumentList.DeleteDocument")}
-          tooltipPosition="top"
-        />
+        {/* Only show delete button if document is not being processed */}
+        {canDelete && (
+          <Button
+            icon="pi pi-trash"
+            className="p-button-rounded p-button-danger"
+            onClick={() => handleDelete(rowData)}
+            tooltip={t("DocumentList.DeleteDocument")}
+            tooltipPosition="top"
+          />
+        )}
       </div>
     );
   };

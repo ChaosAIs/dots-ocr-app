@@ -5,10 +5,10 @@ import { InputText } from "primereact/inputtext";
 import { InputTextarea } from "primereact/inputtextarea";
 import { Dropdown } from "primereact/dropdown";
 import { Badge } from "primereact/badge";
-import { confirmDialog } from "primereact/confirmdialog";
 import { useTranslation } from "react-i18next";
 import workspaceService from "../../services/workspaceService";
 import sharingService from "../../services/sharingService";
+import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
 import "./WorkspaceSidebar.scss";
@@ -33,8 +33,11 @@ export const WorkspaceSidebar = ({
 
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
+  const [showDeleteOptionsDialog, setShowDeleteOptionsDialog] = useState(false);
+  const [workspaceToDelete, setWorkspaceToDelete] = useState(null);
   const [editingWorkspace, setEditingWorkspace] = useState(null);
   const [newSharesCount, setNewSharesCount] = useState(0);
+  const [workspacesWithInProgress, setWorkspacesWithInProgress] = useState(new Set());
 
   // Form state
   const [formData, setFormData] = useState({
@@ -57,9 +60,39 @@ export const WorkspaceSidebar = ({
     }
   }, []);
 
+  // Check for in-progress documents and track which workspaces have them
+  const checkInProgressDocuments = useCallback(async () => {
+    try {
+      const response = await documentService.getInProgressDocuments();
+      if (response.status === "success" && response.documents) {
+        // Get unique workspace IDs from in-progress documents
+        const workspaceIds = new Set(
+          response.documents
+            .filter(doc => doc.workspace_id)
+            .map(doc => doc.workspace_id)
+        );
+        setWorkspacesWithInProgress(workspaceIds);
+      } else {
+        setWorkspacesWithInProgress(new Set());
+      }
+    } catch (error) {
+      console.error("Error checking in-progress documents:", error);
+    }
+  }, []);
+
   useEffect(() => {
     loadNewSharesCount();
   }, [loadNewSharesCount]);
+
+  // Check for in-progress documents on mount and periodically
+  useEffect(() => {
+    checkInProgressDocuments();
+
+    // Poll every 5 seconds to keep track of in-progress documents
+    const intervalId = setInterval(checkInProgressDocuments, 5000);
+
+    return () => clearInterval(intervalId);
+  }, [checkInProgressDocuments]);
 
   // Create workspace using context
   const handleCreate = async () => {
@@ -118,40 +151,43 @@ export const WorkspaceSidebar = ({
     }
   };
 
-  // Delete workspace using context
+  // Delete workspace - show options dialog
   const handleDelete = (workspace) => {
     if (workspace.is_default || workspace.is_system) {
       messageService.warnToast(t("Workspace.CannotDeleteDefault"));
       return;
     }
 
-    confirmDialog({
-      message: t("Workspace.DeleteConfirm", { name: workspace.name }),
-      header: t("Workspace.DeleteTitle"),
-      icon: "pi pi-exclamation-triangle",
-      acceptClassName: "p-button-danger",
-      accept: async () => {
-        try {
-          await ctxDeleteWorkspace(workspace.id, false);
-          messageService.successToast(t("Workspace.DeleteSuccess"));
+    setWorkspaceToDelete(workspace);
+    setShowDeleteOptionsDialog(true);
+  };
 
-          // Select default workspace if deleted workspace was selected
-          if (selectedWorkspace?.id === workspace.id) {
-            const defaultWs = workspaces.find(ws => ws.is_default && ws.id !== workspace.id);
-            if (defaultWs && onWorkspaceSelect) {
-              onWorkspaceSelect(defaultWs);
-            }
-          }
+  // Execute workspace deletion with selected option
+  const executeDeleteWorkspace = async (deleteDocuments) => {
+    if (!workspaceToDelete) return;
 
-          if (onWorkspaceChange) {
-            onWorkspaceChange("delete", workspace);
-          }
-        } catch (error) {
-          console.error("Error deleting workspace:", error);
-          messageService.errorToast(error.response?.data?.detail || t("Workspace.DeleteError"));
+    try {
+      await ctxDeleteWorkspace(workspaceToDelete.id, deleteDocuments);
+      messageService.successToast(t("Workspace.DeleteSuccess"));
+
+      // Select default workspace if deleted workspace was selected
+      if (selectedWorkspace?.id === workspaceToDelete.id) {
+        const defaultWs = workspaces.find(ws => ws.is_default && ws.id !== workspaceToDelete.id);
+        if (defaultWs && onWorkspaceSelect) {
+          onWorkspaceSelect(defaultWs);
         }
       }
-    });
+
+      if (onWorkspaceChange) {
+        onWorkspaceChange("delete", workspaceToDelete);
+      }
+    } catch (error) {
+      console.error("Error deleting workspace:", error);
+      messageService.errorToast(error.response?.data?.detail || t("Workspace.DeleteError"));
+    } finally {
+      setShowDeleteOptionsDialog(false);
+      setWorkspaceToDelete(null);
+    }
   };
 
   // Set default workspace using context
@@ -208,6 +244,10 @@ export const WorkspaceSidebar = ({
   const renderWorkspaceItem = (workspace) => {
     const isSelected = selectedWorkspace?.id === workspace.id;
     const isSharedWithMe = workspace.is_system && workspace.name === "Shared With Me";
+    // Check if workspace has documents being processed
+    const hasInProgressDocuments = workspacesWithInProgress.has(workspace.id);
+    // Can delete if not default, not system, and no in-progress documents
+    const canDelete = !workspace.is_default && !hasInProgressDocuments;
 
     return (
       <div
@@ -234,15 +274,18 @@ export const WorkspaceSidebar = ({
         </div>
         {!workspace.is_system && !collapsed && (
           <div className="workspace-actions">
-            <Button
-              icon="pi pi-pencil"
-              className="p-button-text p-button-sm"
-              onClick={(e) => {
-                e.stopPropagation();
-                openEditDialog(workspace);
-              }}
-              tooltip={t("Workspace.EditWorkspace")}
-            />
+            {/* Hide edit button for default "My Documents" workspace */}
+            {!workspace.is_default && (
+              <Button
+                icon="pi pi-pencil"
+                className="p-button-text p-button-sm"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openEditDialog(workspace);
+                }}
+                tooltip={t("Workspace.EditWorkspace")}
+              />
+            )}
             {!workspace.is_default && (
               <Button
                 icon="pi pi-star"
@@ -254,7 +297,8 @@ export const WorkspaceSidebar = ({
                 tooltip={t("Workspace.SetDefault")}
               />
             )}
-            {!workspace.is_default && (
+            {/* Hide delete button if workspace is default or has in-progress documents */}
+            {canDelete && (
               <Button
                 icon="pi pi-trash"
                 className="p-button-text p-button-sm p-button-danger"
@@ -465,6 +509,48 @@ export const WorkspaceSidebar = ({
               optionValue="value"
               itemTemplate={iconOptionTemplate}
               valueTemplate={iconOptionTemplate}
+            />
+          </div>
+        </div>
+      </Dialog>
+
+      {/* Delete Options Dialog */}
+      <Dialog
+        visible={showDeleteOptionsDialog}
+        onHide={() => {
+          setShowDeleteOptionsDialog(false);
+          setWorkspaceToDelete(null);
+        }}
+        header={t("Workspace.DeleteTitle")}
+        style={{ width: "500px" }}
+        className="workspace-dialog delete-options-dialog"
+      >
+        <div className="delete-options-content">
+          <p className="delete-warning">
+            <i className="pi pi-exclamation-triangle" />
+            {t("Workspace.DeleteOptionsMessage", { name: workspaceToDelete?.name })}
+          </p>
+          <div className="delete-options-buttons">
+            <Button
+              label={t("Workspace.DeleteAndRemoveFiles")}
+              icon="pi pi-trash"
+              className="p-button-danger delete-option-btn"
+              onClick={() => executeDeleteWorkspace(true)}
+            />
+            <Button
+              label={t("Workspace.DeleteAndMoveFiles")}
+              icon="pi pi-folder"
+              className="p-button-warning delete-option-btn"
+              onClick={() => executeDeleteWorkspace(false)}
+            />
+            <Button
+              label={t("Workspace.Cancel")}
+              icon="pi pi-times"
+              className="p-button-text delete-option-btn"
+              onClick={() => {
+                setShowDeleteOptionsDialog(false);
+                setWorkspaceToDelete(null);
+              }}
             />
           </div>
         </div>

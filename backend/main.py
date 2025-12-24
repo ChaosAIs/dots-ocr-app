@@ -1497,7 +1497,13 @@ async def get_index_status():
 
 @app.get("/documents/in-progress")
 async def get_in_progress_documents():
-    """Get all documents that are currently being processed."""
+    """Get all documents that are not fully indexed.
+
+    A document is considered "not fully indexed" if:
+    - convert_status is not "converted" (pending, converting, partial, failed)
+    - index_status is not "indexed" (pending, indexing, partial, failed)
+    - Any indexing phase is not "completed"
+    """
     try:
         in_progress_docs = []
 
@@ -1506,11 +1512,17 @@ async def get_in_progress_documents():
             all_docs = repo.get_all()
 
             for doc in all_docs:
-                is_converting = doc.convert_status == ConvertStatus.CONVERTING
-                is_indexing = doc.index_status == IndexStatus.INDEXING
+                # Check conversion status - only "converted" is complete
+                is_conversion_complete = doc.convert_status == ConvertStatus.CONVERTED
+                is_converting = doc.convert_status in [ConvertStatus.PENDING, ConvertStatus.CONVERTING]
 
-                is_granular_indexing = False
+                # Check indexing status
+                is_index_complete = doc.index_status == IndexStatus.INDEXED
+                is_indexing = doc.index_status in [IndexStatus.PENDING, IndexStatus.INDEXING]
+
+                # Check granular indexing phases
                 all_phases_complete = False
+                is_granular_indexing = False
                 if doc.indexing_details:
                     vector_status = doc.indexing_details.get("vector_indexing", {}).get("status")
                     metadata_status = doc.indexing_details.get("metadata_extraction", {}).get("status")
@@ -1528,18 +1540,31 @@ async def get_in_progress_documents():
                         graphrag_status == "completed"
                     )
 
-                if all_phases_complete and is_indexing:
+                # Auto-fix index status if all phases are complete
+                if all_phases_complete and doc.index_status == IndexStatus.INDEXING:
                     try:
                         indexed_chunks = doc.indexed_chunks or 0
                         repo.update_index_status(doc, IndexStatus.INDEXED, indexed_chunks, message="All indexing phases completed")
+                        is_index_complete = True
                         is_indexing = False
                     except Exception:
                         pass
 
-                if is_converting or is_indexing or is_granular_indexing:
+                # Document is fully indexed only when both conversion and indexing are complete
+                # If indexing_details is empty/None, document is not fully indexed
+                is_fully_indexed = (
+                    is_conversion_complete and
+                    is_index_complete and
+                    doc.indexing_details and  # Must have indexing details
+                    all_phases_complete
+                )
+
+                # Include document if it's not fully indexed
+                if not is_fully_indexed:
                     doc_dict = doc.to_dict()
                     doc_dict["is_converting"] = is_converting
                     doc_dict["is_indexing"] = is_indexing or is_granular_indexing
+                    doc_dict["is_fully_indexed"] = False
                     in_progress_docs.append(doc_dict)
 
         return JSONResponse(content={

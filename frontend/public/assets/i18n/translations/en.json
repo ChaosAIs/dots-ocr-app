@@ -249,7 +249,10 @@
         "LoadError": "Failed to load workspaces",
         "NoWorkspaces": "No workspaces found",
         "NameRequired": "Workspace name is required",
-        "CannotDeleteDefault": "Cannot delete the default workspace"
+        "CannotDeleteDefault": "Cannot delete the default workspace",
+        "DeleteOptionsMessage": "You are about to delete workspace \"{{name}}\". What would you like to do with the documents inside?",
+        "DeleteAndRemoveFiles": "Delete workspace and all files",
+        "DeleteAndMoveFiles": "Move files to My Documents"
     },
     "Share": {
         "Title": "Share Document",
