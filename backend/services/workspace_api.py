@@ -166,6 +166,11 @@ def list_workspaces(
         include_system=include_system
     )
 
+    # Recalculate document counts to ensure accuracy
+    for ws in workspaces:
+        if not ws.is_system:
+            service.workspace_repo.recalculate_document_count(ws.id)
+
     return [workspace_to_response(ws) for ws in workspaces]
 
 
@@ -504,7 +509,7 @@ def move_document(
     # Get the document
     from db.document_repository import DocumentRepository
     doc_repo = DocumentRepository(db)
-    document = doc_repo.get_document_by_id(request.document_id)
+    document = doc_repo.get_by_id(request.document_id)
 
     if not document:
         raise HTTPException(

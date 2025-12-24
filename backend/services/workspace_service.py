@@ -586,10 +586,10 @@ class WorkspaceService:
         self.db.commit()
         self.db.refresh(document)
 
-        # Update document counts
+        # Update document counts - recalculate for accuracy
         if old_workspace_id:
-            self.workspace_repo.update_document_count(old_workspace_id, delta=-1)
-        self.workspace_repo.update_document_count(target_workspace_id, delta=1)
+            self.workspace_repo.recalculate_document_count(old_workspace_id)
+        self.workspace_repo.recalculate_document_count(target_workspace_id)
 
         logger.info(f"Moved document {document.id} to workspace {target_workspace_id}")
         return document

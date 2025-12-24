@@ -10,6 +10,7 @@ import { messageService } from "../../core/message/messageService";
 import { useWorkspace, WorkspaceEvents } from "../../contexts/WorkspaceContext";
 import MarkdownViewer from "./markdownViewer";
 import { DocumentFileUpload } from "./fileUpload";
+import MoveDocumentDialog from "./MoveDocumentDialog";
 import "./documentList.scss";
 
 export const DocumentList = forwardRef((props, ref) => {
@@ -25,6 +26,8 @@ export const DocumentList = forwardRef((props, ref) => {
   const [statusLogs, setStatusLogs] = useState([]); // status logs data
   const [statusLogsLoading, setStatusLogsLoading] = useState(false);
   const [showUploadDialog, setShowUploadDialog] = useState(false); // upload dialog
+  const [showMoveDialog, setShowMoveDialog] = useState(false); // move document dialog
+  const [documentToMove, setDocumentToMove] = useState(null); // document to move
   const [tableKey, setTableKey] = useState(0); // Force DataTable re-render
   // Ref to store the latest loadDocuments function for WebSocket handler
   const loadDocumentsRef = useRef(null);
@@ -450,6 +453,19 @@ export const DocumentList = forwardRef((props, ref) => {
     }
   };
 
+  // Handle move document - open dialog
+  const handleMoveDocument = (document) => {
+    setDocumentToMove(document);
+    setShowMoveDialog(true);
+  };
+
+  // Handle move success - refresh documents
+  const handleMoveSuccess = useCallback(() => {
+    loadDocuments();
+    setShowMoveDialog(false);
+    setDocumentToMove(null);
+  }, [loadDocuments]);
+
   // Handle upload success - subscribe to new documents and refresh list
   const handleUploadSuccess = useCallback((uploadedDocIds) => {
     console.log(`📋 DocumentList: Upload success with ${uploadedDocIds?.length || 0} document IDs:`, uploadedDocIds);
@@ -507,6 +523,14 @@ export const DocumentList = forwardRef((props, ref) => {
     // Hide delete button if document is still being processed
     const canDelete = !isConverting && !isIndexing;
 
+    // Check if document is fully indexed (can be moved)
+    const isFullyIndexed = vectorStatus === "completed" &&
+                           metadataStatus === "completed" &&
+                           graphragStatus === "completed";
+
+    // Can move only if fully indexed and not currently processing
+    const canMove = isFullyIndexed && !isConverting && !isIndexing;
+
     return (
       <div className="action-buttons">
         {/* Show view button only if conversion is fully completed with no errors */}
@@ -525,6 +549,17 @@ export const DocumentList = forwardRef((props, ref) => {
                     ? t("DocumentList.PartialConversionCannotView")
                     : t("DocumentList.ConversionInProgressCannotView")
             }
+            tooltipPosition="top"
+          />
+        )}
+
+        {/* Show move button only if document is fully indexed */}
+        {canMove && (
+          <Button
+            icon="pi pi-arrow-right-arrow-left"
+            className="p-button-rounded p-button-info"
+            onClick={() => handleMoveDocument(rowData)}
+            tooltip={t("DocumentList.MoveDocument")}
             tooltipPosition="top"
           />
         )}
@@ -875,6 +910,17 @@ export const DocumentList = forwardRef((props, ref) => {
       >
         <DocumentFileUpload onUploadSuccess={handleUploadSuccess} />
       </Dialog>
+
+      {/* Move Document Dialog */}
+      <MoveDocumentDialog
+        visible={showMoveDialog}
+        document={documentToMove}
+        onHide={() => {
+          setShowMoveDialog(false);
+          setDocumentToMove(null);
+        }}
+        onMoveSuccess={handleMoveSuccess}
+      />
     </div>
   );
 });

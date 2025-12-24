@@ -113,7 +113,15 @@
     "IndexFailed": "Échec de l'indexation du document",
     "BatchIndexStarted": "Indexation par lot démarrée en arrière-plan",
     "BatchIndexInProgress": "Une indexation par lot est déjà en cours",
-    "BatchIndexFailed": "Échec du démarrage de l'indexation par lot"
+    "BatchIndexFailed": "Échec du démarrage de l'indexation par lot",
+    "MoveDocument": "Déplacer vers l'espace de travail",
+    "MoveDocumentTitle": "Déplacer le document",
+    "SelectTargetWorkspace": "Sélectionnez un espace de travail pour déplacer ce document :",
+    "NoOtherWorkspaces": "Aucun autre espace de travail disponible. Créez d'abord un nouvel espace de travail.",
+    "MoveSuccess": "Document déplacé avec succès",
+    "MoveFailed": "Échec du déplacement du document",
+    "Moving": "Déplacement...",
+    "Cancel": "Annuler"
   },
   "MarkdownViewer": {
     "DownloadMarkdown": "Télécharger le Markdown",
