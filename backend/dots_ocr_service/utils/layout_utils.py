@@ -5,9 +5,9 @@ import fitz
 from io import BytesIO
 import json
 
-from dots_ocr.utils.image_utils import smart_resize
-from dots_ocr.utils.consts import MIN_PIXELS, MAX_PIXELS
-from dots_ocr.utils.output_cleaner import OutputCleaner
+from .image_utils import smart_resize
+from .consts import MIN_PIXELS, MAX_PIXELS
+from .output_cleaner import OutputCleaner
 
 
 # Define a color map (using RGBA format)

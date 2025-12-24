@@ -3,8 +3,8 @@ import base64
 from PIL import Image
 from typing import Tuple
 import os
-from dots_ocr.utils.consts import IMAGE_FACTOR, MIN_PIXELS, MAX_PIXELS
-from dots_ocr.utils.doc_utils import fitz_doc_to_image
+from .consts import IMAGE_FACTOR, MIN_PIXELS, MAX_PIXELS
+from .doc_utils import fitz_doc_to_image
 from io import BytesIO
 import fitz
 import requests

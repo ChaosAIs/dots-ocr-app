@@ -11,13 +11,13 @@ import time
 import threading
 
 
-from dots_ocr.model.inference import inference_with_vllm
-from dots_ocr.utils.consts import image_extensions, MIN_PIXELS, MAX_PIXELS
-from dots_ocr.utils.image_utils import get_image_by_fitz_doc, fetch_image, smart_resize
-from dots_ocr.utils.doc_utils import fitz_doc_to_image, load_images_from_pdf
-from dots_ocr.utils.prompts import dict_promptmode_to_prompt
-from dots_ocr.utils.layout_utils import post_process_output, draw_layout_on_image, pre_process_bboxes
-from dots_ocr.utils.format_transformer import layoutjson2md
+from .model.inference import inference_with_vllm
+from .utils.consts import image_extensions, MIN_PIXELS, MAX_PIXELS
+from .utils.image_utils import get_image_by_fitz_doc, fetch_image, smart_resize
+from .utils.doc_utils import fitz_doc_to_image, load_images_from_pdf
+from .utils.prompts import dict_promptmode_to_prompt
+from .utils.layout_utils import post_process_output, draw_layout_on_image, pre_process_bboxes
+from .utils.format_transformer import layoutjson2md
 from gemma_ocr_service.gemma3_ocr_converter import Gemma3OCRConverter
 from qwen_ocr_service.qwen3_ocr_converter import Qwen3OCRConverter
 

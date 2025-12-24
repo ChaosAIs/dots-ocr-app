@@ -5,7 +5,7 @@ import re
 from html.parser import HTMLParser
 
 from PIL import Image
-from dots_ocr.utils.image_utils import PILimage_to_base64
+from .image_utils import PILimage_to_base64
 
 
 def has_latex_markdown(text: str) -> bool:
