@@ -4,8 +4,8 @@
 from .local_qwen_embedding import LocalQwen3Embedding
 from .vectorstore import (
     get_vectorstore,
-    get_retriever,
-    get_retriever_with_sources,
+    unified_vector_search,
+    UnifiedSearchResult,
     delete_documents_by_source,
     get_chunks_by_ids,
 )
@@ -22,8 +22,8 @@ from .chat_api import router as chat_router
 __all__ = [
     "LocalQwen3Embedding",
     "get_vectorstore",
-    "get_retriever",
-    "get_retriever_with_sources",
+    "unified_vector_search",
+    "UnifiedSearchResult",
     "delete_documents_by_source",
     "get_chunks_by_ids",
     "chunk_markdown_file",

@@ -5,15 +5,13 @@ This module provides a unified retrieval interface that works with or without Gr
 allowing the iterative reasoning engine to use the same logic regardless of backend.
 """
 
-import os
 import logging
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
+from .vectorstore import PARENT_CHUNK_AUTO_INCLUDE
 
-# Parent/child chunk configuration
-PARENT_CHUNK_AUTO_INCLUDE = os.getenv("PARENT_CHUNK_AUTO_INCLUDE", "true").lower() == "true"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -141,13 +139,12 @@ class UnifiedRetriever:
         top_k: int = 20
     ) -> RetrievalResult:
         """
-        Vector-only retrieval using Qdrant.
+        Vector-only retrieval using unified_vector_search.
 
         This is used when GraphRAG is disabled. Returns chunks only,
         with empty entities and relationships.
 
-        When PARENT_CHUNK_AUTO_INCLUDE is enabled, automatically fetches
-        parent chunks for any child chunks in the results.
+        Now uses unified_vector_search() for consistent behavior with legacy mode.
 
         Args:
             query: Search query string
@@ -159,143 +156,46 @@ class UnifiedRetriever:
         logger.info(f"[UnifiedRetriever] Vector-only retrieval for: '{query[:50]}...'")
 
         try:
-            from .vectorstore import get_vectorstore, get_parent_chunks_for_children
-            from qdrant_client import models
+            from .vectorstore import unified_vector_search
 
-            vectorstore = get_vectorstore()
-
-            # Build search kwargs with optional source filtering and access control
-            search_kwargs = {"k": top_k}
-
-            # Build filter conditions
-            filter_conditions = []
-
-            # Add source filter if specified
-            if self.source_names and len(self.source_names) > 0:
-                filter_conditions.append(
-                    models.Filter(
-                        should=[
-                            models.FieldCondition(
-                                key="metadata.source",
-                                match=models.MatchValue(value=source_name),
-                            )
-                            for source_name in self.source_names
-                        ]
-                    )
-                )
-                logger.debug(f"[UnifiedRetriever] Filtering to sources: {self.source_names}")
-
-            # Add document ID filter for access control
+            # Determine document IDs to search
+            doc_id_list = []
             if self.accessible_doc_ids is not None and len(self.accessible_doc_ids) > 0:
-                doc_id_strings = [str(doc_id) for doc_id in self.accessible_doc_ids]
-                filter_conditions.append(
-                    models.FieldCondition(
-                        key="metadata.document_id",
-                        match=models.MatchAny(any=doc_id_strings),
-                    )
-                )
-                logger.info(f"[UnifiedRetriever] Access control: filtering to {len(doc_id_strings)} accessible document IDs")
+                doc_id_list = [str(doc_id) for doc_id in self.accessible_doc_ids]
+                logger.info(f"[UnifiedRetriever] Access control: filtering to {len(doc_id_list)} accessible document IDs")
 
-            # Combine filters with AND logic if we have multiple conditions
-            if len(filter_conditions) > 1:
-                search_kwargs["filter"] = models.Filter(must=filter_conditions)
-            elif len(filter_conditions) == 1:
-                search_kwargs["filter"] = filter_conditions[0]
-
-            # Perform vector search
-            docs = vectorstore.similarity_search(query, **search_kwargs)
-
-            # Convert to unified chunk format
-            chunks = []
-            sources = set()
-            child_chunk_ids = []  # Track child chunks for parent lookup
-
-            logger.debug(f"[UnifiedRetriever] Processing {len(docs)} documents from vector search")
-
-            for i, doc in enumerate(docs):
-                source = doc.metadata.get("source", "Unknown")
-                sources.add(source)
-                chunk_id = doc.metadata.get("chunk_id", "")
-                chunk_type = doc.metadata.get("chunk_type", "unknown")
-                is_parent_chunk = doc.metadata.get("is_parent_chunk", False)
-                parent_chunk_id = doc.metadata.get("parent_chunk_id")
-
-                # Detailed logging for each chunk
-                content_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else ""
-                logger.debug(
-                    f"[UnifiedRetriever] Chunk {i+1}/{len(docs)}: id={chunk_id}, "
-                    f"type={chunk_type}, is_parent={is_parent_chunk}, "
-                    f"parent_id={parent_chunk_id}, source={source}"
-                )
-
-                chunks.append({
-                    "page_content": doc.page_content,
-                    "metadata": doc.metadata,
-                    "chunk_id": chunk_id,
-                    "is_parent": is_parent_chunk,
-                    "_score": 0,  # Qdrant similarity_search doesn't return scores directly
-                })
-
-                # Track child chunks that have a parent
-                if parent_chunk_id:
-                    child_chunk_ids.append(chunk_id)
-                    logger.debug(f"[UnifiedRetriever] → Identified as CHILD chunk, will fetch parent: {parent_chunk_id}")
-
-            # Summary of chunk types found
-            parent_count = sum(1 for c in chunks if c.get("is_parent"))
-            child_count = len(child_chunk_ids)
-            atomic_count = len(chunks) - parent_count - child_count
-            logger.info(
-                f"[UnifiedRetriever] Vector search results: {len(chunks)} chunks "
-                f"(parents={parent_count}, children={child_count}, atomic={atomic_count}) from {len(sources)} sources"
+            # Use unified vector search (same as legacy path)
+            search_result = unified_vector_search(
+                query=query,
+                document_ids=doc_id_list,
+                k=top_k,
+                fetch_k=50,
+                lambda_mult=0.5,
+                per_document_selection=True,
+                include_parent_chunks=None  # Uses PARENT_CHUNK_AUTO_INCLUDE env variable
             )
 
-            # Auto-include parent chunks for child matches
-            parent_chunks = []
-            if PARENT_CHUNK_AUTO_INCLUDE and child_chunk_ids:
-                logger.info(f"[UnifiedRetriever] PARENT_CHUNK_AUTO_INCLUDE enabled, fetching parents for {len(child_chunk_ids)} child chunks")
-                logger.debug(f"[UnifiedRetriever] Child chunk IDs: {child_chunk_ids}")
+            # Check for blocked/empty results
+            if search_result.retrieval_stats.get("blocked"):
+                logger.warning("[UnifiedRetriever] Search blocked - no document access")
+                return RetrievalResult(query_used=query, retrieval_mode="vector")
 
-                parent_docs = get_parent_chunks_for_children(child_chunk_ids, self.source_names)
-
-                # Add parent chunks (deduplicated from regular chunks)
-                seen_ids = {c["chunk_id"] for c in chunks}
-                already_present_count = 0
-                for doc in parent_docs:
-                    parent_id = doc.metadata.get("chunk_id", "")
-                    if parent_id not in seen_ids:
-                        parent_chunk = {
-                            "page_content": doc.page_content,
-                            "metadata": doc.metadata,
-                            "chunk_id": parent_id,
-                            "is_parent": True,
-                            "is_context_expansion": True,  # Mark as expanded context
-                        }
-                        parent_chunks.append(parent_chunk)
-                        seen_ids.add(parent_id)
-                        sources.add(doc.metadata.get("source", "Unknown"))
-                        content_preview = doc.page_content[:80].replace('\n', ' ') if doc.page_content else ""
-                        logger.debug(f"[UnifiedRetriever] + Added parent chunk: {parent_id}, content='{content_preview}...'")
-                    else:
-                        already_present_count += 1
-                        logger.debug(f"[UnifiedRetriever] - Parent chunk {parent_id} already in results, skipping")
-
-                if parent_chunks:
-                    logger.info(
-                        f"[UnifiedRetriever] ✓ Added {len(parent_chunks)} parent chunks for context expansion "
-                        f"({already_present_count} already present, skipped)"
-                    )
-            elif not PARENT_CHUNK_AUTO_INCLUDE:
-                logger.debug("[UnifiedRetriever] PARENT_CHUNK_AUTO_INCLUDE is disabled, skipping parent fetch")
-            elif not child_chunk_ids:
-                logger.debug("[UnifiedRetriever] No child chunks found in results, no parent fetch needed")
+            # Log summary
+            stats = search_result.retrieval_stats
+            chunk_types = stats.get("chunk_types", {})
+            logger.info(
+                f"[UnifiedRetriever] Vector search results: {len(search_result.chunks)} chunks "
+                f"(parents={chunk_types.get('parent', 0)}, children={chunk_types.get('child', 0)}, "
+                f"atomic={chunk_types.get('atomic', 0)}) + {len(search_result.parent_chunks)} context chunks "
+                f"from {len(search_result.sources)} sources"
+            )
 
             return RetrievalResult(
                 entities=[],
                 relationships=[],
-                chunks=chunks,
-                parent_chunks=parent_chunks,
-                sources=sources,
+                chunks=search_result.chunks,
+                parent_chunks=search_result.parent_chunks,
+                sources=search_result.sources,
                 query_used=query,
                 retrieval_mode="vector"
             )

@@ -14,7 +14,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
 
-from .vectorstore import get_retriever, get_retriever_with_sources
+from .vectorstore import unified_vector_search, UnifiedSearchResult
 from .llm_service import get_llm_service
 from .utils.date_normalizer import normalize_query_dates
 
@@ -1324,6 +1324,8 @@ def _search_legacy(
     """
     Legacy single-shot search (fallback when iterative reasoning is disabled).
 
+    Now uses unified_vector_search() for consistent behavior with iterative mode.
+
     Args:
         query: Original user query
         enhanced_query: LLM-enhanced query
@@ -1335,41 +1337,41 @@ def _search_legacy(
     Returns:
         Formatted search results string
     """
-    logger.info("[Search] Using legacy single-shot search")
+    logger.info("[Search] Using legacy single-shot search (via unified_vector_search)")
 
-    # Use routed_document_ids directly - these are already filtered by access control
-    doc_id_list = routed_document_ids if routed_document_ids else None
-    if doc_id_list:
+    # Determine document IDs to search - prefer routed, fallback to accessible
+    if routed_document_ids and len(routed_document_ids) > 0:
+        doc_id_list = routed_document_ids
         logger.info(f"[Search] Legacy search filtering to {len(doc_id_list)} routed documents")
-
-    # Step 3: Create retriever with document_id filtering only
-    if doc_id_list:
-        retriever = get_retriever_with_sources(
-            k=18,
-            fetch_k=50,
-            source_names=None,  # Not used - using document_ids only
-            lambda_mult=0.5,
-            per_source_selection=True,
-            document_ids=doc_id_list
-        )
+    elif accessible_doc_ids and len(accessible_doc_ids) > 0:
+        doc_id_list = list(accessible_doc_ids)
+        logger.info(f"[Search] Legacy search using {len(doc_id_list)} accessible documents (no routing)")
     else:
-        # No routing - use all accessible documents
-        fallback_doc_ids = list(accessible_doc_ids) if accessible_doc_ids else None
-        retriever = get_retriever(k=15, fetch_k=50, document_ids=fallback_doc_ids)
+        doc_id_list = []
 
-    # Step 4: Search with enhanced query
+    # Use unified vector search
     _send_progress("Searching document chunks...", 50)
 
-    docs = retriever.invoke(enhanced_query)
+    search_result = unified_vector_search(
+        query=enhanced_query,
+        document_ids=doc_id_list,
+        k=18,
+        fetch_k=50,
+        lambda_mult=0.5,
+        per_document_selection=True,
+        include_parent_chunks=True  # Uses env variable if None
+    )
 
-    if not docs:
+    # Check if search returned results
+    if search_result.total_count == 0:
+        if search_result.retrieval_stats.get("blocked"):
+            return "No documents accessible for this query."
         return "No relevant documents found for this query."
 
     # Format results
     results = []
-    seen_sources = set()
 
-    # Step 5: Get GraphRAG context (if enabled)
+    # Get GraphRAG context (if enabled)
     _send_progress("Retrieving knowledge from graph...", 60)
 
     graphrag_context = _get_graphrag_context(
@@ -1380,20 +1382,36 @@ def _search_legacy(
     if graphrag_context:
         results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
 
-    for i, doc in enumerate(docs, 1):
-        source = doc.metadata.get("source", "Unknown")
-        heading = doc.metadata.get("heading_path", "")
-        content = doc.page_content
+    # Format regular chunks
+    doc_num = 1
+    for chunk in search_result.chunks:
+        source = chunk["metadata"].get("source", "Unknown")
+        heading = chunk["metadata"].get("heading_path", "")
+        content = chunk["page_content"]
 
-        result = f"[Document {i}: {source}]"
+        result = f"[Document {doc_num}: {source}]"
         if heading:
             result += f"\nSection: {heading}"
         result += f"\n{content}"
         results.append(result)
-        seen_sources.add(source)
+        doc_num += 1
+
+    # Format parent chunks (context expansion)
+    for chunk in search_result.parent_chunks:
+        source = chunk["metadata"].get("source", "Unknown")
+        heading = chunk["metadata"].get("heading_path", "")
+        content = chunk["page_content"]
+
+        result = f"[Document {doc_num} (Context): {source}]"
+        if heading:
+            result += f"\nSection: {heading}"
+        result += f"\n{content}"
+        results.append(result)
+        doc_num += 1
 
     logger.info(
-        f"[Search] Legacy search: {len(docs)} chunks from {len(seen_sources)} sources | "
+        f"[Search] Legacy search: {len(search_result.chunks)} chunks + "
+        f"{len(search_result.parent_chunks)} parent chunks from {len(search_result.sources)} sources | "
         f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
     )
 

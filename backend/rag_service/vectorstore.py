@@ -5,7 +5,8 @@ Connects to Qdrant running at localhost:6333.
 
 import os
 import logging
-from typing import Optional, List
+from dataclasses import dataclass, field
+from typing import Optional, List, Set, Dict, Any
 from qdrant_client import QdrantClient
 from qdrant_client.http import models
 from langchain_qdrant import QdrantVectorStore
@@ -14,6 +15,24 @@ from langchain_core.documents import Document
 from .local_qwen_embedding import LocalQwen3Embedding
 
 logger = logging.getLogger(__name__)
+
+# Configuration for unified vector search
+PARENT_CHUNK_AUTO_INCLUDE = os.getenv("PARENT_CHUNK_AUTO_INCLUDE", "true").lower() == "true"
+
+
+@dataclass
+class UnifiedSearchResult:
+    """
+    Unified result structure for vector search operations.
+
+    This provides a consistent result format for both legacy single-shot
+    and iterative reasoning search paths.
+    """
+    chunks: List[Dict[str, Any]] = field(default_factory=list)
+    parent_chunks: List[Dict[str, Any]] = field(default_factory=list)
+    sources: Set[str] = field(default_factory=set)
+    total_count: int = 0
+    retrieval_stats: Dict[str, Any] = field(default_factory=dict)
 
 # Collection names for document embeddings
 COLLECTION_NAME = "documents"
@@ -331,264 +350,376 @@ def get_parent_chunk_by_id(
     return docs[0] if docs else None
 
 
-def _create_per_source_retriever(
-    vectorstore,
-    source_names: List[str],
+def unified_vector_search(
+    query: str,
+    document_ids: List[str],
+    k: int = 18,
+    fetch_k: int = 50,
+    lambda_mult: float = 0.5,
+    per_document_selection: bool = True,
+    include_parent_chunks: bool = None,
+) -> UnifiedSearchResult:
+    """
+    Unified vector search function combining the best features from legacy and iterative approaches.
+
+    This function provides a consistent search experience regardless of whether iterative
+    reasoning is enabled or disabled. It combines:
+    - MMR search with diversity control (from legacy)
+    - Per-document balanced selection (from legacy)
+    - Parent chunk auto-inclusion (from iterative)
+    - Deduplication and chunk type tracking (from iterative)
+
+    Args:
+        query: Search query string
+        document_ids: List of document IDs the user can access (REQUIRED for access control).
+                     If None or empty, returns empty results for security.
+        k: Number of chunks to retrieve (default: 18)
+        fetch_k: Number of candidates to fetch for MMR (default: 50)
+        lambda_mult: MMR diversity parameter. 0.0 = max diversity, 1.0 = max relevance (default: 0.5)
+        per_document_selection: If True, retrieve chunks from each document separately
+                               to ensure all documents are represented (default: True)
+        include_parent_chunks: If True, auto-fetch parent chunks for child chunks.
+                              If None, uses PARENT_CHUNK_AUTO_INCLUDE env variable.
+
+    Returns:
+        UnifiedSearchResult with chunks, parent_chunks, sources, and stats
+    """
+    # Resolve include_parent_chunks from env if not specified
+    if include_parent_chunks is None:
+        include_parent_chunks = PARENT_CHUNK_AUTO_INCLUDE
+
+    # Security check - block if no document_ids provided
+    if document_ids is None or len(document_ids) == 0:
+        logger.warning("[UnifiedSearch] No accessible documents - returning empty results for security")
+        return UnifiedSearchResult(
+            chunks=[],
+            parent_chunks=[],
+            sources=set(),
+            total_count=0,
+            retrieval_stats={
+                "query": query,
+                "blocked": True,
+                "reason": "no_document_access"
+            }
+        )
+
+    logger.info(f"[UnifiedSearch] Starting search: query='{query[:50]}...', docs={len(document_ids)}, k={k}")
+
+    vectorstore = get_vectorstore()
+    all_chunks = []
+    seen_chunk_ids = set()
+    sources = set()
+    child_chunk_ids = []
+
+    # Convert document_ids to strings
+    doc_id_strings = [str(doc_id) for doc_id in document_ids]
+
+    try:
+        if per_document_selection and len(doc_id_strings) > 1:
+            # Per-document balanced selection: retrieve from each document separately
+            all_chunks, seen_chunk_ids, sources, child_chunk_ids = _search_per_document(
+                vectorstore=vectorstore,
+                query=query,
+                document_ids=doc_id_strings,
+                k=k,
+                fetch_k=fetch_k,
+                lambda_mult=lambda_mult
+            )
+        else:
+            # Single search across all documents
+            all_chunks, seen_chunk_ids, sources, child_chunk_ids = _search_all_documents(
+                vectorstore=vectorstore,
+                query=query,
+                document_ids=doc_id_strings,
+                k=k,
+                fetch_k=fetch_k,
+                lambda_mult=lambda_mult
+            )
+
+        # Auto-include parent chunks for child matches
+        parent_chunks = []
+        if include_parent_chunks and child_chunk_ids:
+            parent_chunks = _fetch_parent_chunks(
+                child_chunk_ids=child_chunk_ids,
+                seen_chunk_ids=seen_chunk_ids,
+                sources=sources
+            )
+
+        # Build retrieval stats
+        parent_count = sum(1 for c in all_chunks if c.get("is_parent"))
+        child_count = len(child_chunk_ids)
+        atomic_count = len(all_chunks) - parent_count
+
+        stats = {
+            "query": query,
+            "k": k,
+            "fetch_k": fetch_k,
+            "lambda_mult": lambda_mult,
+            "per_document_selection": per_document_selection,
+            "include_parent_chunks": include_parent_chunks,
+            "document_count": len(doc_id_strings),
+            "chunk_count": len(all_chunks),
+            "parent_chunks_added": len(parent_chunks),
+            "chunk_types": {
+                "parent": parent_count,
+                "child": child_count,
+                "atomic": atomic_count
+            },
+            "source_count": len(sources)
+        }
+
+        total_count = len(all_chunks) + len(parent_chunks)
+
+        logger.info(
+            f"[UnifiedSearch] Complete: {len(all_chunks)} chunks + {len(parent_chunks)} parent chunks "
+            f"from {len(sources)} sources"
+        )
+
+        return UnifiedSearchResult(
+            chunks=all_chunks,
+            parent_chunks=parent_chunks,
+            sources=sources,
+            total_count=total_count,
+            retrieval_stats=stats
+        )
+
+    except Exception as e:
+        logger.error(f"[UnifiedSearch] Search failed: {e}")
+        return UnifiedSearchResult(
+            chunks=[],
+            parent_chunks=[],
+            sources=set(),
+            total_count=0,
+            retrieval_stats={
+                "query": query,
+                "error": str(e)
+            }
+        )
+
+
+def _search_per_document(
+    vectorstore: QdrantVectorStore,
+    query: str,
+    document_ids: List[str],
     k: int,
     fetch_k: int,
-    lambda_mult: float = None,
-    document_ids: list = None
-):
+    lambda_mult: float
+) -> tuple:
     """
-    Create a custom retriever that retrieves chunks from each source separately,
-    then combines them to ensure all sources are represented.
+    Search with per-document balanced selection using MMR.
 
-    This prevents MMR from excluding entire sources due to diversity filtering.
-
-    Args:
-        vectorstore: The Qdrant vectorstore instance
-        source_names: List of source names to retrieve from
-        k: Total number of chunks to retrieve
-        fetch_k: Number of candidates to fetch per source for MMR
-        lambda_mult: MMR diversity parameter
-        document_ids: Optional list of document IDs for access control filtering
+    Retrieves chunks from each document separately to ensure all documents
+    are represented in the results.
 
     Returns:
-        A custom retriever that ensures per-source representation
+        Tuple of (chunks, seen_chunk_ids, sources, child_chunk_ids)
     """
-    from langchain_core.retrievers import BaseRetriever
-    from langchain_core.callbacks import CallbackManagerForRetrieverRun
-    from typing import List as TypingList, Optional as TypingOptional
+    # Calculate chunks per document (distribute k evenly)
+    chunks_per_doc = max(2, k // len(document_ids))
+    fetch_per_doc = max(10, fetch_k // len(document_ids))
 
-    class PerDocumentRetriever(BaseRetriever):
-        """Custom retriever that ensures all documents are represented using document_id filter only."""
+    logger.info(
+        f"[UnifiedSearch] Per-document selection: {chunks_per_doc} chunks from each of "
+        f"{len(document_ids)} documents"
+    )
 
-        vectorstore: QdrantVectorStore
-        document_ids: TypingList[str]  # Required - list of accessible document IDs
-        k: int
-        fetch_k: int
-        lambda_mult: float
+    all_chunks = []
+    seen_chunk_ids = set()
+    sources = set()
+    child_chunk_ids = []
 
-        class Config:
-            arbitrary_types_allowed = True
-
-        def _get_relevant_documents(
-            self, query: str, *, run_manager: CallbackManagerForRetrieverRun = None
-        ) -> TypingList[Document]:
-            """Retrieve documents with per-document selection using document_id filter only."""
-
-            # Calculate chunks per document (distribute k evenly)
-            chunks_per_doc = max(2, self.k // len(self.document_ids))
-            fetch_per_doc = max(10, self.fetch_k // len(self.document_ids))
-
-            logger.info(
-                f"[PerDocumentRetriever] Retrieving {chunks_per_doc} chunks from each of "
-                f"{len(self.document_ids)} documents (total target: {self.k})"
+    for doc_id in document_ids:
+        try:
+            # Create filter for this document only
+            doc_filter = models.Filter(
+                must=[
+                    models.FieldCondition(
+                        key="metadata.document_id",
+                        match=models.MatchValue(value=doc_id),
+                    )
+                ]
             )
 
-            all_docs = []
-            seen_chunk_ids = set()
+            # Check if document has any chunks
+            test_docs = vectorstore.similarity_search(query, k=1, filter=doc_filter)
+            if not test_docs:
+                logger.debug(f"[UnifiedSearch] No chunks found for document_id: {doc_id}")
+                continue
 
-            # Retrieve from each document separately using document_id filter only
-            for doc_id in self.document_ids:
-                try:
-                    # Create filter using only document_id
-                    doc_filter = models.Filter(
-                        must=[
-                            models.FieldCondition(
-                                key="metadata.document_id",
-                                match=models.MatchValue(value=doc_id),
-                            )
-                        ]
-                    )
+            # Search with MMR for this document
+            docs = vectorstore.max_marginal_relevance_search(
+                query,
+                k=chunks_per_doc,
+                fetch_k=fetch_per_doc,
+                filter=doc_filter,
+                lambda_mult=lambda_mult
+            )
 
-                    # First, check how many chunks exist for this document
-                    try:
-                        test_docs = self.vectorstore.similarity_search(
-                            query,
-                            k=1,
-                            filter=doc_filter
-                        )
-                        if not test_docs:
-                            logger.debug(
-                                f"[PerDocumentRetriever] No chunks found for document_id: {doc_id}"
-                            )
-                            continue
-                    except Exception as e:
-                        logger.warning(f"[PerDocumentRetriever] Cannot access document {doc_id}: {e}")
-                        continue
+            source_name = docs[0].metadata.get('source', doc_id[:8]) if docs else doc_id[:8]
+            logger.debug(f"[UnifiedSearch] Document '{source_name}': Retrieved {len(docs)} chunks")
 
-                    # Search with MMR for this document only
-                    docs = self.vectorstore.max_marginal_relevance_search(
-                        query,
-                        k=chunks_per_doc,
-                        fetch_k=fetch_per_doc,
-                        filter=doc_filter,
-                        lambda_mult=self.lambda_mult if self.lambda_mult is not None else 0.5
-                    )
+            # Process and deduplicate chunks
+            for doc in docs:
+                chunk_data, chunk_id, is_child = _process_document_to_chunk(doc)
 
-                    source_name = docs[0].metadata.get('source', doc_id[:8]) if docs else doc_id[:8]
-                    logger.info(
-                        f"[PerDocumentRetriever] Document '{source_name}' ({doc_id[:8]}...): Retrieved {len(docs)} chunks"
-                    )
-
-                    # Deduplicate by chunk_id
-                    added_count = 0
-                    for doc in docs:
-                        chunk_id = doc.metadata.get("chunk_id")
-                        if chunk_id and chunk_id not in seen_chunk_ids:
-                            all_docs.append(doc)
-                            seen_chunk_ids.add(chunk_id)
-                            added_count += 1
-                        elif not chunk_id:
-                            all_docs.append(doc)
-                            added_count += 1
-
-                    logger.debug(
-                        f"[PerDocumentRetriever] Document '{source_name}': Added {added_count}/{len(docs)} chunks"
-                    )
-
-                except Exception as e:
-                    logger.error(f"[PerDocumentRetriever] Error retrieving from document {doc_id}: {e}")
+                if chunk_id and chunk_id in seen_chunk_ids:
                     continue
 
-            # Trim to k if needed
-            if len(all_docs) > self.k:
-                logger.info(f"[PerDocumentRetriever] Got {len(all_docs)} chunks, trimming to {self.k}")
-                all_docs = all_docs[:self.k]
+                all_chunks.append(chunk_data)
+                if chunk_id:
+                    seen_chunk_ids.add(chunk_id)
+                sources.add(chunk_data["metadata"].get("source", "Unknown"))
 
-            logger.info(
-                f"[PerDocumentRetriever] Final result: {len(all_docs)} chunks from "
-                f"{len(set(doc.metadata.get('document_id', 'Unknown') for doc in all_docs))} documents"
-            )
+                if is_child:
+                    child_chunk_ids.append(chunk_id)
 
-            return all_docs
+        except Exception as e:
+            logger.error(f"[UnifiedSearch] Error retrieving from document {doc_id}: {e}")
+            continue
 
-    # Convert document_ids to strings for the retriever
-    doc_id_strings = [str(doc_id) for doc_id in document_ids] if document_ids else []
+    # Trim to k if we got more than requested
+    if len(all_chunks) > k:
+        logger.debug(f"[UnifiedSearch] Got {len(all_chunks)} chunks, trimming to {k}")
+        all_chunks = all_chunks[:k]
 
-    return PerDocumentRetriever(
-        vectorstore=vectorstore,
-        document_ids=doc_id_strings,
-        k=k,
-        fetch_k=fetch_k,
-        lambda_mult=lambda_mult if lambda_mult is not None else 0.5
+    logger.info(
+        f"[UnifiedSearch] Per-document result: {len(all_chunks)} chunks from "
+        f"{len(set(c['metadata'].get('document_id', 'Unknown') for c in all_chunks))} documents"
     )
 
+    return all_chunks, seen_chunk_ids, sources, child_chunk_ids
 
-def get_retriever_with_sources(
-    k: int = 8,
-    fetch_k: int = 30,
-    source_names: List[str] = None,  # Deprecated - kept for backward compatibility
-    lambda_mult: float = None,
-    per_source_selection: bool = True,  # Renamed semantically to per_document_selection
-    document_ids: list = None
-):
+
+def _search_all_documents(
+    vectorstore: QdrantVectorStore,
+    query: str,
+    document_ids: List[str],
+    k: int,
+    fetch_k: int,
+    lambda_mult: float
+) -> tuple:
     """
-    Get a retriever from the vectorstore with document_id filtering.
+    Search across all documents with MMR.
 
-    IMPORTANT: This function now uses document_id as the primary filter.
-    source_names is deprecated and ignored.
-
-    Args:
-        k: Number of documents to retrieve (total across all documents).
-        fetch_k: Number of documents to fetch for MMR.
-        source_names: DEPRECATED - ignored. Use document_ids instead.
-        lambda_mult: MMR diversity parameter (0.0 = max diversity, 1.0 = max relevance).
-                     If None, uses default (0.5).
-        per_source_selection: If True and document_ids provided, retrieve chunks
-                              from each document separately to ensure all documents
-                              are represented.
-        document_ids: List of document IDs to filter results (required for access control).
+    Used when per_document_selection is False or there's only one document.
 
     Returns:
-        A LangChain retriever configured for MMR search with document_id filtering.
+        Tuple of (chunks, seen_chunk_ids, sources, child_chunk_ids)
     """
-    vectorstore = get_vectorstore()
-
-    # If per-document selection is enabled and we have document_ids, use custom retriever
-    if per_source_selection and document_ids and len(document_ids) > 1:
-        logger.info(
-            f"[Retriever] Using per-document selection for {len(document_ids)} documents "
-            f"to ensure all documents are represented"
-        )
-        return _create_per_source_retriever(
-            vectorstore=vectorstore,
-            source_names=None,  # Not used anymore
-            k=k,
-            fetch_k=fetch_k,
-            lambda_mult=lambda_mult,
-            document_ids=document_ids
-        )
-
-    # Otherwise, use standard MMR retriever with document_id filter only
-    search_kwargs = {"k": k, "fetch_k": fetch_k}
-
-    # Build filter using document_id only
-    if document_ids is not None and len(document_ids) > 0:
-        doc_id_strings = [str(doc_id) for doc_id in document_ids]
-        search_kwargs["filter"] = models.Filter(
-            must=[
-                models.FieldCondition(
-                    key="metadata.document_id",
-                    match=models.MatchAny(any=doc_id_strings),
-                )
-            ]
-        )
-
-    # Add lambda_mult if specified (controls relevance vs diversity tradeoff)
-    if lambda_mult is not None:
-        search_kwargs["lambda_mult"] = lambda_mult
-
-    return vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs=search_kwargs,
-    )
-
-
-def get_retriever(
-    k: int = 8,
-    fetch_k: int = 30,
-    source_filter: str = None,  # DEPRECATED - ignored
-    document_ids: list = None
-):
-    """
-    Get a retriever from the vectorstore using document_id filter only.
-
-    Args:
-        k: Number of documents to retrieve.
-        fetch_k: Number of documents to fetch for MMR.
-        source_filter: DEPRECATED - ignored. Use document_ids instead.
-        document_ids: List of document IDs to filter results (for access control).
-
-    Returns:
-        A LangChain retriever configured for MMR search.
-    """
-    vectorstore = get_vectorstore()
-    search_kwargs = {"k": k, "fetch_k": fetch_k}
-
-    # Build filter using document_id only
-    filter_conditions = []
-
-    # Add document ID filter for access control
-    if document_ids is not None and len(document_ids) > 0:
-        # Convert UUIDs to strings if necessary
-        doc_id_strings = [str(doc_id) for doc_id in document_ids]
-        filter_conditions.append(
+    # Build filter for all accessible documents
+    doc_filter = models.Filter(
+        must=[
             models.FieldCondition(
                 key="metadata.document_id",
-                match=models.MatchAny(any=doc_id_strings),
+                match=models.MatchAny(any=document_ids),
             )
+        ]
+    )
+
+    # Perform MMR search
+    docs = vectorstore.max_marginal_relevance_search(
+        query,
+        k=k,
+        fetch_k=fetch_k,
+        filter=doc_filter,
+        lambda_mult=lambda_mult
+    )
+
+    logger.info(f"[UnifiedSearch] All-document search: Retrieved {len(docs)} chunks")
+
+    all_chunks = []
+    seen_chunk_ids = set()
+    sources = set()
+    child_chunk_ids = []
+
+    for doc in docs:
+        chunk_data, chunk_id, is_child = _process_document_to_chunk(doc)
+
+        if chunk_id and chunk_id in seen_chunk_ids:
+            continue
+
+        all_chunks.append(chunk_data)
+        if chunk_id:
+            seen_chunk_ids.add(chunk_id)
+        sources.add(chunk_data["metadata"].get("source", "Unknown"))
+
+        if is_child:
+            child_chunk_ids.append(chunk_id)
+
+    return all_chunks, seen_chunk_ids, sources, child_chunk_ids
+
+
+def _process_document_to_chunk(doc: Document) -> tuple:
+    """
+    Convert a Document to chunk dict format with metadata.
+
+    Returns:
+        Tuple of (chunk_dict, chunk_id, is_child)
+    """
+    chunk_id = doc.metadata.get("chunk_id", "")
+    parent_chunk_id = doc.metadata.get("parent_chunk_id")
+    is_parent_chunk = doc.metadata.get("is_parent_chunk", False)
+
+    chunk_data = {
+        "page_content": doc.page_content,
+        "metadata": doc.metadata,
+        "chunk_id": chunk_id,
+        "is_parent": is_parent_chunk,
+    }
+
+    # Track if this is a child chunk (has a parent)
+    is_child = bool(parent_chunk_id)
+
+    return chunk_data, chunk_id, is_child
+
+
+def _fetch_parent_chunks(
+    child_chunk_ids: List[str],
+    seen_chunk_ids: set,
+    sources: set
+) -> List[Dict[str, Any]]:
+    """
+    Fetch parent chunks for child chunks.
+
+    Args:
+        child_chunk_ids: List of child chunk IDs that have parents
+        seen_chunk_ids: Set of already seen chunk IDs (will be updated)
+        sources: Set of sources (will be updated)
+
+    Returns:
+        List of parent chunk dicts
+    """
+    logger.info(f"[UnifiedSearch] Fetching parents for {len(child_chunk_ids)} child chunks")
+
+    parent_docs = get_parent_chunks_for_children(child_chunk_ids, source_names=None)
+    parent_chunks = []
+    already_present_count = 0
+
+    for doc in parent_docs:
+        parent_id = doc.metadata.get("chunk_id", "")
+
+        if parent_id in seen_chunk_ids:
+            already_present_count += 1
+            continue
+
+        parent_chunk = {
+            "page_content": doc.page_content,
+            "metadata": doc.metadata,
+            "chunk_id": parent_id,
+            "is_parent": True,
+            "is_context_expansion": True,  # Mark as expanded context
+        }
+        parent_chunks.append(parent_chunk)
+        seen_chunk_ids.add(parent_id)
+        sources.add(doc.metadata.get("source", "Unknown"))
+
+    if parent_chunks:
+        logger.info(
+            f"[UnifiedSearch] Added {len(parent_chunks)} parent chunks "
+            f"({already_present_count} already present, skipped)"
         )
 
-    # Apply filter if any conditions exist
-    if filter_conditions:
-        search_kwargs["filter"] = models.Filter(must=filter_conditions)
-
-    return vectorstore.as_retriever(
-        search_type="mmr",
-        search_kwargs=search_kwargs,
-    )
+    return parent_chunks
 
 
 def clear_collection():
