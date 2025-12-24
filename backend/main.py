@@ -1267,6 +1267,10 @@ def _process_vector_chunk_task(chunk_task) -> bool:
             chunk.metadata["child_chunk_ids"] = new_child_ids
             logger.debug(f"[ParentChild] Updated child_chunk_ids: {len(old_child_ids)} children remapped")
 
+        # Inject document_id into chunk metadata for access control filtering
+        # This is REQUIRED for vector search to filter by document_id
+        chunk.metadata["document_id"] = str(chunk_task.document_id)
+
         # Index to Qdrant vectorstore
         vectorstore = get_vectorstore()
         vectorstore.add_documents([chunk])
