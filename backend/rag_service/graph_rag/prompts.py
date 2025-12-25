@@ -8,6 +8,11 @@ This module contains all prompts used for:
 - Multi-turn reasoning
 """
 
+from rag_service.chunking.document_types import (
+    generate_type_prompt_section,
+    DOCUMENT_TYPES,
+)
+
 # =============================================================================
 # Query Mode Detection Prompts
 # =============================================================================
@@ -328,9 +333,10 @@ RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
 # Query Enhancement with Metadata Extraction (for Document Routing)
 # =============================================================================
 
-QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = """You are an expert search query analyzer for a document retrieval system. Your task is to deeply analyze the user's query and enhance it for optimal document retrieval.
+# Template for query enhancement prompt - document types are injected dynamically
+_QUERY_ENHANCEMENT_TEMPLATE = """You are an expert search query analyzer for a document retrieval system. Your task is to deeply analyze the user's query and enhance it for optimal document retrieval.
 
-User Query: {query}
+User Query: {{query}}
 
 ## CRITICAL INSTRUCTION: CHECK CAREFULLY WITH DETAILS - DO NOT MISS ANY ITEMS
 
@@ -376,27 +382,22 @@ Before submitting, verify:
 - [ ] Will this query find ALL relevant documents, not just some?
 
 Return ONLY valid JSON in this exact format:
-{{{{
+{{{{{{{{
   "enhanced_query": "A detailed, comprehensive query that captures the full intent with ALL specific terms, dates, entities, and context - nothing missing",
   "entities": ["entity1", "entity2", "entity3"],
   "topics": ["topic1", "topic2", "topic3"],
   "document_type_hints": ["type1", "type2"],
   "intent": "detailed description of what the user wants to find, including scope (single/multiple/all)"
-}}}}
+}}}}}}}}
 
-## CRITICAL Guidelines for document_type_hints:
-Choose from these EXACT types based on what the user is looking for:
-  * "receipt" - for meals, restaurant bills, purchases, transactions, expenses
-  * "invoice" - for product purchases, orders, billing documents
-  * "resume" - for CV, job applications, career history, skills
-  * "report" - for analysis, summaries, findings
-  * "manual" - for instructions, guides, how-to documents
-  * "article" - for news, blog posts, written content
-  * "technical_doc" - for API docs, specifications, technical references
+{document_types_section}
 
-- IMPORTANT: If query mentions "meal", "food", "restaurant", "dining", "expense" → use "receipt"
-- IMPORTANT: If query mentions someone's name + "resume" or "CV" → use "resume"
-- IMPORTANT: If query mentions "invoice", "order", "purchase" of products → use "invoice"
+## Type Selection Guidelines:
+- If query mentions "meal", "food", "restaurant", "dining", "expense" → use "receipt"
+- If query mentions someone's name + "resume" or "CV" → use "resume"
+- If query mentions "invoice", "order", "purchase" of products → use "invoice"
+- If query is about technical concepts, APIs, or system design → use "technical_doc" or "research_paper"
+- If query is about analysis, findings, or summaries → use "report"
 
 ## Guidelines for entities (BE EXHAUSTIVE):
 - Extract EVERY SINGLE named entity from the query (names, dates, products, places)
@@ -428,8 +429,22 @@ Choose from these EXACT types based on what the user is looking for:
 - FINAL CHECK: Read your enhanced_query and verify it covers everything in the original
 
 Now THINK CAREFULLY, CHECK EVERY DETAIL, and analyze this query thoroughly:
-Query: {query}
+Query: {{query}}
 """
+
+
+def _build_query_enhancement_prompt() -> str:
+    """
+    Build the query enhancement prompt with centralized document types.
+    This ensures consistency between document classification and query enhancement.
+    """
+    # Generate the document types section from centralized definitions
+    doc_types_section = generate_type_prompt_section()
+    return _QUERY_ENHANCEMENT_TEMPLATE.format(document_types_section=doc_types_section)
+
+
+# Generate the prompt once at module load time
+QUERY_ENHANCEMENT_WITH_METADATA_PROMPT = _build_query_enhancement_prompt()
 
 
 # Document Routing - LLM-based Relevance Scoring

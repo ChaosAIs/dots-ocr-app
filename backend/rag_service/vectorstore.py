@@ -1328,3 +1328,207 @@ def get_metadata_collection_info() -> dict:
     except Exception as e:
         logger.error(f"Error getting metadata collection info: {e}")
         return {"name": METADATA_COLLECTION_NAME, "error": str(e)}
+
+
+# =============================================================================
+# Query Relevance Scoring for Chunks
+# =============================================================================
+
+# Configuration for query relevance scoring
+CONTEXT_ENABLE_QUERY_SCORING = os.getenv("CONTEXT_ENABLE_QUERY_SCORING", "true").lower() == "true"
+
+
+def _compute_cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """
+    Compute cosine similarity between two vectors.
+
+    Args:
+        vec1: First vector
+        vec2: Second vector
+
+    Returns:
+        Cosine similarity score between 0 and 1
+    """
+    if not vec1 or not vec2 or len(vec1) != len(vec2):
+        return 0.0
+
+    dot_product = sum(a * b for a, b in zip(vec1, vec2))
+    norm1 = sum(a * a for a in vec1) ** 0.5
+    norm2 = sum(b * b for b in vec2) ** 0.5
+
+    if norm1 == 0 or norm2 == 0:
+        return 0.0
+
+    return dot_product / (norm1 * norm2)
+
+
+def score_chunks_by_query(
+    chunks: List[Dict[str, Any]],
+    query: str,
+    query_embedding: List[float] = None
+) -> List[Dict[str, Any]]:
+    """
+    Score chunks by query relevance using cosine similarity.
+
+    This function computes relevance scores for a list of chunks against a query
+    by comparing the query embedding with stored chunk embeddings in Qdrant.
+
+    Args:
+        chunks: List of chunk dictionaries with chunk_id in metadata
+        query: The query string (used if query_embedding not provided)
+        query_embedding: Optional pre-computed query embedding
+
+    Returns:
+        Same chunks with _score field added to metadata, sorted by score descending
+    """
+    if not chunks:
+        return chunks
+
+    if not CONTEXT_ENABLE_QUERY_SCORING:
+        logger.debug("[QueryScoring] Disabled via CONTEXT_ENABLE_QUERY_SCORING")
+        return chunks
+
+    client = get_qdrant_client()
+    embeddings = get_embeddings()
+
+    # Get query embedding if not provided
+    if query_embedding is None:
+        if not query:
+            logger.warning("[QueryScoring] No query or embedding provided")
+            return chunks
+        try:
+            query_embedding = embeddings.embed_query(query)
+            logger.debug(f"[QueryScoring] Embedded query: '{query[:50]}...' -> {len(query_embedding)} dims")
+        except Exception as e:
+            logger.error(f"[QueryScoring] Failed to embed query: {e}")
+            return chunks
+
+    # Collect chunk IDs for batch retrieval
+    chunk_id_to_idx = {}
+    for idx, chunk in enumerate(chunks):
+        chunk_id = chunk.get("chunk_id") or chunk.get("metadata", {}).get("chunk_id", "")
+        if chunk_id:
+            chunk_id_to_idx[chunk_id] = idx
+
+    if not chunk_id_to_idx:
+        logger.warning("[QueryScoring] No valid chunk IDs found")
+        return chunks
+
+    logger.info(f"[QueryScoring] Scoring {len(chunk_id_to_idx)} chunks against query")
+
+    try:
+        # Build filter to retrieve specific chunks with their vectors
+        should_conditions = [
+            models.FieldCondition(
+                key="metadata.chunk_id",
+                match=models.MatchValue(value=chunk_id),
+            )
+            for chunk_id in chunk_id_to_idx.keys()
+        ]
+
+        filter_condition = models.Filter(should=should_conditions)
+
+        # Scroll through chunks with vectors
+        result, _ = client.scroll(
+            collection_name=COLLECTION_NAME,
+            scroll_filter=filter_condition,
+            limit=len(chunk_id_to_idx),
+            with_payload=True,
+            with_vectors=True,  # Get the stored embeddings
+        )
+
+        # Calculate scores for each chunk
+        scores_computed = 0
+        for point in result:
+            payload = point.payload or {}
+            metadata = payload.get("metadata", {})
+            chunk_id = metadata.get("chunk_id", "")
+
+            if chunk_id not in chunk_id_to_idx:
+                continue
+
+            # Get stored vector
+            stored_vector = point.vector
+            if stored_vector is None:
+                continue
+
+            # Compute cosine similarity
+            score = _compute_cosine_similarity(query_embedding, stored_vector)
+
+            # Add score to the chunk
+            idx = chunk_id_to_idx[chunk_id]
+            if "metadata" not in chunks[idx]:
+                chunks[idx]["metadata"] = {}
+            chunks[idx]["metadata"]["_score"] = score
+            chunks[idx]["_score"] = score  # Also at top level for convenience
+            scores_computed += 1
+
+        logger.info(f"[QueryScoring] Computed scores for {scores_computed}/{len(chunk_id_to_idx)} chunks")
+
+        # Sort chunks by score (highest first)
+        chunks_with_scores = [(c, c.get("_score", 0.0)) for c in chunks]
+        chunks_with_scores.sort(key=lambda x: x[1], reverse=True)
+        sorted_chunks = [c for c, _ in chunks_with_scores]
+
+        # Log score distribution
+        if sorted_chunks:
+            scores = [c.get("_score", 0.0) for c in sorted_chunks]
+            if scores:
+                logger.info(
+                    f"[QueryScoring] Score distribution: max={max(scores):.3f}, "
+                    f"min={min(scores):.3f}, avg={sum(scores)/len(scores):.3f}"
+                )
+
+        return sorted_chunks
+
+    except Exception as e:
+        logger.error(f"[QueryScoring] Failed to score chunks: {e}")
+        return chunks
+
+
+def score_and_merge_chunks(
+    chunk_lists: List[List[Dict[str, Any]]],
+    query: str,
+    deduplicate: bool = True
+) -> List[Dict[str, Any]]:
+    """
+    Merge multiple chunk lists, deduplicate, and score by query relevance.
+
+    This is the main entry point for centralized scoring. It:
+    1. Merges all chunk lists
+    2. Deduplicates by chunk_id
+    3. Scores all unique chunks against the query
+    4. Returns sorted by relevance score
+
+    Args:
+        chunk_lists: List of chunk lists (e.g., [vector_chunks, graph_chunks, parent_chunks])
+        query: The query string for scoring
+        deduplicate: Whether to deduplicate by chunk_id (default: True)
+
+    Returns:
+        Merged, deduplicated, scored, and sorted chunks
+    """
+    if not chunk_lists:
+        return []
+
+    # Merge all chunks
+    all_chunks = []
+    seen_ids = set()
+
+    for chunk_list in chunk_lists:
+        for chunk in chunk_list:
+            if deduplicate:
+                chunk_id = chunk.get("chunk_id") or chunk.get("metadata", {}).get("chunk_id", "")
+                if chunk_id and chunk_id in seen_ids:
+                    continue
+                if chunk_id:
+                    seen_ids.add(chunk_id)
+            all_chunks.append(chunk)
+
+    logger.info(
+        f"[ScoreAndMerge] Merged {sum(len(cl) for cl in chunk_lists)} chunks "
+        f"into {len(all_chunks)} unique chunks"
+    )
+
+    # Score and sort
+    return score_chunks_by_query(all_chunks, query)

@@ -21,6 +21,7 @@ from .domain_patterns import (
     get_domain_for_document_type,
     detect_domain_from_content,
 )
+from .document_types import generate_classification_taxonomy
 
 logger = logging.getLogger(__name__)
 
@@ -36,29 +37,29 @@ LARGE_DOC_TOKENS = 10000  # > 10000 tokens = large document
 # Pre-Classification Prompt
 # ============================================================================
 
-UNIVERSAL_PRE_CHUNKING_PROMPT = """You are a document analysis expert. Analyze this document to determine optimal chunking strategy.
+UNIVERSAL_PRE_CHUNKING_PROMPT_TEMPLATE = """You are a document analysis expert. Analyze this document to determine optimal chunking strategy.
 
-DOCUMENT NAME: {filename}
-DOCUMENT SIZE: {total_chars} characters (~{estimated_tokens} tokens)
+DOCUMENT NAME: {{filename}}
+DOCUMENT SIZE: {{total_chars}} characters (~{{estimated_tokens}} tokens)
 
 DOCUMENT PREVIEW (first 2000 chars):
-{preview_start}
+{{preview_start}}
 
 DOCUMENT END (last 1000 chars):
-{preview_end}
+{{preview_end}}
 
 STRUCTURAL MARKERS DETECTED:
-- Tables: {has_tables}
-- Headers: {has_headers}
-- Lists: {has_lists}
-- Code blocks: {has_code}
-- Equations: {has_equations}
-- Numbered clauses: {has_numbered_clauses}
-- Citations: {has_citations}
-- Form fields: {has_form_fields}
+- Tables: {{has_tables}}
+- Headers: {{has_headers}}
+- Lists: {{has_lists}}
+- Code blocks: {{has_code}}
+- Equations: {{has_equations}}
+- Numbered clauses: {{has_numbered_clauses}}
+- Citations: {{has_citations}}
+- Form fields: {{has_form_fields}}
 
 Analyze and respond with JSON only (no markdown, no code blocks):
-{{
+{{{{
   "document_type": "<type from taxonomy below>",
   "document_domain": "legal|academic|medical|engineering|education|financial|government|professional|general",
   "content_density": "sparse|normal|dense",
@@ -72,18 +73,9 @@ Analyze and respond with JSON only (no markdown, no code blocks):
   "special_handling": ["list of special processing needed"],
   "confidence": <0.0-1.0>,
   "reasoning": "Brief explanation"
-}}
+}}}}
 
-DOCUMENT TYPE TAXONOMY:
-- Business/Finance: receipt, invoice, financial_report, bank_statement, expense_report, quotation, purchase_order
-- Legal: contract, agreement, legal_brief, patent, terms_of_service, privacy_policy, compliance_doc
-- Technical: technical_spec, api_documentation, user_manual, datasheet, architecture_doc, code_documentation
-- Academic: research_paper, thesis, academic_article, literature_review, case_study, lab_report
-- Medical: medical_record, clinical_report, lab_result, prescription, discharge_summary
-- Education: textbook, course_material, syllabus, exam, tutorial, lecture_notes
-- Government: government_form, permit, license, policy_document, legislation
-- Professional: resume, cover_letter, job_description, employee_handbook
-- General: report, memo, letter, email, article, meeting_notes, other
+{taxonomy}
 
 STRATEGY GUIDELINES:
 - "whole_document": Small atomic documents (<1000 tokens) that should stay together
@@ -95,6 +87,19 @@ STRATEGY GUIDELINES:
 - "table_preserving": Documents with significant tabular data
 - "semantic_header": Well-structured documents with clear headers
 - "paragraph": Narrative documents without strong structure"""
+
+
+def get_pre_chunking_prompt() -> str:
+    """
+    Get the pre-chunking prompt with centralized document type taxonomy.
+    This ensures consistency between classification and query enhancement.
+    """
+    taxonomy = generate_classification_taxonomy()
+    return UNIVERSAL_PRE_CHUNKING_PROMPT_TEMPLATE.format(taxonomy=taxonomy)
+
+
+# Generate the prompt once at module load time for efficiency
+UNIVERSAL_PRE_CHUNKING_PROMPT = get_pre_chunking_prompt()
 
 
 class DocumentClassifier:

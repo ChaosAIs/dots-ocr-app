@@ -18,6 +18,7 @@ from typing import List, Dict, Any, Tuple, Optional
 
 from db.document_repository import DocumentRepository
 from db.database import get_db_session
+from rag_service.chunking.document_types import types_match, expand_type_aliases
 
 logger = logging.getLogger(__name__)
 
@@ -284,6 +285,9 @@ class DocumentRouter:
 
             ENTITY_MATCH_BOOST = float(os.getenv("ENTITY_MATCH_BOOST", "0.3"))
 
+            # Track the highest score after boosting (before penalties) for threshold calculation
+            max_boosted_score = 0.0
+
             if query_entities or query_terms:
                 logger.info(f"[Router Vector] ENTITY MATCHING BOOST:")
                 logger.info(f"[Router Vector]   • Query entities (normalized): {query_entities}")
@@ -349,6 +353,8 @@ class DocumentRouter:
                         result["score"] = min(1.0, original_score + boost)
                         result["_boosted"] = True
                         result["_boost_amount"] = boost
+                        # Track max boosted score BEFORE penalties are applied
+                        max_boosted_score = max(max_boosted_score, result["score"])
                         logger.info(
                             f"[Router Vector]   ↑ BOOSTED: {source_name_raw:40s} "
                             f"{original_score:.4f} → {result['score']:.4f} (+{boost:.4f}) "
@@ -358,13 +364,21 @@ class DocumentRouter:
                 # Re-sort by score after boosting
                 results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
+                # Also track unboosted top score in case no boosting occurred
+                if max_boosted_score == 0.0 and results:
+                    max_boosted_score = results[0].get("score", 0)
+
             # ========== DOCUMENT TYPE FILTERING ==========
             # If document_type_hints are provided, filter/penalize mismatched types
+            # Uses centralized type matching with alias expansion for flexible matching
             doc_type_hints = [t.lower() for t in query_metadata.get("document_type_hints", [])]
             if doc_type_hints:
                 DOC_TYPE_MISMATCH_PENALTY = float(os.getenv("DOC_TYPE_MISMATCH_PENALTY", "0.5"))
+                # Expand type hints to include aliases (e.g., "technical_doc" -> includes "report", "research_paper")
+                expanded_hints = expand_type_aliases(doc_type_hints)
                 logger.info(f"[Router Vector] DOCUMENT TYPE FILTERING:")
                 logger.info(f"[Router Vector]   • Required types: {doc_type_hints}")
+                logger.info(f"[Router Vector]   • Expanded types (with aliases): {sorted(expanded_hints)}")
                 logger.info(f"[Router Vector]   • Mismatch penalty: {DOC_TYPE_MISMATCH_PENALTY}")
 
                 for result in results:
@@ -372,19 +386,16 @@ class DocumentRouter:
                     source_name = result.get("source_name", "")
                     original_score = result.get("score", 0)
 
-                    # Check if document type matches any of the hints
-                    type_matches = any(
-                        hint in doc_type or doc_type in hint
-                        for hint in doc_type_hints
-                    )
+                    # Use centralized type matching with alias expansion
+                    type_matches_result = types_match(doc_type_hints, doc_type)
 
-                    if not type_matches and doc_type:
+                    if not type_matches_result and doc_type:
                         # Apply penalty for type mismatch
                         result["score"] = original_score * DOC_TYPE_MISMATCH_PENALTY
                         result["_type_penalized"] = True
                         logger.info(
                             f"[Router Vector]   ↓ PENALIZED: {source_name:40s} "
-                            f"type='{doc_type}' not in {doc_type_hints} "
+                            f"type='{doc_type}' not in {list(expanded_hints)} "
                             f"({original_score:.4f} → {result['score']:.4f})"
                         )
                     else:
@@ -398,7 +409,7 @@ class DocumentRouter:
             # ========== ADAPTIVE THRESHOLD CALCULATION ==========
             # Log all raw results first for debugging
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"[Router Vector] RESULTS AFTER BOOSTING: {len(results)} results")
+            logger.info(f"[Router Vector] RESULTS AFTER BOOSTING & PENALTIES: {len(results)} results")
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             for i, r in enumerate(results):
@@ -420,16 +431,28 @@ class DocumentRouter:
                     embedding_preview = embedding_text[:100] + "..." if len(embedding_text) > 100 else embedding_text
                     logger.debug(f"[Router Vector]       Stored: \"{embedding_preview}\"")
 
-            # Calculate adaptive threshold
-            top_score = results[0].get("score", 0) if results else 0
-            relative_threshold = top_score * VECTOR_ROUTING_RELATIVE_THRESHOLD
+            # Calculate adaptive threshold using the max boosted score (before penalties)
+            # This ensures documents that got entity matching boost set a higher threshold
+            # to filter out irrelevant documents that were never boosted
+            top_score_after_penalty = results[0].get("score", 0) if results else 0
+
+            # Use max_boosted_score if available (higher threshold), otherwise fall back to top_score
+            # This is the key fix: threshold is based on PRE-PENALTY boosted score
+            if max_boosted_score > 0:
+                threshold_base_score = max_boosted_score
+            else:
+                threshold_base_score = top_score_after_penalty
+
+            relative_threshold = threshold_base_score * VECTOR_ROUTING_RELATIVE_THRESHOLD
 
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
             logger.info(f"[Router Vector] ADAPTIVE THRESHOLD CALCULATION:")
-            logger.info(f"[Router Vector]   • Top score:              {top_score:.4f}")
-            logger.info(f"[Router Vector]   • Relative threshold (%): {VECTOR_ROUTING_RELATIVE_THRESHOLD:.0%}")
-            logger.info(f"[Router Vector]   • Computed threshold:     {relative_threshold:.4f}")
-            logger.info(f"[Router Vector]   • Formula: {top_score:.4f} × {VECTOR_ROUTING_RELATIVE_THRESHOLD} = {relative_threshold:.4f}")
+            logger.info(f"[Router Vector]   • Max boosted score (pre-penalty): {max_boosted_score:.4f}")
+            logger.info(f"[Router Vector]   • Top score (post-penalty):        {top_score_after_penalty:.4f}")
+            logger.info(f"[Router Vector]   • Threshold base score:            {threshold_base_score:.4f}")
+            logger.info(f"[Router Vector]   • Relative threshold (%):          {VECTOR_ROUTING_RELATIVE_THRESHOLD:.0%}")
+            logger.info(f"[Router Vector]   • Computed threshold:              {relative_threshold:.4f}")
+            logger.info(f"[Router Vector]   • Formula: {threshold_base_score:.4f} × {VECTOR_ROUTING_RELATIVE_THRESHOLD} = {relative_threshold:.4f}")
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
             # Extract and deduplicate document IDs with adaptive filtering

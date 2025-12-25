@@ -26,6 +26,12 @@ CONTEXT_PARENT_BUDGET_PERCENT = int(os.getenv("CONTEXT_PARENT_BUDGET_PERCENT", "
 CONTEXT_GRAPH_BUDGET_PERCENT = int(os.getenv("CONTEXT_GRAPH_BUDGET_PERCENT", "15"))
 CONTEXT_SUMMARIZE_LARGE_CHUNKS = os.getenv("CONTEXT_SUMMARIZE_LARGE_CHUNKS", "true").lower() == "true"
 
+# Query relevance scoring configuration
+CONTEXT_ENABLE_QUERY_SCORING = os.getenv("CONTEXT_ENABLE_QUERY_SCORING", "true").lower() == "true"
+CONTEXT_SCORE_THRESHOLD_CRITICAL = float(os.getenv("CONTEXT_SCORE_THRESHOLD_CRITICAL", "0.85"))
+CONTEXT_SCORE_THRESHOLD_HIGH = float(os.getenv("CONTEXT_SCORE_THRESHOLD_HIGH", "0.70"))
+CONTEXT_SCORE_THRESHOLD_MEDIUM = float(os.getenv("CONTEXT_SCORE_THRESHOLD_MEDIUM", "0.50"))
+
 
 class ChunkPriority(Enum):
     """Priority levels for chunks in context building."""
@@ -134,7 +140,12 @@ class TokenAwareContextBuilder:
         is_parent: bool = False,
     ) -> ChunkPriority:
         """
-        Calculate priority for a chunk based on its metadata.
+        Calculate priority for a chunk based on its metadata and query relevance score.
+
+        Priority is determined by:
+        1. Query relevance score (_score) if available - dynamic, query-specific
+        2. Key section markers (is_key_section, is_abstract) - always critical
+        3. Static importance_score as fallback
 
         Args:
             chunk: The chunk dictionary
@@ -145,14 +156,29 @@ class TokenAwareContextBuilder:
         """
         metadata = chunk.get("metadata", {})
 
-        # Check for key section markers
+        # Check for key section markers - these are always critical
         is_key_section = metadata.get("is_key_section", False)
         is_abstract = metadata.get("is_abstract", False)
-        importance_score = metadata.get("importance_score", 0.5)
-
-        # Key sections are critical
         if is_key_section or is_abstract:
             return ChunkPriority.CRITICAL
+
+        # Use query relevance score (_score) if available
+        # This is the dynamic score computed against the current query
+        query_score = chunk.get("_score") or metadata.get("_score")
+
+        if query_score is not None:
+            # Use query-specific relevance scoring
+            if query_score >= CONTEXT_SCORE_THRESHOLD_CRITICAL:
+                return ChunkPriority.CRITICAL
+            elif query_score >= CONTEXT_SCORE_THRESHOLD_HIGH:
+                return ChunkPriority.HIGH
+            elif query_score >= CONTEXT_SCORE_THRESHOLD_MEDIUM:
+                return ChunkPriority.MEDIUM
+            else:
+                return ChunkPriority.LOW
+
+        # Fallback to static importance_score if no query score
+        importance_score = metadata.get("importance_score", 0.5)
 
         # High importance score
         if importance_score >= 0.8:
@@ -179,7 +205,9 @@ class TokenAwareContextBuilder:
         """
         Prepare a chunk for context inclusion.
 
-        May summarize if the chunk is too large.
+        May summarize if the chunk is too large. For parent chunks that already
+        have a pre-computed summary from the indexing process, we use that
+        summary instead of re-summarizing.
 
         Args:
             chunk: The chunk dictionary
@@ -200,8 +228,32 @@ class TokenAwareContextBuilder:
         is_summarized = False
         final_content = content
 
-        # Check if summarization is needed
-        if available_tokens and original_tokens > available_tokens and self.summarize_large_chunks:
+        # Check if this parent chunk already has a pre-computed summary from indexing
+        # This avoids duplicate summarization for large parent chunks
+        existing_summary = metadata.get("parent_summary")
+        existing_summary_tokens = metadata.get("parent_summary_tokens", 0)
+
+        if existing_summary and is_parent:
+            # Use the pre-computed summary if it fits within the available budget
+            if available_tokens is None or existing_summary_tokens <= available_tokens:
+                final_content = existing_summary
+                is_summarized = True
+                logger.debug(
+                    f"Using pre-computed summary for parent chunk {chunk_id}: "
+                    f"{original_tokens} -> {existing_summary_tokens} tokens"
+                )
+            elif available_tokens and existing_summary_tokens > available_tokens:
+                # Pre-computed summary is still too large, need to further compress
+                logger.debug(
+                    f"Pre-computed summary ({existing_summary_tokens} tokens) exceeds budget "
+                    f"({available_tokens}), will further compress"
+                )
+                # Fall through to summarization logic below with the summary as base
+                content = existing_summary
+                original_tokens = existing_summary_tokens
+
+        # Check if summarization is needed (only if not already using pre-computed summary)
+        if not is_summarized and available_tokens and original_tokens > available_tokens and self.summarize_large_chunks:
             summarizer = self._get_summarizer()
             if summarizer:
                 try:
@@ -221,6 +273,10 @@ class TokenAwareContextBuilder:
                         final_content = final_content.rsplit(' ', 1)[0] + "..."
                     is_summarized = True
 
+        # Use query relevance score if available, otherwise fall back to static importance_score
+        query_score = chunk.get("_score") or metadata.get("_score")
+        relevance_score = query_score if query_score is not None else metadata.get("importance_score", 0.5)
+
         return ContextChunk(
             content=final_content,
             source=source,
@@ -231,7 +287,7 @@ class TokenAwareContextBuilder:
             is_parent=is_parent,
             is_summarized=is_summarized,
             original_token_count=original_tokens,
-            relevance_score=metadata.get("importance_score", 0.5),
+            relevance_score=relevance_score,
             metadata=metadata,
         )
 
@@ -320,17 +376,39 @@ class TokenAwareContextBuilder:
         """
         Build a token-aware context from chunks and additional context.
 
+        When a query is provided and CONTEXT_ENABLE_QUERY_SCORING is enabled,
+        chunks are scored against the query for relevance-based prioritization.
+
         Args:
             chunks: Regular search result chunks
             parent_chunks: Parent chunks for context expansion
             graph_context: Optional graph RAG context string
-            query: The original query (for reference)
+            query: The original query (used for relevance scoring)
 
         Returns:
             BuiltContext with formatted context and statistics
         """
         parent_chunks = parent_chunks or []
         warnings = []
+
+        # Score chunks by query relevance if query is provided
+        if query and CONTEXT_ENABLE_QUERY_SCORING and (chunks or parent_chunks):
+            try:
+                from .vectorstore import score_chunks_by_query
+
+                # Score regular chunks
+                if chunks:
+                    chunks = score_chunks_by_query(chunks, query)
+                    logger.info(f"[ContextBuilder] Scored {len(chunks)} chunks against query")
+
+                # Score parent chunks with the same query
+                if parent_chunks:
+                    parent_chunks = score_chunks_by_query(parent_chunks, query)
+                    logger.info(f"[ContextBuilder] Scored {len(parent_chunks)} parent chunks against query")
+
+            except Exception as e:
+                logger.warning(f"[ContextBuilder] Query scoring failed, using static scores: {e}")
+                warnings.append(f"Query scoring failed: {str(e)}")
 
         # Prepare all chunks
         prepared_chunks = []

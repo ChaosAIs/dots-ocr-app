@@ -43,6 +43,7 @@ class ReasoningResult:
     queries_made: List[str] = field(default_factory=list)
     steps_taken: int = 0
     reasoning_mode: str = "iterative"  # "iterative" or "single-shot"
+    initial_query: str = ""  # Original user question for query relevance scoring
 
     def has_answer(self) -> bool:
         """Check if a final answer was generated."""
@@ -175,13 +176,19 @@ class IterativeReasoningEngine:
         seen_chunk_ids = set()
         seen_parent_chunk_ids = set()
 
-        # Step 1: Generate initial query
+        # Step 1: Generate initial query (LLM-enhanced search query)
         if progress_callback:
             await progress_callback("Generating initial search query...", 10)
 
         logger.info("[IterativeReasoning] Generating initial query...")
         current_query = await self._generate_initial_query(question, INITIAL_QUERY_PROMPT)
-        logger.info(f"[IterativeReasoning] Initial query: '{current_query}'")
+
+        # Log query comparison for debugging
+        logger.info("-" * 70)
+        logger.info("[IterativeReasoning] QUERY COMPARISON:")
+        logger.info(f"  Original question: '{question}'")
+        logger.info(f"  Generated query:   '{current_query}'")
+        logger.info(f"  Query changed:     {question != current_query}")
         logger.info("-" * 70)
 
         # Iterative reasoning loop
@@ -360,7 +367,8 @@ class IterativeReasoningEngine:
             sources=all_sources,
             queries_made=queries_made,
             steps_taken=step,
-            reasoning_mode="iterative"
+            reasoning_mode="iterative",
+            initial_query=question,
         )
 
     async def _single_shot_retrieval(self, question: str) -> ReasoningResult:
@@ -386,7 +394,8 @@ class IterativeReasoningEngine:
             sources=result.sources,
             queries_made=[question],
             steps_taken=1,
-            reasoning_mode="single-shot"
+            reasoning_mode="single-shot",
+            initial_query=question,
         )
 
     async def _generate_initial_query(
@@ -397,26 +406,45 @@ class IterativeReasoningEngine:
         """
         Generate initial search query from user question.
 
+        This method uses an LLM to transform the user's natural language question
+        into an optimized search query with:
+        - Entity-focused terms
+        - Relevant keywords and synonyms
+        - Specific context for better retrieval
+
         Args:
             question: User's original question
             prompt_template: INITIAL_QUERY_PROMPT template
 
         Returns:
-            Generated query string
+            Generated query string (enhanced for retrieval)
         """
+        logger.info("[IterativeReasoning] === QUERY GENERATION START ===")
+        logger.info(f"[IterativeReasoning] Original question: '{question}'")
+
         prompt = prompt_template.format(question=question)
+        logger.debug(f"[IterativeReasoning] Using prompt template (first 200 chars): {prompt[:200]}...")
 
         from langchain_core.messages import HumanMessage
         llm = self._get_llm_service().get_query_model(temperature=0.1, num_predict=200)
+
+        logger.info("[IterativeReasoning] Invoking LLM for query generation...")
         response_msg = await llm.ainvoke([HumanMessage(content=prompt)])
         response = response_msg.content.strip()
+
+        logger.info(f"[IterativeReasoning] LLM raw response: '{response}'")
 
         # Extract query from <query>...</query> tags
         query_match = re.search(r'<query>(.*?)</query>', response, re.DOTALL)
         if query_match:
-            return query_match.group(1).strip()
+            generated_query = query_match.group(1).strip()
+            logger.info(f"[IterativeReasoning] Extracted query from tags: '{generated_query}'")
+            logger.info("[IterativeReasoning] === QUERY GENERATION END (success) ===")
+            return generated_query
         else:
             # Fallback to original question
+            logger.warning(f"[IterativeReasoning] No <query> tags found in response, using original question")
+            logger.info("[IterativeReasoning] === QUERY GENERATION END (fallback) ===")
             return question
 
     async def _generate_final_answer(

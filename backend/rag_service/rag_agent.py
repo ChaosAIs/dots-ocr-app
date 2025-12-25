@@ -1270,13 +1270,24 @@ def _format_reasoning_result(result) -> str:
     # Build graph context string from entities and relationships
     graph_context = _format_graph_context(result.entities, result.relationships)
 
+    # Get the initial query for relevance scoring
+    initial_query = getattr(result, 'initial_query', None)
+    queries_made = getattr(result, 'queries_made', [])
+
+    # Log what query will be used for scoring
+    logger.info("[Search] Query relevance scoring debug:")
+    logger.info(f"  Initial query (for scoring): '{initial_query}'")
+    logger.info(f"  Queries made during retrieval: {queries_made}")
+    logger.info(f"  Number of chunks to score: {len(result.chunks)}")
+    logger.info(f"  Number of parent chunks to score: {len(getattr(result, 'parent_chunks', []))}")
+
     # Use token-aware context builder for chunks and parent chunks
     try:
         built_context = build_token_aware_context(
             chunks=result.chunks,
             parent_chunks=getattr(result, 'parent_chunks', []),
             graph_context=graph_context,
-            query=None,  # Query already processed in reasoning
+            query=initial_query,  # Pass query for centralized relevance scoring
         )
 
         # Log context building stats
