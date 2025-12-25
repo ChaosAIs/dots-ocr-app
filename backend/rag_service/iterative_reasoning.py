@@ -36,6 +36,7 @@ class ReasoningResult:
     """
     final_answer: str = ""
     chunks: List[Dict[str, Any]] = field(default_factory=list)
+    parent_chunks: List[Dict[str, Any]] = field(default_factory=list)  # Parent context chunks
     entities: List[Dict[str, Any]] = field(default_factory=list)
     relationships: List[Dict[str, Any]] = field(default_factory=list)
     sources: set = field(default_factory=set)
@@ -168,9 +169,11 @@ class IterativeReasoningEngine:
         all_entities = []
         all_relationships = []
         all_chunks = []
+        all_parent_chunks = []
         all_sources = set()
         seen_entity_ids = set()
         seen_chunk_ids = set()
+        seen_parent_chunk_ids = set()
 
         # Step 1: Generate initial query
         if progress_callback:
@@ -205,6 +208,7 @@ class IterativeReasoningEngine:
                 "entities": result.entities,
                 "relationships": result.relationships,
                 "chunks": result.chunks,
+                "parent_chunks": result.parent_chunks,
             }
             retrieved_knowledge.append(knowledge_step)
             queries_made.append(current_query)
@@ -213,6 +217,7 @@ class IterativeReasoningEngine:
             logger.info(f"  - Entities: {len(result.entities)}")
             logger.info(f"  - Relationships: {len(result.relationships)}")
             logger.info(f"  - Chunks: {len(result.chunks)}")
+            logger.info(f"  - Parent chunks: {len(result.parent_chunks)}")
             logger.info(f"  - Sources: {result.sources}")
 
             # Accumulate results (deduplicate)
@@ -231,6 +236,15 @@ class IterativeReasoningEngine:
                     seen_chunk_ids.add(chunk_id)
                 elif not chunk_id:
                     all_chunks.append(chunk)
+
+            # Accumulate parent chunks (deduplicate)
+            for parent in result.parent_chunks:
+                parent_id = parent.get("chunk_id", parent.get("metadata", {}).get("chunk_id", ""))
+                if parent_id and parent_id not in seen_parent_chunk_ids:
+                    all_parent_chunks.append(parent)
+                    seen_parent_chunk_ids.add(parent_id)
+                elif not parent_id:
+                    all_parent_chunks.append(parent)
 
             all_relationships.extend(result.relationships)
             all_sources.update(result.sources)
@@ -332,6 +346,7 @@ class IterativeReasoningEngine:
         logger.info(f"  - Total entities: {len(all_entities)}")
         logger.info(f"  - Total relationships: {len(all_relationships)}")
         logger.info(f"  - Total chunks: {len(all_chunks)}")
+        logger.info(f"  - Total parent chunks: {len(all_parent_chunks)}")
         logger.info(f"  - Sources: {all_sources}")
         logger.info(f"  - Final answer: {'Yes' if final_answer else 'No'} ({len(final_answer)} chars)")
         logger.info("=" * 70)
@@ -339,6 +354,7 @@ class IterativeReasoningEngine:
         return ReasoningResult(
             final_answer=final_answer,
             chunks=all_chunks,
+            parent_chunks=all_parent_chunks,
             entities=all_entities,
             relationships=all_relationships,
             sources=all_sources,
@@ -364,6 +380,7 @@ class IterativeReasoningEngine:
         return ReasoningResult(
             final_answer="",  # No answer generated, let caller handle
             chunks=result.chunks,
+            parent_chunks=result.parent_chunks,
             entities=result.entities,
             relationships=result.relationships,
             sources=result.sources,

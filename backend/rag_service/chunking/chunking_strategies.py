@@ -7,6 +7,7 @@ logic to preserve semantic coherence.
 """
 
 import logging
+import os
 import re
 import uuid
 from abc import ABC, abstractmethod
@@ -18,6 +19,10 @@ from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
     RecursiveCharacterTextSplitter,
 )
+
+# Configuration for parent chunk summarization
+GENERATE_PARENT_SUMMARIES = os.getenv("GENERATE_PARENT_SUMMARIES", "true").lower() == "true"
+PARENT_SUMMARY_TOKEN_THRESHOLD = int(os.getenv("PARENT_SUMMARY_TOKEN_THRESHOLD", "1500"))
 
 from .chunk_metadata import (
     ChunkingProfile,
@@ -105,6 +110,52 @@ class ChunkingStrategy(ABC):
     def _estimate_tokens(self, text: str) -> int:
         """Estimate token count (rough: 1 token ≈ 4 chars)."""
         return len(text) // 4
+
+    def _generate_parent_summary(
+        self,
+        content: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Generate a summary for a parent chunk if it exceeds the token threshold.
+
+        This method uses the ParentChunkSummarizer to create a concise summary
+        that can be used during retrieval instead of the full content.
+
+        Args:
+            content: The full parent chunk content
+            metadata: Optional metadata for context
+
+        Returns:
+            Dictionary with summary info, or None if not needed/available
+        """
+        if not GENERATE_PARENT_SUMMARIES:
+            return None
+
+        token_count = self._estimate_tokens(content)
+        if token_count <= PARENT_SUMMARY_TOKEN_THRESHOLD:
+            return None
+
+        try:
+            from .parent_chunk_summarizer import summarize_parent_chunk
+            result = summarize_parent_chunk(content, metadata)
+
+            if result.was_summarized:
+                return {
+                    "parent_summary": result.summary,
+                    "parent_summary_tokens": result.summary_token_count,
+                    "parent_original_tokens": result.original_token_count,
+                    "parent_compression_ratio": result.compression_ratio,
+                    "parent_content_type": result.content_type,
+                    "parent_key_points": result.key_points,
+                    "parent_entities": result.preserved_entities,
+                }
+        except ImportError:
+            logger.debug("Parent chunk summarizer not available")
+        except Exception as e:
+            logger.warning(f"Failed to generate parent summary: {e}")
+
+        return None
 
     def _build_heading_path(self, metadata: Dict[str, Any]) -> str:
         """Build heading path from header metadata."""
@@ -278,6 +329,11 @@ class SemanticHeaderStrategy(ChunkingStrategy):
                 parent_metadata["chunk_id"] = parent_chunk_id  # Override generated ID
                 parent_metadata["child_chunk_ids"] = child_ids  # Set child IDs before creating Document
                 parent_metadata["parent_chunk_index"] = i
+
+                # Generate summary for large parent chunks
+                summary_info = self._generate_parent_summary(page_content, parent_metadata)
+                if summary_info:
+                    parent_metadata.update(summary_info)
 
                 parent_doc = Document(page_content=page_content, metadata=parent_metadata)
                 final_chunks.append(parent_doc)
@@ -777,6 +833,11 @@ class MedicalSectionStrategy(ChunkingStrategy):
                     parent_metadata["is_key_section"] = True
                     parent_metadata["importance_score"] = 0.9
 
+                # Generate summary for large parent chunks
+                summary_info = self._generate_parent_summary(section_content, parent_metadata)
+                if summary_info:
+                    parent_metadata.update(summary_info)
+
                 parent_doc = Document(page_content=section_content, metadata=parent_metadata)
                 final_chunks.append(parent_doc)
                 chunk_index += 1
@@ -1092,6 +1153,11 @@ class TablePreservingStrategy(ChunkingStrategy):
                     parent_metadata["child_chunk_ids"] = child_ids  # Set child IDs before creating Document
                     parent_metadata["contains_table"] = True
                     parent_metadata["table_type"] = table_type
+
+                    # Generate summary for large table parent chunks
+                    summary_info = self._generate_parent_summary(table_content, parent_metadata)
+                    if summary_info:
+                        parent_metadata.update(summary_info)
 
                     parent_doc = Document(page_content=table_content, metadata=parent_metadata)
                     final_chunks.append(parent_doc)

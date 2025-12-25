@@ -54,6 +54,15 @@ from .adaptive_chunker import (
     chunk_file_adaptive,
 )
 
+from .parent_chunk_summarizer import (
+    ParentChunkSummarizer,
+    ParentChunkSummary,
+    get_parent_chunk_summarizer,
+    summarize_parent_chunk,
+    needs_parent_chunk_summary,
+    estimate_tokens,
+)
+
 __all__ = [
     # Domain patterns
     "DocumentDomain",
@@ -93,4 +102,11 @@ __all__ = [
     "AdaptiveChunkingResult",
     "chunk_document_adaptive",
     "chunk_file_adaptive",
+    # Parent chunk summarizer
+    "ParentChunkSummarizer",
+    "ParentChunkSummary",
+    "get_parent_chunk_summarizer",
+    "summarize_parent_chunk",
+    "needs_parent_chunk_summary",
+    "estimate_tokens",
 ]

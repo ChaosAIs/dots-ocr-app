@@ -17,6 +17,7 @@ from langgraph.prebuilt import ToolNode
 from .vectorstore import unified_vector_search, UnifiedSearchResult
 from .llm_service import get_llm_service
 from .utils.date_normalizer import normalize_query_dates
+from .context_builder import build_token_aware_context, get_context_builder
 
 # Set up early logger for GraphRAG import debugging
 _early_logger = logging.getLogger(__name__)
@@ -1160,12 +1161,10 @@ def search_documents(query: str) -> str:
                 routed_document_ids=routed_document_ids
             )
         else:
-            # Fallback to legacy single-shot search
-            return _search_legacy(
+            # Simple vector-only search (no iterative reasoning)
+            return _simple_vector_search(
                 query=query,
                 enhanced_query=enhanced_query,
-                max_steps=max_steps,
-                relevant_sources=None,  # Deprecated - use routed_document_ids
                 accessible_doc_ids=accessible_doc_ids,
                 routed_document_ids=routed_document_ids
             )
@@ -1250,6 +1249,9 @@ def _format_reasoning_result(result) -> str:
     """
     Format the ReasoningResult into a string for the LLM.
 
+    Uses token-aware context building to ensure results fit within
+    LLM context window limits while prioritizing the most relevant content.
+
     Args:
         result: ReasoningResult from IterativeReasoningEngine
 
@@ -1265,43 +1267,66 @@ def _format_reasoning_result(result) -> str:
         logger.info(f"[Search] Using final answer from iterative reasoning ({len(result.final_answer)} chars)")
         results.append(f"[Iterative Reasoning Answer]\n{result.final_answer}")
 
-    # Add entity/relationship context if available (from GraphRAG)
-    if result.entities:
-        entity_context = "[Knowledge Graph Entities]\n"
-        for entity in result.entities[:15]:
-            name = entity.get("name", entity.get("entity_name", "Unknown"))
-            entity_type = entity.get("entity_type", "")
-            desc = entity.get("description", "")[:200]
-            entity_context += f"- **{name}** ({entity_type}): {desc}\n"
-        results.append(entity_context)
+    # Build graph context string from entities and relationships
+    graph_context = _format_graph_context(result.entities, result.relationships)
 
-    if result.relationships:
-        rel_context = "[Knowledge Graph Relationships]\n"
-        for rel in result.relationships[:15]:
-            src = rel.get("src_name", rel.get("src_entity_id", "?"))
-            tgt = rel.get("tgt_name", rel.get("tgt_entity_id", "?"))
-            desc = rel.get("description", "related to")
-            rel_context += f"- {src} → {tgt}: {desc}\n"
-        results.append(rel_context)
+    # Use token-aware context builder for chunks and parent chunks
+    try:
+        built_context = build_token_aware_context(
+            chunks=result.chunks,
+            parent_chunks=getattr(result, 'parent_chunks', []),
+            graph_context=graph_context,
+            query=None,  # Query already processed in reasoning
+        )
 
-    # Add document chunks as context
-    seen_sources = set()
-    for i, chunk in enumerate(result.chunks[:20], 1):
-        source = chunk.get("metadata", {}).get("source", "Unknown")
-        heading = chunk.get("metadata", {}).get("heading_path", "")
-        content = chunk.get("page_content", chunk.get("content", ""))
+        # Log context building stats
+        logger.info(
+            f"[Search] Iterative reasoning context built: {built_context.total_tokens} tokens, "
+            f"{built_context.chunks_included}/{len(result.chunks)} chunks, "
+            f"{built_context.parent_chunks_included}/{len(getattr(result, 'parent_chunks', []))} parents "
+            f"({built_context.parent_chunks_summarized} summarized), "
+            f"graph_tokens={built_context.graph_context_tokens}"
+        )
 
-        chunk_result = f"[Document {i}: {source}]"
-        if heading:
-            chunk_result += f"\nSection: {heading}"
-        chunk_result += f"\n{content}"
-        results.append(chunk_result)
-        seen_sources.add(source)
+        if built_context.warnings:
+            for warning in built_context.warnings:
+                logger.warning(f"[Search] Context builder warning: {warning}")
+
+        # Add the formatted context from the builder
+        if built_context.formatted_context:
+            results.append(built_context.formatted_context)
+
+    except Exception as e:
+        # Fallback to simple formatting if context builder fails
+        logger.warning(f"[Search] Context builder failed for iterative reasoning, using simple format: {e}")
+
+        # Format graph context manually
+        if graph_context:
+            results.append(graph_context)
+
+        # Add document chunks as context (simple fallback)
+        seen_sources = set()
+        for i, chunk in enumerate(result.chunks[:20], 1):
+            source = chunk.get("metadata", {}).get("source", "Unknown")
+            heading = chunk.get("metadata", {}).get("heading_path", "")
+            content = chunk.get("page_content", chunk.get("content", ""))
+
+            chunk_result = f"[Document {i}: {source}]"
+            if heading:
+                chunk_result += f"\nSection: {heading}"
+            chunk_result += f"\n{content}"
+            results.append(chunk_result)
+            seen_sources.add(source)
+
+        logger.info(
+            f"[Search] Fallback formatting: {len(result.chunks)} chunks from {len(seen_sources)} sources"
+        )
 
     # Log summary
     logger.info(
         f"[Search] Iterative reasoning complete: {result.steps_taken} steps, "
-        f"{len(result.queries_made)} queries, {len(result.chunks)} chunks from {len(seen_sources)} sources, "
+        f"{len(result.queries_made)} queries, {len(result.chunks)} chunks, "
+        f"{len(getattr(result, 'parent_chunks', []))} parent chunks, "
         f"answer={'yes' if result.final_answer else 'no'}"
     )
 
@@ -1313,39 +1338,86 @@ def _format_reasoning_result(result) -> str:
     return "\n\n---\n\n".join(results)
 
 
-def _search_legacy(
+def _format_graph_context(entities: list, relationships: list) -> str:
+    """
+    Format entities and relationships into a graph context string.
+
+    This helper function creates a formatted string from GraphRAG entities
+    and relationships that can be passed to the token-aware context builder.
+
+    Args:
+        entities: List of entity dictionaries from GraphRAG
+        relationships: List of relationship dictionaries from GraphRAG
+
+    Returns:
+        Formatted graph context string, or empty string if no graph data
+    """
+    if not entities and not relationships:
+        return ""
+
+    parts = []
+
+    # Format entities
+    if entities:
+        entity_lines = ["[Knowledge Graph Entities]"]
+        for entity in entities[:15]:
+            name = entity.get("name", entity.get("entity_name", "Unknown"))
+            entity_type = entity.get("entity_type", "")
+            desc = entity.get("description", "")[:200]
+            entity_lines.append(f"- **{name}** ({entity_type}): {desc}")
+        if len(entities) > 15:
+            entity_lines.append(f"... and {len(entities) - 15} more entities")
+        parts.append("\n".join(entity_lines))
+
+    # Format relationships
+    if relationships:
+        rel_lines = ["[Knowledge Graph Relationships]"]
+        for rel in relationships[:15]:
+            src = rel.get("src_name", rel.get("src_entity_id", "?"))
+            tgt = rel.get("tgt_name", rel.get("tgt_entity_id", "?"))
+            desc = rel.get("description", "related to")
+            rel_lines.append(f"- {src} → {tgt}: {desc}")
+        if len(relationships) > 15:
+            rel_lines.append(f"... and {len(relationships) - 15} more relationships")
+        parts.append("\n".join(rel_lines))
+
+    return "\n\n".join(parts)
+
+
+def _simple_vector_search(
     query: str,
     enhanced_query: str,
-    max_steps: int,
-    relevant_sources: List[str] = None,  # DEPRECATED - use routed_document_ids
     accessible_doc_ids: Optional[set] = None,
     routed_document_ids: Optional[List[str]] = None
 ) -> str:
     """
-    Legacy single-shot search (fallback when iterative reasoning is disabled).
+    Simple vector-only search (used when iterative reasoning is disabled).
 
-    Now uses unified_vector_search() for consistent behavior with iterative mode.
+    This function performs a straightforward vector search without:
+    - Iterative reasoning (multi-step query refinement)
+    - GraphRAG context (graph-based knowledge retrieval)
+
+    Uses unified_vector_search() for consistent behavior and token-aware
+    context building to ensure results fit within LLM context limits.
 
     Args:
         query: Original user query
         enhanced_query: LLM-enhanced query
-        max_steps: Max steps for GraphRAG (if enabled)
-        relevant_sources: DEPRECATED - use routed_document_ids
         accessible_doc_ids: Optional set of document IDs the user can access (for access control)
         routed_document_ids: List of document IDs from router (filtered by access control)
 
     Returns:
         Formatted search results string
     """
-    logger.info("[Search] Using legacy single-shot search (via unified_vector_search)")
+    logger.info("[Search] Using simple vector search (no iterative reasoning)")
 
     # Determine document IDs to search - prefer routed, fallback to accessible
     if routed_document_ids and len(routed_document_ids) > 0:
         doc_id_list = routed_document_ids
-        logger.info(f"[Search] Legacy search filtering to {len(doc_id_list)} routed documents")
+        logger.info(f"[Search] Vector search filtering to {len(doc_id_list)} routed documents")
     elif accessible_doc_ids and len(accessible_doc_ids) > 0:
         doc_id_list = list(accessible_doc_ids)
-        logger.info(f"[Search] Legacy search using {len(doc_id_list)} accessible documents (no routing)")
+        logger.info(f"[Search] Vector search using {len(doc_id_list)} accessible documents (no routing)")
     else:
         doc_id_list = []
 
@@ -1368,56 +1440,75 @@ def _search_legacy(
             return "No documents accessible for this query."
         return "No relevant documents found for this query."
 
-    # Format results
-    results = []
+    # Use token-aware context builder to format results within token limits
+    _send_progress("Building context...", 70)
 
-    # Get GraphRAG context (if enabled)
-    _send_progress("Retrieving knowledge from graph...", 60)
+    try:
+        built_context = build_token_aware_context(
+            chunks=search_result.chunks,
+            parent_chunks=search_result.parent_chunks,
+            graph_context=None,  # No GraphRAG in simple vector search
+            query=enhanced_query,
+        )
 
-    graphrag_context = _get_graphrag_context(
-        enhanced_query,
-        max_steps=max_steps,
-        source_names=relevant_sources if relevant_sources else None
-    )
-    if graphrag_context:
-        results.append(f"[Knowledge Graph Context]\n{graphrag_context}")
+        # Log context building stats
+        logger.info(
+            f"[Search] Context built: {built_context.total_tokens} tokens, "
+            f"{built_context.chunks_included}/{len(search_result.chunks)} chunks, "
+            f"{built_context.parent_chunks_included}/{len(search_result.parent_chunks)} parents "
+            f"({built_context.parent_chunks_summarized} summarized)"
+        )
 
-    # Format regular chunks
-    doc_num = 1
-    for chunk in search_result.chunks:
-        source = chunk["metadata"].get("source", "Unknown")
-        heading = chunk["metadata"].get("heading_path", "")
-        content = chunk["page_content"]
+        if built_context.warnings:
+            for warning in built_context.warnings:
+                logger.warning(f"[Search] Context builder warning: {warning}")
 
-        result = f"[Document {doc_num}: {source}]"
-        if heading:
-            result += f"\nSection: {heading}"
-        result += f"\n{content}"
-        results.append(result)
-        doc_num += 1
+        _send_progress("Generating answer...", 80)
 
-    # Format parent chunks (context expansion)
-    for chunk in search_result.parent_chunks:
-        source = chunk["metadata"].get("source", "Unknown")
-        heading = chunk["metadata"].get("heading_path", "")
-        content = chunk["page_content"]
+        return built_context.formatted_context
 
-        result = f"[Document {doc_num} (Context): {source}]"
-        if heading:
-            result += f"\nSection: {heading}"
-        result += f"\n{content}"
-        results.append(result)
-        doc_num += 1
+    except Exception as e:
+        # Fallback to simple formatting if context builder fails
+        logger.warning(f"[Search] Context builder failed, using simple format: {e}")
 
-    logger.info(
-        f"[Search] Legacy search: {len(search_result.chunks)} chunks + "
-        f"{len(search_result.parent_chunks)} parent chunks from {len(search_result.sources)} sources | "
-        f"GraphRAG context: {'yes' if graphrag_context else 'no'}"
-    )
+        results = []
+        doc_num = 1
 
-    _send_progress("Generating answer...", 80)
+        # Format regular chunks
+        for chunk in search_result.chunks:
+            source = chunk["metadata"].get("source", "Unknown")
+            heading = chunk["metadata"].get("heading_path", "")
+            content = chunk["page_content"]
 
-    return "\n\n---\n\n".join(results)
+            result = f"[Document {doc_num}: {source}]"
+            if heading:
+                result += f"\nSection: {heading}"
+            result += f"\n{content}"
+            results.append(result)
+            doc_num += 1
+
+        # Format parent chunks - use summary if available
+        for chunk in search_result.parent_chunks:
+            source = chunk["metadata"].get("source", "Unknown")
+            heading = chunk["metadata"].get("heading_path", "")
+            # Prefer summary over full content if available
+            content = chunk["metadata"].get("parent_summary", chunk["page_content"])
+
+            result = f"[Document {doc_num} (Context): {source}]"
+            if heading:
+                result += f"\nSection: {heading}"
+            result += f"\n{content}"
+            results.append(result)
+            doc_num += 1
+
+        logger.info(
+            f"[Search] Simple vector search: {len(search_result.chunks)} chunks + "
+            f"{len(search_result.parent_chunks)} parent chunks from {len(search_result.sources)} sources"
+        )
+
+        _send_progress("Generating answer...", 80)
+
+        return "\n\n---\n\n".join(results)
 
 
 # Define tools
