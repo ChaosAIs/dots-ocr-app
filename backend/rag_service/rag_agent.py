@@ -225,7 +225,18 @@ CRITICAL INSTRUCTIONS FOR USING CONTEXT:
 - Analyze the provided context thoroughly and extract the information requested by the user
 - If you see invoice data, receipt data, or financial data in the context, YOU HAVE ACCESS TO IT - use it to answer
 - Extract numbers, dates, vendors, items, prices, and other details directly from the "Document Content" chunks
-- Perform calculations, aggregations, and analysis based on the data you see in the context
+
+CRITICAL INSTRUCTIONS FOR ANALYTICS/AGGREGATION QUERIES (HYBRID MODE):
+- When "PRE-COMPUTED ANALYTICS DATA" is provided in the context, it contains ACCURATE statistics computed by SQL queries
+- For questions about totals, sums, counts, breakdowns, or aggregations → ALWAYS use the PRE-COMPUTED ANALYTICS DATA
+- DO NOT try to manually calculate totals by adding up values from individual document chunks
+- The document chunks in hybrid mode are for general context only (e.g., document names, vendor info, product descriptions)
+- The analytics data is the AUTHORITATIVE source for numerical statistics - trust it over manual calculations
+- Present the analytics data in a clear, formatted way (tables, bullet points) following the hierarchical structure provided
+- IMPORTANT: Copy ALL group and sub-group values from the analytics data exactly as shown
+- DO NOT report $0.00 for any group that has a non-zero value in the analytics data
+- If you see different values in document chunks, IGNORE THEM - the analytics data is computed from the COMPLETE dataset
+- The analytics data contains the complete breakdown by all dimensions (primary, secondary, etc.) - use these exact values
 
 CRITICAL INSTRUCTIONS FOR PRODUCT/PURCHASE QUERIES:
 - When asked about "products" or "purchases", ONLY include actual items/goods that were purchased and its price/quantity/tax/discount/shipping fee
@@ -1616,44 +1627,73 @@ def call_model(state: AgentState) -> AgentState:
             logger.info(f"[vLLM] Classification result: {intent}")
 
             if intent == "SEARCH":
-                # Extract conversation history from messages for context-aware search
-                conversation_history = []
-                for msg in messages:
-                    if isinstance(msg, HumanMessage):
-                        conversation_history.append({"role": "user", "content": msg.content})
-                    elif isinstance(msg, AIMessage):
-                        conversation_history.append({"role": "assistant", "content": msg.content})
+                # Check if we have pre-computed analytics context
+                # For analytics-focused queries, skip document chunk retrieval entirely
+                # as chunks are just partial data that confuses the LLM
+                global _analytics_context
 
-                # Enhance query with conversation context (excluding current query)
-                # The last message is the current query, so we use history up to that point
-                history_for_context = conversation_history[:-1] if len(conversation_history) > 1 else []
-                enhanced_query = _build_enhanced_fallback_query(user_query, history_for_context)
+                if _analytics_context:
+                    # ANALYTICS-FOCUSED HYBRID MODE:
+                    # Skip document chunk search - use analytics data + document summary only
+                    logger.info(f"[vLLM] Analytics context available - skipping chunk retrieval for cleaner response")
 
-                if enhanced_query != user_query:
-                    logger.info(f"[vLLM] Enhanced query with context: '{user_query[:30]}...' -> '{enhanced_query[:50]}...'")
-
-                # Search for context first
-                logger.info(f"[vLLM] Searching documents for query: {enhanced_query[:50]}...")
-                context = search_documents.invoke({"query": enhanced_query})
-
-                # Add context to the system message with explicit instructions
-                if context.startswith("[GraphRAG Final Answer]"):
-                    # GraphRAG generated a complete answer - use it directly
-                    context_message = f"\n\nRelevant document context:\n{context}"
-                else:
-                    # Normalize dates in the user query for better matching
+                    # Normalize the query
                     normalized_query = normalize_query_dates(user_query)
                     if normalized_query != user_query:
                         logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
 
-                    # Simple context message - dates are already normalized in the content
-                    context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
+                    # Build context with ONLY analytics data (no confusing chunks)
+                    context_message = f"""
+╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
+║  📊 PRE-COMPUTED ANALYTICS DATA - USE THESE EXACT VALUES IN YOUR RESPONSE                           ║
+╠══════════════════════════════════════════════════════════════════════════════════════════════════════╣
 
-                # Inject analytics context if available (for hybrid queries)
-                global _analytics_context
-                if _analytics_context:
-                    logger.info(f"[vLLM] Injecting analytics context for hybrid query")
-                    context_message = f"\n\n**STRUCTURED DATA ANALYSIS (from database):**\n{_analytics_context}\n" + context_message
+{_analytics_context}
+
+╠══════════════════════════════════════════════════════════════════════════════════════════════════════╣
+║  INSTRUCTIONS:                                                                                       ║
+║  1. Format the above data in a clear, readable way (tables, bullet points, etc.)                    ║
+║  2. Use the EXACT values shown above - they are computed from the complete dataset                  ║
+║  3. Include all groups and sub-groups shown - do not skip any categories                            ║
+║  4. Present totals by year and by category as requested                                             ║
+╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
+
+**USER QUESTION**: {normalized_query}
+"""
+                else:
+                    # STANDARD RAG MODE: Search for document chunks
+                    # Extract conversation history from messages for context-aware search
+                    conversation_history = []
+                    for msg in messages:
+                        if isinstance(msg, HumanMessage):
+                            conversation_history.append({"role": "user", "content": msg.content})
+                        elif isinstance(msg, AIMessage):
+                            conversation_history.append({"role": "assistant", "content": msg.content})
+
+                    # Enhance query with conversation context (excluding current query)
+                    # The last message is the current query, so we use history up to that point
+                    history_for_context = conversation_history[:-1] if len(conversation_history) > 1 else []
+                    enhanced_query = _build_enhanced_fallback_query(user_query, history_for_context)
+
+                    if enhanced_query != user_query:
+                        logger.info(f"[vLLM] Enhanced query with context: '{user_query[:30]}...' -> '{enhanced_query[:50]}...'")
+
+                    # Search for context first
+                    logger.info(f"[vLLM] Searching documents for query: {enhanced_query[:50]}...")
+                    context = search_documents.invoke({"query": enhanced_query})
+
+                    # Add context to the system message with explicit instructions
+                    if context.startswith("[GraphRAG Final Answer]"):
+                        # GraphRAG generated a complete answer - use it directly
+                        context_message = f"\n\nRelevant document context:\n{context}"
+                    else:
+                        # Normalize dates in the user query for better matching
+                        normalized_query = normalize_query_dates(user_query)
+                        if normalized_query != user_query:
+                            logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
+
+                        # Simple context message - dates are already normalized in the content
+                        context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
 
                 augmented_messages = list(messages)
                 if isinstance(augmented_messages[0], SystemMessage):
@@ -1662,9 +1702,9 @@ def call_model(state: AgentState) -> AgentState:
                     )
 
                 # DEBUG: Log the context being sent to LLM
-                logger.info(f"[vLLM] Context length: {len(context)} chars")
-                logger.info(f"[vLLM] Context preview (first 500 chars): {context[:500]}")
-                
+                logger.info(f"[vLLM] Context message length: {len(context_message)} chars")
+                logger.info(f"[vLLM] Context preview (first 500 chars): {context_message[:500]}")
+
                 # DEBUG: Log the full system message being sent
                 if isinstance(augmented_messages[0], SystemMessage):
                     logger.info(f"[vLLM] System message length: {len(augmented_messages[0].content)} chars")

@@ -253,7 +253,26 @@ class TokenAwareContextBuilder:
                 original_tokens = existing_summary_tokens
 
         # Check if summarization is needed (only if not already using pre-computed summary)
-        if not is_summarized and available_tokens and original_tokens > available_tokens and self.summarize_large_chunks:
+        # Skip summarization for:
+        # 1. Spreadsheet/Excel documents (structured data shouldn't be summarized)
+        # 2. Chunks that are close to budget (only summarize if exceeds by >20%)
+        # 3. Small chunks below the global threshold (1500 tokens default)
+        doc_type = metadata.get("document_type", "").lower()
+        is_spreadsheet = doc_type in ["spreadsheet", "excel", "csv", "xlsx", "xls"] or \
+                         source.lower().endswith(('.xlsx', '.xls', '.csv'))
+
+        # Only summarize if chunk significantly exceeds available budget AND is above global threshold
+        # Also skip for spreadsheet documents which have structured data
+        should_summarize = (
+            not is_summarized and
+            available_tokens and
+            original_tokens > available_tokens * 1.2 and  # Must exceed by >20%
+            original_tokens > 500 and  # Minimum size threshold
+            self.summarize_large_chunks and
+            not is_spreadsheet  # Skip spreadsheets
+        )
+
+        if should_summarize:
             summarizer = self._get_summarizer()
             if summarizer:
                 try:
@@ -272,6 +291,8 @@ class TokenAwareContextBuilder:
                     if not final_content.endswith("..."):
                         final_content = final_content.rsplit(' ', 1)[0] + "..."
                     is_summarized = True
+        elif not is_summarized and is_spreadsheet:
+            logger.debug(f"Skipping summarization for spreadsheet chunk {chunk_id}")
 
         # Use query relevance score if available, otherwise fall back to static importance_score
         query_score = chunk.get("_score") or metadata.get("_score")

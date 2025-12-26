@@ -237,6 +237,15 @@ class ExtractionService:
         Returns:
             Extracted data dictionary
         """
+        # For spreadsheet types with markdown tables, try direct parsing first
+        # This is more reliable than LLM extraction for tabular data
+        if schema_type == "spreadsheet":
+            parsed_result = self._parse_markdown_table(content)
+            if parsed_result and parsed_result.get("line_items"):
+                logger.info(f"Successfully parsed {len(parsed_result['line_items'])} rows from markdown table")
+                return parsed_result
+            logger.info("Markdown table parsing returned no data, falling back to LLM extraction")
+
         if not self.llm_client:
             logger.warning("LLM client not configured, using mock extraction")
             return self._mock_extraction(content, schema_type)
@@ -247,6 +256,23 @@ class ExtractionService:
         try:
             response = self.llm_client.generate(full_prompt)
             result = self._parse_llm_response(response)
+
+            # Validate spreadsheet extraction - if LLM only returned headers, try parsing
+            if schema_type == "spreadsheet":
+                line_items = result.get("line_items", [])
+                # Check if line_items is just a list of strings (column names) instead of dicts
+                if line_items and all(isinstance(item, str) for item in line_items):
+                    logger.warning("LLM returned column headers instead of row data, falling back to markdown parsing")
+                    parsed_result = self._parse_markdown_table(content)
+                    if parsed_result and parsed_result.get("line_items"):
+                        return parsed_result
+                # Check if line_items is empty but we have content with tables
+                elif not line_items and '|' in content:
+                    logger.warning("LLM returned empty line_items, falling back to markdown parsing")
+                    parsed_result = self._parse_markdown_table(content)
+                    if parsed_result and parsed_result.get("line_items"):
+                        return parsed_result
+
             return result
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}")
@@ -754,6 +780,359 @@ Document section:
             "line_items": [],
             "summary_data": {}
         }
+
+    def _parse_markdown_table(self, content: str) -> Dict[str, Any]:
+        """
+        Parse markdown table format to extract structured data.
+
+        This method dynamically analyzes column headers and sample data to generate
+        semantic field mappings, making it adaptable to any spreadsheet structure.
+
+        Args:
+            content: Document content with markdown tables
+
+        Returns:
+            Extracted data dictionary with header_data, line_items, summary_data,
+            including dynamic field_mappings for query processing
+        """
+        import re
+
+        lines = content.split('\n')
+        headers = []
+        line_items = []
+        table_start = None
+
+        # Find the table header (first line with multiple pipe-separated columns)
+        for i, line in enumerate(lines):
+            # Skip lines that are clearly not table rows
+            if not line.strip() or '|' not in line:
+                continue
+
+            # Check if this looks like a table header (has multiple columns)
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if len(parts) >= 2:
+                # Check if next line is a separator line (contains --- or :--)
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1]
+                    if re.match(r'^\s*\|[\s\-:|]+\|\s*$', next_line) or all(c in '-:| ' for c in next_line.strip()):
+                        table_start = i
+                        headers = parts
+                        break
+
+        if not headers or table_start is None:
+            logger.warning("No markdown table found in content")
+            return {}
+
+        logger.info(f"Found table with headers: {headers}")
+
+        # Collect sample values for each column (for type inference)
+        sample_values = {h: [] for h in headers}
+
+        # Parse data rows (skip header and separator)
+        row_number = 0
+        for line in lines[table_start + 2:]:  # +2 to skip header and separator
+            line = line.strip()
+            if not line or '|' not in line:
+                continue
+
+            # Skip separator lines
+            if all(c in '-:| ' for c in line):
+                continue
+
+            values = [v.strip() for v in line.split('|') if v.strip()]
+
+            # Only process rows with matching column count
+            if len(values) == len(headers):
+                row_number += 1
+                row = {"row_number": row_number}
+
+                for header, value in zip(headers, values):
+                    # Try to convert numeric values
+                    parsed_value = self._parse_cell_value(value)
+                    row[header] = parsed_value
+
+                    # Collect samples for type inference (first 10 non-null values)
+                    if len(sample_values[header]) < 10 and parsed_value is not None:
+                        sample_values[header].append(parsed_value)
+
+                line_items.append(row)
+            elif len(values) > 0:
+                # Handle rows with different column counts (take what we can)
+                logger.debug(f"Row has {len(values)} values but expected {len(headers)}, skipping")
+
+        logger.info(f"Parsed {len(line_items)} data rows from markdown table")
+
+        # Generate dynamic field mappings using LLM or heuristics
+        field_mappings = self._generate_field_mappings_with_llm(headers, line_items[:10])
+        if not field_mappings:
+            # Fallback to heuristic-based inference
+            field_mappings = self._infer_field_mappings(headers, sample_values)
+        logger.info(f"Generated field mappings: {field_mappings}")
+
+        return {
+            "header_data": {
+                "column_headers": headers,
+                "total_rows": len(line_items),
+                "total_columns": len(headers),
+                "field_mappings": field_mappings  # Store semantic mappings for queries
+            },
+            "line_items": line_items,
+            "summary_data": {
+                "row_count": len(line_items),
+                "column_count": len(headers)
+            }
+        }
+
+    def _generate_field_mappings_with_llm(
+        self,
+        headers: List[str],
+        sample_data: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        """
+        Use LLM to analyze column headers and sample data to generate field mappings.
+
+        This provides more accurate semantic understanding than heuristic-based inference.
+
+        Args:
+            headers: List of column header names
+            sample_data: List of sample row dictionaries (first 10 rows)
+
+        Returns:
+            Dictionary mapping column names to semantic field info, or None if LLM unavailable
+        """
+        if not self.llm_client:
+            logger.info("LLM client not available, skipping LLM-based field mapping")
+            return None
+
+        try:
+            from analytics_service.schema_analyzer import analyze_spreadsheet_schema
+            field_mappings = analyze_spreadsheet_schema(headers, sample_data, self.llm_client)
+            logger.info(f"[LLM] Successfully generated field mappings for {len(field_mappings)} columns")
+            return field_mappings
+        except ImportError:
+            logger.warning("Schema analyzer module not available")
+            return None
+        except Exception as e:
+            logger.warning(f"LLM field mapping generation failed: {e}")
+            return None
+
+    def _infer_field_mappings(
+        self,
+        headers: List[str],
+        sample_values: Dict[str, List]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Infer semantic field mappings from column headers and sample values.
+
+        This creates a dynamic schema that maps each column to a semantic type
+        (date, amount, category, entity, etc.) for use in queries.
+
+        Args:
+            headers: List of column header names
+            sample_values: Dict mapping headers to sample values
+
+        Returns:
+            Dict mapping each column to its semantic type and properties
+        """
+        import re
+
+        # Semantic type patterns (column name keywords)
+        # Order matters - more specific patterns should come first
+        # Use word boundaries or multi-word patterns to avoid false matches
+        semantic_patterns = [
+            # Date fields (high priority)
+            ("date", {
+                "keywords": ["date", "time", "created", "updated", "timestamp", "day", "when", "period"],
+                "data_type": "datetime",
+                "aggregation": None
+            }),
+            # Person/Representative fields (before entity to avoid "name" false match)
+            ("person", {
+                "keywords": ["sales rep", "sales_rep", "representative", "agent", "salesperson", "manager", "assignee", "owner", "rep "],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Payment method (before amount to catch "payment method" specifically)
+            ("method", {
+                "keywords": ["payment method", "payment_method", "pay method", "method of payment", "channel", "source", "medium"],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Amount/Money fields
+            ("amount", {
+                "keywords": ["total sales", "total_sales", "total amount", "total_amount", "grand total", "amount", "price", "cost", "revenue", "fee", "tax", "subtotal"],
+                "data_type": "number",
+                "aggregation": "sum"
+            }),
+            # Unit price (specific, not for aggregation typically)
+            ("unit_price", {
+                "keywords": ["unit price", "unit_price", "unit cost", "price each", "rate"],
+                "data_type": "number",
+                "aggregation": None  # Usually not summed directly
+            }),
+            # Quantity fields
+            ("quantity", {
+                "keywords": ["quantity", "qty", "count", "units", "items", "number of"],
+                "data_type": "number",
+                "aggregation": "sum"
+            }),
+            # Category fields
+            ("category", {
+                "keywords": ["category", "type", "class", "group", "classification", "segment", "kind"],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Status fields
+            ("status", {
+                "keywords": ["status", "state", "condition", "stage", "phase"],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Entity/Customer fields
+            ("entity", {
+                "keywords": ["customer name", "customer_name", "vendor name", "vendor_name", "supplier", "client", "company", "merchant", "buyer", "seller"],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Product fields
+            ("product", {
+                "keywords": ["product", "item", "sku", "goods", "service"],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Region fields
+            ("region", {
+                "keywords": ["region", "area", "location", "zone", "territory", "country", "city", "state"],
+                "data_type": "string",
+                "aggregation": "group_by"
+            }),
+            # Identifier fields (low priority)
+            ("identifier", {
+                "keywords": ["order id", "order_id", "id", "number", "code", "reference", "invoice", "receipt", "transaction"],
+                "data_type": "string",
+                "aggregation": None
+            }),
+        ]
+
+        field_mappings = {}
+
+        for header in headers:
+            header_lower = header.lower().replace('_', ' ').replace('-', ' ')
+            samples = sample_values.get(header, [])
+
+            # Determine semantic type from column name
+            # Patterns are ordered by priority - more specific patterns first
+            semantic_type = "unknown"
+            data_type = "string"
+            aggregation = None
+
+            for sem_type, config in semantic_patterns:
+                if any(kw in header_lower for kw in config["keywords"]):
+                    semantic_type = sem_type
+                    data_type = config["data_type"]
+                    aggregation = config["aggregation"]
+                    break
+
+            # If not detected by name, infer from sample values
+            if semantic_type == "unknown" and samples:
+                inferred_type = self._infer_type_from_samples(samples)
+                if inferred_type == "number":
+                    # Check if it looks like an amount (has decimals, larger values)
+                    if any(isinstance(v, float) and v != int(v) for v in samples if isinstance(v, (int, float))):
+                        semantic_type = "amount"
+                        aggregation = "sum"
+                    else:
+                        semantic_type = "quantity"
+                        aggregation = "sum"
+                    data_type = "number"
+                elif inferred_type == "date":
+                    semantic_type = "date"
+                    data_type = "datetime"
+                else:
+                    # Check cardinality for potential grouping fields
+                    unique_values = len(set(str(v) for v in samples))
+                    if unique_values < len(samples) * 0.5:  # Low cardinality = good for grouping
+                        semantic_type = "category"
+                        aggregation = "group_by"
+
+            field_mappings[header] = {
+                "semantic_type": semantic_type,
+                "data_type": data_type,
+                "aggregation": aggregation,
+                "original_name": header
+            }
+
+        return field_mappings
+
+    def _infer_type_from_samples(self, samples: List) -> str:
+        """
+        Infer data type from sample values.
+
+        Args:
+            samples: List of sample values
+
+        Returns:
+            Inferred type: 'number', 'date', or 'string'
+        """
+        import re
+
+        if not samples:
+            return "string"
+
+        num_count = 0
+        date_count = 0
+
+        date_patterns = [
+            r'^\d{4}-\d{2}-\d{2}',  # YYYY-MM-DD
+            r'^\d{2}/\d{2}/\d{4}',  # MM/DD/YYYY or DD/MM/YYYY
+            r'^\d{2}-\d{2}-\d{4}',  # MM-DD-YYYY or DD-MM-YYYY
+        ]
+
+        for val in samples:
+            if isinstance(val, (int, float)):
+                num_count += 1
+            elif isinstance(val, str):
+                for pattern in date_patterns:
+                    if re.match(pattern, val):
+                        date_count += 1
+                        break
+
+        total = len(samples)
+        if num_count / total > 0.7:
+            return "number"
+        if date_count / total > 0.7:
+            return "date"
+        return "string"
+
+    def _parse_cell_value(self, value: str):
+        """
+        Parse a cell value, converting to appropriate type.
+
+        Args:
+            value: Cell value as string
+
+        Returns:
+            Parsed value (number, date string, or original string)
+        """
+        import re
+
+        if not value or value.lower() in ('null', 'none', 'n/a', '-'):
+            return None
+
+        # Try to parse as number (handle currency symbols and commas)
+        cleaned = re.sub(r'[$€£¥,]', '', value.strip())
+        try:
+            # Try float first
+            num = float(cleaned)
+            # Return int if it's a whole number
+            if num == int(num) and '.' not in cleaned:
+                return int(num)
+            return num
+        except ValueError:
+            pass
+
+        # Return as string (dates will stay as strings in YYYY-MM-DD format)
+        return value
 
     def _save_extraction_result(
         self,

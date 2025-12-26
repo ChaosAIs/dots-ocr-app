@@ -342,10 +342,43 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 # Execute analytics query if needed
                                 if use_analytics_path:
                                     await progress_callback("Querying structured data...", 15)
+
+                                    # ====== DOCUMENT RELEVANCE FILTERING FOR ANALYTICS ======
+                                    # Reuse the same document routing logic as RAG path to filter
+                                    # to relevant documents before querying structured data
+                                    from .document_router import DocumentRouter
+                                    from .llm_service import get_llm_service
+                                    from .rag_agent import _analyze_query_with_llm
+
+                                    # Get query metadata for document routing
+                                    query_analysis = _analyze_query_with_llm(enhanced_message)
+                                    query_metadata = query_analysis.get("metadata", {})
+
+                                    # Convert UUIDs to strings for the router (router expects List[str])
+                                    accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
+
+                                    # Route to relevant documents
+                                    llm_service = get_llm_service()
+                                    router = DocumentRouter(llm_service=llm_service)
+                                    routed_document_ids = router.route_query(
+                                        query_metadata,
+                                        original_query=enhanced_message,
+                                        accessible_document_ids=accessible_doc_ids_str
+                                    )
+
+                                    # Use routed document IDs if available, otherwise fall back to all accessible
+                                    # Router returns List[str], need to convert back to List[UUID] for orchestrator
+                                    if routed_document_ids and len(routed_document_ids) > 0:
+                                        analytics_doc_ids = [UUID(doc_id) for doc_id in routed_document_ids]
+                                        logger.info(f"[Intent Routing] Analytics using {len(analytics_doc_ids)} routed documents (filtered from {len(accessible_doc_ids_list)} accessible)")
+                                    else:
+                                        analytics_doc_ids = accessible_doc_ids_list
+                                        logger.info(f"[Intent Routing] Analytics using all {len(analytics_doc_ids)} accessible documents (no routing filter applied)")
+
                                     analytics_result = orchestrator.execute_analytics_query(
                                         query=enhanced_message,
                                         classification=classification,
-                                        accessible_doc_ids=accessible_doc_ids_list
+                                        accessible_doc_ids=analytics_doc_ids
                                     )
                                     logger.info(f"[Intent Routing] Analytics result: {analytics_result.get('summary', {})}")
 

@@ -310,15 +310,36 @@ class IntentClassifier:
         elif 'this year' in query_lower:
             return {"start": f"{now.year}-01-01", "end": now.strftime("%Y-%m-%d")}
 
-        # Check for specific month mentions
+        # Check for specific month mentions with proper word boundary matching
+        # Only match if the month is explicitly mentioned as a time reference
+        # e.g., "in March", "for January", "March 2024", but NOT "marching" or partial matches
+        import calendar
         for month_name, month_num in months.items():
-            if month_name in query_lower:
-                import calendar
-                last_day = calendar.monthrange(mentioned_year, month_num)[1]
-                return {
-                    "start": f"{mentioned_year}-{month_num:02d}-01",
-                    "end": f"{mentioned_year}-{month_num:02d}-{last_day:02d}"
-                }
+            # Use word boundary regex to avoid partial matches
+            # Match patterns like: "in march", "for march", "march 2024", "march sales", etc.
+            # But require it to be a standalone word
+            month_pattern = rf'\b{month_name}\b'
+            if re.search(month_pattern, query_lower):
+                # Additional check: ensure it's used in a time context
+                # Look for patterns that indicate time reference
+                time_context_patterns = [
+                    rf'\b(in|for|during|from|since|until|by|of)\s+{month_name}\b',  # "in march", "for january"
+                    rf'\b{month_name}\s+(20\d{{2}})\b',  # "march 2024"
+                    rf'\b{month_name}\s+(sales|report|data|summary|total|amount)\b',  # "march sales"
+                    rf'\b{month_name}\s+\d{{1,2}}',  # "march 15"
+                    rf'\d{{1,2}}\s+{month_name}',  # "15 march"
+                ]
+
+                is_time_reference = any(re.search(pat, query_lower) for pat in time_context_patterns)
+
+                # Only apply month filter if it's clearly a time reference
+                # or if the query is very short (likely just asking about a specific month)
+                if is_time_reference or len(query_lower.split()) <= 5:
+                    last_day = calendar.monthrange(mentioned_year, month_num)[1]
+                    return {
+                        "start": f"{mentioned_year}-{month_num:02d}-01",
+                        "end": f"{mentioned_year}-{month_num:02d}-{last_day:02d}"
+                    }
 
         # If only year is mentioned
         if year_match and mentioned_year != current_year:
