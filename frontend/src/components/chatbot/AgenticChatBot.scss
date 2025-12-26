@@ -478,6 +478,20 @@
   }
 }
 
+// Mobile workspace toggle button - hidden on desktop
+.mobile-workspace-toggle {
+  display: none;
+
+  .workspace-badge {
+    font-size: 0.65rem;
+  }
+}
+
+// Mobile workspace drawer overlay and panel
+.mobile-workspace-overlay {
+  display: none;
+}
+
 // Responsive adjustments
 @media (max-width: 768px) {
   .chatbot-container {
@@ -500,6 +514,82 @@
 
     .header-title span {
       display: none;
+    }
+  }
+
+  // Show mobile workspace toggle on small screens
+  .mobile-workspace-toggle {
+    display: flex;
+  }
+
+  // Mobile workspace drawer
+  .mobile-workspace-overlay {
+    display: flex;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.5);
+    z-index: 1000;
+    justify-content: flex-end;
+    animation: fadeIn 0.2s ease;
+  }
+
+  .mobile-workspace-drawer {
+    width: 85%;
+    max-width: 320px;
+    height: 100%;
+    background-color: var(--surface-card);
+    box-shadow: -4px 0 20px rgba(0, 0, 0, 0.15);
+    display: flex;
+    flex-direction: column;
+    animation: slideInRight 0.3s ease;
+
+    .mobile-drawer-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem;
+      border-bottom: 1px solid var(--surface-border);
+      background-color: var(--surface-ground);
+
+      span {
+        font-weight: 600;
+        font-size: 1.1rem;
+        color: var(--text-color);
+      }
+    }
+
+    // Override workspace browser panel styles for mobile drawer
+    .workspace-browser-panel {
+      display: flex !important;
+      width: 100%;
+      min-width: 100%;
+      border-left: none;
+      flex: 1;
+
+      .workspace-browser-header {
+        display: none; // Hide the header since we have drawer header
+      }
+    }
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes slideInRight {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
     }
   }
 }

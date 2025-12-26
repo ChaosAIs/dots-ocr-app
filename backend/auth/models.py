@@ -67,3 +67,35 @@ class MessageResponse(BaseModel):
     message: str
     success: bool = True
 
+
+# ===== User Preferences Models =====
+
+class ChatPreferences(BaseModel):
+    """Chat-specific preferences."""
+    selectedWorkspaceIds: list[str] = Field(default_factory=list, description="List of selected workspace UUIDs for RAG search filtering")
+    lastUpdated: Optional[str] = None
+
+
+class UserPreferences(BaseModel):
+    """Full user preferences object."""
+    chat: Optional[ChatPreferences] = None
+
+    class Config:
+        extra = "allow"  # Allow additional preference keys
+
+
+class UpdatePreferencesRequest(BaseModel):
+    """Request to update user preferences."""
+    preferences: Dict[str, Any]
+
+
+class UpdateChatPreferencesRequest(BaseModel):
+    """Request to update chat preferences."""
+    selectedWorkspaceIds: list[str] = Field(default_factory=list)
+
+
+class PreferencesResponse(BaseModel):
+    """User preferences response."""
+    preferences: Dict[str, Any]
+    success: bool = True
+

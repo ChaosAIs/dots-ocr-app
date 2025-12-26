@@ -102,6 +102,9 @@ class User(Base):
     # Profile information
     profile_data = Column(JSONB, default=dict)
 
+    # User preferences (chat settings, UI preferences, etc.)
+    preferences = Column(JSONB, default=dict)
+
     # Authentication tracking
     last_login_at = Column(DateTime(timezone=True))
     last_login_ip = Column(String(45))
@@ -136,6 +139,7 @@ class User(Base):
             "role": self.role.value if self.role else None,
             "status": self.status.value if self.status else None,
             "profile_data": self.profile_data,
+            "preferences": self.preferences,
             "last_login_at": self.last_login_at.isoformat() if self.last_login_at else None,
             "email_verified": self.email_verified,
             "created_at": self.created_at.isoformat() if self.created_at else None,

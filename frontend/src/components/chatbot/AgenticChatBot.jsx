@@ -7,7 +7,9 @@ import { Toast } from "primereact/toast";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
+import authService from "../../services/authService";
 import { ChatHistory } from "./ChatHistory";
+import { WorkspaceBrowser } from "./WorkspaceBrowser";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../../core/auth/components/authProvider";
 import "./AgenticChatBot.scss";
@@ -30,7 +32,13 @@ export const AgenticChatBot = () => {
   const [editingContent, setEditingContent] = useState("");
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
 
+  // Workspace browser state
+  const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState([]);
+  const [workspaceBrowserCollapsed, setWorkspaceBrowserCollapsed] = useState(false);
+  const [mobileWorkspaceDrawerOpen, setMobileWorkspaceDrawerOpen] = useState(false);
+
   const wsRef = useRef(null);
+  const workspaceBrowserRef = useRef(null);
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
   const toast = useRef(null);
@@ -55,6 +63,25 @@ export const AgenticChatBot = () => {
   useEffect(() => {
     setIsInitializing(false);
   }, []);
+
+  // Load chat preferences (selected workspaces) on mount
+  useEffect(() => {
+    const loadChatPreferences = async () => {
+      try {
+        const result = await authService.getChatPreferences();
+        if (result.success && result.chat?.selectedWorkspaceIds) {
+          console.log("[AgenticChatBot] Loaded workspace preferences:", result.chat.selectedWorkspaceIds);
+          setSelectedWorkspaceIds(result.chat.selectedWorkspaceIds);
+        }
+      } catch (error) {
+        console.error("[AgenticChatBot] Error loading chat preferences:", error);
+      }
+    };
+
+    if (user) {
+      loadChatPreferences();
+    }
+  }, [user]);
 
   // Calculate exponential backoff delay for reconnection
   const getReconnectDelay = useCallback((attempt) => {
@@ -444,6 +471,7 @@ export const AgenticChatBot = () => {
         JSON.stringify({
           message: userMessage.content,
           user_id: user?.id,
+          workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
         })
       );
     } else {
@@ -456,7 +484,7 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
       connectWebSocket();
     }
-  }, [inputValue, isLoading, sessionId, connectWebSocket]);
+  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedWorkspaceIds]);
 
   const handleRetry = useCallback(async (msg, msgIndex) => {
     if (isLoading || !sessionId) return;
@@ -528,10 +556,11 @@ export const AgenticChatBot = () => {
           message: messageContent,
           user_id: user?.id,
           is_retry: true,
+          workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -542,7 +571,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId]);
+  }, [isLoading, sessionId, selectedWorkspaceIds]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -693,10 +722,11 @@ export const AgenticChatBot = () => {
           message: newContent,
           user_id: user?.id,
           is_retry: true,
+          workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
         })
       );
 
-      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({
@@ -707,7 +737,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry]);
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedWorkspaceIds]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -835,6 +865,16 @@ export const AgenticChatBot = () => {
                     {isConnected ? "Ready" : "Reconnecting..."}
                   </span>
                 )}
+                {/* Mobile workspace browser toggle */}
+                <Button
+                  icon="pi pi-database"
+                  className="p-button-text p-button-secondary mobile-workspace-toggle"
+                  onClick={() => setMobileWorkspaceDrawerOpen(true)}
+                  tooltip="Knowledge Sources"
+                  tooltipOptions={{ position: "left" }}
+                  badge={selectedWorkspaceIds.length > 0 ? String(selectedWorkspaceIds.length) : null}
+                  badgeClassName="workspace-badge"
+                />
                 <Button
                   icon="pi pi-plus"
                   className="p-button-text p-button-secondary"
@@ -1043,6 +1083,37 @@ export const AgenticChatBot = () => {
           </>
         )}
       </div>
+
+      {/* Right Sidebar - Workspace Browser (Desktop) */}
+      <WorkspaceBrowser
+        ref={workspaceBrowserRef}
+        selectedWorkspaceIds={selectedWorkspaceIds}
+        onSelectionChange={setSelectedWorkspaceIds}
+        collapsed={workspaceBrowserCollapsed}
+        onToggleCollapse={() => setWorkspaceBrowserCollapsed(!workspaceBrowserCollapsed)}
+      />
+
+      {/* Mobile Workspace Browser Drawer */}
+      {mobileWorkspaceDrawerOpen && (
+        <div className="mobile-workspace-overlay" onClick={() => setMobileWorkspaceDrawerOpen(false)}>
+          <div className="mobile-workspace-drawer" onClick={(e) => e.stopPropagation()}>
+            <div className="mobile-drawer-header">
+              <span>Knowledge Sources</span>
+              <Button
+                icon="pi pi-times"
+                className="p-button-text p-button-secondary"
+                onClick={() => setMobileWorkspaceDrawerOpen(false)}
+              />
+            </div>
+            <WorkspaceBrowser
+              selectedWorkspaceIds={selectedWorkspaceIds}
+              onSelectionChange={setSelectedWorkspaceIds}
+              collapsed={false}
+              onToggleCollapse={() => setMobileWorkspaceDrawerOpen(false)}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 };

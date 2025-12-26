@@ -4,7 +4,7 @@ User repository for database operations.
 import logging
 import re
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -302,4 +302,103 @@ class UserRepository:
 
         logger.info(f"Password changed for user: {user.username}")
         return True
+
+    # ===== User Preferences Methods =====
+
+    def get_user_preferences(self, user_id: UUID) -> Dict[str, Any]:
+        """
+        Get user preferences.
+
+        Args:
+            user_id: The user's UUID
+
+        Returns:
+            User preferences dictionary, or empty dict if not set
+        """
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return {}
+        return user.preferences or {}
+
+    def update_user_preferences(self, user_id: UUID, preferences: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Replace entire user preferences.
+
+        Args:
+            user_id: The user's UUID
+            preferences: New preferences dictionary
+
+        Returns:
+            Updated preferences, or None if user not found
+        """
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+
+        user.preferences = preferences
+        user.updated_at = datetime.utcnow()
+        self.db.commit()
+        self.db.refresh(user)
+
+        logger.info(f"Updated preferences for user: {user.username}")
+        return user.preferences
+
+    def update_preference_key(self, user_id: UUID, key: str, value: Any) -> Optional[Dict[str, Any]]:
+        """
+        Update a specific preference key while preserving other preferences.
+
+        Args:
+            user_id: The user's UUID
+            key: The preference key to update (e.g., 'chat', 'ui')
+            value: The value to set for this key
+
+        Returns:
+            Updated preferences, or None if user not found
+        """
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+
+        # Get current preferences or initialize empty dict
+        current_preferences = user.preferences or {}
+
+        # Update the specific key
+        current_preferences[key] = value
+
+        # Save back to user
+        user.preferences = current_preferences
+        user.updated_at = datetime.utcnow()
+        self.db.commit()
+        self.db.refresh(user)
+
+        logger.info(f"Updated preference key '{key}' for user: {user.username}")
+        return user.preferences
+
+    def get_chat_preferences(self, user_id: UUID) -> Dict[str, Any]:
+        """
+        Get chat-specific preferences (convenience method).
+
+        Args:
+            user_id: The user's UUID
+
+        Returns:
+            Chat preferences dictionary
+        """
+        preferences = self.get_user_preferences(user_id)
+        return preferences.get('chat', {})
+
+    def update_chat_preferences(self, user_id: UUID, chat_preferences: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Update chat-specific preferences (convenience method).
+
+        Args:
+            user_id: The user's UUID
+            chat_preferences: Chat preferences to set
+
+        Returns:
+            Updated full preferences, or None if user not found
+        """
+        # Add timestamp to chat preferences
+        chat_preferences['lastUpdated'] = datetime.utcnow().isoformat()
+        return self.update_preference_key(user_id, 'chat', chat_preferences)
 

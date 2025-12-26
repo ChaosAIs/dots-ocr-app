@@ -12,7 +12,8 @@ from db.models import User, UserRole
 from db.user_repository import UserRepository
 from auth.models import (
     RegisterRequest, LoginRequest, TokenResponse, RefreshTokenRequest,
-    ChangePasswordRequest, UserResponse, MessageResponse
+    ChangePasswordRequest, UserResponse, MessageResponse,
+    UpdatePreferencesRequest, UpdateChatPreferencesRequest, PreferencesResponse
 )
 from auth.dependencies import get_current_active_user, require_admin
 from auth.password_utils import PasswordUtils
@@ -317,4 +318,78 @@ def delete_user(
         )
 
     return MessageResponse(message="User deleted successfully")
+
+
+# ===== User Preferences Endpoints =====
+
+@router.get("/preferences", response_model=PreferencesResponse)
+def get_preferences(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get current user's preferences."""
+    user_repo = UserRepository(db)
+    preferences = user_repo.get_user_preferences(current_user.id)
+
+    return PreferencesResponse(preferences=preferences)
+
+
+@router.put("/preferences", response_model=PreferencesResponse)
+def update_preferences(
+    request: UpdatePreferencesRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update entire user preferences."""
+    user_repo = UserRepository(db)
+    preferences = user_repo.update_user_preferences(current_user.id, request.preferences)
+
+    if preferences is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    logger.info(f"Updated preferences for user: {current_user.username}")
+    return PreferencesResponse(preferences=preferences)
+
+
+@router.patch("/preferences/chat", response_model=PreferencesResponse)
+def update_chat_preferences(
+    request: UpdateChatPreferencesRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update chat-specific preferences (workspace selections, etc.)."""
+    user_repo = UserRepository(db)
+
+    chat_prefs = {
+        "selectedWorkspaceIds": request.selectedWorkspaceIds
+    }
+
+    preferences = user_repo.update_chat_preferences(current_user.id, chat_prefs)
+
+    if preferences is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    logger.info(f"Updated chat preferences for user: {current_user.username}")
+    return PreferencesResponse(preferences=preferences)
+
+
+@router.get("/preferences/chat")
+def get_chat_preferences(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get chat-specific preferences."""
+    user_repo = UserRepository(db)
+    chat_prefs = user_repo.get_chat_preferences(current_user.id)
+
+    return {
+        "chat": chat_prefs,
+        "success": True
+    }
 

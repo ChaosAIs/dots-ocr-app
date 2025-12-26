@@ -1025,3 +1025,46 @@ class DocumentRepository:
             "completed_at": page_ocr.get("completed_at")
         }
 
+    # ========== Workspace Document Filtering Methods ==========
+
+    def get_document_ids_by_workspaces(self, workspace_ids: List[UUID]) -> set:
+        """
+        Get all document IDs that belong to the specified workspaces.
+
+        Args:
+            workspace_ids: List of workspace UUIDs to filter by
+
+        Returns:
+            Set of document UUIDs belonging to these workspaces
+        """
+        if not workspace_ids:
+            return set()
+
+        documents = self.db.query(Document.id).filter(
+            and_(
+                Document.deleted_at.is_(None),
+                Document.workspace_id.in_(workspace_ids)
+            )
+        ).all()
+
+        return {doc.id for doc in documents}
+
+    def get_document_ids_by_workspace(self, workspace_id: UUID) -> set:
+        """
+        Get all document IDs that belong to a specific workspace.
+
+        Args:
+            workspace_id: Workspace UUID to filter by
+
+        Returns:
+            Set of document UUIDs belonging to this workspace
+        """
+        documents = self.db.query(Document.id).filter(
+            and_(
+                Document.deleted_at.is_(None),
+                Document.workspace_id == workspace_id
+            )
+        ).all()
+
+        return {doc.id for doc in documents}
+

@@ -312,6 +312,108 @@ class AuthService {
             return { success: false, error: error.message || 'Network error' };
         }
     }
+
+    // ===== User Preferences Methods =====
+
+    /**
+     * Get all user preferences
+     */
+    async getPreferences() {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/preferences`, {
+                method: 'GET',
+                headers: {
+                    ...this.getAuthHeaders(),
+                },
+            });
+
+            if (!response.ok) {
+                return { success: false, error: 'Failed to get preferences' };
+            }
+
+            const data = await response.json();
+            return { success: true, preferences: data.preferences };
+        } catch (error) {
+            console.error('Get preferences error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
+
+    /**
+     * Update all user preferences
+     */
+    async updatePreferences(preferences) {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/preferences`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...this.getAuthHeaders(),
+                },
+                body: JSON.stringify({ preferences }),
+            });
+
+            if (!response.ok) {
+                return { success: false, error: 'Failed to update preferences' };
+            }
+
+            const data = await response.json();
+            return { success: true, preferences: data.preferences };
+        } catch (error) {
+            console.error('Update preferences error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
+
+    /**
+     * Get chat-specific preferences
+     */
+    async getChatPreferences() {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/preferences/chat`, {
+                method: 'GET',
+                headers: {
+                    ...this.getAuthHeaders(),
+                },
+            });
+
+            if (!response.ok) {
+                return { success: false, error: 'Failed to get chat preferences' };
+            }
+
+            const data = await response.json();
+            return { success: true, chat: data.chat };
+        } catch (error) {
+            console.error('Get chat preferences error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
+
+    /**
+     * Update chat-specific preferences (workspace selections, etc.)
+     */
+    async updateChatPreferences(selectedWorkspaceIds) {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/preferences/chat`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...this.getAuthHeaders(),
+                },
+                body: JSON.stringify({ selectedWorkspaceIds }),
+            });
+
+            if (!response.ok) {
+                return { success: false, error: 'Failed to update chat preferences' };
+            }
+
+            const data = await response.json();
+            return { success: true, preferences: data.preferences };
+        } catch (error) {
+            console.error('Update chat preferences error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
 }
 
 // Export singleton instance
