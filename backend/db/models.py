@@ -80,6 +80,12 @@ class TaskStatus(str, enum.Enum):
     PROCESSING = "processing"  # Worker is actively processing
     COMPLETED = "completed"  # Successfully finished
     FAILED = "failed"        # Failed after max retries
+    SKIPPED = "skipped"      # Intentionally skipped (e.g., tabular data for GraphRAG)
+
+
+# Statuses that count as "done" for status rollup calculations
+# Both COMPLETED and SKIPPED are considered successful completion
+DONE_STATUSES = {TaskStatus.COMPLETED, TaskStatus.SKIPPED}
 
 
 # ===== User Management Models =====
@@ -369,6 +375,19 @@ class Document(Base):
     graphrag_started_at = Column(DateTime(timezone=True), nullable=True)
     graphrag_completed_at = Column(DateTime(timezone=True), nullable=True)
     graphrag_error = Column(Text, nullable=True)
+
+    # GraphRAG skip control (for tabular/structured data that doesn't benefit from entity extraction)
+    skip_graphrag = Column(Boolean, default=False, nullable=False)
+    skip_graphrag_reason = Column(String(100), nullable=True)  # e.g., "file_type:.xlsx", "document_type:invoice"
+
+    # Structured Data Extraction status (for extracting tabular data from spreadsheets, invoices, etc.)
+    extraction_eligible = Column(Boolean, nullable=True)
+    extraction_status = Column(String(20), default='pending')  # pending, processing, completed, failed, skipped
+    extraction_schema_type = Column(String(64), nullable=True)  # invoice, receipt, spreadsheet, etc.
+    extraction_started_at = Column(DateTime(timezone=True), nullable=True)
+    extraction_completed_at = Column(DateTime(timezone=True), nullable=True)
+    extraction_error = Column(Text, nullable=True)
+
     # Worker tracking at document level
     current_worker_id = Column(String(100), nullable=True)
     last_heartbeat = Column(DateTime(timezone=True), nullable=True)
@@ -567,4 +586,288 @@ class UserDocument(Base):
             "access_count": self.access_count,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+# ===== Data Extraction Enums =====
+
+class ExtractionStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+
+
+class ValidationStatus(str, enum.Enum):
+    PENDING = "pending"
+    VALID = "valid"
+    INVALID = "invalid"
+    PARTIAL = "partial"
+
+
+class AnalyticsState(str, enum.Enum):
+    INITIAL = "INITIAL"
+    CLASSIFYING = "CLASSIFYING"
+    QUESTIONING = "QUESTIONING"
+    PLANNING = "PLANNING"
+    REVIEWING = "REVIEWING"
+    REFINING = "REFINING"
+    EXECUTING = "EXECUTING"
+    COMPLETE = "COMPLETE"
+    FOLLOW_UP = "FOLLOW_UP"
+    ERROR = "ERROR"
+    EXPIRED = "EXPIRED"
+
+
+# ===== Data Extraction Models =====
+
+class DataSchema(Base):
+    """Schema definitions for structured data extraction."""
+    __tablename__ = "data_schemas"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    schema_type = Column(String(64), nullable=False, unique=True)
+    schema_version = Column(String(16), default='1.0')
+    domain = Column(String(32), nullable=False)
+    display_name = Column(String(128))
+    description = Column(Text)
+
+    # Schema definitions (JSON Schema format)
+    header_schema = Column(JSONB, nullable=False, default=dict)
+    line_items_schema = Column(JSONB)
+    summary_schema = Column(JSONB)
+
+    # Extraction configuration
+    extraction_prompt = Column(Text)
+    field_mappings = Column(JSONB, default=dict)
+
+    # Validation rules
+    validation_rules = Column(JSONB, default=dict)
+
+    # Metadata
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "schema_type": self.schema_type,
+            "schema_version": self.schema_version,
+            "domain": self.domain,
+            "display_name": self.display_name,
+            "description": self.description,
+            "header_schema": self.header_schema,
+            "line_items_schema": self.line_items_schema,
+            "summary_schema": self.summary_schema,
+            "is_active": self.is_active,
+        }
+
+
+class DocumentData(Base):
+    """Extracted structured data from documents."""
+    __tablename__ = "documents_data"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id = Column(PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, unique=True)
+
+    # Schema Reference
+    schema_type = Column(String(64), nullable=False)
+    schema_version = Column(String(16), default='1.0')
+
+    # Extracted Data
+    header_data = Column(JSONB, nullable=False, default=dict)
+    line_items = Column(JSONB, default=list)
+    summary_data = Column(JSONB, default=dict)
+
+    # For large tables
+    line_items_storage = Column(String(16), default='inline')
+    line_items_count = Column(Integer, default=0)
+
+    # Validation & Quality
+    validation_status = Column(String(20), default='pending')
+    overall_confidence = Column(String(10))  # Store as string to avoid decimal issues
+    field_confidences = Column(JSONB, default=dict)
+    validation_results = Column(JSONB)
+
+    # Extraction Metadata
+    extraction_method = Column(String(32))
+    extraction_model = Column(String(64))
+    extraction_duration_ms = Column(Integer)
+    extraction_metadata = Column(JSONB, default=dict)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    document = relationship("Document", backref="extracted_data")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "document_id": str(self.document_id),
+            "schema_type": self.schema_type,
+            "schema_version": self.schema_version,
+            "header_data": self.header_data,
+            "line_items": self.line_items if self.line_items_storage == 'inline' else f"[{self.line_items_count} items in external storage]",
+            "summary_data": self.summary_data,
+            "line_items_count": self.line_items_count,
+            "validation_status": self.validation_status,
+            "overall_confidence": self.overall_confidence,
+            "extraction_method": self.extraction_method,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class DocumentDataLineItem(Base):
+    """Overflow storage for large table line items."""
+    __tablename__ = "documents_data_line_items"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    documents_data_id = Column(PGUUID(as_uuid=True), ForeignKey("documents_data.id", ondelete="CASCADE"), nullable=False)
+    line_number = Column(Integer, nullable=False)
+    data = Column(JSONB, nullable=False)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Relationships
+    documents_data = relationship("DocumentData", backref="overflow_line_items")
+
+
+class SemanticMapping(Base):
+    """Mapping of business concepts to schema fields."""
+    __tablename__ = "semantic_mappings"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    # Concept identification
+    concept_name = Column(String(128), nullable=False)
+    concept_aliases = Column(ARRAY(Text), default=list)
+    concept_description = Column(Text)
+
+    # Mapping to schema fields
+    applicable_schema_types = Column(ARRAY(String(64)), default=list)
+    json_path = Column(String(256), nullable=False)
+    data_type = Column(String(32), default='string')
+
+    # Aggregation configuration
+    default_aggregation = Column(String(32))
+    is_calculated = Column(Boolean, default=False)
+    calculation_formula = Column(Text)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "concept_name": self.concept_name,
+            "concept_aliases": self.concept_aliases,
+            "applicable_schema_types": self.applicable_schema_types,
+            "json_path": self.json_path,
+            "data_type": self.data_type,
+            "default_aggregation": self.default_aggregation,
+        }
+
+
+class EntityRegistry(Base):
+    """Registry of known entities (companies, products, etc.)."""
+    __tablename__ = "entity_registry"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    workspace_id = Column(PGUUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"))
+
+    # Entity identification
+    entity_type = Column(String(64), nullable=False)
+    canonical_name = Column(String(256), nullable=False)
+    aliases = Column(ARRAY(Text), default=list)
+
+    # Statistics
+    document_count = Column(Integer, default=0)
+    last_seen_at = Column(DateTime(timezone=True))
+
+    # Additional metadata
+    entity_metadata = Column(JSONB, default=dict)
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "workspace_id": str(self.workspace_id) if self.workspace_id else None,
+            "entity_type": self.entity_type,
+            "canonical_name": self.canonical_name,
+            "aliases": self.aliases,
+            "document_count": self.document_count,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+        }
+
+
+class AnalyticsSession(Base):
+    """Analytics conversation session for interactive querying."""
+    __tablename__ = "analytics_sessions"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+
+    # Links to existing infrastructure
+    chat_session_id = Column(PGUUID(as_uuid=True), ForeignKey("chat_sessions.id", ondelete="SET NULL"))
+    user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    workspace_id = Column(PGUUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False)
+
+    # State Machine
+    state = Column(String(32), nullable=False, default='INITIAL')
+    state_entered_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Query Context
+    original_query = Column(Text, nullable=False)
+    intent_classification = Column(JSONB)
+
+    # Gathered Information
+    gathered_info = Column(JSONB, default=dict)
+
+    # Plan Management
+    current_plan = Column(JSONB)
+    plan_version = Column(Integer, default=0)
+    plan_history = Column(JSONB, default=list)
+
+    # Execution State
+    execution_progress = Column(JSONB)
+
+    # Results Cache
+    cached_results = Column(JSONB)
+    result_generated_at = Column(DateTime(timezone=True))
+
+    # Timestamps
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    expires_at = Column(DateTime(timezone=True))
+
+    # Relationships
+    chat_session = relationship("ChatSession", backref="analytics_sessions")
+    user = relationship("User", backref="analytics_sessions")
+    workspace = relationship("Workspace", backref="analytics_sessions")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": str(self.id),
+            "chat_session_id": str(self.chat_session_id) if self.chat_session_id else None,
+            "user_id": str(self.user_id),
+            "workspace_id": str(self.workspace_id),
+            "state": self.state,
+            "state_entered_at": self.state_entered_at.isoformat() if self.state_entered_at else None,
+            "original_query": self.original_query,
+            "intent_classification": self.intent_classification,
+            "gathered_info": self.gathered_info,
+            "current_plan": self.current_plan,
+            "plan_version": self.plan_version,
+            "execution_progress": self.execution_progress,
+            "cached_results": self.cached_results,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
         }

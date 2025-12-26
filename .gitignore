@@ -35,3 +35,5 @@ backend/rag_service/chunking/__pycache__/
 backend/rag_service/utils/__pycache__/
 backend/services/__pycache__/
 backend/rag_service/chunking/__pycache__/
+backend/extraction_service/__pycache__/
+backend/analytics_service/__pycache__/

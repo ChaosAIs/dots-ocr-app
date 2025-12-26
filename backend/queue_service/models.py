@@ -162,6 +162,7 @@ class TaskQueueChunk(Base):
     graphrag_error = Column(Text, nullable=True)
     graphrag_retry_count = Column(Integer, default=0)
     graphrag_last_heartbeat = Column(TIMESTAMP(timezone=True), nullable=True)
+    graphrag_skip_reason = Column(String(50), nullable=True)  # Reason for skipping GraphRAG
 
     # Processing results
     entities_extracted = Column(Integer, default=0)

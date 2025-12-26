@@ -8,6 +8,7 @@ from typing import Optional, List, Dict, Any
 from uuid import UUID
 
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import or_
 
 from db.models import User, UserRole, UserStatus, RefreshToken
@@ -337,6 +338,7 @@ class UserRepository:
 
         user.preferences = preferences
         user.updated_at = datetime.utcnow()
+        flag_modified(user, "preferences")
         self.db.commit()
         self.db.refresh(user)
 
@@ -365,9 +367,13 @@ class UserRepository:
         # Update the specific key
         current_preferences[key] = value
 
-        # Save back to user
-        user.preferences = current_preferences
+        # Save back to user - use copy to ensure SQLAlchemy detects the change
+        user.preferences = dict(current_preferences)
         user.updated_at = datetime.utcnow()
+
+        # Flag the JSONB column as modified to ensure SQLAlchemy tracks the change
+        flag_modified(user, "preferences")
+
         self.db.commit()
         self.db.refresh(user)
 

@@ -66,6 +66,9 @@ _progress_callback = None
 # Global accessible document IDs for access control in tool functions
 _accessible_doc_ids = None
 
+# Global analytics context for hybrid queries (pre-computed SQL aggregation results)
+_analytics_context = None
+
 
 def _estimate_token_count(text: str) -> int:
     """
@@ -1646,6 +1649,12 @@ def call_model(state: AgentState) -> AgentState:
                     # Simple context message - dates are already normalized in the content
                     context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
 
+                # Inject analytics context if available (for hybrid queries)
+                global _analytics_context
+                if _analytics_context:
+                    logger.info(f"[vLLM] Injecting analytics context for hybrid query")
+                    context_message = f"\n\n**STRUCTURED DATA ANALYSIS (from database):**\n{_analytics_context}\n" + context_message
+
                 augmented_messages = list(messages)
                 if isinstance(augmented_messages[0], SystemMessage):
                     augmented_messages[0] = SystemMessage(
@@ -1810,7 +1819,8 @@ async def stream_agent_response(
     progress_callback=None,
     session_context: Optional[Dict[str, Any]] = None,
     is_retry: bool = False,
-    accessible_doc_ids: Optional[set] = None
+    accessible_doc_ids: Optional[set] = None,
+    analytics_context: Optional[str] = None
 ):
     """
     Stream the agent response for a query.
@@ -1822,14 +1832,20 @@ async def stream_agent_response(
         session_context: Optional session metadata with entities, topics, and conversation context.
         is_retry: If True, user clicked retry button - always trigger new document search.
         accessible_doc_ids: Optional set of document IDs the user has access to (for access control filtering).
+        analytics_context: Optional pre-computed analytics context for hybrid queries (from SQL aggregation).
 
     Yields:
         Chunks of the response text.
     """
     # Store progress callback and accessible doc IDs in global variables so tools can access them
-    global _progress_callback, _accessible_doc_ids
+    global _progress_callback, _accessible_doc_ids, _analytics_context
     _progress_callback = progress_callback
     _accessible_doc_ids = accessible_doc_ids
+    _analytics_context = analytics_context
+
+    # Log analytics context if provided (for hybrid queries)
+    if analytics_context:
+        logger.info(f"[Analytics Context] Received pre-computed analytics context ({len(analytics_context)} chars) for hybrid query")
 
     # Log access control info
     if accessible_doc_ids is not None:

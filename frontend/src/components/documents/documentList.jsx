@@ -520,8 +520,8 @@ export const DocumentList = forwardRef((props, ref) => {
                        metadataStatus === "processing" ||
                        graphragStatus === "processing";
 
-    // Hide delete button if document is still being processed
-    const canDelete = !isConverting && !isIndexing;
+    // Always allow delete - users should be able to delete failed or stuck documents
+    const canDelete = true;
 
     // Check if document is fully indexed (can be moved)
     const isFullyIndexed = vectorStatus === "completed" &&

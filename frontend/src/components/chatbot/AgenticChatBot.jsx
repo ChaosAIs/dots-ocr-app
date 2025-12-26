@@ -128,9 +128,15 @@ export const AgenticChatBot = () => {
       return;
     }
 
-    // Don't connect if closing/connecting
+    // Don't connect if closing/connecting - wait for close to complete
     if (wsRef.current?.readyState === WebSocket.CONNECTING) {
       console.log("[WebSocket] Already connecting, skipping...");
+      return;
+    }
+
+    // Don't connect if closing - wait for close to complete
+    if (wsRef.current?.readyState === WebSocket.CLOSING) {
+      console.log("[WebSocket] Closing in progress, will reconnect after close...");
       return;
     }
 
@@ -168,7 +174,12 @@ export const AgenticChatBot = () => {
     ws.onclose = (event) => {
       setIsConnected(false);
       stopHeartbeat();
-      console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}`);
+      console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}, wasManualClose: ${isManualCloseRef.current}`);
+
+      // Clear the WebSocket reference since it's now closed
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
 
       // Don't reconnect if manually closed or auth errors
       if (isManualCloseRef.current) {
@@ -231,19 +242,22 @@ export const AgenticChatBot = () => {
           setStreamingContent(streamingContentRef.current);
         } else if (data.type === "end") {
           // Complete the message with the accumulated content
-          const finalContent = streamingContentRef.current;
+          let finalContent = streamingContentRef.current;
 
-          // Only add the assistant message if there's actual content
-          // Empty messages at end of stream are normal and should be ignored
-          if (finalContent.trim()) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                role: "assistant",
-                content: finalContent,
-              },
-            ]);
+          // If no content received, provide a friendly fallback message
+          // This ensures the AI assistant always responds
+          if (!finalContent.trim()) {
+            finalContent = "I couldn't generate a response for your question. This might be because:\n\n• No relevant information was found in the selected documents\n• The question might need more context\n• Please try rephrasing your question or selecting different documents.";
           }
+
+          // Always add the assistant message
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: finalContent,
+            },
+          ]);
 
           streamingContentRef.current = "";
           setStreamingContent("");
@@ -276,37 +290,53 @@ export const AgenticChatBot = () => {
             }, 500);
           }
         } else if (data.type === "error") {
-          // Show error toast
-          toast.current?.show({
-            severity: "error",
-            summary: "Error",
-            detail: data.message || "An error occurred while processing your message",
-            life: 5000,
-          });
+          // Log the error but don't show toast - we'll show a friendly assistant message instead
+          console.warn("[WebSocket] Received error:", data.message);
+
+          // Create a user-friendly error response
+          const errorContent = streamingContentRef.current.trim() ||
+            "I'm sorry, but I encountered an issue while processing your request. Please try again, or rephrase your question.\n\nIf the problem persists, try refreshing the page.";
+
+          // Add the error as an assistant message so the chat flow continues
+          setMessages((prev) => [
+            ...prev,
+            {
+              role: "assistant",
+              content: errorContent,
+              isError: true,  // Flag to style differently if needed
+            },
+          ]);
 
           // Clear streaming content
           streamingContentRef.current = "";
           setStreamingContent("");
           setIsLoading(false);
 
-          // Mark the last user message as having an error (for retry functionality)
-          // Find the last user message and add error flag
-          setMessages((prev) => {
-            const lastUserMsgIndex = prev.length - 1;
-            if (lastUserMsgIndex >= 0 && prev[lastUserMsgIndex].role === "user") {
-              const updated = [...prev];
-              updated[lastUserMsgIndex] = {
-                ...updated[lastUserMsgIndex],
-                hasError: true,
-                errorMessage: data.message
-              };
-              return updated;
-            }
-            return prev;
-          });
+          // Increment message count
+          messageCountRef.current += 2; // user + assistant
         }
       } catch (e) {
         console.error("Error parsing message:", e);
+        // If we're in loading state, add a fallback response to avoid blocking
+        if (setIsLoading) {
+          setMessages((prev) => {
+            // Check if the last message is from user (waiting for response)
+            if (prev.length > 0 && prev[prev.length - 1].role === "user") {
+              return [
+                ...prev,
+                {
+                  role: "assistant",
+                  content: "I encountered an issue processing the response. Please try your question again.",
+                  isError: true,
+                },
+              ];
+            }
+            return prev;
+          });
+          streamingContentRef.current = "";
+          setStreamingContent("");
+          setIsLoading(false);
+        }
       }
     };
 
@@ -527,18 +557,28 @@ export const AgenticChatBot = () => {
       streamingContentRef.current = "";
       setStreamingContent("");
 
-      // Wait for WebSocket to be ready
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        console.log("WebSocket not ready, waiting...");
-        let retries = 0;
-        const maxRetries = 20;
+      // Ensure WebSocket is connected - initiate connection if needed
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        console.log("[Retry] WebSocket not ready, initiating connection...");
 
-        while (wsRef.current?.readyState !== WebSocket.OPEN && retries < maxRetries) {
+        // Reset manual close flag since we want to connect
+        isManualCloseRef.current = false;
+        reconnectAttemptsRef.current = 0;
+
+        // Initiate connection
+        connectWebSocket();
+
+        // Wait for connection with timeout
+        let retries = 0;
+        const maxRetries = 30; // 3 seconds total
+
+        while ((!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) && retries < maxRetries) {
           await new Promise(resolve => setTimeout(resolve, 100));
           retries++;
         }
 
-        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          console.error("[Retry] WebSocket failed to connect after 3 seconds");
           toast.current?.show({
             severity: "error",
             summary: "Connection Failed",
@@ -548,6 +588,8 @@ export const AgenticChatBot = () => {
           setIsLoading(false);
           return;
         }
+
+        console.log("[Retry] WebSocket connected successfully");
       }
 
       // Send to WebSocket with is_retry flag to force new document search
@@ -571,7 +613,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, selectedWorkspaceIds]);
+  }, [isLoading, sessionId, selectedWorkspaceIds, connectWebSocket]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -693,18 +735,28 @@ export const AgenticChatBot = () => {
       streamingContentRef.current = "";
       setStreamingContent("");
 
-      // Wait for WebSocket to be ready
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        console.log("WebSocket not ready, waiting...");
-        let retries = 0;
-        const maxRetries = 20;
+      // Ensure WebSocket is connected - initiate connection if needed
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        console.log("[RetryWithEdit] WebSocket not ready, initiating connection...");
 
-        while (wsRef.current?.readyState !== WebSocket.OPEN && retries < maxRetries) {
+        // Reset manual close flag since we want to connect
+        isManualCloseRef.current = false;
+        reconnectAttemptsRef.current = 0;
+
+        // Initiate connection
+        connectWebSocket();
+
+        // Wait for connection with timeout
+        let retries = 0;
+        const maxRetries = 30; // 3 seconds total
+
+        while ((!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) && retries < maxRetries) {
           await new Promise(resolve => setTimeout(resolve, 100));
           retries++;
         }
 
-        if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          console.error("[RetryWithEdit] WebSocket failed to connect after 3 seconds");
           toast.current?.show({
             severity: "error",
             summary: "Connection Failed",
@@ -714,6 +766,8 @@ export const AgenticChatBot = () => {
           setIsLoading(false);
           return;
         }
+
+        console.log("[RetryWithEdit] WebSocket connected successfully");
       }
 
       // Send to WebSocket with is_retry flag to force new document search
@@ -737,7 +791,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedWorkspaceIds]);
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedWorkspaceIds, connectWebSocket]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -749,19 +803,35 @@ export const AgenticChatBot = () => {
   const clearChat = () => {
     // Clear current session and messages
     // New session will be created when user sends first message
-    setSessionId(null);
-    setMessages([]);
-    streamingContentRef.current = "";
-    setStreamingContent("");
 
     // Reset reconnection counter and message count
     reconnectAttemptsRef.current = 0;
     messageCountRef.current = 0;
 
-    // Close WebSocket
+    // Mark as manual close BEFORE closing to prevent reconnection attempts
+    isManualCloseRef.current = true;
+
+    // Stop heartbeat
+    stopHeartbeat();
+
+    // Clear any pending reconnect timeout
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    // Close WebSocket and clear reference
     if (wsRef.current) {
       wsRef.current.close();
+      wsRef.current = null;
     }
+
+    // Now clear session state (after WebSocket is closed)
+    setSessionId(null);
+    setMessages([]);
+    streamingContentRef.current = "";
+    setStreamingContent("");
+    setIsConnected(false);
 
     // Reload chat history to show the new session will be created
     if (chatHistoryRef.current) {
@@ -783,21 +853,41 @@ export const AgenticChatBot = () => {
       // Load messages for the selected session
       const history = await chatService.getSessionMessages(newSessionId);
       const loadedMessages = history.map((msg) => ({
+        id: msg.id,  // Include message ID for retry functionality
         role: msg.role,
         content: msg.content,
       }));
-      setMessages(loadedMessages);
 
-      // Update session ID and reconnect WebSocket
-      setSessionId(newSessionId);
+      // IMPORTANT: Close existing WebSocket BEFORE changing session ID
+      // This prevents race conditions with reconnection attempts
+
+      // Mark as manual close to prevent reconnection to old session
+      isManualCloseRef.current = true;
+
+      // Stop heartbeat
+      stopHeartbeat();
+
+      // Clear any pending reconnect timeout
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
+      }
+
+      // Close old WebSocket and clear reference
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+
+      setIsConnected(false);
 
       // Reset reconnection counter and set message count
       reconnectAttemptsRef.current = 0;
       messageCountRef.current = loadedMessages.length;
 
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      // Now update session ID - this will trigger useEffect to create new connection
+      setMessages(loadedMessages);
+      setSessionId(newSessionId);
 
       // Check if title needs regeneration (do this in background)
       chatService.regenerateSessionTitle(newSessionId)

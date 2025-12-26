@@ -7,6 +7,7 @@ import hashlib
 import logging
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Callable, Any
 from uuid import UUID
 
@@ -27,6 +28,9 @@ class TaskQueueService:
     - GraphRAG chunk tasks
     """
 
+    # File extensions that should use doc_service converter instead of OCR
+    DOC_SERVICE_EXTENSIONS = {'.docx', '.doc', '.xlsx', '.xlsm', '.xlsb', '.xls', '.txt', '.csv', '.tsv', '.log', '.text'}
+
     def __init__(
         self,
         input_dir: str,
@@ -35,7 +39,8 @@ class TaskQueueService:
         task_queue_manager: Any = None,
         task_scheduler: Any = None,
         queue_worker_pool: Any = None,
-        document_status_broadcast: Optional[Callable] = None
+        document_status_broadcast: Optional[Callable] = None,
+        doc_converter_manager: Any = None
     ):
         """
         Initialize task queue service.
@@ -48,6 +53,7 @@ class TaskQueueService:
             task_scheduler: TaskScheduler instance
             queue_worker_pool: HierarchicalWorkerPool instance
             document_status_broadcast: Callback for document status broadcasts
+            doc_converter_manager: DocumentConverterManager for Word/Excel/CSV files
         """
         self.input_dir = input_dir
         self.output_dir = output_dir
@@ -56,6 +62,7 @@ class TaskQueueService:
         self.task_scheduler = task_scheduler
         self.queue_worker_pool = queue_worker_pool
         self.document_status_broadcast = document_status_broadcast
+        self.doc_converter_manager = doc_converter_manager
 
         # Check if task queue is enabled
         self.task_queue_enabled = os.getenv("TASK_QUEUE_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -185,12 +192,12 @@ class TaskQueueService:
                 page_output_path = find_page_markdown(page_task.page_number, total_pages)
 
                 if not page_output_path:
-                    logger.info(f"📄 Page markdown not found, triggering OCR for document: {filename}")
+                    logger.info(f"📄 Page markdown not found, triggering conversion for document: {filename}")
 
                     lock_file = os.path.join(page_output_dir, f".{base_name}.converting")
 
                     if os.path.exists(lock_file):
-                        logger.info(f"⏳ OCR conversion in progress by another worker, waiting...")
+                        logger.info(f"⏳ Conversion in progress by another worker, waiting...")
                         for _ in range(120):
                             time.sleep(5)
                             page_output_path = find_page_markdown(page_task.page_number, total_pages)
@@ -200,21 +207,34 @@ class TaskQueueService:
                             if not os.path.exists(lock_file):
                                 break
                         else:
-                            raise TimeoutError(f"Timeout waiting for page {page_task.page_number} OCR")
+                            raise TimeoutError(f"Timeout waiting for page {page_task.page_number} conversion")
                     else:
                         try:
                             os.makedirs(os.path.dirname(lock_file), exist_ok=True)
                             with open(lock_file, 'w') as f:
                                 f.write(str(page_task.document_id))
 
-                            parser_output_dir = os.path.dirname(page_output_dir)
-                            logger.info(f"🚀 Starting OCR conversion for {filename} -> {parser_output_dir}")
-                            results = self.parser.parse_file(
-                                input_path,
-                                output_dir=parser_output_dir,
-                                prompt_mode="prompt_layout_all_en",
-                            )
-                            logger.info(f"✅ OCR conversion completed for {filename}: {len(results)} pages")
+                            # Check if file should use doc_service converter (Excel, Word, CSV, etc.)
+                            file_ext = Path(input_path).suffix.lower()
+                            if file_ext in self.DOC_SERVICE_EXTENSIONS:
+                                # Use doc_service converter for Excel/Word/CSV files (skip OCR)
+                                logger.info(f"📊 Using doc_service converter for {filename} (extension: {file_ext})")
+                                page_output_path = self._convert_with_doc_service(
+                                    input_path=input_path,
+                                    output_dir=page_output_dir,
+                                    base_name=base_name
+                                )
+                                logger.info(f"✅ Doc service conversion completed for {filename}")
+                            else:
+                                # Use OCR for PDFs and images
+                                parser_output_dir = os.path.dirname(page_output_dir)
+                                logger.info(f"🚀 Starting OCR conversion for {filename} -> {parser_output_dir}")
+                                results = self.parser.parse_file(
+                                    input_path,
+                                    output_dir=parser_output_dir,
+                                    prompt_mode="prompt_layout_all_en",
+                                )
+                                logger.info(f"✅ OCR conversion completed for {filename}: {len(results)} pages")
 
                             doc.output_path = self.to_relative_output_path(page_output_dir)
                             db.commit()
@@ -223,7 +243,9 @@ class TaskQueueService:
                             if os.path.exists(lock_file):
                                 os.remove(lock_file)
 
-                    page_output_path = find_page_markdown(page_task.page_number, total_pages)
+                    # Only search for markdown if we used OCR (doc_service already set page_output_path)
+                    if not page_output_path:
+                        page_output_path = find_page_markdown(page_task.page_number, total_pages)
 
                 if not page_output_path:
                     raise FileNotFoundError(
@@ -239,6 +261,27 @@ class TaskQueueService:
                 ).first()
 
                 if page_record:
+                    # Check if this is a single-file document (non-PDF like Excel, Word, CSV)
+                    # These produce a single output file, so we should only create chunks once
+                    file_ext = Path(doc.filename).suffix.lower() if doc.filename else ''
+                    is_single_file_doc = file_ext in self.DOC_SERVICE_EXTENSIONS
+
+                    if is_single_file_doc:
+                        # For single-file documents, check if chunks already exist for this document
+                        # If another page already created chunks, skip chunk creation for this page
+                        from queue_service import TaskQueueChunk
+                        existing_chunks = db.query(TaskQueueChunk).filter(
+                            TaskQueueChunk.document_id == page_task.document_id
+                        ).first()
+
+                        if existing_chunks:
+                            logger.info(f"⏭️ Skipping chunk creation for page {page_task.page_number} - "
+                                       f"chunks already exist for single-file document {filename}")
+                            page_record.chunk_count = 0
+                            db.commit()
+                            logger.info(f"✅ OCR completed for page {page_task.page_number} of {filename} (skipped chunking)")
+                            return page_output_path
+
                     result = chunk_markdown_with_summaries(
                         page_output_path,
                         source_name=f"{filename}_page_{page_task.page_number}"
@@ -270,6 +313,52 @@ class TaskQueueService:
         except Exception as e:
             logger.error(f"❌ OCR page task failed for page {page_task.page_number} of doc {page_task.document_id}: {e}", exc_info=True)
             raise
+
+    def _convert_with_doc_service(self, input_path: str, output_dir: str, base_name: str) -> str:
+        """
+        Convert a document (Excel, Word, CSV, etc.) to markdown using doc_service.
+
+        This method is used for file types that don't need OCR (already text-based).
+
+        Args:
+            input_path: Absolute path to the input file
+            output_dir: Directory to save the output markdown file
+            base_name: Base name for the output file (without extension)
+
+        Returns:
+            str: Path to the generated markdown file
+
+        Raises:
+            ValueError: If no converter is available for the file type
+            Exception: If conversion fails
+        """
+        if not self.doc_converter_manager:
+            raise ValueError("doc_converter_manager not initialized - cannot convert document files")
+
+        file_path_obj = Path(input_path)
+
+        # Find appropriate converter
+        converter = self.doc_converter_manager.find_converter_for_file(file_path_obj)
+        if not converter:
+            raise ValueError(f"No converter found for file type: {file_path_obj.suffix}")
+
+        # Create output directory structure
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Generate output filename matching the expected pattern
+        output_filename = f"{base_name}_nohf.md"
+        output_path = Path(output_dir) / output_filename
+
+        logger.info(f"📝 Converting {file_path_obj.name} to markdown at {output_path}")
+
+        # Convert the file
+        success = converter.convert_file(file_path_obj, output_path)
+
+        if not success:
+            raise Exception(f"Failed to convert {file_path_obj.name} with {converter.get_converter_info()['name']}")
+
+        logger.info(f"✅ Successfully converted {file_path_obj.name} using {converter.get_converter_info()['name']}")
+        return str(output_path)
 
     def process_vector_chunk_task(self, chunk_task) -> bool:
         """
@@ -305,6 +394,11 @@ class TaskQueueService:
 
                 source_name = os.path.splitext(doc.filename)[0]
 
+                # Check if this is a single-file document type
+                # For these, we use chunk_index 0 as the canonical page number to avoid duplicates
+                file_ext = Path(doc.filename).suffix.lower() if doc.filename else ''
+                is_single_file_doc = file_ext in self.DOC_SERVICE_EXTENSIONS
+
             result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
             chunks = result.chunks
 
@@ -317,14 +411,23 @@ class TaskQueueService:
             chunk = chunks[chunk_task.chunk_index]
 
             # Build ID mapping for parent/child relationships
+            # For single-file documents, always use page 0 to ensure consistent IDs
+            canonical_page_number = 0 if is_single_file_doc else page_number
+
             old_to_new_id_map = {}
             for idx, c in enumerate(chunks):
                 old_id = c.metadata.get("chunk_id", "")
                 content_hash = hashlib.md5(c.page_content.encode()).hexdigest()[:16]
-                new_id = f"{chunk_task.document_id}_{page_number}_{idx}_{content_hash}"
+                new_id = f"{chunk_task.document_id}_{canonical_page_number}_{idx}_{content_hash}"
                 old_to_new_id_map[old_id] = new_id
 
-            chunk.metadata["chunk_id"] = chunk_task.chunk_id
+            # Use canonical chunk_id for single-file documents to prevent duplicates
+            if is_single_file_doc:
+                content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
+                canonical_chunk_id = f"{chunk_task.document_id}_{canonical_page_number}_{chunk_task.chunk_index}_{content_hash}"
+                chunk.metadata["chunk_id"] = canonical_chunk_id
+            else:
+                chunk.metadata["chunk_id"] = chunk_task.chunk_id
 
             # Update parent/child references
             old_parent_id = chunk.metadata.get("parent_chunk_id")
@@ -338,6 +441,32 @@ class TaskQueueService:
             chunk.metadata["document_id"] = str(chunk_task.document_id)
 
             vectorstore = get_vectorstore()
+
+            # For single-file documents, check if this chunk already exists in Qdrant
+            # This prevents duplicate vectors when multiple page tasks process the same content
+            if is_single_file_doc:
+                canonical_chunk_id = chunk.metadata["chunk_id"]
+                try:
+                    # Check if point already exists using the Qdrant client
+                    from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+                    existing = vectorstore.client.scroll(
+                        collection_name=vectorstore.collection_name,
+                        scroll_filter=Filter(
+                            must=[
+                                FieldCondition(
+                                    key="metadata.chunk_id",
+                                    match=MatchValue(value=canonical_chunk_id)
+                                )
+                            ]
+                        ),
+                        limit=1
+                    )
+                    if existing and existing[0]:
+                        logger.info(f"⏭️ Skipping duplicate vector for chunk: {canonical_chunk_id}")
+                        return True
+                except Exception as check_err:
+                    logger.debug(f"Could not check for existing chunk (will proceed): {check_err}")
+
             vectorstore.add_documents([chunk])
 
             logger.info(f"✅ Vector index completed for chunk: {chunk_task.chunk_id}")

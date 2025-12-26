@@ -29,8 +29,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
 from db.database import get_db_session, create_db_session
-from db.models import Document
+from db.models import Document, DONE_STATUSES
 from .models import TaskQueuePage, TaskQueueChunk, TaskStatus
+from rag_service.graphrag_skip_config import (
+    should_skip_graphrag_for_file,
+    should_skip_graphrag_for_document_type,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -208,10 +212,10 @@ class HierarchicalTaskQueueManager:
         """
         Update document status based on children (bubble-up logic).
 
-        Rules:
+        Rules (UPDATED - skipped counts as done):
         1. If ANY child is "processing" → parent = "processing"
         2. If ANY child is "pending"    → parent = "pending"
-        3. If ALL children "completed"  → parent = "completed"
+        3. If ALL children in DONE_STATUSES (completed/skipped) → parent = "completed"
         4. If ANY child "failed" (no pending/processing) → parent = "failed"
 
         Args:
@@ -233,6 +237,7 @@ class HierarchicalTaskQueueManager:
                     func.count().filter(status_col == TaskStatus.PENDING).label("pending"),
                     func.count().filter(status_col == TaskStatus.COMPLETED).label("completed"),
                     func.count().filter(status_col == TaskStatus.FAILED).label("failed"),
+                    func.count().filter(status_col == TaskStatus.SKIPPED).label("skipped"),
                     func.count().label("total")
                 ).filter(TaskQueuePage.document_id == document_id).first()
             else:
@@ -247,18 +252,23 @@ class HierarchicalTaskQueueManager:
                     func.count().filter(status_col == TaskStatus.PENDING).label("pending"),
                     func.count().filter(status_col == TaskStatus.COMPLETED).label("completed"),
                     func.count().filter(status_col == TaskStatus.FAILED).label("failed"),
+                    func.count().filter(status_col == TaskStatus.SKIPPED).label("skipped"),
                     func.count().label("total")
                 ).filter(TaskQueueChunk.document_id == document_id).first()
 
             if not counts or counts.total == 0:
                 return
 
+            # Calculate done count (completed + skipped both count as done)
+            done_count = (counts.completed or 0) + (counts.skipped or 0)
+
             # Determine new status using bubble-up rules
             if counts.processing > 0:
                 new_status = TaskStatus.PROCESSING
             elif counts.pending > 0:
                 new_status = TaskStatus.PENDING
-            elif counts.completed == counts.total:
+            elif done_count == counts.total:
+                # All tasks are done (either completed or skipped)
                 new_status = TaskStatus.COMPLETED
             elif counts.failed > 0:
                 new_status = TaskStatus.FAILED
@@ -310,10 +320,10 @@ class HierarchicalTaskQueueManager:
         """
         Update page status based on children chunks (bubble-up logic).
 
-        Rules:
+        Rules (UPDATED - skipped counts as done):
         1. If ANY chunk is "processing" → page = "processing"
         2. If ANY chunk is "pending"    → page = "pending"
-        3. If ALL chunks "completed"    → page = "completed"
+        3. If ALL chunks in DONE_STATUSES (completed/skipped) → page = "completed"
         4. If ANY chunk "failed" (no pending/processing) → page = "failed"
 
         Args:
@@ -341,18 +351,23 @@ class HierarchicalTaskQueueManager:
                 func.count().filter(status_col == TaskStatus.PENDING).label("pending"),
                 func.count().filter(status_col == TaskStatus.COMPLETED).label("completed"),
                 func.count().filter(status_col == TaskStatus.FAILED).label("failed"),
+                func.count().filter(status_col == TaskStatus.SKIPPED).label("skipped"),
                 func.count().label("total")
             ).filter(TaskQueueChunk.page_id == page_id).first()
 
             if not counts or counts.total == 0:
                 return
 
+            # Calculate done count (completed + skipped both count as done)
+            done_count = (counts.completed or 0) + (counts.skipped or 0)
+
             # Determine new status using bubble-up rules
             if counts.processing > 0:
                 new_status = TaskStatus.PROCESSING
             elif counts.pending > 0:
                 new_status = TaskStatus.PENDING
-            elif counts.completed == counts.total:
+            elif done_count == counts.total:
+                # All tasks are done (either completed or skipped)
                 new_status = TaskStatus.COMPLETED
             elif counts.failed > 0:
                 new_status = TaskStatus.FAILED
@@ -454,19 +469,24 @@ class HierarchicalTaskQueueManager:
                 func.count().filter(TaskQueueChunk.graphrag_status == TaskStatus.PROCESSING).label("processing"),
                 func.count().filter(TaskQueueChunk.graphrag_status == TaskStatus.FAILED).label("failed"),
                 func.count().filter(TaskQueueChunk.graphrag_status == TaskStatus.PENDING).label("pending"),
+                func.count().filter(TaskQueueChunk.graphrag_status == TaskStatus.SKIPPED).label("skipped"),
                 func.sum(TaskQueueChunk.entities_extracted).label("entities"),
                 func.sum(TaskQueueChunk.relationships_extracted).label("relationships"),
             ).filter(TaskQueueChunk.document_id == document_id).first()
 
             if graphrag_stats and graphrag_stats.total > 0:
-                # Determine overall graphrag status
+                # Calculate done count (completed + skipped)
+                done_count = (graphrag_stats.completed or 0) + (graphrag_stats.skipped or 0)
+
+                # Determine overall graphrag status (skipped documents show as "completed")
                 if graphrag_stats.processing > 0:
                     graphrag_status = "processing"
-                elif graphrag_stats.completed == graphrag_stats.total:
+                elif done_count == graphrag_stats.total:
+                    # All chunks are done (either completed or skipped)
                     graphrag_status = "completed"
                 elif graphrag_stats.failed > 0 and graphrag_stats.pending == 0 and graphrag_stats.processing == 0:
                     graphrag_status = "failed"
-                elif graphrag_stats.completed > 0:
+                elif done_count > 0:
                     graphrag_status = "partial"
                 else:
                     graphrag_status = "pending"
@@ -475,14 +495,19 @@ class HierarchicalTaskQueueManager:
                     "status": graphrag_status,
                     "total_chunks": graphrag_stats.total,
                     "expected_total_chunks": graphrag_stats.total,
-                    "processed_chunks": graphrag_stats.completed,
-                    "failed_chunks": graphrag_stats.failed,
-                    "pending_chunks": graphrag_stats.pending,
-                    "processing_chunks": graphrag_stats.processing,
+                    "processed_chunks": graphrag_stats.completed or 0,
+                    "skipped_chunks": graphrag_stats.skipped or 0,
+                    "failed_chunks": graphrag_stats.failed or 0,
+                    "pending_chunks": graphrag_stats.pending or 0,
+                    "processing_chunks": graphrag_stats.processing or 0,
                     "entities_extracted": graphrag_stats.entities or 0,
                     "relationships_extracted": graphrag_stats.relationships or 0,
                     "updated_at": now.isoformat(),
                 }
+
+                # Add skip reason if all chunks were skipped
+                if graphrag_stats.skipped == graphrag_stats.total and doc.skip_graphrag_reason:
+                    doc.indexing_details["graphrag_indexing"]["skip_reason"] = doc.skip_graphrag_reason
 
             # === OCR Stats (from pages) ===
             ocr_stats = db.query(
@@ -933,6 +958,10 @@ class HierarchicalTaskQueueManager:
             # If so, trigger metadata extraction in background
             self._check_and_trigger_metadata_extraction(document_id, db)
 
+            # Check if all vector chunks complete - trigger data extraction
+            # Data extraction runs BEFORE GraphRAG to ensure structured data is available early
+            self._check_and_trigger_data_extraction(document_id, db)
+
             logger.debug(f"Completed Vector chunk task: chunk={chunk_task_id}")
             return True
 
@@ -1024,6 +1053,8 @@ class HierarchicalTaskQueueManager:
         Claim the next available GraphRAG indexing chunk task.
 
         Only picks up chunks where Vector indexing is completed.
+        Automatically skips chunks from documents that shouldn't be GraphRAG indexed
+        (e.g., spreadsheets, invoices, receipts with tabular data).
 
         Args:
             worker_id: Worker identifier
@@ -1037,40 +1068,61 @@ class HierarchicalTaskQueueManager:
             db = create_db_session()
 
         try:
-            # Find next GraphRAG chunk task where Vector is completed
-            chunk = db.query(TaskQueueChunk).filter(
-                TaskQueueChunk.graphrag_status.in_([TaskStatus.PENDING, TaskStatus.FAILED]),
-                TaskQueueChunk.graphrag_retry_count < TaskQueueChunk.max_retries,
-                TaskQueueChunk.vector_status == TaskStatus.COMPLETED  # Dependency check
-            ).order_by(
-                TaskQueueChunk.graphrag_status.desc(),  # Failed first
-                TaskQueueChunk.graphrag_retry_count.asc(),
-                TaskQueueChunk.created_at.asc()
-            ).with_for_update(skip_locked=True).first()
+            while True:  # Loop to handle skipped chunks
+                # Find next GraphRAG chunk task where Vector is completed
+                chunk = db.query(TaskQueueChunk).filter(
+                    TaskQueueChunk.graphrag_status.in_([TaskStatus.PENDING, TaskStatus.FAILED]),
+                    TaskQueueChunk.graphrag_retry_count < TaskQueueChunk.max_retries,
+                    TaskQueueChunk.vector_status == TaskStatus.COMPLETED  # Dependency check
+                ).order_by(
+                    TaskQueueChunk.graphrag_status.desc(),  # Failed first
+                    TaskQueueChunk.graphrag_retry_count.asc(),
+                    TaskQueueChunk.created_at.asc()
+                ).with_for_update(skip_locked=True).first()
 
-            if not chunk:
-                return None
+                if not chunk:
+                    return None
 
-            # Claim the task
-            now = datetime.now(timezone.utc)
-            chunk.graphrag_status = TaskStatus.PROCESSING
-            chunk.graphrag_worker_id = worker_id
-            chunk.graphrag_started_at = now
-            chunk.graphrag_last_heartbeat = now
+                # Check if this chunk should skip GraphRAG
+                should_skip, skip_reason = self._should_skip_graphrag(chunk, db)
 
-            db.commit()
+                if should_skip:
+                    # Mark as skipped (not failed) - this counts as "done"
+                    chunk.graphrag_status = TaskStatus.SKIPPED
+                    chunk.graphrag_skip_reason = skip_reason
+                    chunk.graphrag_completed_at = datetime.now(timezone.utc)
+                    db.commit()
 
-            logger.info(f"Worker {worker_id} claimed GraphRAG chunk task: chunk={chunk.chunk_id}")
+                    logger.info(f"⏭️ Skipped GraphRAG for chunk {chunk.chunk_id}: {skip_reason}")
 
-            return ChunkTaskData(
-                id=chunk.id,
-                page_id=chunk.page_id,
-                document_id=chunk.document_id,
-                chunk_id=chunk.chunk_id,
-                chunk_index=chunk.chunk_index,
-                phase="graphrag",
-                retry_count=chunk.graphrag_retry_count
-            )
+                    # Update parent statuses (skipped counts as done)
+                    self.update_page_status(chunk.page_id, "graphrag", db)
+                    self.update_document_status(chunk.document_id, "graphrag", db)
+                    self.sync_document_indexing_details(chunk.document_id, db)
+
+                    # Continue to find next non-skipped chunk
+                    continue
+
+                # Claim the task (normal processing)
+                now = datetime.now(timezone.utc)
+                chunk.graphrag_status = TaskStatus.PROCESSING
+                chunk.graphrag_worker_id = worker_id
+                chunk.graphrag_started_at = now
+                chunk.graphrag_last_heartbeat = now
+
+                db.commit()
+
+                logger.info(f"Worker {worker_id} claimed GraphRAG chunk task: chunk={chunk.chunk_id}")
+
+                return ChunkTaskData(
+                    id=chunk.id,
+                    page_id=chunk.page_id,
+                    document_id=chunk.document_id,
+                    chunk_id=chunk.chunk_id,
+                    chunk_index=chunk.chunk_index,
+                    phase="graphrag",
+                    retry_count=chunk.graphrag_retry_count
+                )
 
         except Exception as e:
             logger.error(f"Error claiming GraphRAG chunk task: {e}")
@@ -1079,6 +1131,44 @@ class HierarchicalTaskQueueManager:
         finally:
             if should_close_db:
                 db.close()
+
+    def _should_skip_graphrag(self, chunk: TaskQueueChunk, db: Session) -> Tuple[bool, Optional[str]]:
+        """
+        Determine if a chunk should skip GraphRAG indexing.
+
+        Checks in priority order:
+        1. Document-level skip flag (set at upload or after metadata extraction)
+        2. File extension (spreadsheets, CSVs, etc.)
+        3. Document type from metadata (invoices, receipts, etc.)
+
+        Args:
+            chunk: The TaskQueueChunk to check
+            db: Database session
+
+        Returns:
+            Tuple of (should_skip: bool, reason: str or None)
+        """
+        doc = db.query(Document).filter(Document.id == chunk.document_id).first()
+        if not doc:
+            return False, None
+
+        # 1. Check document-level skip flag (highest priority)
+        if doc.skip_graphrag:
+            return True, doc.skip_graphrag_reason or "document_disabled"
+
+        # 2. Check file extension
+        should_skip, reason = should_skip_graphrag_for_file(doc.filename)
+        if should_skip:
+            return True, reason
+
+        # 3. Check document type from metadata
+        if doc.document_metadata:
+            doc_type = doc.document_metadata.get('document_type', '')
+            should_skip, reason = should_skip_graphrag_for_document_type(doc_type)
+            if should_skip:
+                return True, reason
+
+        return False, None
 
     def complete_graphrag_chunk_task(
         self,
@@ -1112,6 +1202,9 @@ class HierarchicalTaskQueueManager:
             self.update_page_status(page_id, "graphrag", db)
             self.update_document_status(chunk.document_id, "graphrag", db)
             self.sync_document_indexing_details(chunk.document_id, db)
+
+            # Note: Data extraction is now triggered after Vector indexing completes
+            # (before GraphRAG), see complete_vector_chunk_task
 
             logger.debug(f"Completed GraphRAG chunk task: chunk={chunk_task_id}, entities={entities_extracted}")
             return True
@@ -1464,6 +1557,15 @@ class HierarchicalTaskQueueManager:
             )
             repo.update_metadata_extraction_status(doc, "completed")
 
+            # Check if document type should skip GraphRAG and set the flag
+            doc_type = metadata.get('document_type', '')
+            should_skip, skip_reason = should_skip_graphrag_for_document_type(doc_type)
+            if should_skip and not doc.skip_graphrag:
+                doc.skip_graphrag = True
+                doc.skip_graphrag_reason = skip_reason
+                db.commit()
+                logger.info(f"[Metadata] Set skip_graphrag=True for {source_name}: {skip_reason}")
+
             # Embed metadata to vector collection for fast document routing
             from rag_service.vectorstore import upsert_document_metadata_embedding
             upsert_document_metadata_embedding(
@@ -1495,3 +1597,31 @@ class HierarchicalTaskQueueManager:
                 logger.warning(f"[Metadata] Could not update failed status: {db_error}")
         finally:
             db.close()
+
+    def _check_and_trigger_data_extraction(
+        self,
+        document_id: UUID,
+        db: Optional[Session] = None
+    ) -> None:
+        """
+        Check if all Vector chunks for a document are complete.
+        If so, trigger structured data extraction in a background thread.
+
+        Data extraction converts documents (invoices, receipts, statements, etc.)
+        into structured JSON format stored in the documents_data table.
+        This enables analytics queries on the extracted data.
+
+        Note: Data extraction now runs BEFORE GraphRAG indexing to ensure
+        structured data is available early in the pipeline.
+
+        Args:
+            document_id: Document UUID
+            db: Database session
+        """
+        try:
+            from extraction_service.task_queue_integration import check_and_trigger_data_extraction
+            check_and_trigger_data_extraction(document_id, db)
+        except ImportError as e:
+            logger.debug(f"[Extraction] Extraction service not available: {e}")
+        except Exception as e:
+            logger.error(f"[Extraction] Error triggering extraction for {document_id}: {e}")

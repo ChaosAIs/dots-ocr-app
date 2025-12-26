@@ -1,6 +1,12 @@
 """
 WebSocket API for real-time chat with the RAG agent.
 Provides streaming responses for better UX.
+
+Enhanced with intent-based routing:
+- DOCUMENT_SEARCH → RAG Service (vector search)
+- DATA_ANALYTICS → SQL Query Executor (documents_data table)
+- HYBRID → Both services combined
+- GENERAL → Direct response
 """
 
 import json
@@ -18,6 +24,8 @@ from .indexer import get_indexed_count
 from db.database import get_db_session
 from chat_service.conversation_manager import ConversationManager
 from chat_service.context_analyzer import ContextAnalyzer
+from chat_service.chat_orchestrator import ChatOrchestrator, OrchestratorResult
+from analytics_service.intent_classifier import QueryIntent
 from db.user_document_repository import UserDocumentRepository
 from db.document_repository import DocumentRepository
 
@@ -29,7 +37,12 @@ CHAT_ENABLE_METADATA_TRACKING = os.getenv("CHAT_ENABLE_METADATA_TRACKING", "true
 CHAT_MAX_ENTITIES_PER_TYPE = int(os.getenv("CHAT_MAX_ENTITIES_PER_TYPE", "10"))
 CHAT_MAX_TOPICS = int(os.getenv("CHAT_MAX_TOPICS", "5"))
 
+# Analytics/Orchestrator configuration
+CHAT_ENABLE_INTENT_ROUTING = os.getenv("CHAT_ENABLE_INTENT_ROUTING", "true").lower() == "true"
+ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
+
 logger.info(f"Chat Context Configuration: ENABLE_CONTEXT_ANALYSIS={CHAT_ENABLE_CONTEXT_ANALYSIS}, ENABLE_METADATA_TRACKING={CHAT_ENABLE_METADATA_TRACKING}")
+logger.info(f"Chat Intent Routing: ENABLE_INTENT_ROUTING={CHAT_ENABLE_INTENT_ROUTING}, ANALYTICS_ENABLED={ANALYTICS_ENABLED}")
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -299,42 +312,139 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # Use enhanced message with resolved pronouns and pass session context
                         chunk_count = 0
                         logger.info(f"[Streaming] Starting to stream response for message: '{enhanced_message[:100]}...' (is_retry={is_retry})")
-                        try:
-                            async for chunk in stream_agent_response(
-                                enhanced_message,
-                                history,
-                                progress_callback=progress_callback,
-                                session_context=session_context,
-                                is_retry=is_retry,
-                                accessible_doc_ids=accessible_doc_ids
-                            ):
-                                chunk_count += 1
-                                full_response += chunk
-                                if chunk_count == 1:
-                                    logger.info(f"[Streaming] Received first chunk (length: {len(chunk)})")
-                                await websocket.send_json({
-                                    "type": "token",
-                                    "content": chunk,
-                                })
 
-                            logger.info(f"[Streaming] Received {chunk_count} chunks, total response length: {len(full_response)} chars")
+                        # Convert accessible_doc_ids set to list for orchestrator
+                        accessible_doc_ids_list = list(accessible_doc_ids) if accessible_doc_ids else []
 
-                            # Check if we got any response
-                            if chunk_count == 0 or not full_response.strip():
-                                logger.warning("[Streaming] No chunks received from agent - this may indicate an issue")
-                                full_response = "I apologize, but I encountered an issue generating a response. Please try again."
-                                streaming_error = Exception("No response chunks received from agent")
+                        # ====== INTENT-BASED ROUTING ======
+                        use_analytics_path = False
+                        use_rag_path = True  # Default to RAG
+                        analytics_result = None
+                        classification = None
 
-                        except WebSocketDisconnect as stream_error:
-                            # Client disconnected - expected behavior (user navigated away, network issue, etc.)
-                            streaming_error = stream_error
-                            logger.info(f"[Streaming] Client disconnected after {chunk_count} chunks - this is normal if user navigated away")
-                            # Don't raise - just stop streaming gracefully
-                        except Exception as stream_error:
-                            streaming_error = stream_error
-                            error_msg = str(stream_error) if str(stream_error) else f"{type(stream_error).__name__}"
-                            logger.error(f"Error during streaming: {error_msg}", exc_info=True)
-                            # Don't raise here - we want to send error message to client
+                        if CHAT_ENABLE_INTENT_ROUTING and ANALYTICS_ENABLED and accessible_doc_ids_list:
+                            try:
+                                # Initialize orchestrator
+                                orchestrator = ChatOrchestrator(db)
+
+                                # Classify the query intent
+                                await progress_callback("Analyzing query intent...", 5)
+                                classification = orchestrator.classify_query(enhanced_message, history)
+
+                                logger.info(f"[Intent Routing] Query: '{enhanced_message[:50]}...' -> Intent: {classification.intent.value}, Confidence: {classification.confidence:.2f}")
+
+                                # Determine routing based on classification
+                                use_analytics_path = orchestrator.should_use_analytics(classification)
+                                use_rag_path = orchestrator.should_use_rag(classification)
+
+                                logger.info(f"[Intent Routing] Routing decision: analytics={use_analytics_path}, rag={use_rag_path}")
+
+                                # Execute analytics query if needed
+                                if use_analytics_path:
+                                    await progress_callback("Querying structured data...", 15)
+                                    analytics_result = orchestrator.execute_analytics_query(
+                                        query=enhanced_message,
+                                        classification=classification,
+                                        accessible_doc_ids=accessible_doc_ids_list
+                                    )
+                                    logger.info(f"[Intent Routing] Analytics result: {analytics_result.get('summary', {})}")
+
+                                    # For pure analytics queries, stream the formatted response directly
+                                    if not use_rag_path and analytics_result.get('data'):
+                                        await progress_callback("Formatting results...", 80)
+                                        formatted_response = orchestrator.format_analytics_response(
+                                            query=enhanced_message,
+                                            analytics_result=analytics_result,
+                                            classification=classification
+                                        )
+                                        # Stream the formatted response
+                                        for chunk in [formatted_response[i:i+50] for i in range(0, len(formatted_response), 50)]:
+                                            chunk_count += 1
+                                            full_response += chunk
+                                            await websocket.send_json({
+                                                "type": "token",
+                                                "content": chunk,
+                                            })
+                                        logger.info(f"[Intent Routing] Streamed analytics response directly ({len(full_response)} chars)")
+                                    elif not use_rag_path and not analytics_result.get('data'):
+                                        # Analytics returned no data - fall back to RAG to search documents
+                                        logger.info(f"[Intent Routing] Analytics returned no data, falling back to RAG for document search")
+                                        use_rag_path = True
+
+                            except Exception as e:
+                                logger.error(f"[Intent Routing] Error during intent classification/analytics: {e}", exc_info=True)
+                                # Fall back to RAG on error
+                                use_rag_path = True
+                                use_analytics_path = False
+
+                        # ====== RAG PATH (if needed) ======
+                        if use_rag_path:
+                            # Prepare context injection for hybrid queries
+                            hybrid_context = None
+                            if use_analytics_path and analytics_result and classification:
+                                try:
+                                    orchestrator = ChatOrchestrator(db)
+                                    hybrid_context = orchestrator._summarize_analytics_for_context(analytics_result)
+                                    logger.info(f"[Intent Routing] Injecting analytics context for hybrid query")
+                                except Exception as e:
+                                    logger.warning(f"[Intent Routing] Failed to prepare hybrid context: {e}")
+
+                            try:
+                                async for chunk in stream_agent_response(
+                                    enhanced_message,
+                                    history,
+                                    progress_callback=progress_callback,
+                                    session_context=session_context,
+                                    is_retry=is_retry,
+                                    accessible_doc_ids=accessible_doc_ids,
+                                    analytics_context=hybrid_context  # Pass analytics context for hybrid queries
+                                ):
+                                    chunk_count += 1
+                                    full_response += chunk
+                                    if chunk_count == 1:
+                                        logger.info(f"[Streaming] Received first chunk (length: {len(chunk)})")
+                                    await websocket.send_json({
+                                        "type": "token",
+                                        "content": chunk,
+                                    })
+
+                                logger.info(f"[Streaming] Received {chunk_count} chunks, total response length: {len(full_response)} chars")
+
+                                # Check if we got any response
+                                if chunk_count == 0 or not full_response.strip():
+                                    logger.warning("[Streaming] No chunks received from agent - sending friendly message")
+                                    # Send a user-friendly message as a normal response (not error)
+                                    friendly_message = "I couldn't find relevant information to answer your question. This could be because:\n\n• The documents in the selected workspace don't contain information related to your query\n• The question might need to be rephrased for better results\n• The data you're looking for hasn't been uploaded yet\n\nPlease try rephrasing your question or check if the relevant documents are available in your workspace."
+                                    full_response = friendly_message
+                                    # Stream the friendly message to the client
+                                    for chunk in [friendly_message[i:i+50] for i in range(0, len(friendly_message), 50)]:
+                                        await websocket.send_json({
+                                            "type": "token",
+                                            "content": chunk,
+                                        })
+                                    # Don't set streaming_error - this is a valid response
+
+                            except WebSocketDisconnect as stream_error:
+                                # Client disconnected - expected behavior (user navigated away, network issue, etc.)
+                                streaming_error = stream_error
+                                logger.info(f"[Streaming] Client disconnected after {chunk_count} chunks - this is normal if user navigated away")
+                                # Don't raise - just stop streaming gracefully
+                            except Exception as stream_error:
+                                streaming_error = stream_error
+                                error_msg = str(stream_error) if str(stream_error) else f"{type(stream_error).__name__}"
+                                logger.error(f"Error during streaming: {error_msg}", exc_info=True)
+                                # Send a user-friendly error message as a normal response
+                                friendly_error = f"I encountered an issue while processing your request. Please try again, or rephrase your question.\n\nIf the problem persists, the system might be temporarily unavailable."
+                                if not full_response:  # Only set if no partial response was sent
+                                    full_response = friendly_error
+                                    try:
+                                        for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
+                                            await websocket.send_json({
+                                                "type": "token",
+                                                "content": chunk,
+                                            })
+                                    except Exception:
+                                        pass  # WebSocket might be closed
 
                         # Save assistant response to database ONLY if no error occurred
                         # Don't save error messages to chat history - let user retry
@@ -421,19 +531,30 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     except Exception as e:
                         error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
                         logger.error(f"Error in message processing: {error_msg}", exc_info=True)
+                        # Send a user-friendly response instead of raw error
                         try:
-                            await websocket.send_json({
-                                "type": "error",
-                                "message": error_msg,
-                            })
+                            friendly_error = "I'm sorry, but I encountered an unexpected issue while processing your question. Please try again.\n\nIf you continue to experience problems, try:\n• Refreshing the page\n• Rephrasing your question\n• Selecting a different workspace"
+                            for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
+                                await websocket.send_json({
+                                    "type": "token",
+                                    "content": chunk,
+                                })
+                            await websocket.send_json({"type": "end"})
                         except Exception as ws_error:
                             logger.error(f"WebSocket error: {ws_error}")
 
                 except json.JSONDecodeError:
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": "Invalid JSON format",
-                    })
+                    # Send a user-friendly response for invalid input
+                    try:
+                        friendly_error = "I couldn't understand your message format. Please try sending your question again."
+                        for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
+                            await websocket.send_json({
+                                "type": "token",
+                                "content": chunk,
+                            })
+                        await websocket.send_json({"type": "end"})
+                    except Exception:
+                        pass
 
         except WebSocketDisconnect:
             logger.info(f"WebSocket disconnected for session: {session_id}")

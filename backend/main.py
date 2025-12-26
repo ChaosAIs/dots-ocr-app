@@ -86,6 +86,15 @@ from chat_service.chat_session_api import router as chat_session_router
 from services.workspace_api import router as workspace_router
 from services.sharing_api import router as sharing_router
 
+# Import analytics API (deferred logging since logger not yet defined)
+try:
+    from analytics_service.analytics_api import router as analytics_router
+    ANALYTICS_AVAILABLE = True
+    _analytics_import_error = None
+except ImportError as e:
+    ANALYTICS_AVAILABLE = False
+    _analytics_import_error = str(e)
+
 # Import task queue system (hierarchical)
 from queue_service import (
     HierarchicalTaskQueueManager,
@@ -110,6 +119,10 @@ from services import (
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Log deferred analytics import error if any
+if _analytics_import_error:
+    logger.warning(f"Analytics service not available: {_analytics_import_error}")
 
 # Suppress noisy asyncio "Event loop is closed" errors during cleanup
 _original_exception_handler = None
@@ -409,7 +422,8 @@ async def lifespan(app: FastAPI):
             output_dir=OUTPUT_DIR,
             parser=parser,
             task_queue_manager=task_queue_manager,
-            document_status_broadcast=document_status_manager.broadcast_from_thread
+            document_status_broadcast=document_status_manager.broadcast_from_thread,
+            doc_converter_manager=doc_converter_manager
         )
 
         queue_worker_pool = HierarchicalWorkerPool(
@@ -495,6 +509,11 @@ app.include_router(chat_session_router)
 app.include_router(chat_router)
 app.include_router(workspace_router)
 app.include_router(sharing_router)
+
+# Include analytics router if available
+if ANALYTICS_AVAILABLE:
+    app.include_router(analytics_router)
+    logger.info("Analytics API enabled")
 
 
 # ===== Helper Functions =====
@@ -743,15 +762,36 @@ async def upload_file(
                 doc.owner_id = owner_id
                 doc.visibility = 'private'
 
-            try:
-                import fitz
-                pdf_doc = fitz.open(absolute_path)
-                total_pages = len(pdf_doc)
-                pdf_doc.close()
-            except Exception:
+            # Determine total_pages based on file type
+            # For non-PDF files (Excel, Word, CSV, etc.), always use 1 page since
+            # doc_service converter produces a single output file
+            file_ext = os.path.splitext(file.filename)[1].lower()
+            doc_service_extensions = {'.docx', '.doc', '.xlsx', '.xlsm', '.xlsb', '.xls', '.txt', '.csv', '.tsv', '.log', '.text'}
+
+            if file_ext in doc_service_extensions:
+                # Non-PDF files: always 1 page (single output file from doc_service)
                 total_pages = 1
+                logger.info(f"📄 Non-PDF file {file.filename}: setting total_pages=1 for doc_service processing")
+            else:
+                # PDF files: get actual page count from fitz
+                try:
+                    import fitz
+                    pdf_doc = fitz.open(absolute_path)
+                    total_pages = len(pdf_doc)
+                    pdf_doc.close()
+                except Exception:
+                    total_pages = 1
 
             doc.total_pages = total_pages
+
+            # Set skip_graphrag flag for file types that don't benefit from entity extraction
+            from rag_service.graphrag_skip_config import should_skip_graphrag_for_file
+            should_skip, skip_reason = should_skip_graphrag_for_file(file.filename)
+            if should_skip:
+                doc.skip_graphrag = True
+                doc.skip_graphrag_reason = skip_reason
+                logger.info(f"📊 Document {file.filename} will skip GraphRAG indexing: {skip_reason}")
+
             db.commit()
 
             if owner_id:
@@ -1312,6 +1352,19 @@ async def delete_document(
                 logger.info(f"Deleted GraphRAG data for source: {source_name}")
             except Exception as e:
                 errors.append(f"Failed to delete GraphRAG data: {str(e)}")
+
+        # Delete extracted data (documents_data) - explicitly delete before document
+        # Note: This would also cascade delete via FK, but explicit is clearer
+        try:
+            from db.models import DocumentData
+            deleted_count = db.query(DocumentData).filter(
+                DocumentData.document_id == doc_uuid
+            ).delete()
+            if deleted_count > 0:
+                db.commit()
+                logger.info(f"Deleted {deleted_count} extracted data record(s) for document: {document_id}")
+        except Exception as e:
+            errors.append(f"Failed to delete extracted data: {str(e)}")
 
         # Delete document from database
         try:

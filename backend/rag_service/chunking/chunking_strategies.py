@@ -1074,8 +1074,69 @@ class TablePreservingStrategy(ChunkingStrategy):
 
         return sorted(tables, key=lambda x: x[0])
 
+    def _split_markdown_table(self, table_md: str, max_rows: int = 20) -> List[str]:
+        """Split markdown table by rows while preserving headers.
+
+        Uses token-aware splitting to ensure chunks don't exceed the chunk_size limit.
+        """
+        lines = table_md.strip().split('\n')
+        if len(lines) < 2:
+            return [table_md]
+
+        # First line is header, second is separator
+        header_line = lines[0]
+        separator_line = lines[1] if len(lines) > 1 and re.match(r'^\|[\s\-:|]+\|$', lines[1]) else None
+
+        if separator_line:
+            header = header_line + '\n' + separator_line
+            data_rows = lines[2:]
+        else:
+            header = header_line
+            data_rows = lines[1:]
+
+        if not data_rows:
+            return [table_md]
+
+        # Calculate header overhead
+        header_overhead = len(header) + 1  # +1 for newline
+
+        available_size = self.chunk_size - header_overhead
+
+        # If total content fits, return as-is
+        total_size = sum(len(row) + 1 for row in data_rows)  # +1 for newlines
+        if total_size <= available_size and len(data_rows) <= max_rows:
+            return [table_md]
+
+        chunks = []
+        current_rows = []
+        current_size = 0
+
+        for row in data_rows:
+            row_size = len(row) + 1  # +1 for newline
+
+            # Check if adding this row would exceed limits
+            if current_rows and (current_size + row_size > available_size or len(current_rows) >= max_rows):
+                # Save current batch
+                chunk = header + '\n' + '\n'.join(current_rows)
+                chunks.append(chunk)
+                current_rows = []
+                current_size = 0
+
+            current_rows.append(row)
+            current_size += row_size
+
+        # Add remaining rows
+        if current_rows:
+            chunk = header + '\n' + '\n'.join(current_rows)
+            chunks.append(chunk)
+
+        return chunks if chunks else [table_md]
+
     def _split_html_table(self, table_html: str, max_rows: int = 20) -> List[str]:
-        """Split HTML table by rows while preserving headers."""
+        """Split HTML table by rows while preserving headers.
+
+        Uses token-aware splitting to ensure chunks don't exceed the chunk_size limit.
+        """
         thead_match = re.search(r"<thead>.*?</thead>", table_html, re.DOTALL | re.IGNORECASE)
         tbody_match = re.search(r"<tbody>(.*?)</tbody>", table_html, re.DOTALL | re.IGNORECASE)
 
@@ -1087,16 +1148,42 @@ class TablePreservingStrategy(ChunkingStrategy):
 
         rows = re.findall(r"<tr>.*?</tr>", tbody_content, re.DOTALL | re.IGNORECASE)
 
-        if len(rows) <= max_rows:
+        if not rows:
+            return [table_html]
+
+        # Calculate header overhead
+        header_overhead = len(f"<table>{thead}<tbody></tbody></table>")
+        available_size = self.chunk_size - header_overhead
+
+        # If total content fits, return as-is
+        total_size = sum(len(row) for row in rows)
+        if total_size <= available_size and len(rows) <= max_rows:
             return [table_html]
 
         chunks = []
-        for i in range(0, len(rows), max_rows):
-            batch_rows = rows[i:i + max_rows]
-            chunk = f"<table>{thead}<tbody>{''.join(batch_rows)}</tbody></table>"
+        current_rows = []
+        current_size = 0
+
+        for row in rows:
+            row_size = len(row)
+
+            # Check if adding this row would exceed limits
+            if current_rows and (current_size + row_size > available_size or len(current_rows) >= max_rows):
+                # Save current batch
+                chunk = f"<table>{thead}<tbody>{''.join(current_rows)}</tbody></table>"
+                chunks.append(chunk)
+                current_rows = []
+                current_size = 0
+
+            current_rows.append(row)
+            current_size += row_size
+
+        # Add remaining rows
+        if current_rows:
+            chunk = f"<table>{thead}<tbody>{''.join(current_rows)}</tbody></table>"
             chunks.append(chunk)
 
-        return chunks
+        return chunks if chunks else [table_html]
 
     def chunk(
         self,
@@ -1128,81 +1215,39 @@ class TablePreservingStrategy(ChunkingStrategy):
                         final_chunks.append(tc)
                         chunk_index += 1
 
-            # Handle table
-            if table_type == "html" and len(table_content) > self.chunk_size:
-                # Split large HTML table with parent/child design
-                table_parts = self._split_html_table(table_content)
+            # Handle table - split if too large (for both HTML and markdown)
+            # NOTE: For tables, we skip parent chunk creation since:
+            # 1. Parent would just duplicate the entire table content
+            # 2. Each split part already has headers preserved
+            # 3. Avoids embedding timeout issues with large tables
+            if len(table_content) > self.chunk_size:
+                # Split large table into smaller parts
+                if table_type == "html":
+                    table_parts = self._split_html_table(table_content)
+                else:  # markdown
+                    table_parts = self._split_markdown_table(table_content)
 
-                if len(table_parts) > 1:
-                    # Generate parent chunk ID and child IDs upfront
-                    parent_chunk_id = self._generate_chunk_id()
-                    child_ids = [self._generate_chunk_id() for _ in table_parts]
-
-                    # Create parent chunk with child IDs already populated
-                    parent_metadata = self._create_base_metadata(
-                        source_name=source_name,
-                        file_path=file_path,
-                        chunk_index=chunk_index,
-                        total_chunks=0,
-                        content=table_content,
-                        existing_metadata=existing_metadata,
-                    )
-                    parent_metadata["chunk_type"] = "parent"
-                    parent_metadata["is_parent_chunk"] = True
-                    parent_metadata["chunk_id"] = parent_chunk_id
-                    parent_metadata["child_chunk_ids"] = child_ids  # Set child IDs before creating Document
-                    parent_metadata["contains_table"] = True
-                    parent_metadata["table_type"] = table_type
-
-                    # Generate summary for large table parent chunks
-                    summary_info = self._generate_parent_summary(table_content, parent_metadata)
-                    if summary_info:
-                        parent_metadata.update(summary_info)
-
-                    parent_doc = Document(page_content=table_content, metadata=parent_metadata)
-                    final_chunks.append(parent_doc)
-                    chunk_index += 1
-
-                    # Create child chunks with pre-generated IDs
-                    for j, part in enumerate(table_parts):
-                        child_chunk_id = child_ids[j]
-
-                        metadata = self._create_base_metadata(
-                            source_name=source_name,
-                            file_path=file_path,
-                            chunk_index=chunk_index,
-                            total_chunks=0,
-                            content=part,
-                            existing_metadata=existing_metadata,
-                        )
-                        metadata["chunk_type"] = "child"
-                        metadata["chunk_id"] = child_chunk_id  # Use pre-generated ID
-                        metadata["parent_chunk_id"] = parent_chunk_id
-                        metadata["is_parent_chunk"] = False
-                        metadata["table_part"] = j + 1
-                        metadata["table_total_parts"] = len(table_parts)
-                        metadata["sub_chunk_index"] = j
-                        metadata["contains_table"] = True
-
-                        final_chunks.append(Document(page_content=part, metadata=metadata))
-                        chunk_index += 1
-                else:
-                    # Only one part, treat as atomic
+                # Create table part chunks directly (no parent chunk for tables)
+                total_parts = len(table_parts)
+                for j, part in enumerate(table_parts):
                     metadata = self._create_base_metadata(
                         source_name=source_name,
                         file_path=file_path,
                         chunk_index=chunk_index,
                         total_chunks=0,
-                        content=table_parts[0],
+                        content=part,
                         existing_metadata=existing_metadata,
                     )
-                    metadata["chunk_type"] = "table"
-                    metadata["table_type"] = table_type
-                    metadata["contains_table"] = True
+                    metadata["chunk_type"] = "table_part"
                     metadata["is_parent_chunk"] = False
+                    metadata["table_part"] = j + 1
+                    metadata["table_total_parts"] = total_parts
+                    metadata["contains_table"] = True
+                    metadata["table_type"] = table_type
+                    # Mark as atomic since each part is self-contained with headers
                     metadata["is_atomic"] = True
 
-                    final_chunks.append(Document(page_content=table_parts[0], metadata=metadata))
+                    final_chunks.append(Document(page_content=part, metadata=metadata))
                     chunk_index += 1
             else:
                 # Keep table as single chunk (atomic)
