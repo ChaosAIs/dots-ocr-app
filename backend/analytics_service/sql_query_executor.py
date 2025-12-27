@@ -1002,7 +1002,8 @@ class SQLQueryExecutor:
         self,
         accessible_doc_ids: List[UUID],
         query: str,
-        llm_client=None
+        llm_client=None,
+        max_correction_attempts: int = 3
     ) -> Dict[str, Any]:
         """
         Execute a natural language query using LLM-generated dynamic SQL.
@@ -1011,12 +1012,15 @@ class SQLQueryExecutor:
         1. Gets the data schema from stored field mappings
         2. Uses LLM to generate appropriate SQL based on user query and schema
         3. Executes the generated SQL directly against the database
-        4. Returns formatted results with hierarchical summaries
+        4. If SQL fails, uses LLM to analyze the error and regenerate corrected SQL
+        5. Retries up to max_correction_attempts times
+        6. Returns formatted results with hierarchical summaries
 
         Args:
             accessible_doc_ids: List of document IDs user can access
             query: User's natural language query
-            llm_client: LLM client for SQL generation
+            llm_client: LLM client for SQL generation and error correction
+            max_correction_attempts: Maximum number of LLM correction attempts (default: 3)
 
         Returns:
             Query results with data, summaries, and generated SQL
@@ -1052,45 +1056,104 @@ class SQLQueryExecutor:
                 "metadata": {"query": query}
             }
 
-        try:
-            # Execute the generated SQL
-            result = self.db.execute(text(sql_result.sql_query))
-            rows = result.fetchall()
-            columns = result.keys()
+        # Execute SQL with retry loop for error correction
+        current_sql = sql_result.sql_query
+        attempt = 0
+        last_error = None
+        correction_history = []  # Track all attempts for debugging
 
-            # Convert to list of dicts
-            data = [dict(zip(columns, row)) for row in rows]
+        while attempt <= max_correction_attempts:
+            try:
+                # Execute the SQL
+                logger.info(f"[Dynamic SQL] Executing SQL (attempt {attempt + 1}/{max_correction_attempts + 1})...")
+                result = self.db.execute(text(current_sql))
+                rows = result.fetchall()
+                columns = result.keys()
 
-            logger.info(f"[Dynamic SQL] Query returned {len(data)} rows")
+                # Convert to list of dicts
+                data = [dict(zip(columns, row)) for row in rows]
 
-            # Generate summary report
-            summary_report = generator.generate_summary_report(query, data, field_mappings)
+                logger.info(f"[Dynamic SQL] Query returned {len(data)} rows")
 
-            return {
-                "data": data,
-                "summary": summary_report,
-                "metadata": {
-                    "query": query,
-                    "generated_sql": sql_result.sql_query,
-                    "explanation": sql_result.explanation,
-                    "grouping_fields": sql_result.grouping_fields,
-                    "aggregation_fields": sql_result.aggregation_fields,
-                    "time_granularity": sql_result.time_granularity,
-                    "row_count": len(data)
+                # Generate summary report
+                summary_report = generator.generate_summary_report(query, data, field_mappings)
+
+                return {
+                    "data": data,
+                    "summary": summary_report,
+                    "metadata": {
+                        "query": query,
+                        "generated_sql": current_sql,
+                        "explanation": sql_result.explanation,
+                        "grouping_fields": sql_result.grouping_fields,
+                        "aggregation_fields": sql_result.aggregation_fields,
+                        "time_granularity": sql_result.time_granularity,
+                        "row_count": len(data),
+                        "correction_attempts": attempt,
+                        "correction_history": correction_history if correction_history else None
+                    }
                 }
-            }
 
-        except Exception as e:
-            logger.error(f"[Dynamic SQL] Execution failed: {e}")
-            return {
-                "data": [],
-                "summary": {"error": str(e)},
-                "metadata": {
-                    "query": query,
-                    "generated_sql": sql_result.sql_query,
-                    "error": str(e)
-                }
+            except Exception as e:
+                error_message = str(e)
+                last_error = error_message
+                logger.error(f"[Dynamic SQL] Execution failed (attempt {attempt + 1}): {error_message}")
+
+                # Rollback the transaction to recover from error state
+                try:
+                    self.db.rollback()
+                    logger.info("[Dynamic SQL] Transaction rolled back after error")
+                except Exception as rollback_error:
+                    logger.warning(f"[Dynamic SQL] Rollback failed: {rollback_error}")
+
+                # Track this attempt
+                correction_history.append({
+                    "attempt": attempt + 1,
+                    "sql": current_sql[:500] + "..." if len(current_sql) > 500 else current_sql,
+                    "error": error_message
+                })
+
+                # Check if we have more correction attempts
+                if attempt < max_correction_attempts and llm_client:
+                    logger.info(f"[Dynamic SQL] Attempting LLM-driven SQL correction (attempt {attempt + 1}/{max_correction_attempts})...")
+
+                    # Use LLM to correct the SQL
+                    corrected_result = generator.correct_sql_error(
+                        user_query=query,
+                        failed_sql=current_sql,
+                        error_message=error_message,
+                        field_mappings=field_mappings,
+                        table_filter=doc_filter
+                    )
+
+                    if corrected_result and corrected_result.sql_query:
+                        current_sql = corrected_result.sql_query
+                        logger.info(f"[Dynamic SQL] LLM provided corrected SQL, retrying...")
+                        attempt += 1
+                        continue
+                    else:
+                        logger.warning("[Dynamic SQL] LLM could not provide corrected SQL")
+                        break
+                else:
+                    if not llm_client:
+                        logger.warning("[Dynamic SQL] No LLM client available for SQL correction")
+                    else:
+                        logger.warning(f"[Dynamic SQL] Max correction attempts ({max_correction_attempts}) reached")
+                    break
+
+        # All attempts failed
+        return {
+            "data": [],
+            "summary": {"error": last_error or "SQL execution failed after all correction attempts"},
+            "metadata": {
+                "query": query,
+                "generated_sql": sql_result.sql_query,
+                "final_sql": current_sql,
+                "error": last_error,
+                "correction_attempts": attempt,
+                "correction_history": correction_history
             }
+        }
 
     def _get_available_field_mappings(self, accessible_doc_ids: List[UUID]) -> Dict[str, Dict[str, Any]]:
         """Get field mappings from documents with extracted data."""

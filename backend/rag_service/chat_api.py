@@ -9,6 +9,7 @@ Enhanced with intent-based routing:
 - GENERAL → Direct response
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -390,14 +391,24 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                             analytics_result=analytics_result,
                                             classification=classification
                                         )
-                                        # Stream the formatted response
-                                        for chunk in [formatted_response[i:i+50] for i in range(0, len(formatted_response), 50)]:
-                                            chunk_count += 1
-                                            full_response += chunk
-                                            await websocket.send_json({
-                                                "type": "token",
-                                                "content": chunk,
-                                            })
+                                        # Stream the formatted response with realistic timing
+                                        # Use word-based chunking for more natural streaming
+                                        words = formatted_response.split(' ')
+                                        current_chunk = ""
+                                        for i, word in enumerate(words):
+                                            current_chunk += word + ' '
+                                            # Send chunk every 3-5 words or at sentence boundaries
+                                            is_sentence_end = word.endswith(('.', '!', '?', ':', '\n'))
+                                            if len(current_chunk) >= 20 or is_sentence_end or i == len(words) - 1:
+                                                chunk_count += 1
+                                                full_response += current_chunk
+                                                await websocket.send_json({
+                                                    "type": "token",
+                                                    "content": current_chunk,
+                                                })
+                                                current_chunk = ""
+                                                # Small delay for streaming effect (10-30ms)
+                                                await asyncio.sleep(0.015)
                                         logger.info(f"[Intent Routing] Streamed analytics response directly ({len(full_response)} chars)")
                                     elif not use_rag_path and not analytics_result.get('data'):
                                         # Analytics returned no data - fall back to RAG to search documents

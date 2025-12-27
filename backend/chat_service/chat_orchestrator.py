@@ -6,6 +6,8 @@ This is the central orchestrator that:
 2. Routes to the appropriate service (RAG, SQL Analytics, or both)
 3. Merges results for hybrid queries
 4. Formats final response for streaming
+
+Enhanced with LLM-based dynamic SQL generation for more accurate analytics queries.
 """
 
 import logging
@@ -25,6 +27,8 @@ logger = logging.getLogger(__name__)
 # Configuration
 ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
 ANALYTICS_MIN_CONFIDENCE = float(os.getenv("ANALYTICS_MIN_CONFIDENCE", "0.6"))
+# Enable LLM-based SQL generation (multi-round analysis)
+ANALYTICS_USE_LLM = os.getenv("ANALYTICS_USE_LLM", "true").lower() == "true"
 
 
 class ChatOrchestrator:
@@ -46,6 +50,41 @@ class ChatOrchestrator:
         self.db = db
         self.intent_classifier = IntentClassifier()
         self.sql_executor = SQLQueryExecutor(db)
+        self.llm_client = self._create_llm_client() if ANALYTICS_USE_LLM else None
+
+    def _create_llm_client(self):
+        """Create LLM client for dynamic SQL generation."""
+        try:
+            from rag_service.llm_service import get_llm_service
+            from langchain_core.messages import HumanMessage
+
+            llm_service = get_llm_service()
+            if not llm_service.is_available():
+                logger.warning("[Orchestrator] LLM service not available for SQL generation")
+                return None
+
+            # Get a chat model optimized for SQL generation
+            chat_model = llm_service.get_query_model(
+                temperature=0.1,  # Low temperature for consistent SQL
+                num_ctx=4096,
+                num_predict=2048
+            )
+
+            # Wrapper to provide simple generate() interface
+            class LLMClientWrapper:
+                def __init__(self, model):
+                    self.model = model
+
+                def generate(self, prompt: str) -> str:
+                    response = self.model.invoke([HumanMessage(content=prompt)])
+                    return response.content
+
+            logger.info("[Orchestrator] LLM client created for dynamic SQL generation")
+            return LLMClientWrapper(chat_model)
+
+        except Exception as e:
+            logger.warning(f"[Orchestrator] Failed to create LLM client: {e}")
+            return None
 
     def classify_query(
         self,
@@ -170,13 +209,15 @@ class ChatOrchestrator:
         logger.info(f"[Orchestrator] EXECUTING ANALYTICS QUERY (DYNAMIC SQL)")
         logger.info(f"[Orchestrator]   • Query: '{query[:80]}...'")
         logger.info(f"[Orchestrator]   • Accessible documents: {len(accessible_doc_ids)}")
+        logger.info(f"[Orchestrator]   • LLM-based SQL: {'enabled' if self.llm_client else 'disabled (heuristic mode)'}")
         logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         # First, try dynamic SQL generation (uses field mappings from extracted data)
+        # If LLM client is available, use multi-round LLM analysis for better accuracy
         result = self.sql_executor.execute_dynamic_sql_query(
             accessible_doc_ids=accessible_doc_ids,
             query=query,
-            llm_client=None  # Use heuristic mode for now
+            llm_client=self.llm_client  # Use LLM for multi-round analysis if available
         )
 
         # Check if we got valid results
@@ -258,8 +299,9 @@ class ChatOrchestrator:
         if not data and summary.get('total_records', 0) == 0 and summary.get('grand_total', 0) == 0:
             return self._format_no_data_response(classification)
 
-        # Check if this is dynamic SQL result (has hierarchical_data or summary_by_year)
-        if 'hierarchical_data' in summary or 'summary_by_year' in summary:
+        # Check if this is dynamic SQL result (has hierarchical_data, summary_by_year, or formatted_report)
+        # formatted_report is the LLM-generated response which should be prioritized
+        if 'hierarchical_data' in summary or 'summary_by_year' in summary or 'formatted_report' in summary:
             return self._format_dynamic_sql_response(data, summary, metadata)
 
         # Standard format handling
@@ -276,7 +318,19 @@ class ChatOrchestrator:
 
         This method dynamically formats all summary fields without hardcoding
         specific field names like 'year' or 'category'.
+
+        Priority:
+        1. If formatted_report exists (from LLM summary generation), use it directly
+        2. Otherwise, build response from hierarchical_data and summary_by_* fields
         """
+        # If LLM-generated formatted_report exists, use it directly
+        # This handles cases like MIN/MAX queries where hierarchical_data may be empty
+        # but the LLM has generated a proper formatted response
+        formatted_report = summary.get('formatted_report', '')
+        if formatted_report and formatted_report.strip():
+            logger.info(f"[Orchestrator] Using LLM-generated formatted_report ({len(formatted_report)} chars)")
+            return formatted_report
+
         response_parts = []
 
         # Title
