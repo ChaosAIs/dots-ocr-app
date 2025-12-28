@@ -701,21 +701,25 @@ When showing detailed items, use a TREE/HIERARCHICAL structure instead of a flat
 - List the child items (individual line items) indented under their parent
 - This avoids repeating the same information multiple times
 
-Example of GOOD tree layout:
-### 2025-06 - YU SEAFOOD (2025-06-18)
+IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier, NOT the month!
+- If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
+
+Example of GOOD tree layout (using actual receipt number):
+### Receipt #INV-2025-001 - YU SEAFOOD (2025-06-18)
+**Address:** 123 Main St
 | Item Name | Amount |
 |-----------|--------|
-| 即弱酥皮鲜奶撻 | $5.99 |
-| 子姜牛柳酥 | $5.99 |
+| Crispy Milk Tart | $5.99 |
+| Ginger Beef Puff | $5.99 |
 **Subtotal:** $xx.xx
 
-### 2025-11 - Mr. Congee Garden LTD (2025-11-08)
+### Receipt #INV-2025-002 - Mr. Congee Garden LTD (2025-11-08)
+**Address:** 456 Oak Ave
 | Item Name | Amount |
 |-----------|--------|
-| Shrimp CH Fried Rice | $18.75 |
+| Shrimp Fried Rice | $18.75 |
 **Subtotal:** $xx.xx
 
-Avoid flat tables with repeated values in the same columns.
 
 6. Always include subtotals for each group and a grand total at the end
 

@@ -137,12 +137,16 @@ When presenting detailed items, use a TREE/HIERARCHICAL structure instead of fla
 - List child items under their parent group
 - Include subtotals per group and a grand total at the end
 
-Example format:
-### Receipt 2025-06 - YU SEAFOOD (2025-06-18)
+IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier, NOT the month!
+- If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
+
+Example format (using actual receipt number):
+### Receipt #INV-2025-001 - YU SEAFOOD (2025-06-18)
+**Address:** 123 Main St
 | Item Name | Amount |
 |-----------|--------|
-| Item 1 | $5.99 |
-| Item 2 | $5.99 |
+| Crispy Milk Tart | $5.99 |
+| Ginger Beef Puff | $5.99 |
 **Subtotal:** $11.98
 
 This avoids repeating the same receipt number, restaurant, or date for each row.

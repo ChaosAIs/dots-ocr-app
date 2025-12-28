@@ -329,6 +329,7 @@ For example, if the date is in header_data:
 
 ### For report_type = "detail" (show individual items):
 When user wants to see INDIVIDUAL ITEMS with their details:
+IMPORTANT: Always include document identifiers like receipt_number, invoice_number, or document_number from header_data!
 ```sql
 WITH expanded_items AS (
     SELECT
@@ -339,15 +340,18 @@ WITH expanded_items AS (
     {{WHERE_CLAUSE}}
 )
 SELECT
+    COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'document_number', 'N/A') as receipt_number,
     TO_CHAR((header_data->>'transaction_date')::timestamp, 'YYYY-MM') as month,
     (header_data->>'transaction_date')::date as date,
     header_data->>'store_name' as store,
+    header_data->>'store_address' as address,
     item->>'description' as item_description,
     ROUND((item->>'amount')::numeric, 2) as amount
 FROM expanded_items
 WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{YEAR}}
 ORDER BY (header_data->>'transaction_date')::timestamp, item->>'description'
 ```
+NOTE: The receipt_number/invoice_number field is CRITICAL - it uniquely identifies each receipt/invoice document.
 
 ## SQL Templates by Aggregation Type (for summary reports):
 
@@ -1510,28 +1514,26 @@ When showing detailed items, use a TREE/HIERARCHICAL structure instead of a flat
 - List the child items (individual line items) indented under their parent
 - This avoids repeating the same information multiple times
 
-Example of GOOD tree layout:
-### 2025-06 - YU SEAFOOD (2025-06-18)
+IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier, NOT the month!
+- If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
+- The month (YYYY-MM) is just for organizing, NOT the receipt identifier
+
+Example of GOOD tree layout (using actual receipt number):
+### Receipt #INV-2025-001 - YU SEAFOOD (2025-06-18)
+**Address:** 123 Main St
 | Item Name | Amount |
 |-----------|--------|
-| 即弱酥皮鲜奶撻 | $5.99 |
-| 子姜牛柳酥 | $5.99 |
-| ... | ... |
+| Crispy Milk Tart | $5.99 |
+| Ginger Beef Puff | $5.99 |
 **Subtotal:** $xx.xx
 
-### 2025-11 - Mr. Congee Garden LTD (2025-11-08)
+### Receipt #INV-2025-002 - Mr. Congee Garden LTD (2025-11-08)
+**Address:** 456 Oak Ave
 | Item Name | Amount |
 |-----------|--------|
-| Shrimp CH Fried Rice | $18.75 |
-| ... | ... |
+| Shrimp Fried Rice | $18.75 |
 **Subtotal:** $xx.xx
 
-Example of BAD flat table (avoid this):
-| Receipt | Restaurant | Date | Item | Amount |
-|---------|------------|------|------|--------|
-| 2025-06 | YU SEAFOOD | 2025-06-18 | Item1 | $5.99 |
-| 2025-06 | YU SEAFOOD | 2025-06-18 | Item2 | $5.99 |  <-- Repeated!
-| 2025-06 | YU SEAFOOD | 2025-06-18 | Item3 | $5.99 |  <-- Repeated!
 
 6. Always include subtotals for each group and a grand total at the end
 
