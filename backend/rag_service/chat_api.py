@@ -332,6 +332,11 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                             try:
                                                 # Convert document_ids to UUID set
                                                 selected_doc_ids = set(UUID(doc_id) for doc_id in document_ids)
+                                                # Check for stale/invalid document IDs that frontend might have cached
+                                                stale_ids = selected_doc_ids - accessible_doc_ids
+                                                if stale_ids:
+                                                    logger.warning(f"[Document Filter] Frontend sent {len(stale_ids)} stale/inaccessible document IDs: {[str(sid) for sid in stale_ids]}")
+                                                    logger.warning(f"[Document Filter] These documents may have been deleted and re-uploaded. Frontend should refresh document list.")
                                                 # Intersect with accessible documents
                                                 original_count = len(accessible_doc_ids)
                                                 accessible_doc_ids = accessible_doc_ids.intersection(selected_doc_ids)

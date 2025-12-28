@@ -130,6 +130,14 @@ NATURAL_LANGUAGE_SUMMARY_PROMPT = """Generate a clear, natural language summary 
 5. Be concise but complete
 6. Use markdown formatting for readability
 
+## CRITICAL - Price Handling Rules:
+- ONLY show prices that are EXPLICITLY present in the data
+- If an item has NULL, empty, or no price value, show it as "-" or "N/A" or omit the price column
+- NEVER duplicate or copy a price from one item to another
+- NEVER assume items without prices have the same price as nearby items
+- Items may be grouped where multiple items share ONE price - this is normal for set meals, combos, etc.
+- If price_type is "included" or amount is null, the item is part of a group and does NOT have its own price
+
 ## CRITICAL - Hierarchical/Tree Layout for Grouped Data:
 When presenting detailed items, use a TREE/HIERARCHICAL structure instead of flat tables with duplicate values:
 - Group items by their parent category (e.g., receipt, date, store/restaurant)
@@ -146,8 +154,9 @@ Example format (using actual receipt number):
 | Item Name | Amount |
 |-----------|--------|
 | Crispy Milk Tart | $5.99 |
-| Ginger Beef Puff | $5.99 |
-**Subtotal:** $11.98
+| Ginger Beef Puff | - |
+| Set Meal (includes above) | $25.00 |
+**Subtotal:** $30.99
 
 This avoids repeating the same receipt number, restaurant, or date for each row.
 

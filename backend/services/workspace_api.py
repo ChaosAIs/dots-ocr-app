@@ -404,6 +404,16 @@ def delete_workspace(
             detail="Cannot delete system workspace"
         )
 
+    # Clean up workspace from user preferences before deleting
+    try:
+        from db.user_repository import UserRepository
+        user_repo = UserRepository(db)
+        cleaned_count = user_repo.remove_workspace_from_all_preferences(workspace_id)
+        if cleaned_count > 0:
+            logger.info(f"Cleaned workspace {workspace_id} from {cleaned_count} user(s)' preferences")
+    except Exception as e:
+        logger.warning(f"Failed to clean workspace from preferences: {e}")
+
     success = service.delete_workspace(
         workspace_id=workspace_id,
         delete_documents=delete_documents,

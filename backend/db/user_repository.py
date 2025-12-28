@@ -444,6 +444,104 @@ class UserRepository:
         app_preferences['lastUpdated'] = datetime.utcnow().isoformat()
         return self.update_preference_key(user_id, 'app', app_preferences)
 
+    def remove_document_from_all_preferences(self, document_id: UUID) -> int:
+        """
+        Remove a document ID from all users' chat preferences (selectedDocumentIds).
+        Called when a document is deleted to prevent stale document IDs.
+
+        Args:
+            document_id: The document UUID to remove
+
+        Returns:
+            Number of users whose preferences were updated
+        """
+        document_id_str = str(document_id)
+        updated_count = 0
+
+        try:
+            # Find all users who have this document in their selectedDocumentIds
+            users = self.db.query(User).filter(
+                User.preferences.isnot(None)
+            ).all()
+
+            for user in users:
+                preferences = user.preferences or {}
+                chat_prefs = preferences.get('chat', {})
+                selected_doc_ids = chat_prefs.get('selectedDocumentIds', [])
+
+                if document_id_str in selected_doc_ids:
+                    # Remove the document ID from the list
+                    selected_doc_ids = [did for did in selected_doc_ids if did != document_id_str]
+                    chat_prefs['selectedDocumentIds'] = selected_doc_ids
+                    chat_prefs['lastUpdated'] = datetime.utcnow().isoformat()
+                    preferences['chat'] = chat_prefs
+
+                    user.preferences = dict(preferences)
+                    user.updated_at = datetime.utcnow()
+                    flag_modified(user, "preferences")
+                    updated_count += 1
+                    logger.info(f"Removed document {document_id} from user {user.username}'s preferences")
+
+            if updated_count > 0:
+                self.db.commit()
+                logger.info(f"Cleaned up document {document_id} from {updated_count} user(s)' preferences")
+
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Error removing document from preferences: {e}")
+            self.db.rollback()
+            return 0
+
+    def remove_workspace_from_all_preferences(self, workspace_id: UUID) -> int:
+        """
+        Remove a workspace ID from all users' chat preferences (selectedWorkspaceIds).
+        Called when a workspace is deleted to prevent stale workspace IDs.
+
+        Args:
+            workspace_id: The workspace UUID to remove
+
+        Returns:
+            Number of users whose preferences were updated
+        """
+        workspace_id_str = str(workspace_id)
+        updated_count = 0
+
+        try:
+            # Find all users who have this workspace in their selectedWorkspaceIds
+            users = self.db.query(User).filter(
+                User.preferences.isnot(None)
+            ).all()
+
+            for user in users:
+                preferences = user.preferences or {}
+                chat_prefs = preferences.get('chat', {})
+                selected_ws_ids = chat_prefs.get('selectedWorkspaceIds', [])
+
+                if workspace_id_str in selected_ws_ids:
+                    # Remove the workspace ID from the list
+                    selected_ws_ids = [wid for wid in selected_ws_ids if wid != workspace_id_str]
+                    chat_prefs['selectedWorkspaceIds'] = selected_ws_ids
+                    chat_prefs['lastUpdated'] = datetime.utcnow().isoformat()
+                    preferences['chat'] = chat_prefs
+
+                    user.preferences = dict(preferences)
+                    user.updated_at = datetime.utcnow()
+                    flag_modified(user, "preferences")
+                    updated_count += 1
+                    logger.info(f"Removed workspace {workspace_id} from user {user.username}'s preferences")
+
+            if updated_count > 0:
+                self.db.commit()
+                logger.info(f"Cleaned up workspace {workspace_id} from {updated_count} user(s)' preferences")
+
+            return updated_count
+
+        except Exception as e:
+            logger.error(f"Error removing workspace from preferences: {e}")
+            self.db.rollback()
+            return 0
+
     # ===== User Profile Methods =====
 
     def update_user_profile(

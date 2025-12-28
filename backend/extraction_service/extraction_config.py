@@ -224,9 +224,10 @@ Return a JSON object with the following structure:
     "line_items": [
         {
             "description": "string",
-            "quantity": number,
-            "unit_price": number,
-            "amount": number
+            "quantity": number or null,
+            "unit_price": number or null,
+            "amount": number or null,
+            "price_type": "individual | group_total | included | unknown"
         }
     ],
     "summary_data": {
@@ -236,14 +237,31 @@ Return a JSON object with the following structure:
     }
 }
 
-CRITICAL RULES:
-- Use null for any field where the value is NOT explicitly visible in the document.
-- Do NOT assume or guess values. Only extract what is actually shown.
-- CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed on the document.
-  * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
-  * Do NOT guess the currency based on location, vendor name, or context.
-- Ensure numbers are actual numbers, not strings.
-- Dates should be in YYYY-MM-DD format.""",
+CRITICAL RULES FOR PRICING:
+1. DO NOT ASSUME OR DUPLICATE PRICES:
+   - If an item does NOT have a price/amount directly associated with it, set amount to NULL.
+   - NEVER copy or duplicate a price from one line item to another.
+   - NEVER assume items without prices cost the same as nearby items.
+
+2. GROUPED/BUNDLED PRICING:
+   - Multiple items may share ONE price (e.g., service bundles, package deals).
+   - For items WITHOUT their own price: set amount: null, price_type: "included"
+   - For the item WITH the bundle/group total: set the amount and price_type: "group_total"
+
+3. PRICE TYPE VALUES:
+   - "individual": Item has its own specific price shown
+   - "group_total": This price covers multiple items (a bundle or package)
+   - "included": Item is part of a bundle, price shown on another line
+   - "unknown": Cannot determine pricing structure
+
+4. GENERAL RULES:
+   - Use null for any field where the value is NOT explicitly visible in the document.
+   - Do NOT assume or guess values. Only extract what is actually shown.
+   - CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.
+     * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
+     * Do NOT guess the currency based on location, vendor name, or context.
+   - Ensure numbers are actual numbers, not strings.
+   - Dates should be in YYYY-MM-DD format.""",
 
     "receipt": """Extract structured data from this receipt.
 
@@ -261,9 +279,11 @@ Return a JSON object with:
     "line_items": [
         {
             "description": "string",
-            "quantity": number,
-            "unit_price": number,
-            "amount": number
+            "quantity": number or null,
+            "unit_price": number or null,
+            "amount": number or null,
+            "is_complimentary": boolean,
+            "price_type": "individual | group_total | included | unknown"
         }
     ],
     "summary_data": {
@@ -273,14 +293,39 @@ Return a JSON object with:
     }
 }
 
-CRITICAL RULES:
-- Use null for any field where the value is NOT explicitly visible in the receipt.
-- Do NOT assume or guess values. Only extract what is actually shown.
-- CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed on the receipt.
-  * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
-  * Do NOT guess the currency based on location, store name, or context.
-  * If the receipt shows only "$" without a currency code like "CAD" or "USD", you MUST set currency to null.
-  * Example: A receipt from Canada showing "$85.30" should have currency: null (not "CAD" or "USD").""",
+CRITICAL RULES FOR PRICING:
+1. DO NOT ASSUME OR DUPLICATE PRICES:
+   - If an item does NOT have a price directly next to it on the SAME LINE, set amount to NULL.
+   - NEVER copy or duplicate a price from an adjacent item to another item.
+   - NEVER assume items without prices cost the same as nearby items.
+
+2. GROUPED PRICING (common in restaurant receipts):
+   - Multiple items may share ONE price (e.g., set meals, combo dishes).
+   - Only the LAST item in a group typically shows the total price for all items in that group.
+   - For items in a group WITHOUT their own price: set amount: null, price_type: "included"
+   - For the item WITH the group total: set the amount and price_type: "group_total"
+   - Example: If "Fish", "Rice", "Soup" appear together and only "Soup" shows "$138", then:
+     * Fish: amount: null, price_type: "included"
+     * Rice: amount: null, price_type: "included"
+     * Soup: amount: 138, price_type: "group_total"
+
+3. COMPLIMENTARY/FREE ITEMS:
+   - Items marked with "(送)", "free", "complimentary", "gift", or showing $0.00:
+     set is_complimentary: true, amount: 0, price_type: "individual"
+   - Chinese receipts: "(送)" means complimentary/gifted
+
+4. PRICE TYPE VALUES:
+   - "individual": Item has its own specific price
+   - "group_total": This price covers multiple items above it
+   - "included": Item is part of a group, price shown on another item
+   - "unknown": Cannot determine pricing structure
+
+5. GENERAL RULES:
+   - Use null for any field where the value is NOT explicitly visible.
+   - Do NOT assume or guess values. Only extract what is actually shown.
+   - CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.
+     * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
+     * Do NOT guess the currency based on location, store name, or context.""",
 
     "bank_statement": """Extract structured data from this bank statement.
 

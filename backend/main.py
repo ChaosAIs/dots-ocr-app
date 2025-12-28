@@ -1366,6 +1366,16 @@ async def delete_document(
         except Exception as e:
             errors.append(f"Failed to delete extracted data: {str(e)}")
 
+        # Clean up document from user preferences before deleting
+        try:
+            from db.user_repository import UserRepository
+            user_repo = UserRepository(db)
+            cleaned_count = user_repo.remove_document_from_all_preferences(doc_uuid)
+            if cleaned_count > 0:
+                logger.info(f"Cleaned document {document_id} from {cleaned_count} user(s)' preferences")
+        except Exception as e:
+            errors.append(f"Failed to clean preferences: {str(e)}")
+
         # Delete document from database
         try:
             repo.hard_delete(doc)
