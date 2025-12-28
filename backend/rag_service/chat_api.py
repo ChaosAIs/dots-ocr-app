@@ -354,7 +354,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 orchestrator = ChatOrchestrator(db)
 
                                 # Classify the query intent
-                                await progress_callback("Analyzing query intent...", 5)
+                                await progress_callback("Understanding your question...")
                                 classification = orchestrator.classify_query(enhanced_message, history)
 
                                 logger.info(f"[Intent Routing] Query: '{enhanced_message[:50]}...' -> Intent: {classification.intent.value}, Confidence: {classification.confidence:.2f}")
@@ -367,7 +367,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                                 # Execute analytics query if needed
                                 if use_analytics_path:
-                                    await progress_callback("Querying structured data...", 15)
+                                    await progress_callback("Finding relevant documents...")
 
                                     # ====== DOCUMENT RELEVANCE FILTERING FOR ANALYTICS ======
                                     # Reuse the same document routing logic as RAG path to filter
@@ -401,16 +401,18 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         analytics_doc_ids = accessible_doc_ids_list
                                         logger.info(f"[Intent Routing] Analytics using all {len(analytics_doc_ids)} accessible documents (no routing filter applied)")
 
-                                    analytics_result = orchestrator.execute_analytics_query(
+                                    # Execute analytics query with progress callback
+                                    analytics_result = await orchestrator.execute_analytics_query_async(
                                         query=enhanced_message,
                                         classification=classification,
-                                        accessible_doc_ids=analytics_doc_ids
+                                        accessible_doc_ids=analytics_doc_ids,
+                                        progress_callback=progress_callback
                                     )
                                     logger.info(f"[Intent Routing] Analytics result: {analytics_result.get('summary', {})}")
 
                                     # For pure analytics queries, stream the formatted response directly
                                     if not use_rag_path and analytics_result.get('data'):
-                                        await progress_callback("Formatting results...", 80)
+                                        await progress_callback("Preparing your answer...")
                                         formatted_response = orchestrator.format_analytics_response(
                                             query=enhanced_message,
                                             analytics_result=analytics_result,

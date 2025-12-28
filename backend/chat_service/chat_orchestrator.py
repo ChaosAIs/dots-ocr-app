@@ -231,6 +231,52 @@ class ChatOrchestrator:
 
         return result
 
+    async def execute_analytics_query_async(
+        self,
+        query: str,
+        classification: IntentClassification,
+        accessible_doc_ids: List[UUID],
+        progress_callback: Optional[Callable] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute analytics query with async progress callbacks.
+
+        This is the async version that provides detailed progress updates
+        during the multi-step analytics process.
+
+        Args:
+            query: User's original query
+            classification: Intent classification result
+            accessible_doc_ids: Document IDs user can access
+            progress_callback: Optional async callback for progress updates
+
+        Returns:
+            Analytics query results with LLM-formatted report
+        """
+        logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.info(f"[Orchestrator] EXECUTING ANALYTICS QUERY (ASYNC, LLM-DRIVEN)")
+        logger.info(f"[Orchestrator]   • Query: '{query[:80]}...'")
+        logger.info(f"[Orchestrator]   • Accessible documents: {len(accessible_doc_ids)}")
+        logger.info(f"[Orchestrator]   • LLM client: {'available' if self.llm_client else 'not available'}")
+        logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        # Execute LLM-driven dynamic SQL query with progress callback
+        result = await self.sql_executor.execute_dynamic_sql_query_async(
+            accessible_doc_ids=accessible_doc_ids,
+            query=query,
+            llm_client=self.llm_client,
+            progress_callback=progress_callback
+        )
+
+        logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.info(f"[Orchestrator] ANALYTICS QUERY RESULT:")
+        logger.info(f"[Orchestrator]   • Data rows: {len(result.get('data', []))}")
+        logger.info(f"[Orchestrator]   • Summary keys: {list(result.get('summary', {}).keys())}")
+        logger.info(f"[Orchestrator]   • Has formatted_report: {'formatted_report' in result.get('summary', {})}")
+        logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        return result
+
     def get_data_availability(self, accessible_doc_ids: List[UUID]) -> Dict[str, Any]:
         """
         Check what extracted data is available for the user.

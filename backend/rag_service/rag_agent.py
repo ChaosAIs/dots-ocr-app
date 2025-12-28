@@ -1108,7 +1108,7 @@ def search_documents(query: str) -> str:
         iterative_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
 
         # Send progress update: Analyzing query
-        _send_progress("Analyzing query complexity...", 10)
+        _send_progress("Analyzing your question...")
 
         # Step 0: Analyze query complexity and determine max_steps (COMBINED LLM CALL)
         from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
@@ -1126,7 +1126,7 @@ def search_documents(query: str) -> str:
                    f"reasoning='{complexity_analysis.reasoning}'")
 
         # Step 1: Enhance query and extract metadata (SINGLE LLM CALL)
-        _send_progress("Extracting query metadata...", 20)
+        _send_progress("Identifying key topics and entities...")
 
         query_analysis = _analyze_query_with_llm(query)
         enhanced_query = query_analysis["enhanced_query"]
@@ -1146,7 +1146,7 @@ def search_documents(query: str) -> str:
             logger.info(f"[Access Control] Passing {len(accessible_document_ids)} accessible document IDs to router")
 
         # Step 2.5: Route to relevant documents based on metadata (with access control)
-        _send_progress("Routing to relevant documents...", 30)
+        _send_progress("Finding relevant documents...")
 
         from .document_router import DocumentRouter
         from .llm_service import get_llm_service
@@ -1358,7 +1358,7 @@ def _format_reasoning_result(result) -> str:
     if not results:
         return "No relevant documents found for this query."
 
-    _send_progress("Generating answer...", 90)
+    _send_progress("Preparing your answer...")
 
     return "\n\n---\n\n".join(results)
 
@@ -1447,7 +1447,7 @@ def _simple_vector_search(
         doc_id_list = []
 
     # Use unified vector search
-    _send_progress("Searching document chunks...", 50)
+    _send_progress("Searching through your documents...")
 
     search_result = unified_vector_search(
         query=enhanced_query,
@@ -1466,7 +1466,7 @@ def _simple_vector_search(
         return "No relevant documents found for this query."
 
     # Use token-aware context builder to format results within token limits
-    _send_progress("Building context...", 70)
+    _send_progress("Gathering relevant information...")
 
     try:
         built_context = build_token_aware_context(
@@ -1488,7 +1488,7 @@ def _simple_vector_search(
             for warning in built_context.warnings:
                 logger.warning(f"[Search] Context builder warning: {warning}")
 
-        _send_progress("Generating answer...", 80)
+        _send_progress("Preparing your answer...")
 
         return built_context.formatted_context
 
@@ -1531,7 +1531,7 @@ def _simple_vector_search(
             f"{len(search_result.parent_chunks)} parent chunks from {len(search_result.sources)} sources"
         )
 
-        _send_progress("Generating answer...", 80)
+        _send_progress("Preparing your answer...")
 
         return "\n\n---\n\n".join(results)
 
@@ -1948,7 +1948,7 @@ Do NOT say you need to search documents - the information is already in the conv
 
                 # Send progress update if callback available
                 if progress_callback:
-                    await progress_callback("No data in history, searching documents...", 20)
+                    await progress_callback("Searching documents for more information...")
 
                 # Phase 2: Fallback to document search with enhanced query
                 enhanced_query = _build_enhanced_fallback_query(query, conversation_history)

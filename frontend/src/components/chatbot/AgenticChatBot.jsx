@@ -39,6 +39,9 @@ export const AgenticChatBot = () => {
   const [markdownEditorMessageIndex, setMarkdownEditorMessageIndex] = useState(null);
   const [markdownEditorPreview, setMarkdownEditorPreview] = useState(false);
 
+  // Progress step tracking for better UX
+  const [progressStep, setProgressStep] = useState(null);
+
   // Workspace browser state
   const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState([]);
   const [selectedDocumentIds, setSelectedDocumentIds] = useState([]);
@@ -243,15 +246,13 @@ export const AgenticChatBot = () => {
         if (data.type === "progress") {
           // Display progress message (e.g., "Analyzing query...", "Routing to documents...")
           const progressMsg = data.message || "Processing...";
-          const progressPercent = data.percent;
 
-          // Update streaming content to show progress
-          const progressText = progressPercent
-            ? `🔄 ${progressMsg} (${progressPercent}%)`
-            : `🔄 ${progressMsg}`;
-
-          setStreamingContent(progressText);
+          // Update progress step for UI display (without percentage for cleaner UX)
+          setProgressStep(progressMsg);
+          // Don't set streaming content for progress - we'll show a separate progress indicator
         } else if (data.type === "token") {
+          // Clear progress step when actual content starts streaming
+          setProgressStep(null);
           streamingContentRef.current += data.content;
           setStreamingContent(streamingContentRef.current);
         } else if (data.type === "end") {
@@ -275,6 +276,7 @@ export const AgenticChatBot = () => {
 
           streamingContentRef.current = "";
           setStreamingContent("");
+          setProgressStep(null);
           setIsLoading(false);
 
           // Increment message count
@@ -324,6 +326,7 @@ export const AgenticChatBot = () => {
           // Clear streaming content
           streamingContentRef.current = "";
           setStreamingContent("");
+          setProgressStep(null);
           setIsLoading(false);
 
           // Increment message count
@@ -349,6 +352,7 @@ export const AgenticChatBot = () => {
           });
           streamingContentRef.current = "";
           setStreamingContent("");
+          setProgressStep(null);
           setIsLoading(false);
         }
       }
@@ -547,11 +551,9 @@ export const AgenticChatBot = () => {
         await new Promise(resolve => setTimeout(resolve, 500));
         console.log(`[AgenticChatBot] DB commit wait completed`);
 
-        // Refresh the chat history sidebar to show updated message count
-        if (chatHistoryRef.current?.loadSessions) {
-          console.log(`[AgenticChatBot] Refreshing chat history sidebar after message deletion`);
-          chatHistoryRef.current.loadSessions();
-        }
+        // Note: We don't call loadSessions() here because it will be called
+        // automatically when the WebSocket response completes (in the "end" handler)
+        // This prevents duplicate HTTP requests
       }
 
       // Remove all messages after this one from the UI (including this message)
@@ -791,11 +793,9 @@ export const AgenticChatBot = () => {
         // Wait for DB commit
         await new Promise(resolve => setTimeout(resolve, 500));
 
-        // Refresh the chat history sidebar to show updated message count
-        if (chatHistoryRef.current?.loadSessions) {
-          console.log(`[AgenticChatBot] Refreshing chat history sidebar after message deletion`);
-          chatHistoryRef.current.loadSessions();
-        }
+        // Note: We don't call loadSessions() here because it will be called
+        // automatically when the WebSocket response completes (in the "end" handler)
+        // This prevents duplicate HTTP requests
       }
 
       // Cancel edit mode
@@ -1183,7 +1183,7 @@ export const AgenticChatBot = () => {
             </div>
             <Card className="message-content streaming">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{streamingContent}</ReactMarkdown>
-              <span className="typing-indicator">▊</span>
+              <span className="typing-cursor"></span>
             </Card>
           </div>
         )}
@@ -1193,9 +1193,15 @@ export const AgenticChatBot = () => {
             <div className="message-avatar">
               <i className="pi pi-android" />
             </div>
-            <Card className="message-content">
-              <ProgressSpinner style={{ width: "24px", height: "24px" }} strokeWidth="4" />
-              <span>Searching documents...</span>
+            <Card className="message-content progress-card">
+              <div className="progress-indicator">
+                <div className="progress-dots">
+                  <span className="dot"></span>
+                  <span className="dot"></span>
+                  <span className="dot"></span>
+                </div>
+                <span className="progress-text">{progressStep || t("Chat.SearchingDocuments")}</span>
+              </div>
             </Card>
           </div>
         )}

@@ -178,7 +178,7 @@ class IterativeReasoningEngine:
 
         # Step 1: Generate initial query (LLM-enhanced search query)
         if progress_callback:
-            await progress_callback("Generating initial search query...", 10)
+            await progress_callback("Preparing search strategy...")
 
         logger.info("[IterativeReasoning] Generating initial query...")
         current_query = await self._generate_initial_query(question, INITIAL_QUERY_PROMPT)
@@ -201,8 +201,10 @@ class IterativeReasoningEngine:
             logger.info(f"[IterativeReasoning] Current query: '{current_query}'")
 
             if progress_callback:
-                progress_pct = 20 + (step * 60 // self.max_steps)
-                await progress_callback(f"Searching (round {step}/{self.max_steps})...", progress_pct)
+                if step == 1:
+                    await progress_callback("Searching through your documents...")
+                else:
+                    await progress_callback(f"Refining search (round {step})...")
 
             # Step 2: Retrieve knowledge
             logger.info("[IterativeReasoning] Retrieving knowledge...")
@@ -261,7 +263,7 @@ class IterativeReasoningEngine:
             logger.info("[IterativeReasoning] THINKING: Should I continue or answer?")
 
             if progress_callback:
-                await progress_callback(f"Analyzing results (round {step})...", progress_pct + 10)
+                await progress_callback("Analyzing what I found...")
 
             # Format knowledge summary for LLM
             knowledge_summary = self._format_knowledge_summary(
@@ -340,7 +342,7 @@ class IterativeReasoningEngine:
             logger.info(f"[IterativeReasoning] MAX STEPS REACHED ({self.max_steps})")
             # Generate answer from accumulated knowledge if none was provided
             if progress_callback:
-                await progress_callback("Generating final answer...", 90)
+                await progress_callback("Preparing your answer...")
             final_answer = await self._generate_final_answer(question, retrieved_knowledge)
 
         # Log summary

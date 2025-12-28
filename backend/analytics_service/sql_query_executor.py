@@ -1189,6 +1189,176 @@ class SQLQueryExecutor:
             }
         }
 
+    async def execute_dynamic_sql_query_async(
+        self,
+        accessible_doc_ids: List[UUID],
+        query: str,
+        llm_client=None,
+        max_correction_attempts: int = 3,
+        progress_callback=None
+    ) -> Dict[str, Any]:
+        """
+        Async version of execute_dynamic_sql_query with progress callbacks.
+
+        Provides detailed progress updates during:
+        1. Field mapping retrieval
+        2. SQL generation by LLM
+        3. SQL execution
+        4. Report generation by LLM
+
+        Args:
+            accessible_doc_ids: List of document IDs user can access
+            query: User's natural language query
+            llm_client: LLM client for SQL generation and error correction
+            max_correction_attempts: Maximum number of LLM correction attempts
+            progress_callback: Optional async callback for progress updates
+
+        Returns:
+            Query results with data, summaries, and generated SQL
+        """
+        from analytics_service.llm_sql_generator import LLMSQLGenerator
+
+        # Helper to send progress updates
+        async def send_progress(message: str):
+            if progress_callback:
+                try:
+                    await progress_callback(message)
+                except Exception as e:
+                    logger.warning(f"[Dynamic SQL] Progress callback error: {e}")
+
+        # Step 1: Get field mappings
+        await send_progress("Analyzing document structure...")
+        field_mappings = self._get_available_field_mappings(accessible_doc_ids)
+
+        if not field_mappings:
+            logger.warning("[Dynamic SQL] No field mappings available")
+            return {
+                "data": [],
+                "summary": {"error": "No field mappings available for dynamic SQL generation"},
+                "metadata": {"query": query}
+            }
+
+        # Build document filter for accessible documents
+        doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
+        doc_filter = f"dd.document_id IN ({doc_ids_str})"
+
+        # Step 2: Generate SQL using LLM
+        await send_progress("Generating database query...")
+        generator = LLMSQLGenerator(llm_client)
+        sql_result = generator.generate_sql(query, field_mappings, doc_filter)
+
+        logger.info(f"[Dynamic SQL] Generated SQL:\n{sql_result.sql_query}")
+        logger.info(f"[Dynamic SQL] Explanation: {sql_result.explanation}")
+
+        if not sql_result.success or not sql_result.sql_query:
+            return {
+                "data": [],
+                "summary": {"error": sql_result.error or "Failed to generate SQL"},
+                "metadata": {"query": query}
+            }
+
+        # Step 3: Execute SQL with retry loop for error correction
+        await send_progress("Querying your data...")
+        current_sql = sql_result.sql_query
+        attempt = 0
+        last_error = None
+        correction_history = []
+
+        while attempt <= max_correction_attempts:
+            try:
+                # Execute the SQL
+                logger.info(f"[Dynamic SQL] Executing SQL (attempt {attempt + 1}/{max_correction_attempts + 1})...")
+                result = self.db.execute(text(current_sql))
+                rows = result.fetchall()
+                columns = result.keys()
+
+                # Convert to list of dicts
+                data = [dict(zip(columns, row)) for row in rows]
+
+                logger.info(f"[Dynamic SQL] Query returned {len(data)} rows")
+
+                # Step 4: Generate summary report
+                await send_progress("Generating report...")
+                summary_report = generator.generate_summary_report(query, data, field_mappings)
+
+                return {
+                    "data": data,
+                    "summary": summary_report,
+                    "metadata": {
+                        "query": query,
+                        "generated_sql": current_sql,
+                        "explanation": sql_result.explanation,
+                        "grouping_fields": sql_result.grouping_fields,
+                        "aggregation_fields": sql_result.aggregation_fields,
+                        "time_granularity": sql_result.time_granularity,
+                        "row_count": len(data),
+                        "correction_attempts": attempt,
+                        "correction_history": correction_history if correction_history else None
+                    }
+                }
+
+            except Exception as e:
+                error_message = str(e)
+                last_error = error_message
+                logger.error(f"[Dynamic SQL] Execution failed (attempt {attempt + 1}): {error_message}")
+
+                # Rollback the transaction to recover from error state
+                try:
+                    self.db.rollback()
+                    logger.info("[Dynamic SQL] Transaction rolled back after error")
+                except Exception as rollback_error:
+                    logger.warning(f"[Dynamic SQL] Rollback failed: {rollback_error}")
+
+                # Track this attempt
+                correction_history.append({
+                    "attempt": attempt + 1,
+                    "sql": current_sql[:500] + "..." if len(current_sql) > 500 else current_sql,
+                    "error": error_message
+                })
+
+                # Check if we have more correction attempts
+                if attempt < max_correction_attempts and llm_client:
+                    await send_progress(f"Refining query (attempt {attempt + 2})...")
+                    logger.info(f"[Dynamic SQL] Attempting LLM-driven SQL correction...")
+
+                    # Use LLM to correct the SQL
+                    corrected_result = generator.correct_sql_error(
+                        user_query=query,
+                        failed_sql=current_sql,
+                        error_message=error_message,
+                        field_mappings=field_mappings,
+                        table_filter=doc_filter
+                    )
+
+                    if corrected_result and corrected_result.sql_query:
+                        current_sql = corrected_result.sql_query
+                        logger.info(f"[Dynamic SQL] LLM provided corrected SQL, retrying...")
+                        attempt += 1
+                        continue
+                    else:
+                        logger.warning("[Dynamic SQL] LLM could not provide corrected SQL")
+                        break
+                else:
+                    if not llm_client:
+                        logger.warning("[Dynamic SQL] No LLM client available for SQL correction")
+                    else:
+                        logger.warning(f"[Dynamic SQL] Max correction attempts ({max_correction_attempts}) reached")
+                    break
+
+        # All attempts failed
+        return {
+            "data": [],
+            "summary": {"error": last_error or "SQL execution failed after all correction attempts"},
+            "metadata": {
+                "query": query,
+                "generated_sql": sql_result.sql_query,
+                "final_sql": current_sql,
+                "error": last_error,
+                "correction_attempts": attempt,
+                "correction_history": correction_history
+            }
+        }
+
     def _get_available_field_mappings(self, accessible_doc_ids: List[UUID]) -> Dict[str, Dict[str, Any]]:
         """
         Get field mappings from documents with extracted data.

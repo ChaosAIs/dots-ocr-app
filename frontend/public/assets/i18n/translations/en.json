@@ -18,7 +18,8 @@
         "SaveChanges": "Save Changes",
         "PreviewMode": "Preview",
         "EditMode": "Edit",
-        "MarkdownPlaceholder": "Enter markdown content..."
+        "MarkdownPlaceholder": "Enter markdown content...",
+        "SearchingDocuments": "Searching documents..."
     },
     "Nav": {
         "Home": "Home",
