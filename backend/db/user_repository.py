@@ -89,6 +89,13 @@ class UserRepository:
             if counter > 1000:
                 raise ValueError(f"Unable to generate unique normalized username for: {original}")
 
+    # Default preferences for new users
+    DEFAULT_USER_PREFERENCES = {
+        "app": {
+            "theme": "saga-blue"
+        }
+    }
+
     def create_user(
         self,
         username: str,
@@ -113,7 +120,8 @@ class UserRepository:
             full_name=full_name,
             role=role,
             status=UserStatus.ACTIVE,
-            created_by=created_by
+            created_by=created_by,
+            preferences=self.DEFAULT_USER_PREFERENCES.copy()
         )
 
         self.db.add(user)

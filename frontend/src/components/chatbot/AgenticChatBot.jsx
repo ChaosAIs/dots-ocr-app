@@ -246,11 +246,16 @@ export const AgenticChatBot = () => {
         if (data.type === "progress") {
           // Display progress message (e.g., "Analyzing query...", "Routing to documents...")
           const progressMsg = data.message || "Processing...";
+          console.log("[WebSocket Progress] Received progress message:", progressMsg);
 
           // Update progress step for UI display (without percentage for cleaner UX)
           setProgressStep(progressMsg);
           // Don't set streaming content for progress - we'll show a separate progress indicator
         } else if (data.type === "token") {
+          // Log when token streaming starts (only first token to avoid spam)
+          if (!streamingContentRef.current) {
+            console.log("[WebSocket] Token streaming started, clearing progress step");
+          }
           // Clear progress step when actual content starts streaming
           setProgressStep(null);
           streamingContentRef.current += data.content;
@@ -1200,7 +1205,7 @@ export const AgenticChatBot = () => {
                   <span className="dot"></span>
                   <span className="dot"></span>
                 </div>
-                <span className="progress-text">{progressStep || t("Chat.SearchingDocuments")}</span>
+                <span className="progress-text">{progressStep || t("Chat.ProcessingRequest")}</span>
               </div>
             </Card>
           </div>

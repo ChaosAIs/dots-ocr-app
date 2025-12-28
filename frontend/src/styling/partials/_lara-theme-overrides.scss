@@ -1,0 +1,482 @@
+/*
+ * Lara Theme Overrides
+ *
+ * This file normalizes Lara themes to match the spacing and sizing of other PrimeReact themes
+ * (Saga, Vela, Arya). Lara themes have larger padding and border-radius by default.
+ *
+ * Key differences being normalized:
+ * - border-radius: 6px -> 3px
+ * - content-padding: 1.25rem -> 1rem
+ * - Button padding: 0.75rem 1.25rem -> 0.5rem 1rem
+ * - Input padding: 0.75rem 0.75rem -> 0.5rem 0.5rem
+ */
+
+/* Detect Lara themes and apply overrides */
+body.lara-theme {
+  /* Override CSS variables */
+  --border-radius: 3px;
+  --content-padding: 1rem;
+
+  /* Button base styles */
+  .p-button {
+    padding: 0.5rem 1rem;
+    border-radius: 3px;
+  }
+
+  /* Preserve rounded buttons */
+  .p-button.p-button-rounded {
+    border-radius: 2rem;
+  }
+
+  /* Icon-only buttons - match Saga sizing */
+  .p-button.p-button-icon-only {
+    width: 2.357rem;
+    padding: 0.5rem 0;
+  }
+
+  .p-button.p-button-icon-only.p-button-rounded {
+    border-radius: 50%;
+    height: 2.357rem;
+  }
+
+  .p-button.p-button-sm {
+    padding: 0.4375rem 0.875rem;
+  }
+
+  .p-button.p-button-sm.p-button-icon-only {
+    width: 2rem;
+    padding: 0.4375rem 0;
+  }
+
+  .p-button.p-button-sm.p-button-icon-only.p-button-rounded {
+    height: 2rem;
+  }
+
+  .p-button.p-button-lg {
+    padding: 0.625rem 1.25rem;
+  }
+
+  .p-button.p-button-lg.p-button-icon-only {
+    width: 2.75rem;
+    padding: 0.625rem 0;
+  }
+
+  .p-button.p-button-lg.p-button-icon-only.p-button-rounded {
+    height: 2.75rem;
+  }
+
+  /* Input fields */
+  .p-inputtext {
+    padding: 0.5rem 0.5rem;
+    border-radius: 3px;
+  }
+
+  /* Dropdown */
+  .p-dropdown {
+    border-radius: 3px;
+  }
+
+  .p-dropdown .p-dropdown-label {
+    padding: 0.5rem 0.5rem;
+  }
+
+  .p-dropdown-panel {
+    border-radius: 3px;
+  }
+
+  .p-dropdown-panel .p-dropdown-items .p-dropdown-item {
+    padding: 0.5rem 1rem;
+  }
+
+  /* Select Button */
+  .p-selectbutton .p-button {
+    padding: 0.5rem 1rem;
+  }
+
+  /* Input group addon */
+  .p-inputgroup-addon {
+    padding: 0.5rem 0.5rem;
+    border-radius: 3px;
+  }
+
+  /* Autocomplete */
+  .p-autocomplete-panel {
+    border-radius: 3px;
+  }
+
+  .p-autocomplete-panel .p-autocomplete-items {
+    padding: 0.5rem 0;
+  }
+
+  .p-autocomplete-panel .p-autocomplete-items .p-autocomplete-item {
+    padding: 0.5rem 1rem;
+  }
+
+  /* Calendar/DatePicker */
+  .p-datepicker {
+    border-radius: 3px;
+  }
+
+  .p-datepicker table td > span {
+    border-radius: 3px;
+  }
+
+  /* Chips */
+  .p-chips .p-chips-multiple-container {
+    padding: 0.25rem 0.5rem;
+    border-radius: 3px;
+  }
+
+  .p-chips .p-chips-multiple-container .p-chips-token {
+    padding: 0.25rem 0.5rem;
+    border-radius: 16px;
+  }
+
+  /* Dialog */
+  .p-dialog {
+    border-radius: 3px;
+  }
+
+  .p-dialog .p-dialog-header {
+    padding: 1rem;
+  }
+
+  .p-dialog .p-dialog-content {
+    padding: 0 1rem 1rem 1rem;
+  }
+
+  .p-dialog .p-dialog-footer {
+    padding: 0 1rem 1rem 1rem;
+  }
+
+  /* Card */
+  .p-card {
+    border-radius: 3px;
+  }
+
+  .p-card .p-card-body {
+    padding: 1rem;
+  }
+
+  .p-card .p-card-content {
+    padding: 1rem 0;
+  }
+
+  /* Panel */
+  .p-panel {
+    border-radius: 3px;
+  }
+
+  .p-panel .p-panel-header {
+    padding: 1rem;
+  }
+
+  .p-panel .p-panel-content {
+    padding: 1rem;
+  }
+
+  /* Accordion */
+  .p-accordion .p-accordion-header .p-accordion-header-link {
+    padding: 1rem;
+    border-radius: 3px;
+  }
+
+  .p-accordion .p-accordion-content {
+    padding: 1rem;
+  }
+
+  /* TabView */
+  .p-tabview .p-tabview-nav li .p-tabview-nav-link {
+    padding: 1rem;
+  }
+
+  .p-tabview .p-tabview-panels {
+    padding: 1rem;
+  }
+
+  /* DataTable */
+  .p-datatable .p-datatable-header {
+    padding: 1rem;
+  }
+
+  .p-datatable .p-datatable-thead > tr > th {
+    padding: 1rem;
+  }
+
+  .p-datatable .p-datatable-tbody > tr > td {
+    padding: 1rem;
+  }
+
+  .p-datatable .p-datatable-footer {
+    padding: 1rem;
+  }
+
+  /* Paginator */
+  .p-paginator {
+    padding: 0.5rem 1rem;
+  }
+
+  .p-paginator .p-paginator-element {
+    border-radius: 3px;
+  }
+
+  /* Menu components */
+  .p-menu {
+    border-radius: 3px;
+  }
+
+  .p-menu .p-menuitem > .p-menuitem-content .p-menuitem-link {
+    padding: 0.5rem 1rem;
+  }
+
+  .p-menubar {
+    border-radius: 3px;
+  }
+
+  .p-menubar .p-menuitem > .p-menuitem-content .p-menuitem-link {
+    padding: 0.5rem 1rem;
+  }
+
+  /* Context Menu */
+  .p-contextmenu {
+    border-radius: 3px;
+  }
+
+  .p-contextmenu .p-menuitem > .p-menuitem-content .p-menuitem-link {
+    padding: 0.5rem 1rem;
+  }
+
+  /* Tooltip */
+  .p-tooltip .p-tooltip-text {
+    padding: 0.5rem;
+    border-radius: 3px;
+  }
+
+  /* Toast */
+  .p-toast .p-toast-message {
+    border-radius: 3px;
+  }
+
+  .p-toast .p-toast-message .p-toast-message-content {
+    padding: 1rem;
+  }
+
+  /* Message */
+  .p-message {
+    border-radius: 3px;
+  }
+
+  .p-message .p-message-wrapper {
+    padding: 1rem;
+  }
+
+  /* Tag */
+  .p-tag {
+    padding: 0.25rem 0.4rem;
+    border-radius: 3px;
+  }
+
+  /* Badge */
+  .p-badge {
+    border-radius: 3px;
+  }
+
+  /* Checkbox */
+  .p-checkbox .p-checkbox-box {
+    border-radius: 3px;
+  }
+
+  /* RadioButton */
+  .p-radiobutton .p-radiobutton-box {
+    border-radius: 50%;
+  }
+
+  /* InputSwitch */
+  .p-inputswitch {
+    border-radius: 30px;
+  }
+
+  /* Slider */
+  .p-slider {
+    border-radius: 3px;
+  }
+
+  /* ProgressBar */
+  .p-progressbar {
+    border-radius: 3px;
+  }
+
+  /* FileUpload */
+  .p-fileupload .p-fileupload-buttonbar {
+    padding: 1rem;
+  }
+
+  .p-fileupload .p-fileupload-content {
+    padding: 1rem;
+  }
+
+  /* Sidebar */
+  .p-sidebar .p-sidebar-header {
+    padding: 1rem;
+  }
+
+  .p-sidebar .p-sidebar-content {
+    padding: 1rem;
+  }
+
+  /* OverlayPanel */
+  .p-overlaypanel {
+    border-radius: 3px;
+  }
+
+  .p-overlaypanel .p-overlaypanel-content {
+    padding: 1rem;
+  }
+
+  /* Listbox */
+  .p-listbox {
+    border-radius: 3px;
+  }
+
+  .p-listbox .p-listbox-list .p-listbox-item {
+    padding: 0.5rem 1rem;
+  }
+
+  /* MultiSelect */
+  .p-multiselect {
+    border-radius: 3px;
+  }
+
+  .p-multiselect .p-multiselect-label {
+    padding: 0.5rem 0.5rem;
+  }
+
+  .p-multiselect-panel {
+    border-radius: 3px;
+  }
+
+  .p-multiselect-panel .p-multiselect-items .p-multiselect-item {
+    padding: 0.5rem 1rem;
+  }
+
+  /* TreeSelect */
+  .p-treeselect {
+    border-radius: 3px;
+  }
+
+  .p-treeselect .p-treeselect-label {
+    padding: 0.5rem 0.5rem;
+  }
+
+  /* Textarea */
+  .p-inputtextarea {
+    padding: 0.5rem 0.5rem;
+    border-radius: 3px;
+  }
+
+  /* InputNumber */
+  .p-inputnumber .p-inputnumber-input {
+    border-radius: 3px;
+  }
+
+  .p-inputnumber-buttons-stacked .p-inputnumber-button {
+    border-radius: 0;
+  }
+
+  .p-inputnumber-buttons-stacked .p-inputnumber-button-up {
+    border-top-right-radius: 3px;
+  }
+
+  .p-inputnumber-buttons-stacked .p-inputnumber-button-down {
+    border-bottom-right-radius: 3px;
+  }
+
+  /* Password */
+  .p-password-panel {
+    border-radius: 3px;
+  }
+
+  /* Splitter */
+  .p-splitter {
+    border-radius: 3px;
+  }
+
+  /* ScrollPanel */
+  .p-scrollpanel .p-scrollpanel-bar {
+    border-radius: 3px;
+  }
+
+  /* Toolbar */
+  .p-toolbar {
+    border-radius: 3px;
+    padding: 1rem;
+  }
+
+  /* Steps */
+  .p-steps .p-steps-item .p-menuitem-link {
+    padding: 1rem;
+  }
+
+  /* TabMenu */
+  .p-tabmenu .p-tabmenu-nav .p-tabmenuitem .p-menuitem-link {
+    padding: 1rem;
+  }
+
+  /* Breadcrumb */
+  .p-breadcrumb {
+    border-radius: 3px;
+    padding: 1rem;
+  }
+
+  /* Tree */
+  .p-tree {
+    border-radius: 3px;
+    padding: 1rem;
+  }
+
+  .p-tree .p-tree-container .p-treenode .p-treenode-content {
+    padding: 0.25rem;
+    border-radius: 3px;
+  }
+
+  /* OrderList */
+  .p-orderlist .p-orderlist-list .p-orderlist-item {
+    padding: 0.5rem 1rem;
+  }
+
+  /* PickList */
+  .p-picklist .p-picklist-list .p-picklist-item {
+    padding: 0.5rem 1rem;
+  }
+
+  /* Timeline */
+  .p-timeline .p-timeline-event-marker {
+    border-radius: 50%;
+  }
+
+  /* Inplace */
+  .p-inplace .p-inplace-display {
+    padding: 0.5rem 0.5rem;
+    border-radius: 3px;
+  }
+
+  /* ConfirmPopup */
+  .p-confirm-popup {
+    border-radius: 3px;
+  }
+
+  /* SpeedDial */
+  .p-speeddial-action {
+    border-radius: 50%;
+  }
+
+  /* Galleria */
+  .p-galleria .p-galleria-thumbnail-container {
+    padding: 1rem 0.25rem;
+  }
+
+  /* Image */
+  .p-image-preview-indicator {
+    border-radius: 3px;
+  }
+}

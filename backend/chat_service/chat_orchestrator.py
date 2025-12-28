@@ -70,7 +70,7 @@ class ChatOrchestrator:
                 num_predict=2048
             )
 
-            # Wrapper to provide simple generate() interface
+            # Wrapper to provide simple generate() interface with streaming support
             class LLMClientWrapper:
                 def __init__(self, model):
                     self.model = model
@@ -78,6 +78,12 @@ class ChatOrchestrator:
                 def generate(self, prompt: str) -> str:
                     response = self.model.invoke([HumanMessage(content=prompt)])
                     return response.content
+
+                async def astream(self, prompt: str):
+                    """Async streaming generator for LLM responses."""
+                    async for chunk in self.model.astream([HumanMessage(content=prompt)]):
+                        if chunk.content:
+                            yield chunk.content
 
             logger.info("[Orchestrator] LLM client created for dynamic SQL generation")
             return LLMClientWrapper(chat_model)
@@ -258,6 +264,7 @@ class ChatOrchestrator:
         logger.info(f"[Orchestrator]   • Query: '{query[:80]}...'")
         logger.info(f"[Orchestrator]   • Accessible documents: {len(accessible_doc_ids)}")
         logger.info(f"[Orchestrator]   • LLM client: {'available' if self.llm_client else 'not available'}")
+        logger.info(f"[Orchestrator]   • progress_callback: {'set' if progress_callback else 'None'}")
         logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         # Execute LLM-driven dynamic SQL query with progress callback

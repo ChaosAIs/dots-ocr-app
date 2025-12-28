@@ -40,6 +40,11 @@ const getThemeBasePath = () => {
   return basePath.endsWith("/") ? basePath.slice(0, -1) : basePath;
 };
 
+// Check if theme is a Lara theme
+const isLaraTheme = (theme) => {
+  return theme && theme.startsWith("lara-");
+};
+
 // Function to change theme dynamically
 const changeTheme = (newTheme) => {
   const linkElement = document.getElementById("theme-link");
@@ -56,6 +61,13 @@ const changeTheme = (newTheme) => {
     newLink.rel = "stylesheet";
     newLink.href = themeUrl;
     document.head.appendChild(newLink);
+  }
+
+  // Add or remove lara-theme class for consistent styling
+  if (isLaraTheme(newTheme)) {
+    document.body.classList.add("lara-theme");
+  } else {
+    document.body.classList.remove("lara-theme");
   }
 
   // Store in localStorage as fallback

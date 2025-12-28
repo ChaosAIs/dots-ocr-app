@@ -253,14 +253,57 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     streaming_error = None
 
                     try:
+                        # Track last progress message time for minimum delay
+                        import time
+                        last_progress_time = [0]  # Use list to allow modification in nested function
+                        last_progress_message = [""]  # Track last message for stage-specific delays
+
+                        # Stage-specific minimum display times (in seconds)
+                        # Some stages complete quickly but we want users to see the message
+                        STAGE_MIN_DISPLAY_TIMES = {
+                            # Initial stages - these are followed by LLM calls that take time
+                            "Understanding your question...": 1.5,  # Show longer, LLM call follows
+                            "Analyzing key topics in your question...": 0.2,  # LLM call follows, naturally takes time
+                            "Finding relevant documents...": 1.5,  # Vector search follows
+                            # Analytics stages - some are very fast
+                            "Analyzing data structure...": 1.5,  # Fast operation, need display time
+                            "Building database query...": 0.2,  # LLM SQL generation follows, takes time
+                            "Running database query...": 1.5,  # SQL execution is fast
+                            "Found": 2.0,  # Results found message (prefix match), user wants to see count
+                            "Writing your report...": 1.5,  # Show before streaming starts
+                            # Default for any other messages
+                            "default": 1.0
+                        }
+
+                        def get_min_display_time(message: str) -> float:
+                            """Get minimum display time for a progress message."""
+                            # Check for exact match first
+                            if message in STAGE_MIN_DISPLAY_TIMES:
+                                return STAGE_MIN_DISPLAY_TIMES[message]
+                            # Check for prefix match (e.g., "Found 43 records...")
+                            for prefix, delay in STAGE_MIN_DISPLAY_TIMES.items():
+                                if message.startswith(prefix):
+                                    return delay
+                            return STAGE_MIN_DISPLAY_TIMES["default"]
+
                         # Create progress callback for WebSocket updates
                         async def progress_callback(message: str, percent: int = None):
-                            """Send progress updates to frontend via WebSocket."""
+                            """Send progress updates to frontend via WebSocket with stage-specific delays."""
                             try:
+                                # Get minimum display time for the PREVIOUS message
+                                if last_progress_time[0] > 0:
+                                    min_display = get_min_display_time(last_progress_message[0])
+                                    current_time = time.time()
+                                    elapsed = current_time - last_progress_time[0]
+                                    if elapsed < min_display:
+                                        await asyncio.sleep(min_display - elapsed)
+
                                 payload = {"type": "progress", "message": message}
                                 if percent is not None:
                                     payload["percent"] = percent
                                 await websocket.send_json(payload)
+                                last_progress_time[0] = time.time()
+                                last_progress_message[0] = message
                             except Exception as e:
                                 logger.error(f"Error sending progress update: {e}")
 
@@ -367,8 +410,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                                 # Execute analytics query if needed
                                 if use_analytics_path:
-                                    await progress_callback("Finding relevant documents...")
-
                                     # ====== DOCUMENT RELEVANCE FILTERING FOR ANALYTICS ======
                                     # Reuse the same document routing logic as RAG path to filter
                                     # to relevant documents before querying structured data
@@ -377,6 +418,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     from .rag_agent import _analyze_query_with_llm
 
                                     # Get query metadata for document routing
+                                    await progress_callback("Analyzing key topics in your question...")
                                     query_analysis = _analyze_query_with_llm(enhanced_message)
                                     query_metadata = query_analysis.get("metadata", {})
 
@@ -384,6 +426,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
 
                                     # Route to relevant documents
+                                    await progress_callback("Finding relevant documents...")
                                     llm_service = get_llm_service()
                                     router = DocumentRouter(llm_service=llm_service)
                                     routed_document_ids = router.route_query(
@@ -410,33 +453,53 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     )
                                     logger.info(f"[Intent Routing] Analytics result: {analytics_result.get('summary', {})}")
 
-                                    # For pure analytics queries, stream the formatted response directly
+                                    # For pure analytics queries, stream the report directly from LLM
                                     if not use_rag_path and analytics_result.get('data'):
-                                        await progress_callback("Preparing your answer...")
-                                        formatted_response = orchestrator.format_analytics_response(
-                                            query=enhanced_message,
-                                            analytics_result=analytics_result,
-                                            classification=classification
-                                        )
-                                        # Stream the formatted response with realistic timing
-                                        # Use word-based chunking for more natural streaming
-                                        words = formatted_response.split(' ')
-                                        current_chunk = ""
-                                        for i, word in enumerate(words):
-                                            current_chunk += word + ' '
-                                            # Send chunk every 3-5 words or at sentence boundaries
-                                            is_sentence_end = word.endswith(('.', '!', '?', ':', '\n'))
-                                            if len(current_chunk) >= 20 or is_sentence_end or i == len(words) - 1:
-                                                chunk_count += 1
-                                                full_response += current_chunk
-                                                await websocket.send_json({
-                                                    "type": "token",
-                                                    "content": current_chunk,
-                                                })
-                                                current_chunk = ""
-                                                # Small delay for streaming effect (10-30ms)
-                                                await asyncio.sleep(0.015)
-                                        logger.info(f"[Intent Routing] Streamed analytics response directly ({len(full_response)} chars)")
+                                        # Check if streaming generator is available
+                                        stream_generator = analytics_result.get('_stream_generator')
+                                        field_mappings = analytics_result.get('_field_mappings')
+
+                                        if stream_generator and hasattr(stream_generator, 'stream_summary_report'):
+                                            # Stream the report directly from LLM
+                                            await progress_callback("Writing your report...")
+                                            logger.info(f"[Intent Routing] Streaming report directly from LLM...")
+                                            async for chunk in stream_generator.stream_summary_report(
+                                                enhanced_message,
+                                                analytics_result.get('data', []),
+                                                field_mappings or {}
+                                            ):
+                                                if chunk:
+                                                    chunk_count += 1
+                                                    full_response += chunk
+                                                    await websocket.send_json({
+                                                        "type": "token",
+                                                        "content": chunk,
+                                                    })
+                                            logger.info(f"[Intent Routing] Streamed analytics report ({len(full_response)} chars)")
+                                        else:
+                                            # Fallback: use format_analytics_response with simulated streaming
+                                            await progress_callback("Preparing your answer...")
+                                            formatted_response = orchestrator.format_analytics_response(
+                                                query=enhanced_message,
+                                                analytics_result=analytics_result,
+                                                classification=classification
+                                            )
+                                            # Stream the formatted response with realistic timing
+                                            words = formatted_response.split(' ')
+                                            current_chunk = ""
+                                            for i, word in enumerate(words):
+                                                current_chunk += word + ' '
+                                                is_sentence_end = word.endswith(('.', '!', '?', ':', '\n'))
+                                                if len(current_chunk) >= 20 or is_sentence_end or i == len(words) - 1:
+                                                    chunk_count += 1
+                                                    full_response += current_chunk
+                                                    await websocket.send_json({
+                                                        "type": "token",
+                                                        "content": current_chunk,
+                                                    })
+                                                    current_chunk = ""
+                                                    await asyncio.sleep(0.015)
+                                            logger.info(f"[Intent Routing] Streamed analytics response ({len(full_response)} chars)")
                                     elif not use_rag_path and not analytics_result.get('data'):
                                         # Analytics returned no data - fall back to RAG to search documents
                                         logger.info(f"[Intent Routing] Analytics returned no data, falling back to RAG for document search")

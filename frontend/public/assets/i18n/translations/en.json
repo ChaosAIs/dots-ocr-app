@@ -19,7 +19,7 @@
         "PreviewMode": "Preview",
         "EditMode": "Edit",
         "MarkdownPlaceholder": "Enter markdown content...",
-        "SearchingDocuments": "Searching documents..."
+        "ProcessingRequest": "Processing your request..."
     },
     "Nav": {
         "Home": "Home",

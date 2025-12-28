@@ -1218,16 +1218,25 @@ class SQLQueryExecutor:
         """
         from analytics_service.llm_sql_generator import LLMSQLGenerator
 
+        logger.info(f"[Dynamic SQL Async] Method called with progress_callback: {'set' if progress_callback else 'None'}")
+        logger.info(f"[Dynamic SQL Async] Query: '{query[:80]}...'")
+        logger.info(f"[Dynamic SQL Async] Accessible docs: {len(accessible_doc_ids)}")
+
         # Helper to send progress updates
         async def send_progress(message: str):
+            logger.info(f"[Dynamic SQL] send_progress called with message: '{message}', callback is {'set' if progress_callback else 'None'}")
             if progress_callback:
                 try:
+                    logger.info(f"[Dynamic SQL] Calling progress_callback with: '{message}'")
                     await progress_callback(message)
+                    logger.info(f"[Dynamic SQL] progress_callback completed for: '{message}'")
                 except Exception as e:
                     logger.warning(f"[Dynamic SQL] Progress callback error: {e}")
+            else:
+                logger.warning(f"[Dynamic SQL] No progress_callback available, skipping: '{message}'")
 
         # Step 1: Get field mappings
-        await send_progress("Analyzing document structure...")
+        await send_progress("Analyzing data structure...")
         field_mappings = self._get_available_field_mappings(accessible_doc_ids)
 
         if not field_mappings:
@@ -1243,7 +1252,7 @@ class SQLQueryExecutor:
         doc_filter = f"dd.document_id IN ({doc_ids_str})"
 
         # Step 2: Generate SQL using LLM
-        await send_progress("Generating database query...")
+        await send_progress("Building database query...")
         generator = LLMSQLGenerator(llm_client)
         sql_result = generator.generate_sql(query, field_mappings, doc_filter)
 
@@ -1258,7 +1267,7 @@ class SQLQueryExecutor:
             }
 
         # Step 3: Execute SQL with retry loop for error correction
-        await send_progress("Querying your data...")
+        await send_progress("Running database query...")
         current_sql = sql_result.sql_query
         attempt = 0
         last_error = None
@@ -1277,13 +1286,26 @@ class SQLQueryExecutor:
 
                 logger.info(f"[Dynamic SQL] Query returned {len(data)} rows")
 
-                # Step 4: Generate summary report
-                await send_progress("Generating report...")
-                summary_report = generator.generate_summary_report(query, data, field_mappings)
+                # Step 4: Calculate basic stats (report will be streamed)
+                await send_progress(f"Found {len(data)} records, preparing results...")
 
+                # Calculate grand total for metadata
+                amount_col = None
+                for col in data[0].keys() if data else []:
+                    col_lower = col.lower()
+                    if any(kw in col_lower for kw in ['amount', 'total', 'sales', 'sum', 'price', 'value']):
+                        amount_col = col
+                        break
+                grand_total = sum(float(r.get(amount_col, 0) or 0) for r in data) if amount_col else 0
+
+                # Return data with streaming generator and field_mappings for report streaming
                 return {
                     "data": data,
-                    "summary": summary_report,
+                    "summary": {
+                        "report_title": "Query Results Summary",
+                        "grand_total": round(grand_total, 2),
+                        "total_records": len(data),
+                    },
                     "metadata": {
                         "query": query,
                         "generated_sql": current_sql,
@@ -1294,7 +1316,10 @@ class SQLQueryExecutor:
                         "row_count": len(data),
                         "correction_attempts": attempt,
                         "correction_history": correction_history if correction_history else None
-                    }
+                    },
+                    # Include generator and field_mappings for streaming report
+                    "_stream_generator": generator,
+                    "_field_mappings": field_mappings
                 }
 
             except Exception as e:
