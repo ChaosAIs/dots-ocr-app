@@ -6,12 +6,11 @@ import { Password } from 'primereact/password';
 import { Button } from 'primereact/button';
 import { Toast } from 'primereact/toast';
 import authService from '../../services/authService';
-import './Register.scss';
 
 export const Register = () => {
     const navigate = useNavigate();
     const toast = React.useRef(null);
-    
+
     const [formData, setFormData] = useState({
         username: '',
         email: '',
@@ -19,7 +18,7 @@ export const Register = () => {
         password: '',
         confirmPassword: ''
     });
-    
+
     const [loading, setLoading] = useState(false);
 
     const handleChange = (e) => {
@@ -88,7 +87,7 @@ export const Register = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        
+
         if (!validateForm()) {
             return;
         }
@@ -136,19 +135,19 @@ export const Register = () => {
     };
 
     return (
-        <div className="register-container">
+        <div className="flex align-items-center justify-content-center min-h-screen surface-ground p-4">
             <Toast ref={toast} />
-            
-            <Card className="register-card">
-                <div className="register-header">
-                    <i className="pi pi-user-plus" style={{ fontSize: '3rem', color: '#667eea' }}></i>
-                    <h2>Create Account</h2>
-                    <p>Sign up to get started</p>
+
+            <Card className="w-full md:w-30rem shadow-4">
+                <div className="text-center mb-4">
+                    <i className="pi pi-user-plus text-4xl text-primary mb-3" />
+                    <h2 className="m-0 mb-2 text-color">Create Account</h2>
+                    <p className="m-0 text-500">Sign up to get started</p>
                 </div>
 
-                <form onSubmit={handleSubmit} className="register-form">
-                    <div className="p-field">
-                        <label htmlFor="username">Username *</label>
+                <form onSubmit={handleSubmit}>
+                    <div className="field mb-4">
+                        <label htmlFor="username" className="block font-medium mb-2 text-color">Username *</label>
                         <InputText
                             id="username"
                             name="username"
@@ -160,8 +159,8 @@ export const Register = () => {
                         />
                     </div>
 
-                    <div className="p-field">
-                        <label htmlFor="email">Email *</label>
+                    <div className="field mb-4">
+                        <label htmlFor="email" className="block font-medium mb-2 text-color">Email *</label>
                         <InputText
                             id="email"
                             name="email"
@@ -173,8 +172,8 @@ export const Register = () => {
                         />
                     </div>
 
-                    <div className="p-field">
-                        <label htmlFor="fullName">Full Name</label>
+                    <div className="field mb-4">
+                        <label htmlFor="fullName" className="block font-medium mb-2 text-color">Full Name</label>
                         <InputText
                             id="fullName"
                             name="fullName"
@@ -185,8 +184,8 @@ export const Register = () => {
                         />
                     </div>
 
-                    <div className="p-field">
-                        <label htmlFor="password">Password *</label>
+                    <div className="field mb-4">
+                        <label htmlFor="password" className="block font-medium mb-2 text-color">Password *</label>
                         <Password
                             id="password"
                             name="password"
@@ -197,13 +196,13 @@ export const Register = () => {
                             toggleMask
                             feedback={false}
                         />
-                        <small className="password-hint">
+                        <small className="block mt-2 text-500 font-italic">
                             Must be at least 8 characters with uppercase, lowercase, and digit
                         </small>
                     </div>
 
-                    <div className="p-field">
-                        <label htmlFor="confirmPassword">Confirm Password *</label>
+                    <div className="field mb-4">
+                        <label htmlFor="confirmPassword" className="block font-medium mb-2 text-color">Confirm Password *</label>
                         <Password
                             id="confirmPassword"
                             name="confirmPassword"
@@ -224,10 +223,10 @@ export const Register = () => {
                         loading={loading}
                     />
 
-                    <div className="register-footer">
-                        <p>
+                    <div className="text-center mt-4">
+                        <p className="m-0 text-500">
                             Already have an account?{' '}
-                            <Link to="/login" className="login-link">
+                            <Link to="/login" className="text-primary font-semibold no-underline hover:underline">
                                 Sign in
                             </Link>
                         </p>

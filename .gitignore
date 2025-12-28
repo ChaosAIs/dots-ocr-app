@@ -5,6 +5,7 @@ frontend/node_modules/
 backend/output/
 backend/input/
 frontend/build/
+frontend/public/themes/
 backend/__pycache__/
 .code_assistant/
 backend/doc_service/__pycache__/

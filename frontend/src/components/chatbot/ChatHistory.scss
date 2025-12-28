@@ -40,6 +40,29 @@
     padding: 1rem;
     overflow-y: auto;
     flex: 1;
+
+    // Theme-aware scrollbar styling
+    &::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    &::-webkit-scrollbar-track {
+      background: var(--surface-ground);
+      border-radius: 3px;
+    }
+
+    &::-webkit-scrollbar-thumb {
+      background: var(--surface-border);
+      border-radius: 3px;
+
+      &:hover {
+        background: var(--text-color-secondary);
+      }
+    }
+
+    // Firefox scrollbar styling
+    scrollbar-width: thin;
+    scrollbar-color: var(--surface-border) var(--surface-ground);
   }
 
   .empty-state {
@@ -67,19 +90,18 @@
     align-items: center;
     gap: 0.75rem;
     padding: 0.75rem;
-    border-radius: 6px;
+    border-radius: 0 6px 6px 0;
     cursor: pointer;
     transition: all 0.2s;
-    border: 1px solid transparent;
+    border-left: 3px solid transparent;
 
     &:hover {
       background-color: var(--surface-hover);
-      border-color: var(--surface-border);
     }
 
     &.active {
-      background-color: var(--primary-50);
-      border-color: var(--primary-200);
+      background-color: var(--highlight-bg);
+      border-left-color: var(--primary-color);
 
       .session-name {
         color: var(--primary-color);

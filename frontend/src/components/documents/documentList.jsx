@@ -4,6 +4,7 @@ import { Column } from "primereact/column";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { Dialog } from "primereact/dialog";
+import { Tag } from "primereact/tag";
 import { useTranslation } from "react-i18next";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
@@ -11,7 +12,6 @@ import { useWorkspace, WorkspaceEvents } from "../../contexts/WorkspaceContext";
 import MarkdownViewer from "./markdownViewer";
 import { DocumentFileUpload } from "./fileUpload";
 import MoveDocumentDialog from "./MoveDocumentDialog";
-import "./documentList.scss";
 
 export const DocumentList = forwardRef((props, ref) => {
   // Get workspace from context
@@ -532,12 +532,13 @@ export const DocumentList = forwardRef((props, ref) => {
     const canMove = isFullyIndexed && !isConverting && !isIndexing;
 
     return (
-      <div className="action-buttons">
+      <div className="flex gap-2 justify-content-center align-items-center">
         {/* Show view button only if conversion is fully completed with no errors */}
         {markdown_exists && (
           <Button
             icon="pi pi-eye"
-            className="p-button-rounded p-button-success"
+            rounded
+            severity="success"
             onClick={() => handleViewMarkdown(rowData)}
             disabled={!conversionFullyCompleted}
             tooltip={
@@ -549,7 +550,7 @@ export const DocumentList = forwardRef((props, ref) => {
                     ? t("DocumentList.PartialConversionCannotView")
                     : t("DocumentList.ConversionInProgressCannotView")
             }
-            tooltipPosition="top"
+            tooltipOptions={{ position: "top" }}
           />
         )}
 
@@ -557,10 +558,11 @@ export const DocumentList = forwardRef((props, ref) => {
         {canMove && (
           <Button
             icon="pi pi-arrow-right-arrow-left"
-            className="p-button-rounded p-button-info"
+            rounded
+            severity="info"
             onClick={() => handleMoveDocument(rowData)}
             tooltip={t("DocumentList.MoveDocument")}
-            tooltipPosition="top"
+            tooltipOptions={{ position: "top" }}
           />
         )}
 
@@ -568,10 +570,11 @@ export const DocumentList = forwardRef((props, ref) => {
         {rowData.document_id && (
           <Button
             icon="pi pi-history"
-            className="p-button-rounded p-button-secondary"
+            rounded
+            severity="secondary"
             onClick={() => handleViewStatusLogs(rowData)}
             tooltip={t("DocumentList.ViewStatusLogs")}
-            tooltipPosition="top"
+            tooltipOptions={{ position: "top" }}
           />
         )}
 
@@ -579,10 +582,11 @@ export const DocumentList = forwardRef((props, ref) => {
         {canDelete && (
           <Button
             icon="pi pi-trash"
-            className="p-button-rounded p-button-danger"
+            rounded
+            severity="danger"
             onClick={() => handleDelete(rowData)}
             tooltip={t("DocumentList.DeleteDocument")}
-            tooltipPosition="top"
+            tooltipOptions={{ position: "top" }}
           />
         )}
       </div>
@@ -705,17 +709,30 @@ export const DocumentList = forwardRef((props, ref) => {
       statusClass = "no-index";
     }
 
+    // Map status class to PrimeReact Tag severity
+    const getSeverity = (statusClass) => {
+      const severityMap = {
+        "indexed": "success",
+        "converted": "success",
+        "indexing": "info",
+        "queued": "warning",
+        "partial": "warning",
+        "partial-indexed": "secondary",
+        "failed": "danger",
+        "no-index": "secondary"
+      };
+      return severityMap[statusClass] || "secondary";
+    };
+
     return (
-      <span className={`status-badge ${statusClass}`}>
-        {statusText}
-      </span>
+      <Tag value={statusText} severity={getSeverity(statusClass)} />
     );
   };
 
   // Show loading spinner while translations are loading or documents are loading
   if (!ready || (loading && documents.length === 0)) {
     return (
-      <div className="document-list-loading">
+      <div className="flex justify-content-center align-items-center" style={{ minHeight: '300px' }}>
         <ProgressSpinner />
       </div>
     );
@@ -730,43 +747,37 @@ export const DocumentList = forwardRef((props, ref) => {
 
     if (status === "running") {
       // Calculate progress based on current_index (0-based) if available
-      // When processing document i of n, show progress as (i + 0.5) / n to indicate in-progress
-      // Use indexed_documents / total_documents as fallback (for completed documents)
       let progress = 0;
       if (total_documents > 0) {
         if (current_index !== undefined && current_index !== null) {
-          // Show progress as midpoint of current document (e.g., processing doc 0 of 2 = 25%)
           progress = Math.round(((current_index + 0.5) / total_documents) * 100);
         } else {
-          // Fallback to completed documents ratio
           progress = Math.round((indexed_documents / total_documents) * 100);
         }
       }
       return (
-        <div className="batch-index-status running">
+        <div className="flex align-items-center gap-2 px-3 py-2 border-round bg-blue-50 text-blue-700">
           <ProgressSpinner style={{ width: '20px', height: '20px' }} strokeWidth="4" />
-          <span className="status-message">
-            {message || `${t("DocumentList.Indexing")} ${indexed_documents}/${total_documents}`}
-          </span>
-          <span className="status-progress">({progress}%)</span>
+          <span className="text-sm">{message || `${t("DocumentList.Indexing")} ${indexed_documents}/${total_documents}`}</span>
+          <span className="text-sm font-semibold">({progress}%)</span>
         </div>
       );
     }
 
     if (status === "completed") {
       return (
-        <div className="batch-index-status completed">
-          <i className="pi pi-check-circle" />
-          <span className="status-message">{message || t("DocumentList.IndexCompleted")}</span>
+        <div className="flex align-items-center gap-2 px-3 py-2 border-round bg-green-50 text-green-700">
+          <i className="pi pi-check-circle text-green-500" />
+          <span className="text-sm">{message || t("DocumentList.IndexCompleted")}</span>
         </div>
       );
     }
 
     if (status === "error") {
       return (
-        <div className="batch-index-status error">
-          <i className="pi pi-times-circle" />
-          <span className="status-message">{message || t("DocumentList.IndexError")}</span>
+        <div className="flex align-items-center gap-2 px-3 py-2 border-round bg-red-50 text-red-700">
+          <i className="pi pi-times-circle text-red-500" />
+          <span className="text-sm">{message || t("DocumentList.IndexError")}</span>
         </div>
       );
     }
@@ -775,52 +786,67 @@ export const DocumentList = forwardRef((props, ref) => {
   };
 
   return (
-    <div className="document-list-container">
+    <div className="flex flex-column h-full" style={{ backgroundColor: 'var(--surface-card)' }}>
       {/* Workspace Info Header */}
       {currentWorkspace && (
-        <div className="workspace-info-header">
-          <div className="workspace-icon" style={{ backgroundColor: currentWorkspace.color || '#6366f1' }}>
-            <i className={`pi ${getWorkspaceIconClass(currentWorkspace.icon)}`} />
+        <div
+          className="flex align-items-center gap-3 p-3"
+          style={{
+            backgroundColor: 'var(--surface-section)',
+            borderBottom: '1px solid var(--surface-border)'
+          }}
+        >
+          <div
+            className="flex align-items-center justify-content-center border-round"
+            style={{
+              width: '48px',
+              height: '48px',
+              backgroundColor: currentWorkspace.color || 'var(--primary-color)'
+            }}
+          >
+            <i className={`pi ${getWorkspaceIconClass(currentWorkspace.icon)} text-white text-xl`} />
           </div>
-          <div className="workspace-details">
-            <h3 className="workspace-name">{currentWorkspace.name}</h3>
+          <div className="flex-1">
+            <h3 className="m-0 text-lg font-semibold" style={{ color: 'var(--text-color)' }}>{currentWorkspace.name}</h3>
             {currentWorkspace.description && (
-              <p className="workspace-description">{currentWorkspace.description}</p>
+              <p className="m-0 mt-1 text-sm" style={{ color: 'var(--text-color-secondary)' }}>{currentWorkspace.description}</p>
             )}
           </div>
         </div>
       )}
 
-      <div className="document-list-header">
-        <h2>{t("DocumentList.Title")}</h2>
-        <div className="header-actions">
+      <div className="flex justify-content-between align-items-center p-3 pb-2">
+        <h2 className="m-0 text-xl font-semibold" style={{ color: 'var(--text-color)' }}>{t("DocumentList.Title")}</h2>
+        <div className="flex align-items-center gap-3">
           {/* Auto-processing status indicator */}
           {renderBatchIndexStatus()}
           <Button
             icon="pi pi-upload"
             label={t("DocumentList.Upload")}
-            className="p-button-primary upload-btn"
             onClick={() => setShowUploadDialog(true)}
             disabled={!currentWorkspaceId}
             tooltip={!currentWorkspaceId ? t("DocumentList.SelectWorkspaceFirst") : t("DocumentList.UploadDocuments")}
-            tooltipPosition="top"
+            tooltipOptions={{ position: "top" }}
           />
           <Button
             icon="pi pi-refresh"
-            className="p-button-rounded p-button-text"
+            rounded
+            text
             onClick={loadDocuments}
             loading={loading}
             tooltip={t("DocumentList.Refresh")}
-            tooltipPosition="top"
+            tooltipOptions={{ position: "top" }}
           />
         </div>
       </div>
 
       {documents.length === 0 ? (
-        <div className="no-documents">
-          <p>{t("DocumentList.NoDocuments")}</p>
+        <div className="flex flex-column align-items-center justify-content-center flex-1" style={{ color: 'var(--text-color-secondary)' }}>
+          <i className="pi pi-file text-4xl mb-3" />
+          <p className="m-0">{t("DocumentList.NoDocuments")}</p>
         </div>
       ) : (
+        <div className="flex-1 overflow-auto px-3 pb-3">
         <DataTable
           key={tableKey}
           value={documents}
@@ -859,6 +885,7 @@ export const DocumentList = forwardRef((props, ref) => {
             bodyStyle={{ textAlign: "center" }}
           />
         </DataTable>
+        </div>
       )}
 
       {showMarkdownViewer && selectedDocument && (
@@ -883,7 +910,7 @@ export const DocumentList = forwardRef((props, ref) => {
         }}
       >
         {statusLogsLoading ? (
-          <div className="status-logs-loading">
+          <div className="flex justify-content-center align-items-center p-4">
             <ProgressSpinner style={{ width: "30px", height: "30px" }} />
           </div>
         ) : statusLogs.length === 0 ? (
@@ -906,7 +933,6 @@ export const DocumentList = forwardRef((props, ref) => {
         visible={showUploadDialog}
         style={{ width: "50vw", maxWidth: "700px" }}
         onHide={() => setShowUploadDialog(false)}
-        className="upload-dialog"
       >
         <DocumentFileUpload onUploadSuccess={handleUploadSuccess} />
       </Dialog>

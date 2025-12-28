@@ -11,7 +11,6 @@ import sharingService from "../../services/sharingService";
 import documentService from "../../services/documentService";
 import { messageService } from "../../core/message/messageService";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
-import "./WorkspaceSidebar.scss";
 
 export const WorkspaceSidebar = ({
   selectedWorkspace,
@@ -252,61 +251,138 @@ export const WorkspaceSidebar = ({
     return (
       <div
         key={workspace.id}
-        className={`workspace-item ${isSelected ? "selected" : ""} ${workspace.is_system ? "system" : ""}`}
+        className="workspace-item"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          padding: '0.75rem',
+          marginBottom: '0.25rem',
+          cursor: 'pointer',
+          borderLeft: '3px solid',
+          borderLeftColor: isSelected ? 'var(--primary-color)' : 'transparent',
+          borderRadius: '0 6px 6px 0',
+          backgroundColor: isSelected ? 'var(--highlight-bg)' : 'transparent',
+          transition: 'all 0.2s',
+          opacity: workspace.is_system ? 0.9 : 1
+        }}
+        onMouseEnter={(e) => {
+          if (!isSelected) {
+            e.currentTarget.style.backgroundColor = 'var(--surface-hover)';
+          }
+        }}
+        onMouseLeave={(e) => {
+          if (!isSelected) {
+            e.currentTarget.style.backgroundColor = 'transparent';
+          }
+        }}
         onClick={() => onWorkspaceSelect && onWorkspaceSelect(workspace)}
       >
-        <div className="workspace-icon" style={{ color: workspace.color }}>
-          <i className={getIconClass(workspace.icon)} />
-        </div>
-        <div className="workspace-info">
-          <span className="workspace-name">
-            {workspace.name}
+        {/* Icon - fixed width */}
+        <i
+          className={getIconClass(workspace.icon)}
+          style={{
+            fontSize: '1.25rem',
+            color: workspace.is_system ? 'var(--text-color-secondary)' : workspace.color,
+            width: '24px',
+            flexShrink: 0,
+            marginRight: '0.75rem'
+          }}
+        />
+
+        {/* Text content - flexible, truncates */}
+        <div style={{
+          flex: '1 1 0%',
+          minWidth: 0,
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden'
+        }}>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem'
+          }}>
+            <span style={{
+              color: isSelected ? 'var(--primary-color)' : 'var(--text-color)',
+              fontWeight: isSelected ? '600' : '500',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis'
+            }}>
+              {workspace.name}
+            </span>
             {workspace.is_default && !workspace.is_system && (
-              <i className="pi pi-star-fill default-star" title={t("Workspace.Default")} />
+              <i
+                className="pi pi-star-fill"
+                title={t("Workspace.Default")}
+                style={{
+                  fontSize: '0.75rem',
+                  color: '#EAB308',
+                  flexShrink: 0
+                }}
+              />
             )}
-          </span>
-          <span className="workspace-count">
-            {workspace.document_count} {t("Workspace.Documents")}
+          </div>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            color: 'var(--text-color-secondary)',
+            fontSize: '0.875rem'
+          }}>
+            <span>{workspace.document_count} {t("Workspace.Documents")}</span>
             {isSharedWithMe && newSharesCount > 0 && (
-              <Badge value={newSharesCount} severity="danger" className="new-badge" />
+              <Badge value={newSharesCount} severity="danger" />
             )}
-          </span>
+          </div>
         </div>
+
+        {/* Action buttons - fixed width with explicit sizing for theme consistency */}
         {!workspace.is_system && !collapsed && (
-          <div className="workspace-actions">
-            {/* Hide edit button for default "My Documents" workspace */}
+          <div style={{
+            display: 'flex',
+            gap: '0.125rem',
+            flexShrink: 0,
+            marginLeft: '0.25rem'
+          }}>
             {!workspace.is_default && (
               <Button
                 icon="pi pi-pencil"
-                className="p-button-text p-button-sm"
+                text
+                rounded
                 onClick={(e) => {
                   e.stopPropagation();
                   openEditDialog(workspace);
                 }}
                 tooltip={t("Workspace.EditWorkspace")}
+                style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
               />
             )}
             {!workspace.is_default && (
               <Button
                 icon="pi pi-star"
-                className="p-button-text p-button-sm"
+                text
+                rounded
                 onClick={(e) => {
                   e.stopPropagation();
                   handleSetDefault(workspace);
                 }}
                 tooltip={t("Workspace.SetDefault")}
+                style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
               />
             )}
-            {/* Hide delete button if workspace is default or has in-progress documents */}
             {canDelete && (
               <Button
                 icon="pi pi-trash"
-                className="p-button-text p-button-sm p-button-danger"
+                text
+                rounded
+                severity="danger"
                 onClick={(e) => {
                   e.stopPropagation();
                   handleDelete(workspace);
                 }}
                 tooltip={t("Workspace.Delete")}
+                style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
               />
             )}
           </div>
@@ -335,29 +411,29 @@ export const WorkspaceSidebar = ({
 
   // Color option template
   const colorOptionTemplate = (option) => (
-    <div className="color-option">
-      <div className="color-swatch" style={{ backgroundColor: option.value }} />
+    <div className="flex align-items-center gap-2 p-1">
+      <div className="w-1rem h-1rem border-round border-1 surface-border" style={{ backgroundColor: option.value }} />
       <span>{option.name}</span>
     </div>
   );
 
   // Icon option template
   const iconOptionTemplate = (option) => (
-    <div className="icon-option">
+    <div className="flex align-items-center gap-2 p-1">
       <i className={option.icon} />
       <span>{option.name}</span>
     </div>
   );
 
   return (
-    <div className={`workspace-sidebar ${collapsed ? "collapsed" : ""}`}>
-
+    <div className="flex flex-column h-full">
       {/* Header */}
-      <div className="sidebar-header">
-        <h3>{t("Workspace.Title")}</h3>
+      <div className="flex justify-content-between align-items-center p-3 border-bottom-1 surface-border">
+        <span className="font-semibold text-lg" style={{ color: 'var(--text-color)' }}>{t("Workspace.Title")}</span>
         <Button
           icon="pi pi-plus"
-          className="p-button-text p-button-sm"
+          text
+          rounded
           onClick={() => {
             resetForm();
             setShowCreateDialog(true);
@@ -367,10 +443,10 @@ export const WorkspaceSidebar = ({
       </div>
 
       {/* Workspace list */}
-      <div className="workspace-list">
+      <div className="flex-1 overflow-auto py-2">
         {loading ? (
-          <div className="loading-indicator">
-            <i className="pi pi-spin pi-spinner" />
+          <div className="flex justify-content-center p-4" style={{ color: 'var(--text-color-secondary)' }}>
+            <i className="pi pi-spin pi-spinner text-xl" />
           </div>
         ) : (
           <>
@@ -381,7 +457,7 @@ export const WorkspaceSidebar = ({
 
             {/* System workspaces divider */}
             {workspaces.some(ws => ws.is_system) && (
-              <div className="workspace-divider" />
+              <div className="border-top-1 surface-border mx-3 my-2" />
             )}
 
             {/* System workspaces */}
@@ -399,7 +475,6 @@ export const WorkspaceSidebar = ({
         header={t("Workspace.CreateWorkspace")}
         footer={dialogFooter(handleCreate, () => setShowCreateDialog(false))}
         style={{ width: "450px" }}
-        className="workspace-dialog"
       >
         <div className="p-fluid">
           <div className="field">
@@ -464,7 +539,6 @@ export const WorkspaceSidebar = ({
           setEditingWorkspace(null);
         })}
         style={{ width: "450px" }}
-        className="workspace-dialog"
       >
         <div className="p-fluid">
           <div className="field">
@@ -523,30 +597,32 @@ export const WorkspaceSidebar = ({
         }}
         header={t("Workspace.DeleteTitle")}
         style={{ width: "500px" }}
-        className="workspace-dialog delete-options-dialog"
       >
-        <div className="delete-options-content">
-          <p className="delete-warning">
-            <i className="pi pi-exclamation-triangle" />
-            {t("Workspace.DeleteOptionsMessage", { name: workspaceToDelete?.name })}
-          </p>
-          <div className="delete-options-buttons">
+        <div>
+          <div className="flex align-items-start gap-3 mb-4 p-3 bg-yellow-50 border-round border-1 border-yellow-200">
+            <i className="pi pi-exclamation-triangle text-xl text-yellow-600" />
+            <span className="text-yellow-900">{t("Workspace.DeleteOptionsMessage", { name: workspaceToDelete?.name })}</span>
+          </div>
+          <div className="flex flex-column gap-3">
             <Button
               label={t("Workspace.DeleteAndRemoveFiles")}
               icon="pi pi-trash"
-              className="p-button-danger delete-option-btn"
+              severity="danger"
+              className="w-full justify-content-start"
               onClick={() => executeDeleteWorkspace(true)}
             />
             <Button
               label={t("Workspace.DeleteAndMoveFiles")}
               icon="pi pi-folder"
-              className="p-button-warning delete-option-btn"
+              severity="warning"
+              className="w-full justify-content-start"
               onClick={() => executeDeleteWorkspace(false)}
             />
             <Button
               label={t("Workspace.Cancel")}
               icon="pi pi-times"
-              className="p-button-text delete-option-btn"
+              text
+              className="w-full justify-content-start"
               onClick={() => {
                 setShowDeleteOptionsDialog(false);
                 setWorkspaceToDelete(null);

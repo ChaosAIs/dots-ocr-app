@@ -77,9 +77,16 @@ class ChatPreferences(BaseModel):
     lastUpdated: Optional[str] = None
 
 
+class AppPreferences(BaseModel):
+    """Application-wide preferences."""
+    theme: str = Field(default="saga-blue", description="Selected PrimeReact theme")
+    lastUpdated: Optional[str] = None
+
+
 class UserPreferences(BaseModel):
     """Full user preferences object."""
     chat: Optional[ChatPreferences] = None
+    app: Optional[AppPreferences] = None
 
     class Config:
         extra = "allow"  # Allow additional preference keys
@@ -94,6 +101,11 @@ class UpdateChatPreferencesRequest(BaseModel):
     """Request to update chat preferences."""
     selectedWorkspaceIds: list[str] = Field(default_factory=list)
     selectedDocumentIds: list[str] = Field(default_factory=list)
+
+
+class UpdateThemePreferenceRequest(BaseModel):
+    """Request to update theme preference."""
+    theme: str = Field(..., description="PrimeReact theme name")
 
 
 class PreferencesResponse(BaseModel):

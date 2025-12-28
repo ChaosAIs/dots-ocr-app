@@ -49,9 +49,11 @@
   },
   "scripts": {
     "start": "react-scripts start",
-    "build": "react-scripts build",
+    "build": "npm run copy-themes && react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
+    "postinstall": "npm run copy-themes",
+    "copy-themes": "node scripts/copy-themes.js",
     "build:local_nocors": "npx dotenv-cli -e .env.local.nocors npm run build",
     "build:dev": "npx dotenv-cli -e .env.development npm run build",
     "build:prod": "npx dotenv-cli -e .env.production npm run build",

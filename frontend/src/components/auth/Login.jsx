@@ -7,19 +7,18 @@ import { Button } from 'primereact/button';
 import { Checkbox } from 'primereact/checkbox';
 import { Toast } from 'primereact/toast';
 import { useAuth } from '../../core/auth/components/authProvider';
-import './Login.scss';
 
 export const Login = () => {
     const navigate = useNavigate();
     const { login } = useAuth();
     const toast = React.useRef(null);
-    
+
     const [formData, setFormData] = useState({
         username: '',
         password: '',
         rememberMe: false
     });
-    
+
     const [loading, setLoading] = useState(false);
 
     const handleChange = (e) => {
@@ -32,7 +31,7 @@ export const Login = () => {
 
     const handleSubmit = async (e) => {
         e.preventDefault();
-        
+
         if (!formData.username || !formData.password) {
             toast.current.show({
                 severity: 'warn',
@@ -82,19 +81,19 @@ export const Login = () => {
     };
 
     return (
-        <div className="login-container">
+        <div className="flex align-items-center justify-content-center min-h-screen surface-ground p-4">
             <Toast ref={toast} />
-            
-            <Card className="login-card">
-                <div className="login-header">
-                    <i className="pi pi-sign-in" style={{ fontSize: '3rem', color: '#667eea' }}></i>
-                    <h2>Welcome Back</h2>
-                    <p>Sign in to your account</p>
+
+            <Card className="w-full md:w-25rem shadow-4">
+                <div className="text-center mb-4">
+                    <i className="pi pi-sign-in text-4xl text-primary mb-3" />
+                    <h2 className="m-0 mb-2 text-color">Welcome Back</h2>
+                    <p className="m-0 text-500">Sign in to your account</p>
                 </div>
 
-                <form onSubmit={handleSubmit} className="login-form">
-                    <div className="p-field">
-                        <label htmlFor="username">Username or Email</label>
+                <form onSubmit={handleSubmit}>
+                    <div className="field mb-4">
+                        <label htmlFor="username" className="block font-medium mb-2 text-color">Username or Email</label>
                         <InputText
                             id="username"
                             name="username"
@@ -106,8 +105,8 @@ export const Login = () => {
                         />
                     </div>
 
-                    <div className="p-field">
-                        <label htmlFor="password">Password</label>
+                    <div className="field mb-4">
+                        <label htmlFor="password" className="block font-medium mb-2 text-color">Password</label>
                         <Password
                             id="password"
                             name="password"
@@ -120,14 +119,14 @@ export const Login = () => {
                         />
                     </div>
 
-                    <div className="p-field-checkbox">
+                    <div className="flex align-items-center mb-4">
                         <Checkbox
                             inputId="rememberMe"
                             name="rememberMe"
                             checked={formData.rememberMe}
                             onChange={handleChange}
                         />
-                        <label htmlFor="rememberMe">Remember me</label>
+                        <label htmlFor="rememberMe" className="ml-2 text-500">Remember me</label>
                     </div>
 
                     <Button
@@ -138,10 +137,10 @@ export const Login = () => {
                         loading={loading}
                     />
 
-                    <div className="login-footer">
-                        <p>
+                    <div className="text-center mt-4">
+                        <p className="m-0 text-500">
                             Don't have an account?{' '}
-                            <Link to="/register" className="register-link">
+                            <Link to="/register" className="text-primary font-semibold no-underline hover:underline">
                                 Sign up
                             </Link>
                         </p>

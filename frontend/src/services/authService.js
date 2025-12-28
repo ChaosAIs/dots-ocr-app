@@ -414,6 +414,56 @@ class AuthService {
             return { success: false, error: error.message || 'Network error' };
         }
     }
+
+    /**
+     * Get theme preference
+     */
+    async getThemePreference() {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/preferences/theme`, {
+                method: 'GET',
+                headers: {
+                    ...this.getAuthHeaders(),
+                },
+            });
+
+            if (!response.ok) {
+                return { success: false, error: 'Failed to get theme preference' };
+            }
+
+            const data = await response.json();
+            return { success: true, theme: data.theme };
+        } catch (error) {
+            console.error('Get theme preference error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
+
+    /**
+     * Update theme preference
+     */
+    async updateThemePreference(theme) {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/preferences/theme`, {
+                method: 'PATCH',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...this.getAuthHeaders(),
+                },
+                body: JSON.stringify({ theme }),
+            });
+
+            if (!response.ok) {
+                return { success: false, error: 'Failed to update theme preference' };
+            }
+
+            const data = await response.json();
+            return { success: true, preferences: data.preferences };
+        } catch (error) {
+            console.error('Update theme preference error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
 }
 
 // Export singleton instance

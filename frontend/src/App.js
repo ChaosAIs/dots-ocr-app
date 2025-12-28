@@ -1,5 +1,5 @@
-import React from "react";
-import "primereact/resources/themes/saga-blue/theme.css";
+import React, { useEffect } from "react";
+// Theme CSS is loaded dynamically via index.html and ThemePicker
 import "primereact/resources/primereact.min.css";
 import "primeicons/primeicons.css";
 import "./styling/primeicons.css";
@@ -20,9 +20,16 @@ import { AppRoutes } from "./routes/routes";
 import { NavBar } from "./components/base/navbar";
 import APP_CONFIG from "./core/config/appConfig";
 import MessageDialog from "./core/message/components/messageDialog";
+import { initializeTheme } from "./components/base/ThemePicker";
 
 // Import debug auth utilities to make them globally available
 import "./core/auth/debugAuth";
+
+// Initialize theme from localStorage on app load
+const savedTheme = localStorage.getItem("app-theme");
+if (savedTheme) {
+  initializeTheme(savedTheme);
+}
 
 // Component to conditionally render navbar based on current route
 const ConditionalNavBar = () => {

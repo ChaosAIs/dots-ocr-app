@@ -11,6 +11,7 @@ import { bindActionCreators } from "redux";
 import { actionCreators } from "../../redux/actionCreatorsExport";
 import { Role } from "../../core/enumertions/role";
 import { useNavigate } from "react-router-dom";
+import { ThemePicker } from "./ThemePicker";
 
 export const NavBar = () => {
   //
@@ -101,21 +102,23 @@ export const NavBar = () => {
   );
 
   const start = (
-    <div className="navbar-brand-container">
-      <span className="navbar-brand-text">       
-        {t("Nav.DocumentConversion")}
-      </span>
-    </div>
+    <span className="text-xl font-semibold text-primary white-space-nowrap">
+      {t("Nav.DocumentConversion")}
+    </span>
   );
+
   const end = (
-    <>
-      {isAuthorized && <span className="p-2">{user?.full_name || user?.username || "User"}</span>}
+    <div className="flex align-items-center gap-2">
+      {isAuthorized && (
+        <span className="font-medium text-color">{user?.full_name || user?.username || "User"}</span>
+      )}
       {languageDropdown}
+      {isAuthorized && <ThemePicker />}
       {isAuthorized ? (
         <Button
           label={t("Nav.Logout")}
           rounded
-          className="p-button-gray p-button-rounded"
+          severity="secondary"
           title={t("Nav.Logout")}
           onClick={logout}
         />
@@ -123,25 +126,18 @@ export const NavBar = () => {
         <Button
           label="Login"
           rounded
-          className="p-button-primary p-button-rounded"
           title="Login"
           onClick={() => navigate('/login')}
         />
       )}
-    </>
+    </div>
   );
 
   return (
-    <>
-      <div className="navbar-wrapper">
-        <div className="navbar-container">
-          <Menubar
-            model={items.filter((i) => i.visible === true)}
-            start={start}
-            end={end}
-          ></Menubar>
-        </div>
-      </div>
-    </>
+    <Menubar
+      model={items.filter((i) => i.visible === true)}
+      start={start}
+      end={end}
+    />
   );
 };

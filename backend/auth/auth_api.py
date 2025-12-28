@@ -13,7 +13,8 @@ from db.user_repository import UserRepository
 from auth.models import (
     RegisterRequest, LoginRequest, TokenResponse, RefreshTokenRequest,
     ChangePasswordRequest, UserResponse, MessageResponse,
-    UpdatePreferencesRequest, UpdateChatPreferencesRequest, PreferencesResponse
+    UpdatePreferencesRequest, UpdateChatPreferencesRequest,
+    UpdateThemePreferenceRequest, PreferencesResponse
 )
 from auth.dependencies import get_current_active_user, require_admin
 from auth.password_utils import PasswordUtils
@@ -391,6 +392,46 @@ def get_chat_preferences(
 
     return {
         "chat": chat_prefs,
+        "success": True
+    }
+
+
+@router.patch("/preferences/theme", response_model=PreferencesResponse)
+def update_theme_preference(
+    request: UpdateThemePreferenceRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update theme preference."""
+    user_repo = UserRepository(db)
+
+    app_prefs = {
+        "theme": request.theme
+    }
+
+    preferences = user_repo.update_app_preferences(current_user.id, app_prefs)
+
+    if preferences is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    logger.info(f"Updated theme preference for user: {current_user.username} to {request.theme}")
+    return PreferencesResponse(preferences=preferences)
+
+
+@router.get("/preferences/theme")
+def get_theme_preference(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get theme preference."""
+    user_repo = UserRepository(db)
+    app_prefs = user_repo.get_app_preferences(current_user.id)
+
+    return {
+        "theme": app_prefs.get("theme", "saga-blue") if app_prefs else "saga-blue",
         "success": True
     }
 

@@ -2,7 +2,6 @@ import { useCallback } from "react";
 import { DocumentList } from "../components/documents/documentList";
 import { WorkspaceSidebar } from "../components/workspace/WorkspaceSidebar";
 import { useWorkspace } from "../contexts/WorkspaceContext";
-import "./home.scss";
 
 export const Home = () => {
   // Use centralized workspace context
@@ -32,21 +31,33 @@ export const Home = () => {
   const showDocumentList = hasWorkspaces && hasSelectedWorkspace;
 
   return (
-    <div className="home-container">
-      <WorkspaceSidebar
-        selectedWorkspace={currentWorkspace}
-        onWorkspaceSelect={handleWorkspaceSelect}
-        onWorkspaceChange={handleWorkspaceChange}
-      />
-      <div className="home-content">
+    <div className="flex" style={{ height: 'calc(100vh - 60px)', backgroundColor: 'var(--surface-ground)' }}>
+      {/* Sidebar */}
+      <div
+        className="flex-shrink-0 flex flex-column"
+        style={{
+          width: '280px',
+          backgroundColor: 'var(--surface-card)',
+          borderRight: '1px solid var(--surface-border)'
+        }}
+      >
+        <WorkspaceSidebar
+          selectedWorkspace={currentWorkspace}
+          onWorkspaceSelect={handleWorkspaceSelect}
+          onWorkspaceChange={handleWorkspaceChange}
+        />
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 overflow-auto" style={{ backgroundColor: 'var(--surface-card)' }}>
         {/* Only show DocumentList when there are workspaces and one is selected */}
         {!loading && showDocumentList && <DocumentList />}
 
         {/* Show message when no workspaces exist */}
         {!loading && !hasWorkspaces && (
-          <div className="no-workspace-message">
-            <i className="pi pi-folder-open" style={{ fontSize: '3rem', color: '#ccc', marginBottom: '1rem' }} />
-            <p>No workspaces yet. Create a workspace to start uploading documents.</p>
+          <div className="flex flex-column align-items-center justify-content-center" style={{ minHeight: '300px' }}>
+            <i className="pi pi-folder-open text-4xl mb-3" style={{ color: 'var(--text-color-secondary)' }} />
+            <p className="m-0" style={{ color: 'var(--text-color-secondary)' }}>No workspaces yet. Create a workspace to start uploading documents.</p>
           </div>
         )}
       </div>

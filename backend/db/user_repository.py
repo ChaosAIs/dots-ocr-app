@@ -408,3 +408,31 @@ class UserRepository:
         chat_preferences['lastUpdated'] = datetime.utcnow().isoformat()
         return self.update_preference_key(user_id, 'chat', chat_preferences)
 
+    def get_app_preferences(self, user_id: UUID) -> Dict[str, Any]:
+        """
+        Get app-specific preferences (convenience method).
+
+        Args:
+            user_id: The user's UUID
+
+        Returns:
+            App preferences dictionary
+        """
+        preferences = self.get_user_preferences(user_id)
+        return preferences.get('app', {})
+
+    def update_app_preferences(self, user_id: UUID, app_preferences: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Update app-specific preferences (convenience method).
+
+        Args:
+            user_id: The user's UUID
+            app_preferences: App preferences to set
+
+        Returns:
+            Updated full preferences, or None if user not found
+        """
+        # Add timestamp to app preferences
+        app_preferences['lastUpdated'] = datetime.utcnow().isoformat()
+        return self.update_preference_key(user_id, 'app', app_preferences)
+

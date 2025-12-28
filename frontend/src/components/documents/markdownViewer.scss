@@ -1,13 +1,13 @@
 .markdown-viewer-dialog {
   :deep(.p-dialog-header) {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    border-bottom: 2px solid #667eea;
+    background: linear-gradient(135deg, var(--primary-400) 0%, var(--primary-600) 100%);
+    border-bottom: 2px solid var(--primary-color);
     padding: 16px 20px;
   }
 
   :deep(.p-dialog-content) {
     padding: 0;
-    overflow: auto; // Changed from hidden to auto to enable scrolling
+    overflow: auto;
     height: 100%;
   }
 
@@ -27,7 +27,7 @@
   span {
     flex: 1;
     font-weight: 600;
-    color: white;
+    color: var(--primary-color-text);
     word-break: break-word;
   }
 
@@ -46,8 +46,8 @@
   gap: 0;
 
   :deep(.p-sidebar) {
-    background-color: #f8f9fa;
-    border-right: 1px solid #ddd;
+    background-color: var(--surface-50);
+    border-right: 1px solid var(--surface-border);
     padding: 0;
     z-index: 1000;
   }
@@ -56,8 +56,8 @@
 // TOC Panel on the Left (for multi-page documents)
 .markdown-toc-panel {
   width: 250px;
-  background-color: #f8f9fa;
-  border-right: 1px solid #ddd;
+  background-color: var(--surface-50);
+  border-right: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -65,14 +65,14 @@
 
   .toc-panel-header {
     padding: 16px;
-    border-bottom: 1px solid #ddd;
-    background-color: #f0f2f5;
+    border-bottom: 1px solid var(--surface-border);
+    background-color: var(--surface-100);
 
     h3 {
       margin: 0;
       font-size: 14px;
       font-weight: 600;
-      color: #333;
+      color: var(--text-color);
     }
   }
 
@@ -86,7 +86,7 @@
       cursor: pointer;
       border-left: 3px solid transparent;
       transition: all 0.2s ease;
-      color: #555;
+      color: var(--text-color-secondary);
       font-size: 13px;
       line-height: 1.4;
       display: flex;
@@ -95,9 +95,9 @@
       gap: 8px;
 
       &:hover {
-        background-color: #e8eaed;
-        border-left-color: #667eea;
-        color: #333;
+        background-color: var(--surface-200);
+        border-left-color: var(--primary-color);
+        color: var(--text-color);
       }
 
       .toc-title {
@@ -109,8 +109,8 @@
 
       .toc-page-badge {
         flex-shrink: 0;
-        background-color: #667eea;
-        color: white;
+        background-color: var(--primary-color);
+        color: var(--primary-color-text);
         font-size: 10px;
         font-weight: 600;
         padding: 2px 6px;
@@ -122,7 +122,7 @@
       &.toc-level-1 {
         padding-left: 16px;
         font-weight: 600;
-        color: #333;
+        color: var(--text-color);
       }
 
       &.toc-level-2 {
@@ -160,11 +160,11 @@
     }
 
     &::-webkit-scrollbar-thumb {
-      background: #ccc;
+      background: var(--surface-400);
       border-radius: 3px;
 
       &:hover {
-        background: #999;
+        background: var(--surface-500);
       }
     }
   }
@@ -173,8 +173,8 @@
 // Image Panel in the Middle
 .markdown-image-panel {
   width: 35%;
-  background-color: #f8f9fa;
-  border-right: 1px solid #ddd;
+  background-color: var(--surface-50);
+  border-right: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -182,14 +182,14 @@
 
   .image-panel-header {
     padding: 16px;
-    border-bottom: 1px solid #ddd;
-    background-color: #f0f2f5;
+    border-bottom: 1px solid var(--surface-border);
+    background-color: var(--surface-100);
 
     h3 {
       margin: 0;
       font-size: 14px;
       font-weight: 600;
-      color: #333;
+      color: var(--text-color);
     }
   }
 
@@ -209,9 +209,9 @@
       .page-label {
         font-size: 12px;
         font-weight: 600;
-        color: #666;
+        color: var(--text-color-secondary);
         padding: 4px 8px;
-        background-color: #e8eaed;
+        background-color: var(--surface-200);
         border-radius: 4px;
         display: inline-block;
         align-self: flex-start;
@@ -220,7 +220,7 @@
       .page-image {
         width: 100%;
         height: auto;
-        border: 1px solid #ddd;
+        border: 1px solid var(--surface-border);
         border-radius: 6px;
         box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         transition: all 0.3s ease;
@@ -242,15 +242,15 @@
     }
 
     &::-webkit-scrollbar-track {
-      background: #f1f1f1;
+      background: var(--surface-100);
     }
 
     &::-webkit-scrollbar-thumb {
-      background: #888;
+      background: var(--surface-400);
       border-radius: 4px;
 
       &:hover {
-        background: #555;
+        background: var(--surface-500);
       }
     }
   }
@@ -258,8 +258,8 @@
 
 .markdown-toc-sidebar {
   width: 250px;
-  background-color: #f8f9fa;
-  border-right: 1px solid #ddd;
+  background-color: var(--surface-50);
+  border-right: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
@@ -267,14 +267,14 @@
 
   .toc-header {
     padding: 16px;
-    border-bottom: 1px solid #ddd;
-    background-color: #f0f2f5;
+    border-bottom: 1px solid var(--surface-border);
+    background-color: var(--surface-100);
 
     h3 {
       margin: 0;
       font-size: 14px;
       font-weight: 600;
-      color: #333;
+      color: var(--text-color);
     }
   }
 
@@ -288,20 +288,20 @@
       cursor: pointer;
       border-left: 3px solid transparent;
       transition: all 0.2s ease;
-      color: #555;
+      color: var(--text-color-secondary);
       font-size: 13px;
       line-height: 1.4;
 
       &:hover {
-        background-color: #e8eaed;
-        border-left-color: #667eea;
-        color: #333;
+        background-color: var(--surface-200);
+        border-left-color: var(--primary-color);
+        color: var(--text-color);
       }
 
       &.toc-level-1 {
         padding-left: 16px;
         font-weight: 600;
-        color: #333;
+        color: var(--text-color);
       }
 
       &.toc-level-2 {
@@ -335,35 +335,35 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  overflow: auto; // Changed from hidden to auto to enable vertical scrollbar
-  background-color: white;
+  overflow: auto;
+  background-color: var(--surface-card);
 
   .search-bar {
     display: flex;
     align-items: center;
     gap: 8px;
     padding: 12px 20px;
-    border-bottom: 1px solid #e0e0e0;
-    background-color: #fafafa;
+    border-bottom: 1px solid var(--surface-border);
+    background-color: var(--surface-50);
 
     .search-input {
       flex: 1;
       padding: 8px 12px;
-      border: 1px solid #ddd;
+      border: 1px solid var(--surface-border);
       border-radius: 4px;
       font-size: 14px;
 
       &:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        border-color: var(--primary-color);
+        box-shadow: 0 0 0 3px var(--primary-100);
       }
     }
 
     :deep(.p-button) {
-      color: #999;
+      color: var(--text-color-secondary);
 
       &:hover {
-        background-color: #f0f0f0;
+        background-color: var(--surface-100);
       }
     }
   }
@@ -383,10 +383,10 @@
       sans-serif;
     font-size: 16px;
     line-height: 1.6;
-    color: #333;
+    color: var(--text-color);
 
     mark {
-      background-color: #fff3cd;
+      background-color: var(--yellow-100);
       padding: 2px 4px;
       border-radius: 2px;
       font-weight: 500;
@@ -406,13 +406,13 @@
 
     h1 {
       font-size: 32px;
-      border-bottom: 1px solid #eaecef;
+      border-bottom: 1px solid var(--surface-border);
       padding-bottom: 0.3em;
     }
 
     h2 {
       font-size: 24px;
-      border-bottom: 1px solid #eaecef;
+      border-bottom: 1px solid var(--surface-border);
       padding-bottom: 0.3em;
     }
 
@@ -430,7 +430,7 @@
 
     h6 {
       font-size: 12px;
-      color: #6a737d;
+      color: var(--text-color-secondary);
     }
 
     p {
@@ -449,52 +449,52 @@
 
     blockquote {
       padding: 0 1em;
-      color: #6a737d;
-      border-left: 0.25em solid #dfe2e5;
+      color: var(--text-color-secondary);
+      border-left: 0.25em solid var(--surface-border);
       margin: 0 0 16px 0;
     }
 
     .inline-code {
-      background-color: #f6f8fa;
+      background-color: var(--surface-100);
       padding: 0.2em 0.4em;
       margin: 0;
       font-size: 85%;
       border-radius: 3px;
       font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
         monospace;
-      color: #d73a49;
+      color: var(--red-600);
     }
 
     .code-block-wrapper {
       margin-bottom: 16px;
       border-radius: 6px;
       overflow: hidden;
-      border: 1px solid #e1e4e8;
-      background-color: #282c34;
+      border: 1px solid var(--surface-border);
+      background-color: var(--surface-900);
 
       .code-block-header {
         display: flex;
         justify-content: space-between;
         align-items: center;
         padding: 8px 12px;
-        background-color: #21252b;
-        border-bottom: 1px solid #3e4451;
+        background-color: var(--surface-800);
+        border-bottom: 1px solid var(--surface-700);
 
         .language-label {
           font-size: 12px;
           font-weight: 600;
-          color: #abb2bf;
+          color: var(--surface-300);
           text-transform: uppercase;
           letter-spacing: 0.5px;
         }
 
         :deep(.p-button) {
-          color: #abb2bf;
+          color: var(--surface-300);
           padding: 4px 8px;
 
           &:hover {
             background-color: rgba(255, 255, 255, 0.1);
-            color: #61afef;
+            color: var(--blue-400);
           }
         }
       }
@@ -502,7 +502,7 @@
       :deep(.code-block) {
         margin: 0;
         padding: 16px;
-        background-color: #282c34;
+        background-color: var(--surface-900);
         border-radius: 0;
 
         code {
@@ -511,7 +511,7 @@
           margin: 0;
           font-size: 100%;
           border-radius: 0;
-          color: #abb2bf;
+          color: var(--surface-200);
           font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo,
             monospace;
         }
@@ -526,21 +526,21 @@
       th,
       td {
         padding: 6px 13px;
-        border: 1px solid #dfe2e5;
+        border: 1px solid var(--surface-border);
       }
 
       th {
-        background-color: #f6f8fa;
+        background-color: var(--surface-100);
         font-weight: 600;
       }
 
       tr:nth-child(2n) {
-        background-color: #f6f8fa;
+        background-color: var(--surface-50);
       }
     }
 
     a {
-      color: #0366d6;
+      color: var(--primary-color);
       text-decoration: none;
 
       &:hover {
@@ -553,7 +553,7 @@
       height: auto;
       margin: 16px 0;
       border-radius: 6px;
-      border: 1px solid #e1e4e8;
+      border: 1px solid var(--surface-border);
       cursor: pointer;
       transition: all 0.3s ease;
       box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
@@ -568,17 +568,17 @@
       height: 0.25em;
       padding: 0;
       margin: 24px 0;
-      background-color: #e1e4e8;
+      background-color: var(--surface-border);
       border: 0;
     }
 
     .page-footer {
       margin-top: 40px;
       padding-top: 16px;
-      border-top: 1px solid #e1e4e8;
+      border-top: 1px solid var(--surface-border);
       text-align: right;
       font-size: 12px;
-      color: #999;
+      color: var(--text-color-secondary);
       font-weight: 500;
     }
 
@@ -625,15 +625,15 @@
   }
 
   &::-webkit-scrollbar-track {
-    background: #f1f1f1;
+    background: var(--surface-100);
   }
 
   &::-webkit-scrollbar-thumb {
-    background: #888;
+    background: var(--surface-400);
     border-radius: 4px;
 
     &:hover {
-      background: #555;
+      background: var(--surface-500);
     }
   }
 
@@ -643,15 +643,15 @@
     }
 
     &::-webkit-scrollbar-track {
-      background: #f1f1f1;
+      background: var(--surface-100);
     }
 
     &::-webkit-scrollbar-thumb {
-      background: #888;
+      background: var(--surface-400);
       border-radius: 4px;
 
       &:hover {
-        background: #555;
+        background: var(--surface-500);
       }
     }
   }
@@ -669,11 +669,11 @@
     }
 
     &::-webkit-scrollbar-thumb {
-      background: #ccc;
+      background: var(--surface-400);
       border-radius: 3px;
 
       &:hover {
-        background: #999;
+        background: var(--surface-500);
       }
     }
   }
@@ -690,7 +690,7 @@
     display: flex;
     justify-content: center;
     align-items: center;
-    background-color: #f5f5f5;
+    background-color: var(--surface-ground);
     min-height: 400px;
     max-height: 80vh;
     overflow: auto;
@@ -713,7 +713,7 @@
 
     .p-tabview-panels {
       flex: 1;
-      overflow: auto; // Changed from hidden to auto to enable scrolling
+      overflow: auto;
       padding: 0;
     }
 
@@ -721,7 +721,7 @@
       height: 100%;
       display: flex;
       flex-direction: column;
-      overflow: auto; // Added overflow auto to enable scrolling
+      overflow: auto;
     }
   }
 }
@@ -732,14 +732,14 @@
   align-items: center;
   gap: 16px;
   padding: 12px 16px;
-  background-color: #f8f9fa;
-  border-bottom: 1px solid #ddd;
+  background-color: var(--surface-50);
+  border-bottom: 1px solid var(--surface-border);
 
   .unsaved-indicator {
     display: flex;
     align-items: center;
     gap: 6px;
-    color: #f59e0b;
+    color: var(--yellow-500);
     font-size: 14px;
     font-weight: 500;
 
@@ -754,7 +754,7 @@
   flex: 1;
   overflow: hidden;
   padding: 16px;
-  background-color: #fff;
+  background-color: var(--surface-card);
 
   .markdown-editor {
     width: 100%;
@@ -762,15 +762,15 @@
     font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
     font-size: 14px;
     line-height: 1.6;
-    border: 1px solid #ddd;
+    border: 1px solid var(--surface-border);
     border-radius: 4px;
     padding: 12px;
     resize: none;
 
     &:focus {
       outline: none;
-      border-color: #667eea;
-      box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.1);
+      border-color: var(--primary-color);
+      box-shadow: 0 0 0 2px var(--primary-100);
     }
   }
 }
@@ -779,7 +779,7 @@
 .markdown-viewer-content {
   .search-bar {
     padding: 12px 16px;
-    background-color: #f8f9fa;
-    border-bottom: 1px solid #ddd;
+    background-color: var(--surface-50);
+    border-bottom: 1px solid var(--surface-border);
   }
 }
