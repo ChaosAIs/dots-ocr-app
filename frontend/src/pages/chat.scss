@@ -1,8 +1,16 @@
+// Override body-area constraints for chat page to use full width
+.body-area:has(.chat-page-container) {
+  width: 100% !important;
+  padding: 0.75rem !important;
+  margin: 0 !important;
+}
+
 .chat-page-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 60px); // Adjust for navbar height
-  padding: 1rem;
+  height: calc(100vh - 60px - 1.5rem); // Adjust for navbar height and padding
+  width: 100%;
+  padding: 0;
   background-color: var(--surface-ground);
 }
 
@@ -10,12 +18,10 @@
   flex: 1;
   display: flex;
   flex-direction: column;
-  max-width: 1200px;
   width: 100%;
-  margin: 0 auto;
   background-color: var(--surface-card);
   border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   overflow: hidden;
 }
 

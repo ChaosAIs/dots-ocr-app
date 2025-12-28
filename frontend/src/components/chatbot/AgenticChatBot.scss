@@ -6,7 +6,8 @@
 }
 
 .chatbot-sidebar {
-  width: 320px;
+  width: 360px;
+  min-width: 360px;
   flex-shrink: 0;
   border-right: 1px solid var(--surface-border);
   background-color: var(--surface-card);

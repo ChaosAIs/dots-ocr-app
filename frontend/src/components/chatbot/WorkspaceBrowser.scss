@@ -26,8 +26,8 @@
 .workspace-browser-panel {
   display: flex;
   flex-direction: column;
-  width: 280px;
-  min-width: 280px;
+  width: 340px;
+  min-width: 340px;
   height: 100%;
   background-color: var(--surface-section);
   border-left: 1px solid var(--surface-border);
@@ -282,8 +282,6 @@
     margin-bottom: 0.5rem;
     padding: 0.25rem 0;
     border-left: 2px solid var(--surface-200);
-    max-height: 200px;
-    overflow-y: auto;
 
     .documents-loading,
     .documents-empty {
@@ -417,8 +415,8 @@
 // Responsive adjustments
 @media (max-width: 1200px) {
   .workspace-browser-panel {
-    width: 240px;
-    min-width: 240px;
+    width: 300px;
+    min-width: 300px;
   }
 }
 
