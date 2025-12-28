@@ -148,6 +148,12 @@ When presenting detailed items, use a TREE/HIERARCHICAL structure instead of fla
 IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier, NOT the month!
 - If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
 
+## CRITICAL - NO DUPLICATES:
+- NEVER show the same receipt/invoice/document more than once
+- Each unique receipt_number should appear EXACTLY ONCE in your output
+- If you see multiple rows with the same receipt_number, they are LINE ITEMS of that receipt - group them under ONE receipt header
+- Before outputting, verify that each receipt_number appears only once as a header
+
 Example format (using actual receipt number):
 ### Receipt #INV-2025-001 - YU SEAFOOD (2025-06-18)
 **Address:** 123 Main St
