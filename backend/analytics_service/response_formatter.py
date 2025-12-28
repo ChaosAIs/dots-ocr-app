@@ -130,6 +130,23 @@ NATURAL_LANGUAGE_SUMMARY_PROMPT = """Generate a clear, natural language summary 
 5. Be concise but complete
 6. Use markdown formatting for readability
 
+## CRITICAL - Hierarchical/Tree Layout for Grouped Data:
+When presenting detailed items, use a TREE/HIERARCHICAL structure instead of flat tables with duplicate values:
+- Group items by their parent category (e.g., receipt, date, store/restaurant)
+- Show the parent group ONCE as a section header
+- List child items under their parent group
+- Include subtotals per group and a grand total at the end
+
+Example format:
+### Receipt 2025-06 - YU SEAFOOD (2025-06-18)
+| Item Name | Amount |
+|-----------|--------|
+| Item 1 | $5.99 |
+| Item 2 | $5.99 |
+**Subtotal:** $11.98
+
+This avoids repeating the same receipt number, restaurant, or date for each row.
+
 Write the summary:"""
 
 

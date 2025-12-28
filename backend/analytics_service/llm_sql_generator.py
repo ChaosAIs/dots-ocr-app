@@ -1501,10 +1501,41 @@ FROM expanded_items
 2. If they asked for minimum/maximum values, clearly identify who has the min and max amounts for each year/grouping
 3. Format amounts with $ and proper number formatting (e.g., $1,234.56)
 {detail_instruction}
-5. Use markdown formatting for readability (use tables for listing multiple items)
-6. Always include a grand total at the end if showing amounts
+5. Use markdown formatting for readability
 
-Write the {report_type} report in markdown format:"""
+## CRITICAL - Hierarchical/Tree Layout for Grouped Data:
+When showing detailed items, use a TREE/HIERARCHICAL structure instead of a flat table with duplicate values:
+- If multiple items share the same receipt number, date, or restaurant, group them together
+- Show the parent group (e.g., receipt number, restaurant, date) ONCE as a header
+- List the child items (individual line items) indented under their parent
+- This avoids repeating the same information multiple times
+
+Example of GOOD tree layout:
+### 2025-06 - YU SEAFOOD (2025-06-18)
+| Item Name | Amount |
+|-----------|--------|
+| 即弱酥皮鲜奶撻 | $5.99 |
+| 子姜牛柳酥 | $5.99 |
+| ... | ... |
+**Subtotal:** $xx.xx
+
+### 2025-11 - Mr. Congee Garden LTD (2025-11-08)
+| Item Name | Amount |
+|-----------|--------|
+| Shrimp CH Fried Rice | $18.75 |
+| ... | ... |
+**Subtotal:** $xx.xx
+
+Example of BAD flat table (avoid this):
+| Receipt | Restaurant | Date | Item | Amount |
+|---------|------------|------|------|--------|
+| 2025-06 | YU SEAFOOD | 2025-06-18 | Item1 | $5.99 |
+| 2025-06 | YU SEAFOOD | 2025-06-18 | Item2 | $5.99 |  <-- Repeated!
+| 2025-06 | YU SEAFOOD | 2025-06-18 | Item3 | $5.99 |  <-- Repeated!
+
+6. Always include subtotals for each group and a grand total at the end
+
+Write the {report_type} report in markdown format using hierarchical layout when appropriate:"""
 
             response = self.llm_client.generate(prompt)
 
