@@ -113,3 +113,43 @@ class PreferencesResponse(BaseModel):
     preferences: Dict[str, Any]
     success: bool = True
 
+
+# ===== User Profile Models =====
+
+class UpdateProfileRequest(BaseModel):
+    """Request to update user profile information."""
+    email: EmailStr = Field(..., description="User's email address (required)")
+    full_name: Optional[str] = Field(None, max_length=255, description="User's full name")
+    phone_number: Optional[str] = Field(None, max_length=20, description="User's phone number")
+    address: Optional[str] = Field(None, max_length=500, description="User's address")
+    city: Optional[str] = Field(None, max_length=100, description="User's city")
+    state: Optional[str] = Field(None, max_length=100, description="User's state/province")
+    country: Optional[str] = Field(None, max_length=100, description="User's country")
+    postal_code: Optional[str] = Field(None, max_length=20, description="User's postal code")
+    bio: Optional[str] = Field(None, max_length=1000, description="User's bio/description")
+
+
+class ProfileResponse(BaseModel):
+    """User profile response."""
+    id: str
+    username: str
+    email: str
+    full_name: Optional[str]
+    phone_number: Optional[str]
+    address: Optional[str]
+    city: Optional[str]
+    state: Optional[str]
+    country: Optional[str]
+    postal_code: Optional[str]
+    bio: Optional[str]
+    role: str
+    status: str
+    email_verified: bool
+    last_login_at: Optional[str]
+    created_at: Optional[str]
+    updated_at: Optional[str]
+    success: bool = True
+
+    class Config:
+        from_attributes = True
+

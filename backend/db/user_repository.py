@@ -444,3 +444,125 @@ class UserRepository:
         app_preferences['lastUpdated'] = datetime.utcnow().isoformat()
         return self.update_preference_key(user_id, 'app', app_preferences)
 
+    # ===== User Profile Methods =====
+
+    def update_user_profile(
+        self,
+        user_id: UUID,
+        email: str,
+        full_name: Optional[str] = None,
+        phone_number: Optional[str] = None,
+        address: Optional[str] = None,
+        city: Optional[str] = None,
+        state: Optional[str] = None,
+        country: Optional[str] = None,
+        postal_code: Optional[str] = None,
+        bio: Optional[str] = None
+    ) -> Optional[User]:
+        """
+        Update user profile information.
+
+        Args:
+            user_id: The user's UUID
+            email: User's email (required)
+            full_name: User's full name
+            phone_number: User's phone number
+            address: User's address
+            city: User's city
+            state: User's state/province
+            country: User's country
+            postal_code: User's postal code
+            bio: User's bio/description
+
+        Returns:
+            Updated user, or None if user not found
+        """
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+
+        # Update email
+        user.email = email
+
+        # Update full_name
+        user.full_name = full_name
+
+        # Update profile_data with contact info
+        profile_data = user.profile_data or {}
+        profile_data['phone_number'] = phone_number
+        profile_data['address'] = address
+        profile_data['city'] = city
+        profile_data['state'] = state
+        profile_data['country'] = country
+        profile_data['postal_code'] = postal_code
+        profile_data['bio'] = bio
+        profile_data['lastUpdated'] = datetime.utcnow().isoformat()
+
+        user.profile_data = dict(profile_data)
+        user.updated_at = datetime.utcnow()
+
+        # Flag the JSONB column as modified
+        flag_modified(user, "profile_data")
+
+        self.db.commit()
+        self.db.refresh(user)
+
+        logger.info(f"Updated profile for user: {user.username}")
+        return user
+
+    def get_user_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
+        """
+        Get user profile with contact information.
+
+        Args:
+            user_id: The user's UUID
+
+        Returns:
+            User profile dictionary, or None if user not found
+        """
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+
+        profile_data = user.profile_data or {}
+
+        return {
+            "id": str(user.id),
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "phone_number": profile_data.get('phone_number'),
+            "address": profile_data.get('address'),
+            "city": profile_data.get('city'),
+            "state": profile_data.get('state'),
+            "country": profile_data.get('country'),
+            "postal_code": profile_data.get('postal_code'),
+            "bio": profile_data.get('bio'),
+            "role": user.role.value if user.role else None,
+            "status": user.status.value if user.status else None,
+            "email_verified": user.email_verified,
+            "last_login_at": user.last_login_at.isoformat() if user.last_login_at else None,
+            "created_at": user.created_at.isoformat() if user.created_at else None,
+            "updated_at": user.updated_at.isoformat() if user.updated_at else None,
+        }
+
+    def is_email_taken(self, email: str, exclude_user_id: Optional[UUID] = None) -> bool:
+        """
+        Check if email is already taken by another user.
+
+        Args:
+            email: Email to check
+            exclude_user_id: User ID to exclude from check (for updates)
+
+        Returns:
+            True if email is taken, False otherwise
+        """
+        query = self.db.query(User).filter(
+            User.email == email,
+            User.deleted_at.is_(None)
+        )
+        if exclude_user_id:
+            query = query.filter(User.id != exclude_user_id)
+
+        return query.first() is not None
+

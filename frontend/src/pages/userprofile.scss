@@ -1,0 +1,145 @@
+.user-profile-container {
+  min-height: calc(100vh - 60px);
+  background-color: var(--surface-ground);
+  padding: 1.5rem;
+}
+
+.user-profile-content {
+  max-width: 900px;
+  margin: 0 auto;
+  background-color: var(--surface-card);
+  border: 1px solid var(--surface-border);
+  border-radius: 6px;
+  padding: 1.5rem;
+}
+
+.profile-header {
+  margin-bottom: 1.5rem;
+
+  h2 {
+    margin: 0 0 0.5rem 0;
+    color: var(--text-color);
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+
+  p {
+    margin: 0;
+    color: var(--text-color-secondary);
+    font-size: 0.875rem;
+  }
+}
+
+// Custom tab navigation
+.profile-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1.5rem;
+  border-bottom: 1px solid var(--surface-border);
+  padding-bottom: 0;
+}
+
+.profile-tab {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-color-secondary);
+  font-size: 0.9rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-bottom: -1px;
+
+  i {
+    font-size: 1rem;
+  }
+
+  &:hover {
+    color: var(--text-color);
+    background-color: var(--surface-hover);
+  }
+
+  &.active {
+    color: var(--primary-color);
+    border-bottom-color: var(--primary-color);
+
+    i {
+      color: var(--primary-color);
+    }
+  }
+}
+
+.profile-tab-content {
+  padding-top: 0.5rem;
+}
+
+.profile-section {
+  margin-bottom: 1rem;
+
+  .section-title {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0 0 1rem 0;
+    color: var(--text-color);
+    font-size: 1rem;
+    font-weight: 600;
+
+    i {
+      color: var(--primary-color);
+      font-size: 1.1rem;
+    }
+  }
+}
+
+// Form field styling
+.field {
+  margin-bottom: 1rem;
+
+  label {
+    display: block;
+    margin-bottom: 0.5rem;
+    color: var(--text-color);
+    font-weight: 500;
+    font-size: 0.875rem;
+
+    .required {
+      color: var(--red-400);
+    }
+  }
+
+  small {
+    display: block;
+    margin-top: 0.25rem;
+    color: var(--text-color-secondary);
+    font-size: 0.75rem;
+  }
+}
+
+// Disabled input styling
+.disabled-input {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+// Override PrimeReact Divider for this page
+.user-profile-content .p-divider {
+  margin: 1.5rem 0;
+
+  &.p-divider-horizontal {
+    &::before {
+      border-top-color: var(--surface-border);
+    }
+  }
+}
+
+// Ensure Password component inputs fill width
+.user-profile-content {
+  .p-password {
+    width: 100%;
+  }
+}

@@ -464,6 +464,77 @@ class AuthService {
             return { success: false, error: error.message || 'Network error' };
         }
     }
+
+    // ===== User Profile Methods =====
+
+    /**
+     * Get user profile
+     */
+    async getProfile() {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/profile`, {
+                method: 'GET',
+                headers: {
+                    ...this.getAuthHeaders(),
+                },
+            });
+
+            if (!response.ok) {
+                const data = await response.json();
+                return { success: false, error: data.detail || 'Failed to get profile' };
+            }
+
+            const profile = await response.json();
+            return { success: true, profile };
+        } catch (error) {
+            console.error('Get profile error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
+
+    /**
+     * Update user profile
+     */
+    async updateProfile(profileData) {
+        try {
+            const response = await fetch(`${AUTH_API_URL}/profile`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    ...this.getAuthHeaders(),
+                },
+                body: JSON.stringify(profileData),
+            });
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                // Handle validation errors (array of error objects)
+                if (Array.isArray(data.detail)) {
+                    const errorMessages = data.detail.map(err => {
+                        const field = err.loc && err.loc.length > 1 ? err.loc[err.loc.length - 1] : 'field';
+                        return `${field}: ${err.msg}`;
+                    }).join(', ');
+                    return { success: false, error: errorMessages };
+                }
+                // Handle string error messages
+                return { success: false, error: data.detail || 'Failed to update profile' };
+            }
+
+            // Update stored user data with new email/full_name
+            const currentUser = this.getUser();
+            if (currentUser) {
+                currentUser.email = data.email;
+                currentUser.full_name = data.full_name;
+                localStorage.setItem(USER_KEY, JSON.stringify(currentUser));
+            }
+
+            return { success: true, profile: data };
+        } catch (error) {
+            console.error('Update profile error:', error);
+            return { success: false, error: error.message || 'Network error' };
+        }
+    }
 }
 
 // Export singleton instance

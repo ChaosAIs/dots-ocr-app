@@ -14,7 +14,8 @@ from auth.models import (
     RegisterRequest, LoginRequest, TokenResponse, RefreshTokenRequest,
     ChangePasswordRequest, UserResponse, MessageResponse,
     UpdatePreferencesRequest, UpdateChatPreferencesRequest,
-    UpdateThemePreferenceRequest, PreferencesResponse
+    UpdateThemePreferenceRequest, PreferencesResponse,
+    UpdateProfileRequest, ProfileResponse
 )
 from auth.dependencies import get_current_active_user, require_admin
 from auth.password_utils import PasswordUtils
@@ -434,4 +435,68 @@ def get_theme_preference(
         "theme": app_prefs.get("theme", "saga-blue") if app_prefs else "saga-blue",
         "success": True
     }
+
+
+# ===== User Profile Endpoints =====
+
+@router.get("/profile", response_model=ProfileResponse)
+def get_profile(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Get current user's profile information."""
+    user_repo = UserRepository(db)
+    profile = user_repo.get_user_profile(current_user.id)
+
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    return ProfileResponse(**profile)
+
+
+@router.put("/profile", response_model=ProfileResponse)
+def update_profile(
+    request: UpdateProfileRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update current user's profile information."""
+    user_repo = UserRepository(db)
+
+    # Check if email is being changed and if it's already taken
+    if request.email != current_user.email:
+        if user_repo.is_email_taken(request.email, exclude_user_id=current_user.id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already registered to another user"
+            )
+
+    # Update profile
+    updated_user = user_repo.update_user_profile(
+        user_id=current_user.id,
+        email=request.email,
+        full_name=request.full_name,
+        phone_number=request.phone_number,
+        address=request.address,
+        city=request.city,
+        state=request.state,
+        country=request.country,
+        postal_code=request.postal_code,
+        bio=request.bio
+    )
+
+    if not updated_user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+
+    # Get updated profile
+    profile = user_repo.get_user_profile(current_user.id)
+
+    logger.info(f"Updated profile for user: {current_user.username}")
+    return ProfileResponse(**profile)
 

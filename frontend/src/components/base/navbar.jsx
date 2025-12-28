@@ -1,7 +1,8 @@
-import React, { useContext, useEffect } from "react";
+import React, { useContext, useEffect, useRef } from "react";
 import { Menubar } from "primereact/menubar";
 import { Dropdown } from "primereact/dropdown";
 import { Button } from "primereact/button";
+import { Menu } from "primereact/menu";
 import { AuthContext } from "../../core/auth/components/authProvider";
 import APP_CONFIG from "../../core/config/appConfig";
 import { loadingService } from "../../core/loading/loadingService";
@@ -20,6 +21,7 @@ export const NavBar = () => {
   const language = useSelector((state) => state.language);
   const dispatch = useDispatch();
   const navigate = useNavigate();
+  const userMenuRef = useRef(null);
   //
   // Binding Redux custom action creators.
   // Work for update selected language code.
@@ -107,22 +109,38 @@ export const NavBar = () => {
     </span>
   );
 
+  const userMenuItems = [
+    {
+      label: t("Nav.Profile"),
+      icon: "pi pi-user",
+      command: () => navigate('/userprofile')
+    },
+    {
+      separator: true
+    },
+    {
+      label: t("Nav.Logout"),
+      icon: "pi pi-sign-out",
+      command: logout
+    }
+  ];
+
   const end = (
     <div className="flex align-items-center gap-2">
-      {isAuthorized && (
-        <span className="font-medium text-color">{user?.full_name || user?.username || "User"}</span>
-      )}
       {languageDropdown}
       {isAuthorized && <ThemePicker />}
       {isAuthorized ? (
-        <Button
-          label={t("Nav.Logout")}
-          icon="pi pi-sign-out"
-          outlined
-          severity="danger"
-          title={t("Nav.Logout")}
-          onClick={logout}
-        />
+        <div className="flex align-items-center gap-2">
+          <Button
+            label={user?.full_name || user?.username || "User"}
+            icon="pi pi-user"
+            outlined
+            onClick={(e) => userMenuRef.current.toggle(e)}
+            aria-controls="user-menu"
+            aria-haspopup
+          />
+          <Menu model={userMenuItems} popup ref={userMenuRef} id="user-menu" />
+        </div>
       ) : (
         <Button
           label="Login"

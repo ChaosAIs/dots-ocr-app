@@ -79,6 +79,14 @@ export const AuthProvider = ({ children }) => {
     return result;
   };
 
+  const refreshUser = () => {
+    // Refresh user data from localStorage (after profile update)
+    const currentUser = authService.getUser();
+    if (currentUser) {
+      setUser(currentUser);
+    }
+  };
+
   const contextValue = {
     user,
     loading,
@@ -88,6 +96,7 @@ export const AuthProvider = ({ children }) => {
     login,
     logout,
     register,
+    refreshUser,
     getAuthHeaders: () => authService.getAuthHeaders(),
   };
 
