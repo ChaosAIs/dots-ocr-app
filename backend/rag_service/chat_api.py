@@ -172,6 +172,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     user_id = request.get("user_id")
                     is_retry = request.get("is_retry", False)  # Flag for retry action
                     workspace_ids = request.get("workspace_ids", [])  # Optional workspace filter
+                    document_ids = request.get("document_ids", [])  # Optional document filter
 
                     if not message:
                         await websocket.send_json({
@@ -282,8 +283,32 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     else:
                                         logger.info(f"[Access Control] User {user_id} has access to {len(accessible_doc_ids)} documents: {list(accessible_doc_ids)[:5]}...")
 
-                                        # Apply workspace filter if workspace_ids are provided
-                                        if workspace_ids and len(workspace_ids) > 0:
+                                        # Apply document filter if document_ids are provided (takes precedence over workspace filter)
+                                        if document_ids and len(document_ids) > 0:
+                                            logger.info(f"[Document Filter] Filtering by {len(document_ids)} document(s)")
+                                            try:
+                                                # Convert document_ids to UUID set
+                                                selected_doc_ids = set(UUID(doc_id) for doc_id in document_ids)
+                                                # Intersect with accessible documents
+                                                original_count = len(accessible_doc_ids)
+                                                accessible_doc_ids = accessible_doc_ids.intersection(selected_doc_ids)
+                                                logger.info(f"[Document Filter] Filtered from {original_count} to {len(accessible_doc_ids)} documents")
+                                            except Exception as doc_error:
+                                                logger.warning(f"[Document Filter] Failed to filter by documents: {doc_error}")
+                                                # Fall back to workspace filter if document filter fails
+                                                if workspace_ids and len(workspace_ids) > 0:
+                                                    try:
+                                                        doc_repo = DocumentRepository(db)
+                                                        workspace_doc_ids = doc_repo.get_document_ids_by_workspaces(
+                                                            [UUID(ws_id) for ws_id in workspace_ids]
+                                                        )
+                                                        original_count = len(accessible_doc_ids)
+                                                        accessible_doc_ids = accessible_doc_ids.intersection(workspace_doc_ids)
+                                                        logger.info(f"[Workspace Filter] Fallback - filtered from {original_count} to {len(accessible_doc_ids)} documents")
+                                                    except Exception as ws_error:
+                                                        logger.warning(f"[Workspace Filter] Fallback also failed: {ws_error}")
+                                        # Apply workspace filter if workspace_ids are provided but no document_ids
+                                        elif workspace_ids and len(workspace_ids) > 0:
                                             logger.info(f"[Workspace Filter] Filtering by {len(workspace_ids)} workspace(s): {workspace_ids}")
                                             try:
                                                 doc_repo = DocumentRepository(db)
@@ -298,7 +323,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                                 logger.warning(f"[Workspace Filter] Failed to filter by workspaces: {ws_error}")
                                                 # Continue with all accessible documents if workspace filter fails
                                         else:
-                                            logger.info(f"[Workspace Filter] No workspace filter applied - searching all accessible documents")
+                                            logger.info(f"[Workspace Filter] No workspace/document filter applied - searching all accessible documents")
                                 else:
                                     logger.warning(f"[Access Control] get_user_accessible_document_ids returned None for user {user_id}")
                             except Exception as e:

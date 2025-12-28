@@ -13,7 +13,12 @@
     "CorrectionSaved": "Correction enregistrée",
     "CorrectionSavedDetail": "La réponse a été mise à jour avec succès.",
     "CorrectionFailed": "Échec de l'enregistrement",
-    "CorrectionFailedDetail": "Impossible d'enregistrer la correction. Veuillez réessayer."
+    "CorrectionFailedDetail": "Impossible d'enregistrer la correction. Veuillez réessayer.",
+    "EditMarkdownTitle": "Modifier la réponse",
+    "SaveChanges": "Enregistrer",
+    "PreviewMode": "Aperçu",
+    "EditMode": "Modifier",
+    "MarkdownPlaceholder": "Entrez le contenu markdown..."
   },
   "Nav": {
     "Home": "Domicile",

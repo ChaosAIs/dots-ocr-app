@@ -73,6 +73,7 @@ class MessageResponse(BaseModel):
 class ChatPreferences(BaseModel):
     """Chat-specific preferences."""
     selectedWorkspaceIds: list[str] = Field(default_factory=list, description="List of selected workspace UUIDs for RAG search filtering")
+    selectedDocumentIds: list[str] = Field(default_factory=list, description="List of selected document UUIDs for RAG search filtering")
     lastUpdated: Optional[str] = None
 
 
@@ -92,6 +93,7 @@ class UpdatePreferencesRequest(BaseModel):
 class UpdateChatPreferencesRequest(BaseModel):
     """Request to update chat preferences."""
     selectedWorkspaceIds: list[str] = Field(default_factory=list)
+    selectedDocumentIds: list[str] = Field(default_factory=list)
 
 
 class PreferencesResponse(BaseModel):

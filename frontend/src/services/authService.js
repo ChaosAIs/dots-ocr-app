@@ -390,9 +390,9 @@ class AuthService {
     }
 
     /**
-     * Update chat-specific preferences (workspace selections, etc.)
+     * Update chat-specific preferences (workspace and document selections)
      */
-    async updateChatPreferences(selectedWorkspaceIds) {
+    async updateChatPreferences(selectedWorkspaceIds, selectedDocumentIds = []) {
         try {
             const response = await fetch(`${AUTH_API_URL}/preferences/chat`, {
                 method: 'PATCH',
@@ -400,7 +400,7 @@ class AuthService {
                     'Content-Type': 'application/json',
                     ...this.getAuthHeaders(),
                 },
-                body: JSON.stringify({ selectedWorkspaceIds }),
+                body: JSON.stringify({ selectedWorkspaceIds, selectedDocumentIds }),
             });
 
             if (!response.ok) {

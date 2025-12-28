@@ -10,24 +10,32 @@ import authService from "../../services/authService";
 import "./WorkspaceBrowser.scss";
 
 /**
- * WorkspaceBrowser - Right panel component for selecting workspaces to filter chat RAG search
+ * WorkspaceBrowser - Right panel component for selecting workspaces and documents to filter chat RAG search
  *
  * Features:
  * - Multi-select workspace checkboxes
+ * - Document-level checkboxes within each workspace
+ * - When workspace is checked, all its documents are selected by default
+ * - When workspace is unchecked, all its documents are deselected
+ * - Users can select/deselect individual documents within a workspace
+ * - Workspace checkbox reflects partial selection state (indeterminate)
  * - Collapsible panel
  * - Workspace color/icon indicators
  * - Expandable document lists under each workspace
- * - Persists selection to user preferences
+ * - Persists selection to user preferences (both workspace and document IDs)
  * - Shows "All Documents" when no selection
  */
 export const WorkspaceBrowser = forwardRef(({
   selectedWorkspaceIds,
+  selectedDocumentIds,
   onSelectionChange,
+  onDocumentSelectionChange,
   collapsed,
   onToggleCollapse
 }, ref) => {
   const { workspaces, loading: workspacesLoading, subscribe } = useWorkspace();
   const [localSelectedIds, setLocalSelectedIds] = useState(selectedWorkspaceIds || []);
+  const [localSelectedDocIds, setLocalSelectedDocIds] = useState(selectedDocumentIds || []);
   const [saving, setSaving] = useState(false);
   const [expandedWorkspaces, setExpandedWorkspaces] = useState({});
   const [workspaceDocuments, setWorkspaceDocuments] = useState({});
@@ -38,6 +46,11 @@ export const WorkspaceBrowser = forwardRef(({
     setLocalSelectedIds(selectedWorkspaceIds || []);
   }, [selectedWorkspaceIds]);
 
+  // Sync with parent's selectedDocumentIds
+  useEffect(() => {
+    setLocalSelectedDocIds(selectedDocumentIds || []);
+  }, [selectedDocumentIds]);
+
   // Subscribe to workspace deletion events to clean up selections
   useEffect(() => {
     const unsubscribe = subscribe(WorkspaceEvents.WORKSPACE_DELETED, (deletedWorkspace) => {
@@ -45,53 +58,102 @@ export const WorkspaceBrowser = forwardRef(({
         const newIds = localSelectedIds.filter(id => id !== deletedWorkspace.id);
         setLocalSelectedIds(newIds);
         onSelectionChange?.(newIds);
+
+        // Also remove documents from this workspace from selection
+        const workspaceDocs = workspaceDocuments[deletedWorkspace.id] || [];
+        const docIdsToRemove = workspaceDocs.map(doc => doc.id);
+        const newDocIds = localSelectedDocIds.filter(id => !docIdsToRemove.includes(id));
+        setLocalSelectedDocIds(newDocIds);
+        onDocumentSelectionChange?.(newDocIds);
+
         // Save to preferences
-        savePreferences(newIds);
+        savePreferences(newIds, newDocIds);
       }
     });
     return unsubscribe;
-  }, [subscribe, localSelectedIds, onSelectionChange]);
+  }, [subscribe, localSelectedIds, localSelectedDocIds, onSelectionChange, onDocumentSelectionChange, workspaceDocuments]);
 
   // Expose methods to parent
   useImperativeHandle(ref, () => ({
     getSelectedWorkspaceIds: () => localSelectedIds,
+    getSelectedDocumentIds: () => localSelectedDocIds,
     setSelectedWorkspaceIds: (ids) => {
       setLocalSelectedIds(ids);
       onSelectionChange?.(ids);
     },
+    setSelectedDocumentIds: (ids) => {
+      setLocalSelectedDocIds(ids);
+      onDocumentSelectionChange?.(ids);
+    },
     clearSelection: () => {
       setLocalSelectedIds([]);
+      setLocalSelectedDocIds([]);
       onSelectionChange?.([]);
-      savePreferences([]);
+      onDocumentSelectionChange?.([]);
+      savePreferences([], []);
     }
   }));
 
-  const savePreferences = useCallback(async (ids) => {
+  const savePreferences = useCallback(async (workspaceIds, documentIds) => {
     setSaving(true);
     try {
-      await authService.updateChatPreferences(ids);
+      await authService.updateChatPreferences(workspaceIds, documentIds);
     } catch (error) {
-      console.error("Failed to save workspace preferences:", error);
+      console.error("Failed to save workspace/document preferences:", error);
     } finally {
       setSaving(false);
     }
   }, []);
 
-  const handleWorkspaceToggle = useCallback((workspaceId, e) => {
+  const handleWorkspaceToggle = useCallback(async (workspaceId, e) => {
     // Prevent expanding when clicking checkbox
     if (e) {
       e.stopPropagation();
     }
-    setLocalSelectedIds(prev => {
-      const newIds = prev.includes(workspaceId)
-        ? prev.filter(id => id !== workspaceId)
-        : [...prev, workspaceId];
 
-      onSelectionChange?.(newIds);
-      savePreferences(newIds);
-      return newIds;
-    });
-  }, [onSelectionChange, savePreferences]);
+    const isCurrentlySelected = localSelectedIds.includes(workspaceId);
+    let newWorkspaceIds;
+    let newDocIds = [...localSelectedDocIds];
+
+    if (isCurrentlySelected) {
+      // Uncheck workspace - remove workspace and all its documents
+      newWorkspaceIds = localSelectedIds.filter(id => id !== workspaceId);
+
+      // Remove all documents from this workspace
+      const workspaceDocs = workspaceDocuments[workspaceId] || [];
+      const docIdsToRemove = workspaceDocs.map(doc => doc.id);
+      newDocIds = newDocIds.filter(id => !docIdsToRemove.includes(id));
+    } else {
+      // Check workspace - add workspace and all its documents
+      newWorkspaceIds = [...localSelectedIds, workspaceId];
+
+      // Load documents if not already loaded
+      let docs = workspaceDocuments[workspaceId];
+      if (!docs) {
+        try {
+          const result = await workspaceService.getWorkspace(workspaceId, 50, 0);
+          docs = result.documents || [];
+          setWorkspaceDocuments(prev => ({
+            ...prev,
+            [workspaceId]: docs
+          }));
+        } catch (error) {
+          console.error(`Failed to load documents for workspace ${workspaceId}:`, error);
+          docs = [];
+        }
+      }
+
+      // Add all documents from this workspace
+      const docIdsToAdd = docs.map(doc => doc.id);
+      newDocIds = [...new Set([...newDocIds, ...docIdsToAdd])];
+    }
+
+    setLocalSelectedIds(newWorkspaceIds);
+    setLocalSelectedDocIds(newDocIds);
+    onSelectionChange?.(newWorkspaceIds);
+    onDocumentSelectionChange?.(newDocIds);
+    savePreferences(newWorkspaceIds, newDocIds);
+  }, [localSelectedIds, localSelectedDocIds, workspaceDocuments, onSelectionChange, onDocumentSelectionChange, savePreferences]);
 
   // Toggle workspace expansion and load documents if needed
   const handleToggleExpand = useCallback(async (workspaceId, e) => {
@@ -126,18 +188,102 @@ export const WorkspaceBrowser = forwardRef(({
     }
   }, [expandedWorkspaces, workspaceDocuments]);
 
-  const handleSelectAll = useCallback(() => {
-    const allIds = workspaces.filter(ws => !ws.is_system).map(ws => ws.id);
-    setLocalSelectedIds(allIds);
-    onSelectionChange?.(allIds);
-    savePreferences(allIds);
-  }, [workspaces, onSelectionChange, savePreferences]);
+  const handleSelectAll = useCallback(async () => {
+    const allWorkspaceIds = workspaces.filter(ws => !ws.is_system).map(ws => ws.id);
+    setLocalSelectedIds(allWorkspaceIds);
+    onSelectionChange?.(allWorkspaceIds);
+
+    // Load and select all documents from all workspaces
+    const allDocIds = [];
+    for (const wsId of allWorkspaceIds) {
+      let docs = workspaceDocuments[wsId];
+      if (!docs) {
+        try {
+          const result = await workspaceService.getWorkspace(wsId, 50, 0);
+          docs = result.documents || [];
+          setWorkspaceDocuments(prev => ({
+            ...prev,
+            [wsId]: docs
+          }));
+        } catch (error) {
+          console.error(`Failed to load documents for workspace ${wsId}:`, error);
+          docs = [];
+        }
+      }
+      docs.forEach(doc => allDocIds.push(doc.id));
+    }
+
+    const uniqueDocIds = [...new Set(allDocIds)];
+    setLocalSelectedDocIds(uniqueDocIds);
+    onDocumentSelectionChange?.(uniqueDocIds);
+    savePreferences(allWorkspaceIds, uniqueDocIds);
+  }, [workspaces, workspaceDocuments, onSelectionChange, onDocumentSelectionChange, savePreferences]);
 
   const handleClearSelection = useCallback(() => {
     setLocalSelectedIds([]);
+    setLocalSelectedDocIds([]);
     onSelectionChange?.([]);
-    savePreferences([]);
-  }, [onSelectionChange, savePreferences]);
+    onDocumentSelectionChange?.([]);
+    savePreferences([], []);
+  }, [onSelectionChange, onDocumentSelectionChange, savePreferences]);
+
+  // Handle individual document toggle
+  const handleDocumentToggle = useCallback((workspaceId, docId, e) => {
+    if (e) {
+      e.stopPropagation();
+    }
+
+    const isDocSelected = localSelectedDocIds.includes(docId);
+    let newDocIds;
+    let newWorkspaceIds = [...localSelectedIds];
+
+    if (isDocSelected) {
+      // Uncheck document
+      newDocIds = localSelectedDocIds.filter(id => id !== docId);
+    } else {
+      // Check document
+      newDocIds = [...localSelectedDocIds, docId];
+    }
+
+    // Update workspace selection state based on document selection
+    const workspaceDocs = workspaceDocuments[workspaceId] || [];
+    const workspaceDocIds = workspaceDocs.map(doc => doc.id);
+    const selectedDocsInWorkspace = newDocIds.filter(id => workspaceDocIds.includes(id));
+
+    if (selectedDocsInWorkspace.length === 0) {
+      // No documents selected in this workspace - uncheck workspace
+      newWorkspaceIds = newWorkspaceIds.filter(id => id !== workspaceId);
+    } else if (!newWorkspaceIds.includes(workspaceId)) {
+      // Some documents selected but workspace not in list - add it
+      newWorkspaceIds = [...newWorkspaceIds, workspaceId];
+    }
+
+    setLocalSelectedDocIds(newDocIds);
+    setLocalSelectedIds(newWorkspaceIds);
+    onDocumentSelectionChange?.(newDocIds);
+    onSelectionChange?.(newWorkspaceIds);
+    savePreferences(newWorkspaceIds, newDocIds);
+  }, [localSelectedDocIds, localSelectedIds, workspaceDocuments, onDocumentSelectionChange, onSelectionChange, savePreferences]);
+
+  // Get workspace checkbox state (checked, unchecked, or indeterminate)
+  const getWorkspaceCheckState = useCallback((workspaceId) => {
+    const workspaceDocs = workspaceDocuments[workspaceId] || [];
+    if (workspaceDocs.length === 0) {
+      // No documents loaded yet - use workspace selection state
+      return { checked: localSelectedIds.includes(workspaceId), indeterminate: false };
+    }
+
+    const workspaceDocIds = workspaceDocs.map(doc => doc.id);
+    const selectedDocsInWorkspace = localSelectedDocIds.filter(id => workspaceDocIds.includes(id));
+
+    if (selectedDocsInWorkspace.length === 0) {
+      return { checked: false, indeterminate: false };
+    } else if (selectedDocsInWorkspace.length === workspaceDocIds.length) {
+      return { checked: true, indeterminate: false };
+    } else {
+      return { checked: true, indeterminate: true };
+    }
+  }, [workspaceDocuments, localSelectedDocIds, localSelectedIds]);
 
   // Filter out system workspaces (like "Shared With Me")
   const regularWorkspaces = workspaces.filter(ws => !ws.is_system);
@@ -228,7 +374,7 @@ export const WorkspaceBrowser = forwardRef(({
       </div>
 
       <div className="selection-status">
-        {selectedCount === 0 ? (
+        {selectedCount === 0 && localSelectedDocIds.length === 0 ? (
           <span className="status-text all-docs">
             <i className="pi pi-globe" />
             Searching all documents
@@ -236,7 +382,9 @@ export const WorkspaceBrowser = forwardRef(({
         ) : (
           <span className="status-text filtered">
             <i className="pi pi-filter" />
-            {selectedCount} workspace{selectedCount !== 1 ? "s" : ""} selected
+            {localSelectedDocIds.length > 0
+              ? `${localSelectedDocIds.length} document${localSelectedDocIds.length !== 1 ? "s" : ""} selected`
+              : `${selectedCount} workspace${selectedCount !== 1 ? "s" : ""} selected`}
           </span>
         )}
       </div>
@@ -275,16 +423,17 @@ export const WorkspaceBrowser = forwardRef(({
             const documents = workspaceDocuments[workspace.id] || [];
             const isLoadingDocs = loadingDocuments[workspace.id];
             const docCount = workspace.document_count || 0;
+            const checkState = getWorkspaceCheckState(workspace.id);
 
             return (
               <div key={workspace.id} className="workspace-container">
                 <div
-                  className={`workspace-item ${localSelectedIds.includes(workspace.id) ? "selected" : ""}`}
+                  className={`workspace-item ${checkState.checked ? "selected" : ""} ${checkState.indeterminate ? "indeterminate" : ""}`}
                 >
                   <Checkbox
-                    checked={localSelectedIds.includes(workspace.id)}
+                    checked={checkState.checked}
                     onChange={(e) => handleWorkspaceToggle(workspace.id, e)}
-                    className="workspace-checkbox"
+                    className={`workspace-checkbox ${checkState.indeterminate ? "p-indeterminate" : ""}`}
                     onClick={(e) => e.stopPropagation()}
                   />
                   <div
@@ -327,7 +476,13 @@ export const WorkspaceBrowser = forwardRef(({
                       </div>
                     ) : (
                       documents.map((doc) => (
-                        <div key={doc.id} className="document-item">
+                        <div key={doc.id} className={`document-item ${localSelectedDocIds.includes(doc.id) ? "selected" : ""}`}>
+                          <Checkbox
+                            checked={localSelectedDocIds.includes(doc.id)}
+                            onChange={(e) => handleDocumentToggle(workspace.id, doc.id, e)}
+                            className="document-checkbox"
+                            onClick={(e) => e.stopPropagation()}
+                          />
                           <i className={`document-icon pi ${getDocumentIcon(doc.original_filename || doc.filename)}`} />
                           <span
                             className="document-name"

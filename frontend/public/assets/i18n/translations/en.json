@@ -13,7 +13,12 @@
         "CorrectionSaved": "Correction Saved",
         "CorrectionSavedDetail": "The response has been updated successfully.",
         "CorrectionFailed": "Save Failed",
-        "CorrectionFailedDetail": "Failed to save the correction. Please try again."
+        "CorrectionFailedDetail": "Failed to save the correction. Please try again.",
+        "EditMarkdownTitle": "Edit Response",
+        "SaveChanges": "Save Changes",
+        "PreviewMode": "Preview",
+        "EditMode": "Edit",
+        "MarkdownPlaceholder": "Enter markdown content..."
     },
     "Nav": {
         "Home": "Home",

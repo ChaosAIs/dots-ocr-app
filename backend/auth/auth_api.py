@@ -360,11 +360,12 @@ def update_chat_preferences(
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db)
 ):
-    """Update chat-specific preferences (workspace selections, etc.)."""
+    """Update chat-specific preferences (workspace and document selections)."""
     user_repo = UserRepository(db)
 
     chat_prefs = {
-        "selectedWorkspaceIds": request.selectedWorkspaceIds
+        "selectedWorkspaceIds": request.selectedWorkspaceIds,
+        "selectedDocumentIds": request.selectedDocumentIds
     }
 
     preferences = user_repo.update_chat_preferences(current_user.id, chat_prefs)

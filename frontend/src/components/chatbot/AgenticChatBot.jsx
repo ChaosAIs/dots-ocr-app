@@ -4,6 +4,7 @@ import { Button } from "primereact/button";
 import { Card } from "primereact/card";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { Toast } from "primereact/toast";
+import { Dialog } from "primereact/dialog";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
@@ -32,8 +33,15 @@ export const AgenticChatBot = () => {
   const [editingContent, setEditingContent] = useState("");
   const [isSavingCorrection, setIsSavingCorrection] = useState(false);
 
+  // Markdown editor dialog state
+  const [markdownEditorVisible, setMarkdownEditorVisible] = useState(false);
+  const [markdownEditorContent, setMarkdownEditorContent] = useState("");
+  const [markdownEditorMessageIndex, setMarkdownEditorMessageIndex] = useState(null);
+  const [markdownEditorPreview, setMarkdownEditorPreview] = useState(false);
+
   // Workspace browser state
   const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState([]);
+  const [selectedDocumentIds, setSelectedDocumentIds] = useState([]);
   const [workspaceBrowserCollapsed, setWorkspaceBrowserCollapsed] = useState(false);
   const [mobileWorkspaceDrawerOpen, setMobileWorkspaceDrawerOpen] = useState(false);
 
@@ -64,14 +72,20 @@ export const AgenticChatBot = () => {
     setIsInitializing(false);
   }, []);
 
-  // Load chat preferences (selected workspaces) on mount
+  // Load chat preferences (selected workspaces and documents) on mount
   useEffect(() => {
     const loadChatPreferences = async () => {
       try {
         const result = await authService.getChatPreferences();
-        if (result.success && result.chat?.selectedWorkspaceIds) {
-          console.log("[AgenticChatBot] Loaded workspace preferences:", result.chat.selectedWorkspaceIds);
-          setSelectedWorkspaceIds(result.chat.selectedWorkspaceIds);
+        if (result.success && result.chat) {
+          if (result.chat.selectedWorkspaceIds) {
+            console.log("[AgenticChatBot] Loaded workspace preferences:", result.chat.selectedWorkspaceIds);
+            setSelectedWorkspaceIds(result.chat.selectedWorkspaceIds);
+          }
+          if (result.chat.selectedDocumentIds) {
+            console.log("[AgenticChatBot] Loaded document preferences:", result.chat.selectedDocumentIds);
+            setSelectedDocumentIds(result.chat.selectedDocumentIds);
+          }
         }
       } catch (error) {
         console.error("[AgenticChatBot] Error loading chat preferences:", error);
@@ -502,6 +516,7 @@ export const AgenticChatBot = () => {
           message: userMessage.content,
           user_id: user?.id,
           workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
+          document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
         })
       );
     } else {
@@ -514,7 +529,7 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
       connectWebSocket();
     }
-  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedWorkspaceIds]);
+  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedWorkspaceIds, selectedDocumentIds]);
 
   const handleRetry = useCallback(async (msg, msgIndex) => {
     if (isLoading || !sessionId) return;
@@ -599,10 +614,11 @@ export const AgenticChatBot = () => {
           user_id: user?.id,
           is_retry: true,
           workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
+          document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}, document_ids=${selectedDocumentIds.length}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -613,7 +629,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, selectedWorkspaceIds, connectWebSocket]);
+  }, [isLoading, sessionId, selectedWorkspaceIds, selectedDocumentIds, connectWebSocket]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -631,6 +647,71 @@ export const AgenticChatBot = () => {
   const handleEditContentChange = useCallback((newContent) => {
     setEditingContent(newContent);
   }, []);
+
+  // Open markdown editor dialog for assistant messages
+  const handleOpenMarkdownEditor = useCallback((msgIndex, content) => {
+    setMarkdownEditorMessageIndex(msgIndex);
+    setMarkdownEditorContent(content);
+    setMarkdownEditorPreview(false);
+    setMarkdownEditorVisible(true);
+  }, []);
+
+  // Close markdown editor dialog
+  const handleCloseMarkdownEditor = useCallback(() => {
+    setMarkdownEditorVisible(false);
+    setMarkdownEditorContent("");
+    setMarkdownEditorMessageIndex(null);
+    setMarkdownEditorPreview(false);
+  }, []);
+
+  // Save markdown editor content
+  const handleSaveMarkdownEditor = useCallback(async () => {
+    if (markdownEditorMessageIndex === null || !sessionId || isSavingCorrection) return;
+
+    const msg = messages[markdownEditorMessageIndex];
+    if (!msg || !msg.id) return;
+
+    const newContent = markdownEditorContent.trim();
+    if (!newContent || newContent === msg.content) {
+      handleCloseMarkdownEditor();
+      return;
+    }
+
+    setIsSavingCorrection(true);
+    try {
+      await chatService.updateMessage(sessionId, msg.id, newContent);
+
+      // Update the message in UI
+      setMessages((prev) => {
+        const updated = [...prev];
+        updated[markdownEditorMessageIndex] = {
+          ...updated[markdownEditorMessageIndex],
+          content: newContent,
+          isEdited: true
+        };
+        return updated;
+      });
+
+      toast.current?.show({
+        severity: "success",
+        summary: t("Chat.CorrectionSaved"),
+        detail: t("Chat.CorrectionSavedDetail"),
+        life: 3000,
+      });
+
+      handleCloseMarkdownEditor();
+    } catch (error) {
+      console.error("Error saving correction:", error);
+      toast.current?.show({
+        severity: "error",
+        summary: t("Chat.CorrectionFailed"),
+        detail: t("Chat.CorrectionFailedDetail"),
+        life: 5000,
+      });
+    } finally {
+      setIsSavingCorrection(false);
+    }
+  }, [markdownEditorMessageIndex, markdownEditorContent, sessionId, messages, isSavingCorrection, handleCloseMarkdownEditor, t]);
 
   // Submit correction for assistant message (just updates the database)
   const handleSubmitCorrection = useCallback(async (msg, msgIndex) => {
@@ -777,10 +858,11 @@ export const AgenticChatBot = () => {
           user_id: user?.id,
           is_retry: true,
           workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
+          document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
         })
       );
 
-      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}, document_ids=${selectedDocumentIds.length}: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({
@@ -791,7 +873,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedWorkspaceIds, connectWebSocket]);
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedWorkspaceIds, selectedDocumentIds, connectWebSocket]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1071,14 +1153,14 @@ export const AgenticChatBot = () => {
                         />
                       </>
                     ) : (
-                      // Assistant message actions
+                      // Assistant message actions - open markdown editor popup
                       <Button
                         icon="pi pi-pencil"
                         className="p-button-text p-button-sm edit-button"
-                        onClick={() => handleStartEdit(idx, msg.content)}
+                        onClick={() => handleOpenMarkdownEditor(idx, msg.content)}
                         tooltip={t("Chat.EditResponse")}
                         tooltipOptions={{ position: "top" }}
-                        disabled={isLoading || editingMessageIndex !== null || !msg.id}
+                        disabled={isLoading || markdownEditorVisible || !msg.id}
                       />
                     )}
                   </div>
@@ -1178,7 +1260,9 @@ export const AgenticChatBot = () => {
       <WorkspaceBrowser
         ref={workspaceBrowserRef}
         selectedWorkspaceIds={selectedWorkspaceIds}
+        selectedDocumentIds={selectedDocumentIds}
         onSelectionChange={setSelectedWorkspaceIds}
+        onDocumentSelectionChange={setSelectedDocumentIds}
         collapsed={workspaceBrowserCollapsed}
         onToggleCollapse={() => setWorkspaceBrowserCollapsed(!workspaceBrowserCollapsed)}
       />
@@ -1197,13 +1281,68 @@ export const AgenticChatBot = () => {
             </div>
             <WorkspaceBrowser
               selectedWorkspaceIds={selectedWorkspaceIds}
+              selectedDocumentIds={selectedDocumentIds}
               onSelectionChange={setSelectedWorkspaceIds}
+              onDocumentSelectionChange={setSelectedDocumentIds}
               collapsed={false}
               onToggleCollapse={() => setMobileWorkspaceDrawerOpen(false)}
             />
           </div>
         </div>
       )}
+
+      {/* Markdown Editor Dialog for Assistant Messages */}
+      <Dialog
+        visible={markdownEditorVisible}
+        onHide={handleCloseMarkdownEditor}
+        header={t("Chat.EditMarkdownTitle")}
+        className="markdown-editor-dialog"
+        style={{ width: "90vw", maxWidth: "1200px" }}
+        modal
+        draggable={false}
+        resizable={false}
+        footer={
+          <div className="markdown-editor-footer">
+            <Button
+              label={t("Chat.Cancel")}
+              icon="pi pi-times"
+              className="p-button-text p-button-secondary"
+              onClick={handleCloseMarkdownEditor}
+              disabled={isSavingCorrection}
+            />
+            <Button
+              label={markdownEditorPreview ? t("Chat.EditMode") : t("Chat.PreviewMode")}
+              icon={markdownEditorPreview ? "pi pi-pencil" : "pi pi-eye"}
+              className="p-button-text"
+              onClick={() => setMarkdownEditorPreview(!markdownEditorPreview)}
+              disabled={isSavingCorrection}
+            />
+            <Button
+              label={t("Chat.SaveChanges")}
+              icon={isSavingCorrection ? "pi pi-spin pi-spinner" : "pi pi-check"}
+              className="p-button-primary"
+              onClick={handleSaveMarkdownEditor}
+              disabled={isSavingCorrection || !markdownEditorContent.trim()}
+            />
+          </div>
+        }
+      >
+        <div className="markdown-editor-content">
+          {markdownEditorPreview ? (
+            <div className="markdown-preview">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdownEditorContent}</ReactMarkdown>
+            </div>
+          ) : (
+            <InputTextarea
+              value={markdownEditorContent}
+              onChange={(e) => setMarkdownEditorContent(e.target.value)}
+              className="markdown-textarea"
+              placeholder={t("Chat.MarkdownPlaceholder")}
+              disabled={isSavingCorrection}
+            />
+          )}
+        </div>
+      </Dialog>
     </div>
   );
 };
