@@ -2,6 +2,7 @@
 Extraction Eligibility Checker
 
 Determines if a document is eligible for structured data extraction.
+Uses the centralized DocumentTypeClassifier for LLM-driven analysis.
 """
 
 import os
@@ -12,9 +13,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session as DBSession
 
 from db.models import Document
+from common.document_type_classifier import (
+    DocumentTypeClassifier,
+    ClassificationResult,
+)
 from .extraction_config import (
-    is_extractable_document_type,
-    get_schema_for_document_type,
     determine_extraction_strategy,
     ExtractionStrategy,
 )
@@ -26,21 +29,28 @@ class ExtractionEligibilityChecker:
     """
     Checks if documents are eligible for structured data extraction.
 
+    Uses the centralized DocumentTypeClassifier for LLM-driven
+    document type classification.
+
     Criteria:
-    - Document type is in extractable list
+    - Document type is in extractable list (from DocumentTypeClassifier)
     - Document has been successfully processed (OCR/conversion complete)
     - Document content is structured (tables, line items, etc.)
     """
 
-    def __init__(self, db: DBSession):
+    def __init__(self, db: DBSession, llm_client=None):
         """
         Initialize the eligibility checker.
 
         Args:
             db: SQLAlchemy database session
+            llm_client: Optional LLM client for document type inference
         """
         self.db = db
+        self.llm_client = llm_client
         self.extraction_enabled = os.getenv("DATA_EXTRACTION_ENABLED", "true").lower() == "true"
+        # Use the centralized document type classifier
+        self.type_classifier = DocumentTypeClassifier(db=db, llm_client=llm_client)
 
     def check_eligibility(
         self,
@@ -48,6 +58,9 @@ class ExtractionEligibilityChecker:
     ) -> Tuple[bool, Optional[str], Optional[str]]:
         """
         Check if a document is eligible for extraction.
+
+        Uses the centralized DocumentTypeClassifier for LLM-driven
+        document type classification.
 
         Args:
             document_id: Document UUID
@@ -67,73 +80,56 @@ class ExtractionEligibilityChecker:
         if document.convert_status and document.convert_status.value not in ["converted", "partial"]:
             return False, None, f"Document not ready: convert_status={document.convert_status.value}"
 
-        # Get document type - prioritize file extension for known spreadsheet types
-        # because metadata extraction may misclassify Excel/CSV files based on content
-        doc_metadata = document.document_metadata or {}
+        # Use centralized classifier for document type classification
+        classification = self._classify_document(document)
 
-        # First check if this is a spreadsheet file by extension
-        inferred_type = self._infer_document_type(document)
+        if not classification:
+            return False, None, "Could not classify document type"
 
-        # For spreadsheet file extensions, always use the inferred type
-        # This prevents Excel/CSV files from being classified as 'report' or other non-extractable types
-        if inferred_type in ('spreadsheet', 'csv'):
-            document_type = inferred_type
-            logger.debug(f"Using inferred type '{document_type}' for spreadsheet file")
-        else:
-            # For other files, use metadata document_type if available
-            document_type = doc_metadata.get("document_type", "").lower()
-            if not document_type:
-                document_type = inferred_type
+        # Check if extractable using the classifier's result
+        if not classification.is_extractable:
+            return False, None, f"Document type '{classification.document_type}' is not extractable"
 
-        if not document_type:
-            return False, None, "Could not determine document type"
-
-        # Check if extractable
-        if not is_extractable_document_type(document_type):
-            return False, None, f"Document type '{document_type}' is not extractable"
-
-        # Get schema type
-        schema_type = get_schema_for_document_type(document_type)
+        # Get schema type from classification
+        schema_type = classification.schema_type
         if not schema_type:
-            return False, None, f"No schema defined for document type '{document_type}'"
+            return False, None, f"No schema defined for document type '{classification.document_type}'"
 
-        return True, schema_type, "Eligible for extraction"
+        logger.info(
+            f"[Eligibility] Document {document_id} classified as '{classification.document_type}' "
+            f"(schema: {schema_type}, confidence: {classification.confidence:.2f})"
+        )
 
-    def _infer_document_type(self, document: Document) -> Optional[str]:
+        return True, schema_type, f"Eligible: {classification.reasoning}"
+
+    def _classify_document(self, document: Document) -> Optional[ClassificationResult]:
         """
-        Infer document type from file extension or content.
+        Classify document using the centralized DocumentTypeClassifier.
 
         Args:
             document: Document model instance
 
         Returns:
-            Inferred document type or None
+            ClassificationResult or None
         """
         if not document.filename:
             return None
 
-        filename_lower = document.filename.lower()
+        # Build metadata dict for classifier
+        doc_metadata = document.document_metadata or {}
 
-        # Check file extension
-        if filename_lower.endswith(('.xlsx', '.xls')):
-            return 'spreadsheet'
-        elif filename_lower.endswith('.csv'):
-            return 'csv'
+        try:
+            # Use centralized classifier
+            result = self.type_classifier.classify(
+                filename=document.filename,
+                metadata=doc_metadata,
+                content_preview=None  # Content preview can be added if needed
+            )
+            return result
 
-        # Check filename patterns
-        patterns = {
-            'invoice': ['invoice', 'inv_', 'bill'],
-            'receipt': ['receipt', 'rcpt'],
-            'bank_statement': ['statement', 'bank', 'account'],
-            'purchase_order': ['po_', 'purchase', 'order'],
-            'expense_report': ['expense', 'reimburse'],
-        }
-
-        for doc_type, keywords in patterns.items():
-            if any(kw in filename_lower for kw in keywords):
-                return doc_type
-
-        return None
+        except Exception as e:
+            logger.error(f"[Eligibility] Classification failed: {e}")
+            return None
 
     def determine_strategy(
         self,

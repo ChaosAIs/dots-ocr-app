@@ -956,11 +956,9 @@ class HierarchicalTaskQueueManager:
 
             # Check if all vector chunks for this document are complete
             # If so, trigger metadata extraction in background
+            # NOTE: Data extraction is now triggered INSIDE _run_metadata_extraction
+            # after document_metadata is populated (ensures eligibility check has the data it needs)
             self._check_and_trigger_metadata_extraction(document_id, db)
-
-            # Check if all vector chunks complete - trigger data extraction
-            # Data extraction runs BEFORE GraphRAG to ensure structured data is available early
-            self._check_and_trigger_data_extraction(document_id, db)
 
             logger.debug(f"Completed Vector chunk task: chunk={chunk_task_id}")
             return True
@@ -1581,6 +1579,17 @@ class HierarchicalTaskQueueManager:
                 f"subject={metadata.get('subject_name')} | "
                 f"confidence={metadata.get('confidence', 0):.2f}"
             )
+
+            # Trigger data extraction AFTER metadata is populated
+            # This ensures document_type is available for eligibility checking
+            try:
+                from extraction_service.task_queue_integration import run_document_extraction
+                logger.info(f"[Extraction] Triggering data extraction after metadata for {source_name}")
+                run_document_extraction(document_id)
+            except ImportError as e:
+                logger.debug(f"[Extraction] Extraction service not available: {e}")
+            except Exception as e:
+                logger.error(f"[Extraction] Failed to trigger extraction for {source_name}: {e}")
 
         except ImportError as e:
             logger.warning(f"[Metadata] Extractor not available: {e}")

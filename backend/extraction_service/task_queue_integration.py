@@ -65,8 +65,10 @@ def check_and_trigger_data_extraction(
             return
 
         # Skip if extraction already done or in progress
+        # Note: 'pending' and None are allowed - these indicate extraction should run
+        # 'skipped' is now allowed to be retried after metadata is populated
         extraction_status = getattr(doc, 'extraction_status', None)
-        if extraction_status in ['completed', 'processing', 'skipped']:
+        if extraction_status in ['completed', 'processing']:
             logger.debug(f"Extraction already {extraction_status} for document {document_id}")
             return
 
@@ -111,8 +113,11 @@ def run_document_extraction(document_id: UUID) -> bool:
 
     db = create_db_session()
     try:
-        # Check eligibility first
-        checker = ExtractionEligibilityChecker(db)
+        # Get LLM client for eligibility checking and extraction
+        llm_client = get_extraction_llm_client()
+
+        # Check eligibility first (with LLM for document type inference)
+        checker = ExtractionEligibilityChecker(db, llm_client=llm_client)
         eligible, schema_type, reason = checker.check_eligibility(document_id)
 
         if not eligible:

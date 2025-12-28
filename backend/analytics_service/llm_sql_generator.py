@@ -56,10 +56,14 @@ class LLMSQLGenerator:
     SQL_GENERATION_PROMPT = """You are a SQL expert. Generate a PostgreSQL query to answer the user's question.
 
 ## Data Structure
-The data is stored in a PostgreSQL table with the following structure:
-- Table: documents_data
-- Column: line_items (JSONB array containing rows of data)
-- Each line item is a JSON object with the following fields:
+The data is stored in a PostgreSQL table with TWO separate JSONB columns:
+- Table: documents_data (alias: dd)
+- Column: header_data (JSONB object) - Contains document-level fields like transaction_date, store_name
+- Column: line_items (JSONB array) - Contains item-level fields like description, amount, quantity
+
+CRITICAL: Fields have different sources:
+- source='header': Access via dd.header_data->>'field_name'
+- source='line_item': Access via item->>'field_name' after jsonb_array_elements()
 
 ### Available Fields and Their Types:
 {field_schema}
@@ -68,15 +72,17 @@ The data is stored in a PostgreSQL table with the following structure:
 "{user_query}"
 
 ## Requirements:
-1. Use jsonb_array_elements() to expand line_items array
-2. Use proper type casting: (item->>'field_name')::numeric for numbers, (item->>'field_name')::timestamp for dates
-3. For date grouping:
-   - Yearly: EXTRACT(YEAR FROM (item->>'date_field')::timestamp)
-   - Monthly: TO_CHAR((item->>'date_field')::timestamp, 'YYYY-MM')
-   - Quarterly: CONCAT(EXTRACT(YEAR FROM (item->>'date_field')::timestamp), '-Q', EXTRACT(QUARTER FROM (item->>'date_field')::timestamp))
-4. Use ROUND() for monetary values to 2 decimal places
-5. Always include COUNT(*) as item_count in aggregations
-6. Order results logically (by date ascending, then by category)
+1. Use jsonb_array_elements(dd.line_items) to expand line_items array
+2. For header fields (source='header'): Use dd.header_data->>'field_name'
+3. For line_item fields (source='line_item'): Use item->>'field_name'
+4. Use proper type casting: ::numeric for numbers, ::timestamp for dates
+5. For date grouping (usually from header_data):
+   - Yearly: EXTRACT(YEAR FROM (dd.header_data->>'date_field')::timestamp)
+   - Monthly: TO_CHAR((dd.header_data->>'date_field')::timestamp, 'YYYY-MM')
+   - Quarterly: CONCAT(EXTRACT(YEAR FROM ...)::int, '-Q', EXTRACT(QUARTER FROM ...)::int)
+6. Use ROUND() for monetary values to 2 decimal places
+7. Always include COUNT(*) as item_count in aggregations
+8. Order results logically (by date ascending, then by category)
 
 ## Response Format:
 Return ONLY a JSON object with this exact structure:
@@ -161,12 +167,17 @@ Analyze the query and identify:
    - If user asks for "total", "sum", or just wants amounts aggregated -> aggregation_type = "sum"
    - If user asks for "average", "mean" -> aggregation_type = "avg"
    - If user asks for "count", "how many" -> aggregation_type = "count"
+7. CRITICAL - Report type detection:
+   - "detail": User wants to see INDIVIDUAL ITEMS/RECORDS. Keywords: "details", "list", "show all", "each", "every", "items", "individual", "breakdown", "itemized", "what items", "what did we buy"
+   - "summary": User wants AGGREGATED totals only. Keywords: "total", "sum", "how much", "aggregate"
+   - "comparison": User wants to compare different groups
 
 ## Important:
 - Pay close attention to ordering keywords like "first", "then", "under each", "within"
 - "Group by X, then by Y" means X is the primary grouping, Y is secondary
 - "Show Y under each X" means X is primary, Y is secondary
 - For MIN/MAX queries, identify which entity (customer, vendor, product) should be shown with the min/max value
+- IMPORTANT: If user says "list details", "show details", "list items", they want report_type="detail"
 
 ## Response Format (JSON only):
 {{
@@ -244,11 +255,19 @@ Respond with JSON only:"""
 ## Data Schema (Available Fields):
 {field_schema}
 
-## Data Structure:
-- Table: documents_data (alias: dd)
-- Column: line_items (JSONB array)
-- Access fields using: item->>'Field Name'
-- The 'item' column is created by: jsonb_array_elements(dd.line_items) as item
+## Data Structure - CRITICAL:
+The documents_data table has TWO separate JSONB columns:
+- header_data (JSONB object): Document-level fields like transaction_date, store_name
+- line_items (JSONB array): Item-level fields like description, amount, quantity
+
+IMPORTANT: Check the 'source' and 'access_pattern' in the field schema above!
+- source='header': Access via dd.header_data->>'field_name' or header_data->>'field_name' in CTE
+- source='line_item': Access via item->>'field_name' after jsonb_array_elements()
+
+COMMON MISTAKE: Trying to access header fields (like transaction_date) from line_items.
+For example, if transaction_date is in header_data:
+- WRONG: item->>'transaction_date' -- this field doesn't exist in line_items!
+- CORRECT: header_data->>'transaction_date'
 
 ## Common Error Fixes:
 1. "column X does not exist" in CTE: The 'item' column is only available AFTER jsonb_array_elements() runs. You CANNOT use item->>'...' in WHERE clause inside the CTE (WITH ... AS block). Move such filters to the outer SELECT.
@@ -256,6 +275,7 @@ Respond with JSON only:"""
 3. "invalid input syntax for type numeric": Add NULLIF and type checking for numeric casts.
 4. Date parsing errors: Use proper date format handling.
 5. Aggregate function errors: Ensure aggregates are used with GROUP BY.
+6. Empty results: Check if you're accessing a field from the wrong JSONB column (header_data vs line_items).
 
 ## Requirements:
 1. Analyze the error message carefully
@@ -288,19 +308,55 @@ Respond with JSON only:"""
 - Aggregation Type: {aggregation_type}
 - Entity Field: {entity_field}
 - Date Field: {date_field}
+- Date Field Source: {date_field_source}
+- Report Type: {report_type}
 - Filters: {filters}
 
-## Data Structure:
-- Table: documents_data (alias: dd)
-- Column: line_items (JSONB array)
-- Access fields using: item->>'Field Name'
+## Data Structure - CRITICAL:
+The documents_data table has TWO separate JSONB columns:
+- header_data (JSONB object): Document-level fields like transaction_date, store_name
+- line_items (JSONB array): Item-level fields like description, amount, quantity
 
-## SQL Templates by Aggregation Type:
+IMPORTANT: You must access fields from the correct source:
+- Header fields (source='header'): Use dd.header_data->>'field_name'
+- Line item fields (source='line_item'): Use item->>'field_name' after jsonb_array_elements()
+
+For example, if the date is in header_data:
+- Correct: EXTRACT(YEAR FROM (dd.header_data->>'transaction_date')::timestamp)
+- WRONG: EXTRACT(YEAR FROM (item->>'transaction_date')::timestamp) -- date is NOT in line_items!
+
+## SQL Templates by Report Type and Aggregation Type:
+
+### For report_type = "detail" (show individual items):
+When user wants to see INDIVIDUAL ITEMS with their details:
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+)
+SELECT
+    TO_CHAR((header_data->>'transaction_date')::timestamp, 'YYYY-MM') as month,
+    (header_data->>'transaction_date')::date as date,
+    header_data->>'store_name' as store,
+    item->>'description' as item_description,
+    ROUND((item->>'amount')::numeric, 2) as amount
+FROM expanded_items
+WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{YEAR}}
+ORDER BY (header_data->>'transaction_date')::timestamp, item->>'description'
+```
+
+## SQL Templates by Aggregation Type (for summary reports):
 
 ### For aggregation_type = "sum" (default):
 ```sql
-WITH line_items AS (
-    SELECT jsonb_array_elements(dd.line_items) as item
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
     {{WHERE_CLAUSE}}
@@ -309,16 +365,19 @@ SELECT
     {{SELECT_FIELDS}},
     COUNT(*) as item_count,
     ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-FROM line_items
+FROM expanded_items
 GROUP BY {{GROUP_BY_FIELDS}}
 ORDER BY {{ORDER_BY_FIELDS}}
 ```
+NOTE: Access header fields as: header_data->>'field_name', line item fields as: item->>'field_name'
 
 ### For aggregation_type = "min_max" (finding entities with min AND max values per grouping):
 Use a CTE approach with window functions to find BOTH min and max entities per group:
 ```sql
-WITH line_items AS (
-    SELECT jsonb_array_elements(dd.line_items) as item
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
     {{WHERE_CLAUSE}}
@@ -328,7 +387,7 @@ aggregated AS (
         {{TIME_GROUP_FIELD}} as group_period,
         item->>'{{ENTITY_FIELD}}' as entity_name,
         ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-    FROM line_items
+    FROM expanded_items
     GROUP BY group_period, entity_name
 ),
 ranked AS (
@@ -349,12 +408,15 @@ FROM ranked
 WHERE min_rank = 1 OR max_rank = 1
 ORDER BY group_period, record_type DESC
 ```
+NOTE: For time grouping from header_data, use: header_data->>'transaction_date' (NOT item!)
 
 ### For aggregation_type = "min" (finding entity with minimum value per grouping):
 Use window functions to find the entity with the minimum amount per group:
 ```sql
-WITH line_items AS (
-    SELECT jsonb_array_elements(dd.line_items) as item
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
     {{WHERE_CLAUSE}}
@@ -364,7 +426,7 @@ aggregated AS (
         {{TIME_GROUP_FIELD}} as group_period,
         item->>'{{ENTITY_FIELD}}' as entity_name,
         ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-    FROM line_items
+    FROM expanded_items
     GROUP BY group_period, entity_name
 ),
 ranked AS (
@@ -379,8 +441,10 @@ ORDER BY group_period
 
 ### For aggregation_type = "max" (finding entity with maximum value per grouping):
 ```sql
-WITH line_items AS (
-    SELECT jsonb_array_elements(dd.line_items) as item
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
     {{WHERE_CLAUSE}}
@@ -390,7 +454,7 @@ aggregated AS (
         {{TIME_GROUP_FIELD}} as group_period,
         item->>'{{ENTITY_FIELD}}' as entity_name,
         ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-    FROM line_items
+    FROM expanded_items
     GROUP BY group_period, entity_name
 ),
 ranked AS (
@@ -404,14 +468,20 @@ ORDER BY group_period
 ```
 
 ## Requirements:
-1. Choose the appropriate SQL template based on aggregation_type
-2. For time groupings:
-   - yearly: EXTRACT(YEAR FROM (item->>'date_field')::timestamp)::int
-   - monthly: TO_CHAR((item->>'date_field')::timestamp, 'YYYY-MM')
+1. FIRST check report_type:
+   - If report_type = "detail": Use the DETAIL template to show INDIVIDUAL ITEMS with date, store, description, amount. NO GROUP BY.
+   - If report_type = "summary": Use the aggregation templates with GROUP BY.
+2. Choose the appropriate SQL template based on aggregation_type (for summary reports)
+3. CRITICAL - For time groupings, check the source of the date field:
+   - If date is in header_data (source='header'): Use header_data->>'date_field'
+   - If date is in line_items (source='line_item'): Use item->>'date_field'
+   - yearly: EXTRACT(YEAR FROM (header_data->>'date_field')::timestamp)::int
+   - monthly: TO_CHAR((header_data->>'date_field')::timestamp, 'YYYY-MM')
    - quarterly: CONCAT(EXTRACT(YEAR FROM ...)::int, '-Q', EXTRACT(QUARTER FROM ...)::int)
-3. Non-time groupings: item->>'Field Name'
-4. CRITICAL: Do NOT add any WHERE clause inside the base CTE (WITH ... AS block). Document filtering will be added automatically.
-5. For MIN/MAX queries: You MUST use the window function templates above to return ONLY the min/max records, not all records.
+4. Non-time groupings: Check the source! Use header_data->>'field' or item->>'field' accordingly
+5. CRITICAL: Do NOT add any WHERE clause inside the base CTE (WITH ... AS block). Document filtering will be added automatically.
+6. For MIN/MAX queries: You MUST use the window function templates above to return ONLY the min/max records, not all records.
+7. ALWAYS include header_data in the CTE SELECT so you can access header fields in outer queries.
 
 ## Response Format (JSON only):
 {{
@@ -423,14 +493,239 @@ ORDER BY group_period
 
 Respond with JSON only:"""
 
-    def __init__(self, llm_client=None):
+    def __init__(self, llm_client=None, schema_service=None):
         """
         Initialize the SQL generator.
 
         Args:
             llm_client: LLM client for generating SQL. Must have a generate() method.
+            schema_service: Optional SchemaService for formal schema lookup
         """
         self.llm_client = llm_client
+        self.schema_service = schema_service
+
+    def generate_sql_with_schema(
+        self,
+        user_query: str,
+        document_ids: List[str],
+        db=None
+    ) -> SQLGenerationResult:
+        """
+        Generate SQL using schema-centric approach with dynamic field mapping lookup.
+
+        This method:
+        1. Looks up field mappings from extraction_metadata (cached)
+        2. Falls back to DataSchema table if not cached
+        3. Falls back to LLM-driven inference as last resort
+
+        Args:
+            user_query: User's natural language query
+            document_ids: List of document IDs to query
+            db: Database session for schema lookup
+
+        Returns:
+            SQLGenerationResult with generated SQL
+        """
+        from uuid import UUID
+
+        # Build document filter
+        doc_ids_str = ", ".join(f"'{doc_id}'" for doc_id in document_ids)
+        table_filter = f"dd.document_id IN ({doc_ids_str})"
+
+        # Get field mappings using schema service
+        field_mappings = {}
+        if self.schema_service:
+            try:
+                doc_uuids = [UUID(str(d)) for d in document_ids]
+                field_mappings = self.schema_service.get_field_mappings(doc_uuids)
+                logger.info(f"[SQL Generator] Retrieved {len(field_mappings)} field mappings via schema service")
+            except Exception as e:
+                logger.warning(f"[SQL Generator] Schema service lookup failed: {e}")
+
+        # If no field mappings from schema service, try to get from database directly
+        if not field_mappings and db:
+            field_mappings = self._get_field_mappings_from_db(document_ids, db)
+
+        # Generate SQL with field mappings
+        return self.generate_sql(user_query, field_mappings, table_filter)
+
+    def _get_field_mappings_from_db(
+        self,
+        document_ids: List[str],
+        db
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get field mappings directly from database (extraction_metadata or data_schemas).
+
+        Priority:
+        1. extraction_metadata.field_mappings (per-document cache)
+        2. data_schemas.field_mappings (formal schema)
+        3. Dynamic inference from header_data/line_items
+
+        Args:
+            document_ids: Document IDs to get mappings for
+            db: Database session
+
+        Returns:
+            Combined field mappings dictionary
+        """
+        from sqlalchemy import text
+
+        try:
+            doc_ids_str = ", ".join(f"'{doc_id}'" for doc_id in document_ids)
+
+            # Priority 1: Check extraction_metadata
+            result = db.execute(text(f"""
+                SELECT extraction_metadata->'field_mappings' as field_mappings
+                FROM documents_data
+                WHERE document_id IN ({doc_ids_str})
+                AND extraction_metadata->'field_mappings' IS NOT NULL
+                AND jsonb_typeof(extraction_metadata->'field_mappings') = 'object'
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if row and row[0]:
+                cached = dict(row[0])
+                # Flatten header_fields and line_item_fields
+                field_mappings = {}
+                if 'header_fields' in cached:
+                    field_mappings.update(cached['header_fields'])
+                if 'line_item_fields' in cached:
+                    field_mappings.update(cached['line_item_fields'])
+                if field_mappings:
+                    logger.info("[SQL Generator] Using field mappings from extraction_metadata")
+                    return field_mappings
+
+            # Priority 2: Check DataSchema table
+            result = db.execute(text(f"""
+                SELECT DISTINCT ds.field_mappings
+                FROM documents_data dd
+                JOIN data_schemas ds ON dd.schema_type = ds.schema_type
+                WHERE dd.document_id IN ({doc_ids_str})
+                AND ds.is_active = true
+                AND ds.field_mappings IS NOT NULL
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if row and row[0]:
+                formal = dict(row[0])
+                field_mappings = {}
+                if 'header_fields' in formal:
+                    field_mappings.update(formal['header_fields'])
+                if 'line_item_fields' in formal:
+                    field_mappings.update(formal['line_item_fields'])
+                if field_mappings:
+                    logger.info("[SQL Generator] Using field mappings from DataSchema table")
+                    return field_mappings
+
+            # Priority 3: Infer from actual data
+            logger.info("[SQL Generator] Inferring field mappings from document data")
+            return self._infer_field_mappings_from_documents(document_ids, db)
+
+        except Exception as e:
+            logger.error(f"[SQL Generator] Database field mapping lookup failed: {e}")
+            return {}
+
+    def _infer_field_mappings_from_documents(
+        self,
+        document_ids: List[str],
+        db
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Infer field mappings from actual document data structure.
+
+        Args:
+            document_ids: Document IDs to analyze
+            db: Database session
+
+        Returns:
+            Inferred field mappings
+        """
+        from sqlalchemy import text
+
+        try:
+            doc_ids_str = ", ".join(f"'{doc_id}'" for doc_id in document_ids)
+
+            # Get sample data
+            result = db.execute(text(f"""
+                SELECT
+                    header_data,
+                    line_items->0 as sample_item
+                FROM documents_data
+                WHERE document_id IN ({doc_ids_str})
+                AND line_items IS NOT NULL
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if not row:
+                return {}
+
+            header_data = row[0] or {}
+            sample_item = row[1] or {}
+
+            field_mappings = {}
+
+            # Process header fields
+            for field in header_data.keys():
+                if field not in ['field_mappings', 'column_headers']:
+                    field_mappings[field] = self._classify_field_for_sql(field, 'header')
+
+            # Process line item fields
+            for field in sample_item.keys():
+                if field != 'row_number':
+                    field_mappings[field] = self._classify_field_for_sql(field, 'line_item')
+
+            return field_mappings
+
+        except Exception as e:
+            logger.error(f"[SQL Generator] Field inference failed: {e}")
+            return {}
+
+    def _classify_field_for_sql(self, field_name: str, source: str) -> Dict[str, Any]:
+        """
+        Classify a field for SQL generation purposes.
+
+        Args:
+            field_name: Field name
+            source: 'header' or 'line_item'
+
+        Returns:
+            Field classification
+        """
+        field_lower = field_name.lower().replace('_', ' ')
+
+        # Semantic patterns
+        patterns = [
+            ('date', ['date', 'time', 'created', 'updated', 'timestamp'], 'datetime', None),
+            ('amount', ['total', 'amount', 'price', 'cost', 'revenue', 'sales', 'subtotal', 'fee', 'tax'], 'number', 'sum'),
+            ('quantity', ['quantity', 'qty', 'count', 'units', 'items'], 'number', 'sum'),
+            ('entity', ['customer', 'vendor', 'supplier', 'client', 'company', 'store', 'merchant'], 'string', 'group_by'),
+            ('category', ['category', 'type', 'class', 'group', 'segment'], 'string', 'group_by'),
+            ('product', ['product', 'item', 'description', 'name', 'sku'], 'string', 'group_by'),
+            ('region', ['region', 'city', 'country', 'location', 'address', 'area'], 'string', 'group_by'),
+            ('person', ['sales rep', 'representative', 'agent', 'manager', 'assignee'], 'string', 'group_by'),
+            ('method', ['method', 'payment', 'shipping', 'channel'], 'string', 'group_by'),
+            ('identifier', ['id', 'number', 'code', 'reference'], 'string', None),
+        ]
+
+        for sem_type, keywords, data_type, aggregation in patterns:
+            if any(kw in field_lower for kw in keywords):
+                return {
+                    'semantic_type': sem_type,
+                    'data_type': data_type,
+                    'source': source,
+                    'aggregation': aggregation
+                }
+
+        return {
+            'semantic_type': 'unknown',
+            'data_type': 'string',
+            'source': source,
+            'aggregation': None
+        }
 
     def generate_sql(
         self,
@@ -497,14 +792,16 @@ Respond with JSON only:"""
             logger.warning("[LLM SQL] Round 1 failed, falling back to heuristic")
             return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
 
-        # Extract aggregation type and entity field from Round 1
+        # Extract aggregation type, entity field, and report type from Round 1
         aggregation_type = query_analysis.get('aggregation_type', 'sum')
         entity_field = query_analysis.get('entity_field', '')
+        report_type = query_analysis.get('report_type', 'summary')
 
         logger.info(f"[LLM SQL] Round 1 result: grouping_order={query_analysis.get('grouping_order')}, "
                    f"time={query_analysis.get('time_granularity')}, "
                    f"aggregation={query_analysis.get('aggregation_field')}, "
-                   f"aggregation_type={aggregation_type}, entity_field={entity_field}")
+                   f"aggregation_type={aggregation_type}, entity_field={entity_field}, "
+                   f"report_type={report_type}")
 
         # ========== Round 2: Field Mapping ==========
         logger.info(f"[LLM SQL] Round 2: Mapping fields to schema...")
@@ -556,14 +853,22 @@ Respond with JSON only:"""
         # Use aggregation_type from Round 2 result or fall back to Round 1
         final_aggregation_type = field_mapping_result.get('aggregation_type', aggregation_type)
 
+        # Determine the source of the date field (header vs line_item)
+        date_field = field_mapping_result.get('date_field', 'transaction_date')
+        date_field_source = 'header'  # Default to header since dates are typically document-level
+        if date_field in field_mappings:
+            date_field_source = field_mappings[date_field].get('source', 'header')
+
         sql_prompt = self.VERIFIED_SQL_PROMPT.format(
             user_query=user_query,
             grouping_fields=json.dumps(grouping_fields_desc),
             time_grouping=time_grouping_info,
-            aggregation_field=field_mapping_result.get('aggregation_field', {}).get('actual_field', 'Total Sales'),
+            aggregation_field=field_mapping_result.get('aggregation_field', {}).get('actual_field', 'amount'),
             aggregation_type=final_aggregation_type,
-            entity_field=entity_field_actual or 'Customer Name',
-            date_field=field_mapping_result.get('date_field', 'Purchase Date'),
+            entity_field=entity_field_actual or 'description',
+            date_field=date_field,
+            date_field_source=date_field_source,
+            report_type=report_type,
             filters=json.dumps(query_analysis.get('filters', {}))
         )
 
@@ -678,13 +983,21 @@ Respond with JSON only:"""
             return None
 
     def _format_field_schema_json(self, field_mappings: Dict[str, Dict[str, Any]]) -> str:
-        """Format field mappings as JSON for LLM prompts."""
+        """Format field mappings as JSON for LLM prompts.
+
+        Includes source information (header vs line_item) which is CRITICAL
+        for the LLM to generate correct SQL that accesses fields from the
+        right JSONB column.
+        """
         schema_list = []
         for field_name, mapping in field_mappings.items():
+            source = mapping.get('source', 'line_item')  # Default to line_item for backwards compatibility
             schema_list.append({
                 "field_name": field_name,
                 "data_type": mapping.get('data_type', 'string'),
                 "semantic_type": mapping.get('semantic_type', 'unknown'),
+                "source": source,  # CRITICAL: 'header' or 'line_item'
+                "access_pattern": f"header_data->>'{field_name}'" if source == 'header' else f"item->>'{field_name}'",
                 "aggregation": mapping.get('aggregation', 'none'),
                 "description": mapping.get('description', ''),
                 "aliases": mapping.get('aliases', [])
@@ -848,22 +1161,31 @@ Respond with JSON only:"""
         """
         query_lower = user_query.lower()
 
-        # Find key fields
+        # Find key fields and their sources
         date_field = None
+        date_field_source = 'header'  # Default to header for dates
         amount_field = None
+        amount_field_source = 'line_item'  # Default to line_item for amounts
         category_fields = []
 
         for field_name, mapping in field_mappings.items():
             sem_type = mapping.get('semantic_type', '')
+            source = mapping.get('source', 'line_item')
             if sem_type == 'date' and not date_field:
                 date_field = field_name
+                date_field_source = source
             elif sem_type == 'amount' and mapping.get('aggregation') == 'sum':
                 amount_field = field_name
+                amount_field_source = source
             elif mapping.get('aggregation') == 'group_by':
-                category_fields.append((field_name, sem_type))
+                category_fields.append((field_name, sem_type, source))
             # Also include entity-type fields (customer, vendor, etc.) as potential grouping fields
             elif sem_type == 'entity':
-                category_fields.append((field_name, sem_type))
+                category_fields.append((field_name, sem_type, source))
+
+        # Determine correct accessor for date field
+        date_accessor = f"header_data->>'{date_field}'" if date_field_source == 'header' else f"item->>'{date_field}'"
+        amount_accessor = f"header_data->>'{amount_field}'" if amount_field_source == 'header' else f"item->>'{amount_field}'"
 
         # Detect time granularity
         time_granularity = None
@@ -872,21 +1194,21 @@ Respond with JSON only:"""
         if any(x in query_lower for x in ['by year', 'yearly', 'per year', 'each year', 'and year']):
             time_granularity = "yearly"
             if date_field:
-                time_grouping_sql = f"EXTRACT(YEAR FROM (item->>'{date_field}')::timestamp)::int as year"
+                time_grouping_sql = f"EXTRACT(YEAR FROM ({date_accessor})::timestamp)::int as year"
         elif any(x in query_lower for x in ['by month', 'monthly', 'per month', 'each month', 'and month']):
             time_granularity = "monthly"
             if date_field:
-                time_grouping_sql = f"TO_CHAR((item->>'{date_field}')::timestamp, 'YYYY-MM') as month"
+                time_grouping_sql = f"TO_CHAR(({date_accessor})::timestamp, 'YYYY-MM') as month"
         elif any(x in query_lower for x in ['by quarter', 'quarterly', 'per quarter']):
             time_granularity = "quarterly"
             if date_field:
-                time_grouping_sql = f"CONCAT(EXTRACT(YEAR FROM (item->>'{date_field}')::timestamp)::int, '-Q', EXTRACT(QUARTER FROM (item->>'{date_field}')::timestamp)::int) as quarter"
+                time_grouping_sql = f"CONCAT(EXTRACT(YEAR FROM ({date_accessor})::timestamp)::int, '-Q', EXTRACT(QUARTER FROM ({date_accessor})::timestamp)::int) as quarter"
 
         # Detect category groupings
         grouping_fields = []
         grouping_sql_parts = []
 
-        for field_name, sem_type in category_fields:
+        for field_name, sem_type, source in category_fields:
             # Check if this category is mentioned in query
             field_lower = field_name.lower()
 
@@ -925,7 +1247,9 @@ Respond with JSON only:"""
 
             if matched:
                 grouping_fields.append(field_name)
-                grouping_sql_parts.append(f"item->>'{field_name}' as {field_name.lower().replace(' ', '_')}")
+                # Use correct accessor based on source
+                accessor = f"header_data->>'{field_name}'" if source == 'header' else f"item->>'{field_name}'"
+                grouping_sql_parts.append(f"{accessor} as {field_name.lower().replace(' ', '_')}")
 
         # Build SQL
         select_parts = []
@@ -951,7 +1275,7 @@ Respond with JSON only:"""
                         break
 
                 # Check if any category/entity keyword comes right after 'first'
-                for field_name, _ in category_fields:
+                for field_name, _, _ in category_fields:
                     field_lower = field_name.lower()
                     if field_lower in query_lower[first_pos:first_pos+50]:
                         category_mentioned_after_first = True
@@ -973,7 +1297,7 @@ Respond with JSON only:"""
                 first_category_pos = len(query_lower)
                 first_time_pos = len(query_lower)
 
-                for field_name, _ in category_fields:
+                for field_name, _, _ in category_fields:
                     pos = query_lower.find(field_name.lower())
                     if pos != -1 and pos < first_category_pos:
                         first_category_pos = pos
@@ -1038,24 +1362,24 @@ Respond with JSON only:"""
         # Add aggregations
         select_parts.append("COUNT(*) as item_count")
         if amount_field:
-            select_parts.append(f"ROUND(SUM((item->>'{amount_field}')::numeric), 2) as total_amount")
+            select_parts.append(f"ROUND(SUM(({amount_accessor})::numeric), 2) as total_amount")
 
         # Build WHERE clause
         where_clause = ""
         if table_filter:
             where_clause = f"WHERE {table_filter}"
 
-        # Build final SQL
+        # Build final SQL - include header_data so we can access both header and line item fields
         sql = f"""
-WITH line_items AS (
-    SELECT jsonb_array_elements(dd.line_items) as item
+WITH expanded_items AS (
+    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
     {where_clause}
 )
 SELECT
     {', '.join(select_parts)}
-FROM line_items
+FROM expanded_items
 """
 
         if group_by_parts:
@@ -1148,8 +1472,22 @@ FROM line_items
             # Convert query results to markdown table format
             results_markdown = self._convert_results_to_markdown(query_results, columns)
 
+            # Detect if user wants detailed listing vs summary
+            detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
+                               'each', 'breakdown', 'itemized', 'every', 'specific']
+            query_lower = user_query.lower()
+            wants_details = any(keyword in query_lower for keyword in detail_keywords)
+
+            # Determine instruction based on user intent
+            if wants_details:
+                detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
+                report_type = "detailed"
+            else:
+                detail_instruction = "4. Be concise but complete - summarize the data appropriately"
+                report_type = "summary"
+
             # Simple prompt with markdown-formatted data
-            prompt = f"""Based on the user's question and the SQL query results, write a clear summary report.
+            prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
 "{user_query}"
@@ -1162,10 +1500,11 @@ FROM line_items
 1. Directly answer the user's question based on the data above
 2. If they asked for minimum/maximum values, clearly identify who has the min and max amounts for each year/grouping
 3. Format amounts with $ and proper number formatting (e.g., $1,234.56)
-4. Be concise but complete
-5. Use markdown formatting for readability
+{detail_instruction}
+5. Use markdown formatting for readability (use tables for listing multiple items)
+6. Always include a grand total at the end if showing amounts
 
-Write the summary report in markdown format:"""
+Write the {report_type} report in markdown format:"""
 
             response = self.llm_client.generate(prompt)
 

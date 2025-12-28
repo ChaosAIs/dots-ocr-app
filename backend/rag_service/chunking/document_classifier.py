@@ -3,6 +3,9 @@ Document classifier for pre-chunking analysis.
 
 This module provides LLM-based and rule-based document classification
 to determine the optimal chunking strategy before processing.
+
+Uses the centralized DocumentTypeClassifier for consistent document
+type classification across extraction and chunking services.
 """
 
 import logging
@@ -22,6 +25,12 @@ from .domain_patterns import (
     detect_domain_from_content,
 )
 from .document_types import generate_classification_taxonomy
+
+# Import centralized document type classifier
+from common.document_type_classifier import (
+    DocumentTypeClassifier as CentralizedClassifier,
+    DocumentDomain as CentralDomain,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +116,8 @@ class DocumentClassifier:
     Classifies documents to determine optimal chunking strategy.
 
     Supports both LLM-based and rule-based classification.
+    Uses the centralized DocumentTypeClassifier for consistent
+    document type classification.
     """
 
     def __init__(self, use_llm: bool = True, llm_service=None):
@@ -120,6 +131,7 @@ class DocumentClassifier:
         self.use_llm = use_llm
         self.llm_service = llm_service
         self._llm = None
+        self._centralized_classifier = None
 
     def _get_llm(self):
         """Get or initialize LLM instance."""
@@ -134,6 +146,26 @@ class DocumentClassifier:
                 logger.warning(f"Could not initialize LLM for classification: {e}")
                 self.use_llm = False
         return self._llm
+
+    def _get_centralized_classifier(self) -> CentralizedClassifier:
+        """Get or initialize the centralized document type classifier."""
+        if self._centralized_classifier is None:
+            # Create LLM client wrapper for centralized classifier
+            llm_client = None
+            if self.use_llm:
+                llm = self._get_llm()
+                if llm:
+                    class LLMClientWrapper:
+                        def __init__(self, llm):
+                            self.llm = llm
+                        def generate(self, prompt: str) -> str:
+                            from langchain_core.messages import HumanMessage
+                            response = self.llm.invoke([HumanMessage(content=prompt)])
+                            return response.content
+                    llm_client = LLMClientWrapper(llm)
+
+            self._centralized_classifier = CentralizedClassifier(llm_client=llm_client)
+        return self._centralized_classifier
 
     def classify(
         self,
@@ -422,58 +454,48 @@ class DocumentClassifier:
         markers: Dict[str, bool],
         domain: DocumentDomain,
     ) -> str:
-        """Infer document type from filename and content."""
-        filename_lower = filename.lower()
-        content_lower = content[:5000].lower()
+        """
+        Infer document type using the centralized DocumentTypeClassifier.
 
-        # Check filename patterns - ordered by specificity (more specific first)
-        # Using tuples of (doc_type, patterns, match_in_content) for control
-        type_patterns = [
-            # Education (check first due to chapter/learning patterns)
-            ("textbook", ["textbook"], True),
-            ("course_material", ["chapter", "learning objective", "exercise"], True),
-            ("syllabus", ["syllabus"], True),
-            ("exam", ["exam", "quiz"], True),  # Removed "test" - too generic
+        Uses LLM-driven analysis when available, with fallback to rule-based.
 
-            # Academic (before medical to avoid study/paper conflicts)
-            ("research_paper", ["research paper", "abstract", "methodology", "references"], True),
-            ("thesis", ["thesis", "dissertation"], True),
-            ("academic_article", ["et al.", "et al,", "[1]", "[2]", "(2023)", "(2024)"], True),
+        Args:
+            filename: Document filename
+            content: Document content
+            markers: Structural markers detected in content
+            domain: Detected domain from pattern analysis
 
-            # Medical (specific patterns)
-            ("medical_record", ["chief complaint", "history of present", "assessment", "plan", "hpi", "pmh"], True),
-            ("prescription", ["prescription", "rx"], True),
-            ("lab_result", ["lab result", "laboratory", "blood test", "urinalysis"], True),
-            ("clinical_report", ["clinical", "diagnosis", "icd-10", "cpt"], True),
+        Returns:
+            Document type string
+        """
+        try:
+            # Build metadata from markers for centralized classifier
+            metadata = {
+                'document_type': '',  # Will be inferred
+                'domain': domain.value,
+                'has_tables': markers.get('has_tables', False),
+                'has_amounts': markers.get('has_amounts', False),
+            }
 
-            # Legal
-            ("contract", ["contract", "agreement", "whereas", "hereby"], True),
-            ("terms_of_service", ["terms of service", "terms and conditions"], True),
-            ("privacy_policy", ["privacy policy"], True),
-            ("patent", ["patent"], True),
+            # Use centralized classifier
+            classifier = self._get_centralized_classifier()
+            result = classifier.classify(
+                filename=filename,
+                metadata=metadata,
+                content_preview=content[:2000] if content else None
+            )
 
-            # Financial
-            ("receipt", ["receipt", "rcpt", "total:", "subtotal"], True),
-            ("invoice", ["invoice", "inv", "bill to", "amount due"], True),
-            ("bank_statement", ["bank statement", "account balance"], True),
-            ("expense_report", ["expense report", "reimbursement"], True),
+            if result and result.document_type:
+                logger.info(
+                    f"[Classifier] Centralized classification: {result.document_type} "
+                    f"(confidence: {result.confidence:.2f})"
+                )
+                return result.document_type
 
-            # Technical/Engineering
-            ("technical_spec", ["requirement", "req-", "spec-", "shall", "must"], True),
-            ("api_documentation", ["api", "endpoint", "request", "response"], True),
-            ("user_manual", ["user manual", "user guide", "how to", "instructions"], True),
+        except Exception as e:
+            logger.warning(f"[Classifier] Centralized classification failed: {e}")
 
-            # Professional
-            ("resume", ["resume", "curriculum vitae", "experience", "education", "skills"], True),
-            ("cover_letter", ["cover letter", "dear hiring", "i am writing"], True),
-        ]
-
-        for doc_type, patterns, match_content in type_patterns:
-            for pattern in patterns:
-                if pattern in filename_lower or pattern in content_lower:
-                    return doc_type
-
-        # Fall back to domain default
+        # Fallback to domain-based defaults
         domain_defaults = {
             DocumentDomain.FINANCIAL: "receipt",
             DocumentDomain.LEGAL: "contract",

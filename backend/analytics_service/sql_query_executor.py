@@ -32,10 +32,22 @@ class SQLQueryExecutor:
     - Aggregations (sum, count, avg, min, max)
     - Grouping by time periods (monthly, quarterly, yearly)
     - Access control filtering
+    - Multi-schema queries (independent processing without merge)
+    - LLM-driven field mapping lookup with priority-based caching
     """
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, schema_service=None, llm_client=None):
+        """
+        Initialize the SQL query executor.
+
+        Args:
+            db: SQLAlchemy database session
+            schema_service: Optional SchemaService for schema lookup
+            llm_client: Optional LLM client for dynamic schema inference
+        """
         self.db = db
+        self.schema_service = schema_service
+        self.llm_client = llm_client
 
     def execute_analytics_query(
         self,
@@ -439,6 +451,15 @@ class SQLQueryExecutor:
             if mapping.get("aggregation") == "sum" and item.get(col) is not None
         }
 
+        # If no date in line item, inherit from parent document's header_data
+        if not result.get("date") and doc_data.header_data:
+            header = doc_data.header_data
+            date_fields = ['transaction_date', 'invoice_date', 'receipt_date', 'date', 'statement_date']
+            for field in date_fields:
+                if field in header and header[field]:
+                    result["date"] = str(header[field])
+                    break
+
         return result
 
     def _extract_using_hardcoded_mappings(
@@ -471,12 +492,20 @@ class SQLQueryExecutor:
         status_fields = ['Status', 'status', 'Order Status', 'order_status']
         region_fields = ['Region', 'region', 'Area', 'area', 'Location', 'location']
 
-        # Extract date
+        # Extract date - first try from line item, then fallback to header_data
         date_value = None
         for field in date_fields:
             if field in item and item[field]:
                 date_value = str(item[field])
                 break
+
+        # If no date in line item, inherit from parent document's header_data
+        if not date_value and doc_data.header_data:
+            header = doc_data.header_data
+            for field in date_fields:
+                if field in header and header[field]:
+                    date_value = str(header[field])
+                    break
 
         # Extract amount
         amount_value = None
@@ -861,6 +890,11 @@ class SQLQueryExecutor:
         query_lower = query.lower()
         group_by = None
 
+        # Check if user wants detailed listing - if so, don't group even if they mention "by month"
+        detail_keywords = ['details', 'detail', 'list all', 'show all', 'all items', 'individual',
+                           'each item', 'every item', 'itemized', 'line items', 'specific']
+        wants_details = any(keyword in query_lower for keyword in detail_keywords)
+
         # Check for multi-level grouping first (more specific patterns)
         has_year = any(x in query_lower for x in ['by year', 'yearly', 'per year', 'each year', 'group by year'])
         has_category = any(x in query_lower for x in ['by category', 'by categories', 'per category', 'each category', 'group by category'])
@@ -1156,12 +1190,16 @@ class SQLQueryExecutor:
         }
 
     def _get_available_field_mappings(self, accessible_doc_ids: List[UUID]) -> Dict[str, Dict[str, Any]]:
-        """Get field mappings from documents with extracted data."""
+        """
+        Get field mappings from documents with extracted data.
+
+        If explicit field_mappings don't exist, dynamically infer them from
+        the actual data structure (header_data and line_items).
+        """
         try:
-            # Get documents with field_mappings in header_data
-            # Use raw SQL to properly query JSONB for field_mappings key
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
 
+            # First try: Look for explicit field_mappings
             result = self.db.execute(text(f"""
                 SELECT header_data->'field_mappings' as field_mappings
                 FROM documents_data
@@ -1172,25 +1210,92 @@ class SQLQueryExecutor:
 
             row = result.fetchone()
             if row and row[0]:
-                logger.info(f"[Field Mappings] Found field mappings with {len(row[0])} fields")
+                logger.info(f"[Field Mappings] Found explicit field mappings with {len(row[0])} fields")
                 return dict(row[0])
 
-            # Fallback: try ORM query
-            doc_data = self.db.query(DocumentData).filter(
-                DocumentData.document_id.in_(accessible_doc_ids),
-                DocumentData.header_data.isnot(None)
-            ).first()
+            # Second: Dynamically infer field mappings from actual data structure
+            logger.info("[Field Mappings] No explicit mappings found, inferring from data structure...")
+            return self._infer_field_mappings_from_data(accessible_doc_ids)
 
-            if doc_data and doc_data.header_data:
-                mappings = doc_data.header_data.get('field_mappings', {})
-                if mappings:
-                    logger.info(f"[Field Mappings] Found field mappings via ORM with {len(mappings)} fields")
-                return mappings
-
-            logger.warning("[Field Mappings] No field mappings found in accessible documents")
-            return {}
         except Exception as e:
             logger.error(f"Failed to get field mappings: {e}")
+            return {}
+
+    def _infer_field_mappings_from_data(self, accessible_doc_ids: List[UUID]) -> Dict[str, Dict[str, Any]]:
+        """
+        Dynamically infer field mappings from actual document data structure.
+
+        Analyzes header_data and line_items to create semantic field mappings
+        that the LLM can use for SQL generation.
+        """
+        try:
+            doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
+
+            # Get sample document to analyze structure
+            result = self.db.execute(text(f"""
+                SELECT
+                    schema_type,
+                    header_data,
+                    line_items->0 as sample_line_item
+                FROM documents_data
+                WHERE document_id IN ({doc_ids_str})
+                AND line_items IS NOT NULL
+                AND jsonb_array_length(line_items) > 0
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if not row:
+                logger.warning("[Field Mappings] No documents with line items found")
+                return {}
+
+            schema_type = row[0]
+            header_data = row[1] or {}
+            sample_item = row[2] or {}
+
+            # Build field mappings based on discovered fields
+            field_mappings = {}
+
+            # Map header fields (document-level)
+            header_field_semantics = {
+                'transaction_date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
+                'invoice_date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
+                'receipt_date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
+                'date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
+                'store_name': {'semantic_type': 'entity', 'data_type': 'string', 'source': 'header'},
+                'vendor_name': {'semantic_type': 'entity', 'data_type': 'string', 'source': 'header'},
+                'customer_name': {'semantic_type': 'entity', 'data_type': 'string', 'source': 'header'},
+                'store_address': {'semantic_type': 'location', 'data_type': 'string', 'source': 'header'},
+                'payment_method': {'semantic_type': 'method', 'data_type': 'string', 'source': 'header'},
+                'currency': {'semantic_type': 'currency', 'data_type': 'string', 'source': 'header'},
+                'receipt_number': {'semantic_type': 'identifier', 'data_type': 'string', 'source': 'header'},
+            }
+
+            for field in header_data.keys():
+                if field in header_field_semantics:
+                    field_mappings[field] = header_field_semantics[field]
+
+            # Map line item fields
+            line_item_semantics = {
+                'description': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
+                'item': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
+                'product': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
+                'amount': {'semantic_type': 'amount', 'data_type': 'number', 'source': 'line_item', 'aggregation': 'sum'},
+                'total': {'semantic_type': 'amount', 'data_type': 'number', 'source': 'line_item', 'aggregation': 'sum'},
+                'unit_price': {'semantic_type': 'price', 'data_type': 'number', 'source': 'line_item'},
+                'quantity': {'semantic_type': 'quantity', 'data_type': 'number', 'source': 'line_item', 'aggregation': 'sum'},
+                'category': {'semantic_type': 'category', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
+            }
+
+            for field in sample_item.keys():
+                if field in line_item_semantics:
+                    field_mappings[field] = line_item_semantics[field]
+
+            logger.info(f"[Field Mappings] Inferred {len(field_mappings)} field mappings from {schema_type} data: {list(field_mappings.keys())}")
+            return field_mappings
+
+        except Exception as e:
+            logger.error(f"[Field Mappings] Failed to infer field mappings: {e}")
             return {}
 
     def _analyze_query_heuristically(
@@ -1255,3 +1360,317 @@ class SQLQueryExecutor:
             return 'category'  # Default
         else:
             return None
+
+    # =========================================================================
+    # Multi-Schema Query Support
+    # =========================================================================
+
+    def execute_multi_schema_query(
+        self,
+        accessible_doc_ids: List[UUID],
+        query: str,
+        llm_client=None
+    ) -> Dict[str, Any]:
+        """
+        Execute query across documents with potentially different schemas.
+
+        This method processes each schema type independently without merging,
+        returning separated results for each schema type.
+
+        Args:
+            accessible_doc_ids: List of document IDs user can access
+            query: User's natural language query
+            llm_client: Optional LLM client for SQL generation
+
+        Returns:
+            Dict with results_by_type, combined_summary, and metadata
+        """
+        from analytics_service.llm_sql_generator import LLMSQLGenerator
+
+        logger.info(f"[Multi-Schema Query] Processing {len(accessible_doc_ids)} documents")
+
+        # Step 1: Group documents by schema type
+        schema_groups = self._group_documents_by_schema(accessible_doc_ids)
+
+        logger.info(f"[Multi-Schema Query] Found {len(schema_groups)} schema types: {list(schema_groups.keys())}")
+
+        # Step 2: Process each schema group independently
+        results_by_type = {}
+        all_errors = []
+
+        for schema_type, doc_ids in schema_groups.items():
+            logger.info(f"[Multi-Schema Query] Processing {len(doc_ids)} documents of type '{schema_type}'")
+
+            try:
+                # Get field mappings for this schema type (priority-based lookup)
+                field_mappings = self._get_field_mappings_for_schema(
+                    schema_type=schema_type,
+                    document_ids=doc_ids
+                )
+
+                if not field_mappings:
+                    logger.warning(f"[Multi-Schema Query] No field mappings for {schema_type}, skipping")
+                    continue
+
+                # Build document filter
+                doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in doc_ids)
+                doc_filter = f"dd.document_id IN ({doc_ids_str})"
+
+                # Generate and execute SQL
+                generator = LLMSQLGenerator(llm_client or self.llm_client)
+                sql_result = generator.generate_sql(query, field_mappings, doc_filter)
+
+                if not sql_result.success or not sql_result.sql_query:
+                    logger.warning(f"[Multi-Schema Query] SQL generation failed for {schema_type}")
+                    all_errors.append({
+                        'schema_type': schema_type,
+                        'error': sql_result.error or 'SQL generation failed'
+                    })
+                    continue
+
+                # Execute SQL
+                try:
+                    result = self.db.execute(text(sql_result.sql_query))
+                    rows = result.fetchall()
+                    columns = result.keys()
+                    data = [dict(zip(columns, row)) for row in rows]
+
+                    # Generate summary for this schema type
+                    summary = generator.generate_summary_report(query, data, field_mappings)
+
+                    results_by_type[schema_type] = {
+                        'schema_info': {
+                            'schema_type': schema_type,
+                            'field_mappings': field_mappings,
+                            'document_count': len(doc_ids)
+                        },
+                        'data': data,
+                        'row_count': len(data),
+                        'summary': summary,
+                        'generated_sql': sql_result.sql_query
+                    }
+
+                    logger.info(f"[Multi-Schema Query] {schema_type}: {len(data)} rows returned")
+
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"[Multi-Schema Query] SQL execution failed for {schema_type}: {error_msg}")
+                    all_errors.append({
+                        'schema_type': schema_type,
+                        'error': error_msg
+                    })
+                    self.db.rollback()
+
+            except Exception as e:
+                logger.error(f"[Multi-Schema Query] Processing failed for {schema_type}: {e}")
+                all_errors.append({
+                    'schema_type': schema_type,
+                    'error': str(e)
+                })
+
+        # Step 3: Generate combined summary (without merging data)
+        combined_summary = self._generate_multi_schema_summary(
+            user_query=query,
+            results_by_type=results_by_type,
+            llm_client=llm_client or self.llm_client
+        )
+
+        return {
+            'success': len(results_by_type) > 0,
+            'query': query,
+            'results_by_type': results_by_type,
+            'combined_summary': combined_summary,
+            'schema_types': list(results_by_type.keys()),
+            'errors': all_errors if all_errors else None,
+            'metadata': {
+                'total_documents': len(accessible_doc_ids),
+                'schemas_processed': len(results_by_type),
+                'schemas_failed': len(all_errors),
+                'query_time': datetime.utcnow().isoformat()
+            }
+        }
+
+    def _group_documents_by_schema(
+        self,
+        document_ids: List[UUID]
+    ) -> Dict[str, List[UUID]]:
+        """
+        Group documents by their schema type.
+
+        Args:
+            document_ids: List of document IDs
+
+        Returns:
+            Dict mapping schema_type to list of document IDs
+        """
+        try:
+            doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in document_ids)
+
+            result = self.db.execute(text(f"""
+                SELECT schema_type, document_id
+                FROM documents_data
+                WHERE document_id IN ({doc_ids_str})
+            """))
+
+            groups = {}
+            for row in result.fetchall():
+                schema_type = row[0] or 'unknown'
+                doc_id = row[1]
+
+                if schema_type not in groups:
+                    groups[schema_type] = []
+                groups[schema_type].append(doc_id)
+
+            return groups
+
+        except Exception as e:
+            logger.error(f"[Multi-Schema Query] Failed to group documents: {e}")
+            return {'unknown': document_ids}
+
+    def _get_field_mappings_for_schema(
+        self,
+        schema_type: str,
+        document_ids: List[UUID]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Get field mappings for a schema type using priority-based lookup.
+
+        Priority:
+        1. extraction_metadata.field_mappings (per-document cache)
+        2. DataSchema table (formal schema)
+        3. LLM-driven inference
+
+        Args:
+            schema_type: The schema type
+            document_ids: Document IDs of this schema type
+
+        Returns:
+            Field mappings dictionary
+        """
+        doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in document_ids)
+
+        # Priority 1: Check extraction_metadata
+        try:
+            result = self.db.execute(text(f"""
+                SELECT extraction_metadata->'field_mappings' as field_mappings
+                FROM documents_data
+                WHERE document_id IN ({doc_ids_str})
+                AND extraction_metadata->'field_mappings' IS NOT NULL
+                AND jsonb_typeof(extraction_metadata->'field_mappings') = 'object'
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if row and row[0]:
+                cached = dict(row[0])
+                # Flatten header_fields and line_item_fields
+                field_mappings = {}
+                if 'header_fields' in cached:
+                    field_mappings.update(cached['header_fields'])
+                if 'line_item_fields' in cached:
+                    field_mappings.update(cached['line_item_fields'])
+                if field_mappings:
+                    logger.info(f"[Field Mappings] Using cached mappings for {schema_type}")
+                    return field_mappings
+        except Exception as e:
+            logger.warning(f"[Field Mappings] extraction_metadata lookup failed: {e}")
+
+        # Priority 2: Check DataSchema table
+        try:
+            result = self.db.execute(text(f"""
+                SELECT field_mappings
+                FROM data_schemas
+                WHERE schema_type = '{schema_type}'
+                AND is_active = true
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if row and row[0]:
+                formal = dict(row[0])
+                field_mappings = {}
+                if 'header_fields' in formal:
+                    field_mappings.update(formal['header_fields'])
+                if 'line_item_fields' in formal:
+                    field_mappings.update(formal['line_item_fields'])
+                if field_mappings:
+                    logger.info(f"[Field Mappings] Using formal schema for {schema_type}")
+                    return field_mappings
+        except Exception as e:
+            logger.warning(f"[Field Mappings] DataSchema lookup failed: {e}")
+
+        # Priority 3: Infer from data
+        logger.info(f"[Field Mappings] Inferring mappings for {schema_type}")
+        return self._infer_field_mappings_from_data(document_ids)
+
+    def _generate_multi_schema_summary(
+        self,
+        user_query: str,
+        results_by_type: Dict[str, Any],
+        llm_client=None
+    ) -> str:
+        """
+        Generate a combined summary for multi-schema query results.
+
+        This summarizes results across all schema types without merging the data.
+
+        Args:
+            user_query: Original user query
+            results_by_type: Results grouped by schema type
+            llm_client: Optional LLM client for summary generation
+
+        Returns:
+            Combined summary text
+        """
+        if not results_by_type:
+            return "No data found for your query."
+
+        # Build summary sections for each schema type
+        sections = []
+        for schema_type, result in results_by_type.items():
+            summary = result.get('summary', {})
+            formatted = summary.get('formatted_report', '')
+            row_count = result.get('row_count', 0)
+            doc_count = result.get('schema_info', {}).get('document_count', 0)
+
+            sections.append({
+                'schema_type': schema_type,
+                'document_count': doc_count,
+                'row_count': row_count,
+                'summary': formatted
+            })
+
+        # If LLM available, generate intelligent combined summary
+        if llm_client:
+            try:
+                import json
+                prompt = f"""Combine the following query results from different document types into a unified summary.
+
+User Query: "{user_query}"
+
+Results by Document Type:
+{json.dumps(sections, indent=2)}
+
+Write a clear, combined summary that:
+1. Answers the user's original question
+2. Shows results separated by document type
+3. Highlights any notable differences or patterns across types
+4. Provides grand totals where applicable
+
+Format the response in markdown:"""
+
+                combined = llm_client.generate(prompt)
+                return combined.strip()
+
+            except Exception as e:
+                logger.warning(f"[Multi-Schema Summary] LLM summary failed: {e}")
+
+        # Fallback: Simple concatenation
+        lines = [f"## Query Results by Document Type\n"]
+        for section in sections:
+            lines.append(f"### {section['schema_type'].replace('_', ' ').title()}")
+            lines.append(f"Documents: {section['document_count']}, Rows: {section['row_count']}")
+            lines.append(section['summary'] or "(No summary available)")
+            lines.append("")
+
+        return "\n".join(lines)

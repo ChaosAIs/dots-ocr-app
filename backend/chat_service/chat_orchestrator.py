@@ -191,11 +191,13 @@ class ChatOrchestrator:
         accessible_doc_ids: List[UUID]
     ) -> Dict[str, Any]:
         """
-        Execute analytics query using dynamic SQL generation.
+        Execute analytics query using LLM-driven dynamic SQL generation.
 
-        This method first tries dynamic SQL generation which uses the stored
-        field mappings to generate appropriate SQL. If that fails or returns
-        no data, it falls back to the standard query with relaxed filters.
+        This method uses LLM to:
+        1. Analyze the query and understand user intent
+        2. Generate appropriate SQL based on field mappings
+        3. Execute SQL and format results
+        4. Generate natural language summary
 
         Args:
             query: User's original query
@@ -203,55 +205,28 @@ class ChatOrchestrator:
             accessible_doc_ids: Document IDs user can access
 
         Returns:
-            Analytics query results
+            Analytics query results with LLM-formatted report
         """
         logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        logger.info(f"[Orchestrator] EXECUTING ANALYTICS QUERY (DYNAMIC SQL)")
+        logger.info(f"[Orchestrator] EXECUTING ANALYTICS QUERY (LLM-DRIVEN)")
         logger.info(f"[Orchestrator]   • Query: '{query[:80]}...'")
         logger.info(f"[Orchestrator]   • Accessible documents: {len(accessible_doc_ids)}")
-        logger.info(f"[Orchestrator]   • LLM-based SQL: {'enabled' if self.llm_client else 'disabled (heuristic mode)'}")
+        logger.info(f"[Orchestrator]   • LLM client: {'available' if self.llm_client else 'not available'}")
         logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-        # First, try dynamic SQL generation (uses field mappings from extracted data)
-        # If LLM client is available, use multi-round LLM analysis for better accuracy
+        # Execute LLM-driven dynamic SQL query
+        # Field mappings are inferred dynamically from the data structure
         result = self.sql_executor.execute_dynamic_sql_query(
             accessible_doc_ids=accessible_doc_ids,
             query=query,
-            llm_client=self.llm_client  # Use LLM for multi-round analysis if available
-        )
-
-        # Check if we got valid results
-        if result.get('data') and len(result.get('data', [])) > 0:
-            logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            logger.info(f"[Orchestrator] DYNAMIC SQL QUERY SUCCESS:")
-            logger.info(f"[Orchestrator]   • Data rows: {len(result.get('data', []))}")
-            logger.info(f"[Orchestrator]   • Generated SQL: {result.get('metadata', {}).get('explanation', 'N/A')}")
-            logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-            return result
-
-        # If dynamic SQL didn't work, fall back to standard query with relaxed filters
-        logger.info(f"[Orchestrator] Dynamic SQL returned no data, falling back to standard query")
-
-        # Convert classification to dict for executor - but don't pass restrictive filters
-        intent_dict = {
-            "suggested_schemas": None,  # Don't filter by schema type
-            "detected_time_range": None,  # Don't filter by time range
-            "detected_entities": None,  # Don't filter by entities
-            "detected_metrics": classification.detected_metrics or ['total_amount', 'count']
-        }
-        logger.info(f"[Orchestrator]   • Using relaxed intent dict: {intent_dict}")
-
-        result = self.sql_executor.execute_natural_language_query(
-            accessible_doc_ids=accessible_doc_ids,
-            intent_classification=intent_dict,
-            query=query
+            llm_client=self.llm_client
         )
 
         logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         logger.info(f"[Orchestrator] ANALYTICS QUERY RESULT:")
         logger.info(f"[Orchestrator]   • Data rows: {len(result.get('data', []))}")
-        logger.info(f"[Orchestrator]   • Summary: {result.get('summary', {})}")
-        logger.info(f"[Orchestrator]   • Metadata: {result.get('metadata', {})}")
+        logger.info(f"[Orchestrator]   • Summary keys: {list(result.get('summary', {}).keys())}")
+        logger.info(f"[Orchestrator]   • Has formatted_report: {'formatted_report' in result.get('summary', {})}")
         logger.info(f"[Orchestrator] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
         return result
@@ -277,9 +252,7 @@ class ChatOrchestrator:
         """
         Format analytics results into a readable response.
 
-        Supports both standard and dynamic SQL result formats:
-        - Standard format: {data: [...], summary: {...}, metadata: {...}}
-        - Dynamic SQL format: {data: [...], summary: {hierarchical_data, summary_by_year, ...}, metadata: {...}}
+        Prioritizes LLM-generated formatted_report when available.
 
         Args:
             query: Original user query
@@ -289,23 +262,27 @@ class ChatOrchestrator:
         Returns:
             Formatted response string
         """
-        data = analytics_result.get('data', [])
         summary = analytics_result.get('summary', {})
-        metadata = analytics_result.get('metadata', {})
 
+        # Check for errors
         if 'error' in summary:
             return f"I encountered an error while analyzing your data: {summary['error']}"
 
-        if not data and summary.get('total_records', 0) == 0 and summary.get('grand_total', 0) == 0:
+        # Prioritize LLM-generated formatted_report
+        formatted_report = summary.get('formatted_report', '')
+        if formatted_report and formatted_report.strip():
+            logger.info(f"[Orchestrator] Using LLM-generated formatted_report ({len(formatted_report)} chars)")
+            return formatted_report
+
+        # No data case
+        data = analytics_result.get('data', [])
+        if not data and summary.get('total_records', 0) == 0:
             return self._format_no_data_response(classification)
 
-        # Check if this is dynamic SQL result (has hierarchical_data, summary_by_year, or formatted_report)
-        # formatted_report is the LLM-generated response which should be prioritized
-        if 'hierarchical_data' in summary or 'summary_by_year' in summary or 'formatted_report' in summary:
-            return self._format_dynamic_sql_response(data, summary, metadata)
-
-        # Standard format handling
-        return self._format_standard_analytics_response(data, summary, metadata, classification)
+        # Fallback: basic summary (should rarely happen with LLM-only path)
+        total_amount = summary.get('total_amount', summary.get('grand_total', 0))
+        total_records = summary.get('total_records', len(data))
+        return f"Found {total_records} records with a total of ${total_amount:,.2f}."
 
     def _format_dynamic_sql_response(
         self,
@@ -463,10 +440,17 @@ class ChatOrchestrator:
         data: list,
         summary: Dict[str, Any],
         metadata: Dict[str, Any],
-        classification: IntentClassification
+        classification: IntentClassification,
+        query: str = ""
     ) -> str:
         """Format response from standard analytics query results."""
         response_parts = []
+
+        # Detect if user wants detailed listing vs summary
+        detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
+                           'each', 'breakdown', 'itemized', 'every', 'specific']
+        query_lower = query.lower() if query else ""
+        wants_details = any(keyword in query_lower for keyword in detail_keywords)
 
         # Header
         schema_types = metadata.get('schema_types', [])
@@ -524,18 +508,42 @@ class ChatOrchestrator:
 
         # Individual records (if not grouped)
         elif data and not ('group' in data[0] if data else False):
-            if len(data) <= 10:
-                response_parts.append("\n| Date | Entity | Amount | Type |")
-                response_parts.append("|------|--------|--------|------|")
-                for row in data:
+            # Show all records if user asked for details, otherwise limit to 10
+            max_records = len(data) if wants_details else 10
+            show_all = wants_details or len(data) <= 10
+
+            if show_all or len(data) <= 10:
+                # Build table with all available columns from the data
+                response_parts.append("\n**Details:**")
+                response_parts.append("\n| Date | Description | Amount |")
+                response_parts.append("|------|-------------|--------|")
+
+                for row in data[:max_records]:
                     date = row.get('date', 'N/A')
-                    entity = row.get('entity_name', 'N/A')
+                    # Try to find a description from various fields
+                    description = (
+                        row.get('product') or
+                        row.get('entity_name') or
+                        row.get('category') or
+                        row.get('raw_item', {}).get('description') or
+                        row.get('raw_item', {}).get('Description') or
+                        row.get('raw_item', {}).get('item') or
+                        row.get('raw_item', {}).get('Item') or
+                        row.get('raw_item', {}).get('item_name') or
+                        row.get('raw_item', {}).get('product_name') or
+                        'N/A'
+                    )
+                    # Truncate long descriptions
+                    if len(str(description)) > 40:
+                        description = str(description)[:37] + "..."
                     amount = row.get('amount', 0) or 0
-                    schema = row.get('schema_type', 'N/A')
                     amount_str = f"${amount:,.2f}" if amount else "N/A"
-                    response_parts.append(f"| {date} | {entity} | {amount_str} | {schema} |")
+                    response_parts.append(f"| {date} | {description} | {amount_str} |")
+
+                if not wants_details and len(data) > max_records:
+                    response_parts.append(f"\n*...showing first {max_records} of {len(data)} records. Ask for 'details' to see all.*")
             else:
-                response_parts.append(f"\n*Found {len(data)} matching documents.*")
+                response_parts.append(f"\n*Found {len(data)} matching documents. Ask for 'details' or 'list' to see all items.*")
 
         return "\n".join(response_parts)
 
@@ -561,6 +569,151 @@ class ChatOrchestrator:
         response += "- The filter criteria don't match any records\n"
 
         return response
+
+    def _generate_llm_formatted_report(
+        self,
+        query: str,
+        data: List[Dict[str, Any]],
+        summary: Dict[str, Any]
+    ) -> Optional[str]:
+        """
+        Generate a formatted report using LLM from standard query results.
+
+        This method converts the raw data to a format the LLM can understand
+        and generates a natural language response that includes details when
+        the user asks for them.
+
+        Args:
+            query: Original user query
+            data: List of data rows from query results
+            summary: Summary statistics
+
+        Returns:
+            Formatted report string, or None if generation fails
+        """
+        if not self.llm_client or not data:
+            return None
+
+        try:
+            # Detect if user wants detailed listing vs summary
+            detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
+                               'each', 'breakdown', 'itemized', 'every', 'specific']
+            query_lower = query.lower()
+            wants_details = any(keyword in query_lower for keyword in detail_keywords)
+
+            # Build markdown table from data
+            # Determine columns to show based on available data
+            columns = []
+            if data and len(data) > 0:
+                sample = data[0]
+                # Priority order for columns
+                priority_cols = ['date', 'description', 'product', 'entity_name', 'category', 'amount', 'quantity']
+                for col in priority_cols:
+                    if col in sample or (sample.get('raw_item') and col in sample.get('raw_item', {})):
+                        columns.append(col)
+
+                # Also check raw_item for description
+                if 'raw_item' in sample and isinstance(sample['raw_item'], dict):
+                    raw_cols = sample['raw_item'].keys()
+                    for rc in ['description', 'Description', 'item', 'Item']:
+                        if rc in raw_cols and 'description' not in columns:
+                            columns.append('description')
+                            break
+
+            if not columns:
+                columns = ['date', 'description', 'amount']
+
+            # Build data rows for markdown
+            table_rows = []
+            for row in data:
+                row_data = {}
+                for col in columns:
+                    if col in row:
+                        row_data[col] = row[col]
+                    elif row.get('raw_item') and col in row.get('raw_item', {}):
+                        row_data[col] = row['raw_item'][col]
+                    elif row.get('raw_item'):
+                        # Try case variations
+                        raw_item = row['raw_item']
+                        for key in raw_item:
+                            if key.lower() == col.lower():
+                                row_data[col] = raw_item[key]
+                                break
+                    if col not in row_data:
+                        row_data[col] = 'N/A'
+                table_rows.append(row_data)
+
+            # Create markdown table
+            header = "| " + " | ".join(col.replace('_', ' ').title() for col in columns) + " |"
+            separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+            data_lines = [header, separator]
+
+            for row in table_rows:
+                values = []
+                for col in columns:
+                    val = row.get(col, 'N/A')
+                    if col == 'amount' and isinstance(val, (int, float)):
+                        values.append(f"${val:,.2f}")
+                    elif val is None:
+                        values.append('N/A')
+                    else:
+                        val_str = str(val)
+                        if len(val_str) > 40:
+                            val_str = val_str[:37] + "..."
+                        values.append(val_str)
+                data_lines.append("| " + " | ".join(values) + " |")
+
+            results_markdown = "\n".join(data_lines)
+
+            # Determine instruction based on user intent
+            if wants_details:
+                detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
+                report_type = "detailed"
+            else:
+                detail_instruction = "4. Be concise but complete - summarize the data appropriately"
+                report_type = "summary"
+
+            # Build prompt
+            prompt = f"""Based on the user's question and the query results, write a clear {report_type} report.
+
+## User's Question:
+"{query}"
+
+## Query Results ({len(data)} rows):
+
+{results_markdown}
+
+## Summary Statistics:
+- Total Records: {summary.get('total_records', len(data))}
+- Total Amount: ${summary.get('total_amount', 0):,.2f}
+
+## Instructions:
+1. Directly answer the user's question based on the data above
+2. If they asked for minimum/maximum values, clearly identify them
+3. Format amounts with $ and proper number formatting (e.g., $1,234.56)
+{detail_instruction}
+5. Use markdown formatting for readability (use tables for listing multiple items)
+6. Always include a grand total at the end if showing amounts
+
+Write the {report_type} report in markdown format:"""
+
+            response = self.llm_client.generate(prompt)
+
+            # Clean up the response - remove any code block markers
+            formatted_report = response.strip()
+            if formatted_report.startswith('```'):
+                lines = formatted_report.split('\n')
+                formatted_report = '\n'.join(
+                    line for line in lines
+                    if not line.startswith('```')
+                )
+
+            logger.info(f"[Orchestrator] Generated LLM formatted report ({len(formatted_report)} chars)")
+            return formatted_report
+
+        except Exception as e:
+            logger.error(f"[Orchestrator] Failed to generate LLM formatted report: {e}")
+            return None
 
     def merge_hybrid_results(
         self,

@@ -174,31 +174,6 @@ CREATE TABLE data_schemas (
     created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Semantic mappings (business concepts to fields)
-CREATE TABLE semantic_mappings (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    concept_name VARCHAR(128) NOT NULL,     -- e.g., "total_amount"
-    concept_aliases TEXT[],                  -- ["total", "sum", "grand total"]
-    applicable_schema_types VARCHAR(64)[],
-    json_path VARCHAR(256) NOT NULL,
-    data_type VARCHAR(32),
-    default_aggregation VARCHAR(32),
-    is_calculated BOOLEAN DEFAULT FALSE,
-    calculation_formula TEXT
-);
-
--- Entity registry (known companies, products, etc.)
-CREATE TABLE entity_registry (
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    workspace_id UUID REFERENCES workspaces(id),
-    entity_type VARCHAR(64) NOT NULL,
-    canonical_name VARCHAR(256) NOT NULL,
-    aliases TEXT[] DEFAULT '{}',
-    document_count INTEGER DEFAULT 0,
-    last_seen_at TIMESTAMP,
-    metadata JSONB DEFAULT '{}',
-    UNIQUE(workspace_id, entity_type, canonical_name)
-);
 ```
 
 ---

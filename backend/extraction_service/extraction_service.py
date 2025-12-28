@@ -2,13 +2,19 @@
 Extraction Service
 
 Main service for extracting structured data from documents.
+
+Key Features:
+- LLM-driven schema analysis at each stage
+- Dynamic field mapping inference for unknown document types
+- Schema caching in extraction_metadata for efficient queries
+- Support for both formal schemas (DataSchema table) and dynamic schemas
 """
 
 import os
 import json
 import logging
 import time
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from uuid import UUID
 from datetime import datetime
 
@@ -35,6 +41,11 @@ class ExtractionService:
     - LLM Chunked: Parallel chunked extraction for medium documents
     - Hybrid: LLM for headers, rules for data
     - Parsed: Pure pattern matching for large documents
+
+    Schema Management:
+    - Looks up formal schemas from DataSchema table
+    - Falls back to LLM-driven schema inference
+    - Caches field_mappings in extraction_metadata for efficient queries
     """
 
     def __init__(self, db: DBSession, llm_client=None):
@@ -50,13 +61,129 @@ class ExtractionService:
         self.eligibility_checker = ExtractionEligibilityChecker(db)
         self.min_confidence = float(os.getenv("EXTRACTION_MIN_CONFIDENCE", "0.85"))
 
+    def _get_schema_and_prompt(
+        self,
+        schema_type: str
+    ) -> Tuple[Optional[DataSchema], str, Dict[str, Any]]:
+        """
+        Get schema and extraction prompt using LLM-driven approach.
+
+        Priority:
+        1. DataSchema table (formal schema)
+        2. Hardcoded extraction_config (legacy)
+        3. LLM-generated prompt (dynamic)
+
+        Args:
+            schema_type: The schema type to lookup
+
+        Returns:
+            Tuple of (DataSchema or None, extraction_prompt, field_mappings)
+        """
+        # Priority 1: Check DataSchema table
+        formal_schema = self.db.query(DataSchema).filter(
+            DataSchema.schema_type == schema_type,
+            DataSchema.is_active == True
+        ).first()
+
+        if formal_schema:
+            logger.info(f"[Schema] Found formal schema for {schema_type}")
+            return (
+                formal_schema,
+                formal_schema.extraction_prompt or get_extraction_prompt(schema_type),
+                formal_schema.field_mappings or {}
+            )
+
+        # Priority 2: Use hardcoded extraction_config (legacy support)
+        prompt = get_extraction_prompt(schema_type)
+        if prompt:
+            logger.info(f"[Schema] Using legacy extraction config for {schema_type}")
+            return (None, prompt, {})
+
+        # Priority 3: LLM-generated prompt (for unknown types)
+        if self.llm_client:
+            logger.info(f"[Schema] Generating dynamic prompt for {schema_type}")
+            prompt = self._generate_dynamic_prompt(schema_type)
+            return (None, prompt, {})
+
+        # Fallback
+        logger.warning(f"[Schema] No schema found for {schema_type}, using generic prompt")
+        return (None, self._get_generic_extraction_prompt(), {})
+
+    def _generate_dynamic_prompt(self, schema_type: str) -> str:
+        """
+        Use LLM to generate an extraction prompt for an unknown schema type.
+
+        Args:
+            schema_type: The schema type to generate prompt for
+
+        Returns:
+            Generated extraction prompt
+        """
+        generation_prompt = f"""Generate an extraction prompt for documents of type "{schema_type}".
+
+The prompt should instruct an LLM to:
+1. Identify and extract all header-level fields (document metadata like date, vendor, customer, etc.)
+2. Identify and extract all line items (individual records/rows in the document)
+3. Calculate summary fields (totals, counts, etc.)
+
+Return a JSON object with:
+{{
+    "extraction_prompt": "The complete prompt text...",
+    "expected_header_fields": ["field1", "field2"],
+    "expected_line_item_fields": ["field1", "field2"],
+    "expected_summary_fields": ["field1", "field2"]
+}}
+
+Generate for schema type: {schema_type}"""
+
+        try:
+            response = self.llm_client.generate(generation_prompt)
+            result = self._parse_llm_response(response)
+            if result and 'extraction_prompt' in result:
+                return result['extraction_prompt']
+        except Exception as e:
+            logger.warning(f"[Schema] Dynamic prompt generation failed: {e}")
+
+        return self._get_generic_extraction_prompt()
+
+    def _get_generic_extraction_prompt(self) -> str:
+        """Get a generic extraction prompt for unknown document types."""
+        return """Extract structured data from this document.
+
+Return a JSON object with:
+{
+    "header_data": {
+        // Document-level fields (date, vendor, customer, document number, etc.)
+        // Use null for any field not explicitly visible
+    },
+    "line_items": [
+        // Array of item records/rows in the document
+        // Each item should have consistent fields
+    ],
+    "summary_data": {
+        // Summary fields (totals, counts, etc.)
+    }
+}
+
+IMPORTANT:
+- Extract ALL visible fields
+- Use null for missing values
+- Ensure numbers are actual numbers, not strings
+- Dates should be in YYYY-MM-DD format"""
+
     def extract_document(
         self,
         document_id: UUID,
         force: bool = False
     ) -> Optional[DocumentData]:
         """
-        Extract structured data from a document.
+        Extract structured data from a document using LLM-driven schema analysis.
+
+        This method:
+        1. Checks extraction eligibility
+        2. Looks up formal schema or generates dynamic schema
+        3. Uses schema-aware extraction prompt
+        4. Caches field_mappings in extraction_metadata
 
         Args:
             document_id: Document UUID
@@ -74,6 +201,8 @@ class ExtractionService:
 
         if existing and not force:
             logger.info(f"Document {document_id} already extracted, skipping")
+            # Ensure status is marked as completed if data exists
+            self._update_extraction_status(document_id, "completed")
             return existing
 
         # Check eligibility
@@ -97,28 +226,45 @@ class ExtractionService:
             if not content:
                 raise ValueError("Could not retrieve document content")
 
+            # Get schema and extraction prompt (LLM-driven)
+            formal_schema, extraction_prompt, schema_field_mappings = self._get_schema_and_prompt(schema_type)
+
             # Execute extraction based on strategy
             if strategy == ExtractionStrategy.LLM_DIRECT:
-                result = self._extract_llm_direct(content, schema_type)
+                result = self._extract_llm_direct(content, schema_type, extraction_prompt)
             elif strategy == ExtractionStrategy.LLM_CHUNKED:
-                result = self._extract_llm_chunked(content, schema_type, strategy_metadata)
+                result = self._extract_llm_chunked(content, schema_type, strategy_metadata, extraction_prompt)
             elif strategy == ExtractionStrategy.HYBRID:
-                result = self._extract_hybrid(content, schema_type, strategy_metadata)
+                result = self._extract_hybrid(content, schema_type, strategy_metadata, extraction_prompt)
             elif strategy == ExtractionStrategy.PARSED:
                 result = self._extract_parsed(content, schema_type, document)
             else:
-                result = self._extract_llm_direct(content, schema_type)
+                result = self._extract_llm_direct(content, schema_type, extraction_prompt)
 
             # Validate and save
             if result:
                 duration_ms = int((time.time() - start_time) * 1000)
+
+                # Build field_mappings for caching in extraction_metadata
+                final_field_mappings = self._build_field_mappings(
+                    result=result,
+                    schema_field_mappings=schema_field_mappings,
+                    formal_schema=formal_schema
+                )
+
+                # Add field_mappings to metadata for caching
+                enhanced_metadata = strategy_metadata.copy() if strategy_metadata else {}
+                enhanced_metadata['schema_source'] = 'formal' if formal_schema else 'dynamic'
+                enhanced_metadata['schema_version'] = formal_schema.schema_version if formal_schema else 'inferred'
+
                 document_data = self._save_extraction_result(
                     document_id=document_id,
                     schema_type=schema_type,
                     result=result,
                     strategy=strategy,
                     duration_ms=duration_ms,
-                    metadata=strategy_metadata
+                    metadata=enhanced_metadata,
+                    field_mappings=final_field_mappings
                 )
 
                 self._update_extraction_status(document_id, "completed")
@@ -131,6 +277,45 @@ class ExtractionService:
             logger.error(f"Extraction failed for document {document_id}: {e}")
             self._update_extraction_status(document_id, "failed", error=str(e))
             return None
+
+    def _build_field_mappings(
+        self,
+        result: Dict[str, Any],
+        schema_field_mappings: Dict[str, Any],
+        formal_schema: Optional[DataSchema]
+    ) -> Dict[str, Any]:
+        """
+        Build comprehensive field mappings for caching in extraction_metadata.
+
+        Priority:
+        1. Formal schema field_mappings
+        2. Field_mappings from extraction result (dynamic)
+        3. LLM-inferred field_mappings
+
+        Args:
+            result: Extraction result
+            schema_field_mappings: Field mappings from schema lookup
+            formal_schema: Formal DataSchema if found
+
+        Returns:
+            Complete field_mappings with header_fields and line_item_fields
+        """
+        # Start with formal schema mappings if available
+        if schema_field_mappings:
+            logger.info("[Field Mappings] Using formal schema field_mappings")
+            return schema_field_mappings
+
+        # Check if extraction result contains field_mappings (from _parse_markdown_table)
+        header_data = result.get("header_data", {})
+        if "field_mappings" in header_data:
+            logger.info("[Field Mappings] Using field_mappings from extraction result")
+            # Convert to standard format with source markers
+            extracted_mappings = header_data["field_mappings"]
+            return self._normalize_field_mappings(extracted_mappings)
+
+        # LLM-driven inference as last resort
+        logger.info("[Field Mappings] Inferring field_mappings from extracted data")
+        return self._infer_field_mappings_from_result(result)
 
     def _get_document_content(self, document: Document) -> Optional[str]:
         """
@@ -222,17 +407,140 @@ class ExtractionService:
 
         return None
 
+    def _normalize_field_mappings(
+        self,
+        mappings: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Normalize field mappings to standard format with source markers.
+
+        Args:
+            mappings: Raw field mappings from extraction
+
+        Returns:
+            Normalized field mappings with header_fields and line_item_fields
+        """
+        header_fields = {}
+        line_item_fields = {}
+
+        for field_name, field_info in mappings.items():
+            if isinstance(field_info, dict):
+                source = field_info.get('source', 'line_item')
+                if source == 'header' or source == 'summary':
+                    header_fields[field_name] = {**field_info, 'source': source}
+                else:
+                    line_item_fields[field_name] = {**field_info, 'source': 'line_item'}
+            else:
+                # Simple mapping, assume line_item
+                line_item_fields[field_name] = {
+                    'semantic_type': 'unknown',
+                    'data_type': 'string',
+                    'source': 'line_item'
+                }
+
+        return {
+            'header_fields': header_fields,
+            'line_item_fields': line_item_fields
+        }
+
+    def _infer_field_mappings_from_result(
+        self,
+        result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Infer field mappings from extraction result using LLM or heuristics.
+
+        Args:
+            result: Extraction result with header_data, line_items, summary_data
+
+        Returns:
+            Inferred field mappings
+        """
+        header_fields = {}
+        line_item_fields = {}
+
+        # Process header_data
+        header_data = result.get("header_data", {})
+        for field in header_data.keys():
+            if field not in ['field_mappings', 'column_headers']:
+                header_fields[field] = self._classify_field(field, 'header')
+
+        # Process line_items (first item as template)
+        line_items = result.get("line_items", [])
+        if line_items and isinstance(line_items[0], dict):
+            for field in line_items[0].keys():
+                if field != 'row_number':
+                    line_item_fields[field] = self._classify_field(field, 'line_item')
+
+        # Process summary_data
+        summary_data = result.get("summary_data", {})
+        for field in summary_data.keys():
+            if field not in header_fields:
+                header_fields[field] = self._classify_field(field, 'summary')
+
+        return {
+            'header_fields': header_fields,
+            'line_item_fields': line_item_fields
+        }
+
+    def _classify_field(self, field_name: str, source: str) -> Dict[str, Any]:
+        """
+        Classify a field using semantic pattern matching.
+
+        Args:
+            field_name: The field name to classify
+            source: The source (header, line_item, summary)
+
+        Returns:
+            Field classification with semantic_type, data_type, aggregation
+        """
+        field_lower = field_name.lower().replace('_', ' ').replace('-', ' ')
+
+        # Semantic patterns (more specific first)
+        patterns = [
+            ('date', ['date', 'time', 'created', 'updated', 'timestamp'], 'datetime', None),
+            ('amount', ['total', 'amount', 'price', 'cost', 'revenue', 'sales', 'subtotal', 'sum', 'fee', 'tax'], 'number', 'sum'),
+            ('quantity', ['quantity', 'qty', 'count', 'units', 'items', 'number of'], 'number', 'sum'),
+            ('entity', ['customer', 'vendor', 'supplier', 'client', 'company', 'store', 'merchant'], 'string', 'group_by'),
+            ('category', ['category', 'type', 'class', 'group', 'segment'], 'string', 'group_by'),
+            ('product', ['product', 'item', 'description', 'name', 'sku'], 'string', 'group_by'),
+            ('region', ['region', 'city', 'country', 'location', 'address', 'area'], 'string', 'group_by'),
+            ('person', ['sales rep', 'representative', 'agent', 'manager', 'assignee'], 'string', 'group_by'),
+            ('method', ['method', 'payment', 'shipping', 'channel'], 'string', 'group_by'),
+            ('identifier', ['id', 'number', 'code', 'reference', 'invoice', 'receipt', 'order'], 'string', None),
+        ]
+
+        for sem_type, keywords, data_type, aggregation in patterns:
+            if any(kw in field_lower for kw in keywords):
+                return {
+                    'semantic_type': sem_type,
+                    'data_type': data_type,
+                    'source': source,
+                    'aggregation': aggregation,
+                    'original_name': field_name
+                }
+
+        return {
+            'semantic_type': 'unknown',
+            'data_type': 'string',
+            'source': source,
+            'aggregation': None,
+            'original_name': field_name
+        }
+
     def _extract_llm_direct(
         self,
         content: str,
-        schema_type: str
+        schema_type: str,
+        extraction_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Extract using a single LLM call.
+        Extract using a single LLM call with schema-aware prompt.
 
         Args:
             content: Document content
             schema_type: Target schema type
+            extraction_prompt: Schema-specific extraction prompt (from formal schema or dynamic)
 
         Returns:
             Extracted data dictionary
@@ -250,7 +558,8 @@ class ExtractionService:
             logger.warning("LLM client not configured, using mock extraction")
             return self._mock_extraction(content, schema_type)
 
-        prompt = get_extraction_prompt(schema_type)
+        # Use provided extraction_prompt or fallback to legacy config
+        prompt = extraction_prompt or get_extraction_prompt(schema_type)
         full_prompt = f"{prompt}\n\nDocument content:\n{content[:50000]}"  # Limit content size
 
         try:
@@ -282,15 +591,17 @@ class ExtractionService:
         self,
         content: str,
         schema_type: str,
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        extraction_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
-        Extract using parallel chunked LLM calls.
+        Extract using parallel chunked LLM calls with schema-aware prompts.
 
         Args:
             content: Document content
             schema_type: Target schema type
             metadata: Extraction metadata
+            extraction_prompt: Schema-specific extraction prompt
 
         Returns:
             Merged extracted data dictionary
@@ -299,10 +610,10 @@ class ExtractionService:
         chunks = self._split_content_into_chunks(content)
 
         if len(chunks) == 1:
-            return self._extract_llm_direct(content, schema_type)
+            return self._extract_llm_direct(content, schema_type, extraction_prompt)
 
         # First chunk: Extract headers
-        header_result = self._extract_llm_direct(chunks[0], schema_type)
+        header_result = self._extract_llm_direct(chunks[0], schema_type, extraction_prompt)
 
         # Remaining chunks: Extract line items only
         all_line_items = header_result.get("line_items", [])
@@ -338,7 +649,8 @@ Document section:
         self,
         content: str,
         schema_type: str,
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        extraction_prompt: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Extract using LLM for headers and rules for data.
@@ -347,13 +659,14 @@ Document section:
             content: Document content
             schema_type: Target schema type
             metadata: Extraction metadata
+            extraction_prompt: Schema-specific extraction prompt
 
         Returns:
             Extracted data dictionary
         """
         # Extract first part with LLM to get structure
         first_section = content[:10000]  # First ~10k chars for header detection
-        header_result = self._extract_llm_direct(first_section, schema_type)
+        header_result = self._extract_llm_direct(first_section, schema_type, extraction_prompt)
 
         # If spreadsheet-like, try to parse the rest with rules
         if schema_type == "spreadsheet" and header_result.get("header_data", {}).get("column_headers"):
@@ -362,7 +675,7 @@ Document section:
             header_result["line_items"] = line_items
         else:
             # Fall back to chunked extraction
-            return self._extract_llm_chunked(content, schema_type, metadata)
+            return self._extract_llm_chunked(content, schema_type, metadata, extraction_prompt)
 
         return header_result
 
@@ -1141,10 +1454,11 @@ Document section:
         result: Dict[str, Any],
         strategy: ExtractionStrategy,
         duration_ms: int,
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        field_mappings: Optional[Dict[str, Any]] = None
     ) -> DocumentData:
         """
-        Save extraction result to database.
+        Save extraction result to database with field_mappings cached in extraction_metadata.
 
         Args:
             document_id: Document UUID
@@ -1153,6 +1467,7 @@ Document section:
             strategy: Strategy used
             duration_ms: Extraction duration
             metadata: Additional metadata
+            field_mappings: Field mappings to cache in extraction_metadata
 
         Returns:
             DocumentData model instance
@@ -1160,6 +1475,22 @@ Document section:
         header_data = result.get("header_data", {})
         line_items = result.get("line_items", [])
         summary_data = result.get("summary_data", {})
+
+        # Remove field_mappings from header_data if present (will be stored in extraction_metadata)
+        if "field_mappings" in header_data:
+            header_data = {k: v for k, v in header_data.items() if k != "field_mappings"}
+
+        # Validate currency field - LLMs often assume USD when no currency is explicit
+        # Only allow currency if it's a valid 3-letter code, otherwise set to null
+        if "currency" in header_data:
+            currency_val = header_data.get("currency")
+            if currency_val:
+                # Check if it's a valid 3-letter currency code
+                valid_codes = {"CAD", "USD", "EUR", "GBP", "AUD", "NZD", "JPY", "CNY", "HKD", "SGD", "CHF", "INR", "MXN", "BRL"}
+                if not (isinstance(currency_val, str) and currency_val.upper() in valid_codes):
+                    # Not a valid code, set to null
+                    header_data["currency"] = None
+                    logger.debug(f"Cleared invalid currency value: {currency_val}")
 
         # Determine storage method
         line_items_count = len(line_items)
@@ -1169,6 +1500,12 @@ Document section:
         else:
             storage = "inline"
             inline_items = line_items
+
+        # Build extraction_metadata with field_mappings cache
+        extraction_metadata = metadata.copy() if metadata else {}
+        if field_mappings:
+            extraction_metadata['field_mappings'] = field_mappings
+        extraction_metadata['cached_at'] = datetime.utcnow().isoformat()
 
         # Create or update DocumentData
         existing = self.db.query(DocumentData).filter(
@@ -1184,7 +1521,7 @@ Document section:
             existing.line_items_count = line_items_count
             existing.extraction_method = strategy.value
             existing.extraction_duration_ms = duration_ms
-            existing.extraction_metadata = metadata
+            existing.extraction_metadata = extraction_metadata
             existing.validation_status = "pending"
             document_data = existing
         else:
@@ -1198,13 +1535,15 @@ Document section:
                 line_items_count=line_items_count,
                 extraction_method=strategy.value,
                 extraction_duration_ms=duration_ms,
-                extraction_metadata=metadata,
+                extraction_metadata=extraction_metadata,
                 validation_status="pending"
             )
             self.db.add(document_data)
 
         self.db.commit()
         self.db.refresh(document_data)
+
+        logger.info(f"[Extraction] Saved document_data with field_mappings cached in extraction_metadata")
 
         # Store overflow line items if needed
         if storage == "external":

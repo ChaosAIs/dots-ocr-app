@@ -219,7 +219,7 @@ Return a JSON object with the following structure:
         "customer_name": "string or null",
         "customer_address": "string or null",
         "payment_terms": "string or null",
-        "currency": "string or null (e.g., CAD, USD, EUR - ONLY if explicitly shown on invoice, otherwise null)"
+        "currency": "null (MUST be null unless a 3-letter currency code like CAD, USD, EUR is explicitly printed)"
     },
     "line_items": [
         {
@@ -236,10 +236,12 @@ Return a JSON object with the following structure:
     }
 }
 
-IMPORTANT:
+CRITICAL RULES:
 - Use null for any field where the value is NOT explicitly visible in the document.
 - Do NOT assume or guess values. Only extract what is actually shown.
-- For currency, only include if explicitly printed. Do not assume based on location.
+- CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed on the document.
+  * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
+  * Do NOT guess the currency based on location, vendor name, or context.
 - Ensure numbers are actual numbers, not strings.
 - Dates should be in YYYY-MM-DD format.""",
 
@@ -254,7 +256,7 @@ Return a JSON object with:
         "store_name": "string or null",
         "store_address": "string or null",
         "payment_method": "string or null",
-        "currency": "string or null (e.g., CAD, USD, EUR - ONLY if explicitly shown on receipt, otherwise null)"
+        "currency": "null (MUST be null unless a 3-letter currency code like CAD, USD, EUR is explicitly printed)"
     },
     "line_items": [
         {
@@ -271,12 +273,14 @@ Return a JSON object with:
     }
 }
 
-IMPORTANT:
+CRITICAL RULES:
 - Use null for any field where the value is NOT explicitly visible in the receipt.
 - Do NOT assume or guess values. Only extract what is actually shown.
-- For currency: ONLY set a value if the currency code (CAD, USD, EUR, etc.) is EXPLICITLY printed on the receipt.
-  The "$" symbol alone does NOT indicate USD - it could be CAD, AUD, or other dollar currencies.
-  If only "$" symbols are shown without a currency code, set currency to null.""",
+- CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed on the receipt.
+  * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
+  * Do NOT guess the currency based on location, store name, or context.
+  * If the receipt shows only "$" without a currency code like "CAD" or "USD", you MUST set currency to null.
+  * Example: A receipt from Canada showing "$85.30" should have currency: null (not "CAD" or "USD").""",
 
     "bank_statement": """Extract structured data from this bank statement.
 
@@ -288,7 +292,7 @@ Return a JSON object with:
         "bank_name": "string or null",
         "statement_period_start": "YYYY-MM-DD or null",
         "statement_period_end": "YYYY-MM-DD or null",
-        "currency": "string or null (e.g., CAD, USD, EUR - ONLY if explicitly shown, otherwise null)"
+        "currency": "null (MUST be null unless a 3-letter currency code like CAD, USD, EUR is explicitly printed)"
     },
     "line_items": [
         {
@@ -308,10 +312,11 @@ Return a JSON object with:
     }
 }
 
-IMPORTANT:
+CRITICAL RULES:
 - Use null for any field where the value is NOT explicitly visible in the document.
 - Do NOT assume or guess values. Only extract what is actually shown.
-- For currency, only include if explicitly printed. Do not assume based on location.
+- CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.
+  * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
 - List all transactions in chronological order.""",
 
     "spreadsheet": """Extract structured data from this spreadsheet.
