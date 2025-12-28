@@ -41,4 +41,14 @@ themes.forEach(theme => {
   }
 });
 
+// Fix lara-light-teal theme - incorrect highlight-bg color in PrimeReact package
+// The original value #0f766e (dark teal) should be #f0fdfa (light teal) for light theme
+const laraLightTealFile = path.join(targetDir, 'lara-light-teal', 'theme.css');
+if (fs.existsSync(laraLightTealFile)) {
+  let content = fs.readFileSync(laraLightTealFile, 'utf8');
+  content = content.replace('--highlight-bg: #0f766e;', '--highlight-bg: #f0fdfa;');
+  fs.writeFileSync(laraLightTealFile, content, 'utf8');
+  console.log('Fixed lara-light-teal highlight-bg color');
+}
+
 console.log('Theme copy complete!');

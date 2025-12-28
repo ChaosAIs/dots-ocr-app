@@ -117,15 +117,17 @@ export const NavBar = () => {
       {isAuthorized ? (
         <Button
           label={t("Nav.Logout")}
-          rounded
-          severity="secondary"
+          icon="pi pi-sign-out"
+          outlined
+          severity="danger"
           title={t("Nav.Logout")}
           onClick={logout}
         />
       ) : (
         <Button
           label="Login"
-          rounded
+          icon="pi pi-sign-in"
+          outlined
           title="Login"
           onClick={() => navigate('/login')}
         />

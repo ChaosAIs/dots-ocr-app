@@ -160,24 +160,32 @@ export const ChatHistory = forwardRef(({ currentSessionId, onSessionSelect }, re
         <div className="header-actions">
           <Button
             icon="pi pi-sparkles"
-            className="p-button-text p-button-sm p-button-warning"
+            text
+            rounded
+            severity="warning"
             onClick={handleRegenerateAllTitles}
             tooltip="Regenerate all titles with LLM"
             tooltipOptions={{ position: "bottom" }}
+            style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
           />
           <Button
             icon="pi pi-trash"
-            className="p-button-text p-button-sm p-button-danger"
+            text
+            rounded
+            severity="danger"
             onClick={handleCleanupEmpty}
             tooltip="Clean up empty sessions"
             tooltipOptions={{ position: "bottom" }}
+            style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
           />
           <Button
             icon="pi pi-refresh"
-            className="p-button-text p-button-sm"
+            text
+            rounded
             onClick={loadSessions}
             tooltip="Refresh"
             tooltipOptions={{ position: "bottom" }}
+            style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
           />
         </div>
       </div>
@@ -202,19 +210,24 @@ export const ChatHistory = forwardRef(({ currentSessionId, onSessionSelect }, re
                   onSessionSelect(session.id);
                 }}
               >
+                <i className="pi pi-comments session-icon" />
                 <div className="session-info">
                   <div className="session-name">{getSessionDisplayName(session)}</div>
                   <div className="session-meta">
                     <span className="message-count">
                       <i className="pi pi-comment" />
-                      {session.message_count} messages
+                      {session.message_count}
                     </span>
                     <span className="session-date">{formatDate(session.updated_at)}</span>
                   </div>
                 </div>
                 <Button
                   icon="pi pi-trash"
-                  className="p-button-text p-button-danger p-button-sm delete-btn"
+                  text
+                  rounded
+                  severity="danger"
+                  className="delete-btn"
+                  style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
                   onClick={(e) => {
                     e.stopPropagation();
                     handleDeleteSession(session.id, session.session_name);

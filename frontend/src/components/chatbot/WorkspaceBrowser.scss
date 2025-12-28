@@ -61,7 +61,9 @@
     }
 
     .collapse-btn {
-      padding: 0.25rem;
+      padding: 0;
+      width: 1.75rem;
+      height: 1.75rem;
     }
   }
 
@@ -254,7 +256,7 @@
     }
 
     .workspace-icon {
-      font-size: 0.9rem;
+      font-size: 1rem;
       color: var(--text-color-secondary);
       flex-shrink: 0;
     }
@@ -269,7 +271,8 @@
     }
 
     .workspace-name {
-      font-size: 0.85rem;
+      font-size: 0.875rem;
+      font-weight: 500;
       color: var(--text-color);
       white-space: nowrap;
       overflow: hidden;
@@ -277,14 +280,14 @@
     }
 
     .workspace-doc-count {
-      font-size: 0.7rem;
+      font-size: 0.75rem;
       color: var(--text-color-secondary);
     }
 
     .expand-toggle-btn {
-      padding: 0.25rem;
-      width: 24px;
-      height: 24px;
+      padding: 0;
+      width: 1.75rem;
+      height: 1.75rem;
       flex-shrink: 0;
       opacity: 0.6;
 
@@ -325,7 +328,7 @@
       align-items: center;
       gap: 0.5rem;
       padding: 0.35rem 0.75rem;
-      font-size: 0.75rem;
+      font-size: 0.8rem;
       color: var(--text-color-secondary);
       transition: all 0.15s;
       border-radius: 0 4px 4px 0;
@@ -362,7 +365,7 @@
       }
 
       .document-icon {
-        font-size: 0.8rem;
+        font-size: 0.85rem;
         flex-shrink: 0;
         color: var(--primary-400);
 

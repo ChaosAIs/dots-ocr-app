@@ -343,10 +343,13 @@ export const WorkspaceBrowser = forwardRef(({
       <div className="workspace-browser-collapsed">
         <Button
           icon="pi pi-angle-left"
-          className="p-button-text expand-btn"
+          text
+          rounded
+          className="expand-btn"
           onClick={onToggleCollapse}
           tooltip="Expand Knowledge Sources"
           tooltipOptions={{ position: "left" }}
+          style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
         >
           {selectedCount > 0 && (
             <Badge value={selectedCount} severity="info" className="selection-badge" />
@@ -366,10 +369,13 @@ export const WorkspaceBrowser = forwardRef(({
         </div>
         <Button
           icon="pi pi-angle-right"
-          className="p-button-text p-button-sm collapse-btn"
+          text
+          rounded
+          className="collapse-btn"
           onClick={onToggleCollapse}
           tooltip="Collapse"
           tooltipOptions={{ position: "left" }}
+          style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
         />
       </div>
 
@@ -453,10 +459,13 @@ export const WorkspaceBrowser = forwardRef(({
                   {docCount > 0 && (
                     <Button
                       icon={`pi ${isExpanded ? "pi-chevron-up" : "pi-chevron-down"}`}
-                      className="p-button-text p-button-sm expand-toggle-btn"
+                      text
+                      rounded
+                      className="expand-toggle-btn"
                       onClick={(e) => handleToggleExpand(workspace.id, e)}
                       tooltip={isExpanded ? "Collapse documents" : "Show documents"}
                       tooltipOptions={{ position: "left" }}
+                      style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
                     />
                   )}
                 </div>

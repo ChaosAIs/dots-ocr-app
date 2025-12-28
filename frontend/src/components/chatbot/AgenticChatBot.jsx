@@ -1203,33 +1203,16 @@ export const AgenticChatBot = () => {
             <div ref={messagesEndRef} />
           </div>
 
-          {/* Context Indicators */}
-          {sessionContext && (sessionContext.documents?.length > 0 || sessionContext.topics?.length > 0) && (
-            <div className="context-indicators">
-              {sessionContext.documents?.length > 0 && (
-                <div className="context-chip">
-                  <i className="pi pi-file" />
-                  <span>Discussing: {sessionContext.documents.slice(0, 2).join(", ")}</span>
-                  {sessionContext.documents.length > 2 && (
-                    <span className="context-more">+{sessionContext.documents.length - 2} more</span>
-                  )}
-                </div>
-              )}
-              {sessionContext.topics?.length > 0 && (
-                <div className="context-chip">
-                  <i className="pi pi-tag" />
-                  <span>Topics: {sessionContext.topics.slice(0, 3).join(", ")}</span>
-                  {sessionContext.topics.length > 3 && (
-                    <span className="context-more">+{sessionContext.topics.length - 3} more</span>
-                  )}
-                </div>
-              )}
-              {sessionContext.people?.length > 0 && (
-                <div className="context-chip">
-                  <i className="pi pi-users" />
-                  <span>People: {sessionContext.people.slice(0, 2).join(", ")}</span>
-                </div>
-              )}
+          {/* Context Indicators - Full Width Topics Display */}
+          {sessionContext && sessionContext.topics?.length > 0 && (
+            <div className="context-topics-bar">
+              <i className="pi pi-tag" />
+              <span className="topics-label">Topics:</span>
+              <div className="topics-list">
+                {sessionContext.topics.map((topic, index) => (
+                  <span key={index} className="topic-tag">{topic}</span>
+                ))}
+              </div>
             </div>
           )}
 

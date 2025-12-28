@@ -8,13 +8,13 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 1rem 1.25rem;
+    padding: 0.75rem 1rem;
     border-bottom: 1px solid var(--surface-border);
     background-color: var(--surface-section);
 
     h3 {
       margin: 0;
-      font-size: 1.125rem;
+      font-size: 0.9rem;
       font-weight: 600;
       color: var(--text-color);
     }
@@ -36,8 +36,8 @@
   .sessions-list {
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
-    padding: 1rem;
+    gap: 0.25rem;
+    padding: 0.5rem;
     overflow-y: auto;
     flex: 1;
 
@@ -88,11 +88,11 @@
   .session-item {
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    padding: 0.75rem;
+    gap: 0.5rem;
+    padding: 0.5rem 0.75rem;
     border-radius: 0 6px 6px 0;
     cursor: pointer;
-    transition: all 0.2s;
+    transition: all 0.15s;
     border-left: 3px solid transparent;
 
     &:hover {
@@ -107,17 +107,30 @@
         color: var(--primary-color);
         font-weight: 600;
       }
+
+      .session-icon {
+        color: var(--primary-color);
+      }
+    }
+
+    .session-icon {
+      font-size: 1rem;
+      color: var(--text-color-secondary);
+      flex-shrink: 0;
     }
 
     .session-info {
       flex: 1;
       min-width: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.1rem;
     }
 
     .session-name {
+      font-size: 0.875rem;
       font-weight: 500;
       color: var(--text-color);
-      margin-bottom: 0.25rem;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -126,7 +139,7 @@
     .session-meta {
       display: flex;
       align-items: center;
-      gap: 0.75rem;
+      gap: 0.5rem;
       font-size: 0.75rem;
       color: var(--text-color-secondary);
 
@@ -148,6 +161,7 @@
     .delete-btn {
       opacity: 0;
       transition: opacity 0.2s;
+      flex-shrink: 0;
     }
 
     &:hover .delete-btn {

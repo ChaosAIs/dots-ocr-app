@@ -823,6 +823,7 @@ export const DocumentList = forwardRef((props, ref) => {
           <Button
             icon="pi pi-upload"
             label={t("DocumentList.Upload")}
+            outlined
             onClick={() => setShowUploadDialog(true)}
             disabled={!currentWorkspaceId}
             tooltip={!currentWorkspaceId ? t("DocumentList.SelectWorkspaceFirst") : t("DocumentList.UploadDocuments")}

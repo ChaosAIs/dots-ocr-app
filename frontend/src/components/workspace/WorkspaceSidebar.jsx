@@ -255,14 +255,14 @@ export const WorkspaceSidebar = ({
         style={{
           display: 'flex',
           alignItems: 'center',
-          padding: '0.75rem',
+          padding: '0.5rem 0.75rem',
           marginBottom: '0.25rem',
           cursor: 'pointer',
           borderLeft: '3px solid',
           borderLeftColor: isSelected ? 'var(--primary-color)' : 'transparent',
           borderRadius: '0 6px 6px 0',
           backgroundColor: isSelected ? 'var(--highlight-bg)' : 'transparent',
-          transition: 'all 0.2s',
+          transition: 'all 0.15s',
           opacity: workspace.is_system ? 0.9 : 1
         }}
         onMouseEnter={(e) => {
@@ -281,11 +281,11 @@ export const WorkspaceSidebar = ({
         <i
           className={getIconClass(workspace.icon)}
           style={{
-            fontSize: '1.25rem',
+            fontSize: '1rem',
             color: workspace.is_system ? 'var(--text-color-secondary)' : workspace.color,
-            width: '24px',
+            width: '20px',
             flexShrink: 0,
-            marginRight: '0.75rem'
+            marginRight: '0.5rem'
           }}
         />
 
@@ -303,6 +303,7 @@ export const WorkspaceSidebar = ({
             gap: '0.5rem'
           }}>
             <span style={{
+              fontSize: '0.875rem',
               color: isSelected ? 'var(--primary-color)' : 'var(--text-color)',
               fontWeight: isSelected ? '600' : '500',
               whiteSpace: 'nowrap',
@@ -328,7 +329,7 @@ export const WorkspaceSidebar = ({
             alignItems: 'center',
             gap: '0.5rem',
             color: 'var(--text-color-secondary)',
-            fontSize: '0.875rem'
+            fontSize: '0.75rem'
           }}>
             <span>{workspace.document_count} {t("Workspace.Documents")}</span>
             {isSharedWithMe && newSharesCount > 0 && (
@@ -428,8 +429,8 @@ export const WorkspaceSidebar = ({
   return (
     <div className="flex flex-column h-full">
       {/* Header */}
-      <div className="flex justify-content-between align-items-center p-3 border-bottom-1 surface-border">
-        <span className="font-semibold text-lg" style={{ color: 'var(--text-color)' }}>{t("Workspace.Title")}</span>
+      <div className="flex justify-content-between align-items-center border-bottom-1 surface-border" style={{ padding: '0.75rem 1rem' }}>
+        <span style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-color)' }}>{t("Workspace.Title")}</span>
         <Button
           icon="pi pi-plus"
           text
@@ -439,6 +440,7 @@ export const WorkspaceSidebar = ({
             setShowCreateDialog(true);
           }}
           tooltip={t("Workspace.Create")}
+          style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
         />
       </div>
 
