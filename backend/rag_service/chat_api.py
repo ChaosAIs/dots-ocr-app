@@ -262,9 +262,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # Some stages complete quickly but we want users to see the message
                         STAGE_MIN_DISPLAY_TIMES = {
                             # Initial stages - these are followed by LLM calls that take time
-                            "Understanding your question...": 1.5,  # Show longer, LLM call follows
+                            "Understanding your question...": 2,  # Show longer, LLM call follows
                             "Analyzing key topics in your question...": 0.2,  # LLM call follows, naturally takes time
-                            "Finding relevant documents...": 1.5,  # Vector search follows
+                            "Finding relevant documents...": 2,  # Vector search follows
                             # Analytics stages - some are very fast
                             "Analyzing data structure...": 1.5,  # Fast operation, need display time
                             "Building database query...": 0.2,  # LLM SQL generation follows, takes time

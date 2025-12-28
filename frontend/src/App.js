@@ -8,6 +8,7 @@ import "./styling/App.scss";
 import "./styling/colors.css";
 import "./App.css";
 
+import { PrimeReactProvider } from "primereact/api";
 import MessageBox from "./core/message/components/messageBox";
 import MessageToast from "./core/message/components/messageToast";
 import AppProgress from "./core/loading/components/appProgress";
@@ -42,15 +43,16 @@ const ConditionalNavBar = () => {
 };
 
 function App() {
-    
+
   return (
-    <div className="app">
-      <MessageBox />
-      <MessageToast />
-      <MessageDialog />
-      <ConfirmDialog />
-      <AppProgress />
-      <AuthProvider>
+    <PrimeReactProvider>
+      <div className="app">
+        <MessageBox />
+        <MessageToast />
+        <MessageDialog />
+        <ConfirmDialog />
+        <AppProgress />
+        <AuthProvider>
         {/*  When authentication process updated, nexsted route
                 and route's refered component will got re-render automatically.
                 Note: Any nested components inside "AuthProvider",
@@ -72,7 +74,8 @@ function App() {
           </BrowserRouter>
         </WorkspaceProvider>
       </AuthProvider>
-    </div>
+      </div>
+    </PrimeReactProvider>
   );
 }
 
