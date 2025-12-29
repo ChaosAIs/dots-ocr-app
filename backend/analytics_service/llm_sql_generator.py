@@ -366,13 +366,21 @@ The documents_data table has TWO separate JSONB columns:
 - header_data (JSONB object): Document-level fields like transaction_date, store_name
 - line_items (JSONB array): Item-level fields like description, amount, quantity
 
-IMPORTANT: You must access fields from the correct source:
-- Header fields (source='header'): Use dd.header_data->>'field_name'
+IMPORTANT: You MUST use the Date Field Source parameter above to determine where to access the date field!
+- If Date Field Source = 'header': Use header_data->>'{{date_field}}'
+- If Date Field Source = 'line_item': Use item->>'{{date_field}}' (for spreadsheet data where ALL fields are in line_items)
+
+Access pattern rules:
+- Header fields (source='header'): Use header_data->>'field_name'
 - Line item fields (source='line_item'): Use item->>'field_name' after jsonb_array_elements()
 
-For example, if the date is in header_data:
-- Correct: EXTRACT(YEAR FROM (dd.header_data->>'transaction_date')::timestamp)
-- WRONG: EXTRACT(YEAR FROM (item->>'transaction_date')::timestamp) -- date is NOT in line_items!
+EXAMPLE when Date Field Source = 'line_item' (spreadsheet data):
+- Correct: EXTRACT(YEAR FROM (item->>'Purchase Date')::timestamp)
+- WRONG: EXTRACT(YEAR FROM (header_data->>'Purchase Date')::timestamp) -- field is NOT in header_data!
+
+EXAMPLE when Date Field Source = 'header' (receipts, invoices):
+- Correct: EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp)
+- WRONG: EXTRACT(YEAR FROM (item->>'transaction_date')::timestamp) -- field is NOT in line_items!
 
 ## CRITICAL - Time Filter vs Time Grouping:
 - If time_filter_only=true: Add a WHERE clause to filter by the time period, but do NOT group by time
@@ -426,7 +434,9 @@ FROM expanded_items
 GROUP BY {{GROUP_BY_FIELDS}}
 ORDER BY {{ORDER_BY_FIELDS}}
 ```
-NOTE: Access header fields as: header_data->>'field_name', line item fields as: item->>'field_name'
+**CRITICAL**: Check the Date Field Source parameter!
+- If Date Field Source = 'line_item': Use item->>'Date Field' for date extraction (e.g., TO_CHAR((item->>'Purchase Date')::timestamp, 'YYYY-MM'))
+- If Date Field Source = 'header': Use header_data->>'Date Field' for date extraction
 
 ### For aggregation_type = "avg" when asking about "average per receipt/meal" (DOCUMENT-LEVEL average):
 **CRITICAL**: When user asks "average for each meal", "average per receipt", "average meal cost", they want the average TOTAL per receipt, NOT average per line item.

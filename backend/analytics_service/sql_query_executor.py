@@ -1422,6 +1422,9 @@ class SQLQueryExecutor:
 
         Analyzes header_data and line_items to create semantic field mappings
         that the LLM can use for SQL generation.
+
+        For spreadsheet data, uses flexible matching to map column headers
+        like "Total Sales", "Purchase Date", etc. to semantic types.
         """
         try:
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
@@ -1470,7 +1473,14 @@ class SQLQueryExecutor:
                 if field in header_field_semantics:
                     field_mappings[field] = header_field_semantics[field]
 
-            # Map line item fields
+            # For spreadsheet data, create field mappings directly from column headers
+            # Let the LLM understand the semantics from the column names
+            if schema_type == 'spreadsheet':
+                field_mappings = self._create_spreadsheet_field_mappings(sample_item, header_data)
+                logger.info(f"[Field Mappings] Created {len(field_mappings)} field mappings from spreadsheet columns: {list(field_mappings.keys())}")
+                return field_mappings
+
+            # Map line item fields (for non-spreadsheet documents)
             line_item_semantics = {
                 'description': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
                 'item': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
@@ -1492,6 +1502,88 @@ class SQLQueryExecutor:
         except Exception as e:
             logger.error(f"[Field Mappings] Failed to infer field mappings: {e}")
             return {}
+
+    def _create_spreadsheet_field_mappings(
+        self,
+        sample_item: Dict[str, Any],
+        header_data: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Create field mappings for spreadsheet data directly from column headers.
+
+        Instead of using hardcoded patterns, this method:
+        1. Uses column_headers from header_data if available
+        2. Infers data types from sample values
+        3. Lets the LLM understand column semantics from the names directly
+
+        Args:
+            sample_item: First row of spreadsheet data (with actual values)
+            header_data: Header metadata containing column_headers list
+
+        Returns:
+            Field mappings with actual column names as keys
+        """
+        field_mappings = {}
+
+        # Get column names from header_data or sample_item keys
+        column_headers = header_data.get('column_headers', [])
+        if not column_headers:
+            column_headers = [k for k in sample_item.keys() if k != 'row_number']
+
+        for col_name in column_headers:
+            # Skip internal fields
+            if col_name in ['row_number', '_id']:
+                continue
+
+            # Get sample value to infer data type
+            sample_value = sample_item.get(col_name)
+
+            # Infer data type from sample value
+            data_type = self._infer_data_type(sample_value)
+
+            # Create field mapping - let LLM understand semantics from column name
+            field_mappings[col_name] = {
+                'data_type': data_type,
+                'source': 'line_item',  # Spreadsheet data is in line_items
+                'original_column': col_name,
+                # For numeric fields, suggest they can be aggregated
+                'aggregation': 'sum' if data_type == 'number' else 'group_by'
+            }
+
+        return field_mappings
+
+    def _infer_data_type(self, value: Any) -> str:
+        """
+        Infer the data type from a sample value.
+
+        Args:
+            value: Sample value from the column
+
+        Returns:
+            Data type string: 'number', 'datetime', or 'string'
+        """
+        if value is None:
+            return 'string'
+
+        # Check if it's a number
+        if isinstance(value, (int, float)):
+            return 'number'
+
+        # Check if it's a string that looks like a date/datetime
+        if isinstance(value, str):
+            import re
+            # Common date/datetime patterns
+            date_patterns = [
+                r'^\d{4}-\d{2}-\d{2}',           # 2024-01-15 or 2024-01-15 00:00:00
+                r'^\d{2}/\d{2}/\d{4}',           # 01/15/2024
+                r'^\d{2}-\d{2}-\d{4}',           # 15-01-2024
+                r'^\d{4}/\d{2}/\d{2}',           # 2024/01/15
+            ]
+            for pattern in date_patterns:
+                if re.match(pattern, value.strip()):
+                    return 'datetime'
+
+        return 'string'
 
     def _analyze_query_heuristically(
         self,
