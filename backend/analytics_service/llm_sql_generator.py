@@ -301,32 +301,32 @@ Respond with JSON only:"""
 ## Data Schema (Available Fields):
 {field_schema}
 
-## Data Structure - CRITICAL:
+## CRITICAL - USE EXACT FIELD NAMES FROM SCHEMA:
+You MUST use the EXACT field names from the Data Schema above!
+- Look at the 'field_name' values in the schema (e.g., 'Total Sales', 'Product', 'Purchase Date')
+- DO NOT use generic names like 'amount', 'description', 'date', 'quantity'
+- USE the actual field names exactly as shown in the schema
+
+## Data Structure:
 The documents_data table has TWO separate JSONB columns:
-- header_data (JSONB object): Document-level fields like transaction_date, store_name
-- line_items (JSONB array): Item-level fields like description, amount, quantity
+- header_data (JSONB object): Document-level fields
+- line_items (JSONB array): Item-level fields
 
-IMPORTANT: Check the 'source' and 'access_pattern' in the field schema above!
-- source='header': Access via dd.header_data->>'field_name' or header_data->>'field_name' in CTE
+Check the 'source' and 'access_pattern' in the field schema!
+- source='header': Access via header_data->>'field_name'
 - source='line_item': Access via item->>'field_name' after jsonb_array_elements()
-
-COMMON MISTAKE: Trying to access header fields (like transaction_date) from line_items.
-For example, if transaction_date is in header_data:
-- WRONG: item->>'transaction_date' -- this field doesn't exist in line_items!
-- CORRECT: header_data->>'transaction_date'
 
 ## Common Error Fixes:
 1. "column X does not exist" in CTE: The 'item' column is only available AFTER jsonb_array_elements() runs. You CANNOT use item->>'...' in WHERE clause inside the CTE (WITH ... AS block). Move such filters to the outer SELECT.
 2. "column must appear in GROUP BY": Add the column to GROUP BY clause.
 3. "invalid input syntax for type numeric": Add NULLIF and type checking for numeric casts.
 4. Date parsing errors: Use proper date format handling.
-5. Aggregate function errors: Ensure aggregates are used with GROUP BY.
-6. Empty results: Check if you're accessing a field from the wrong JSONB column (header_data vs line_items).
+5. Wrong field name: Check the schema for exact field names (e.g., 'Total Sales' not 'amount', 'Product' not 'description').
 
 ## Requirements:
 1. Analyze the error message carefully
 2. Identify the root cause
-3. Generate a corrected SQL query that avoids the error
+3. Generate a corrected SQL query using EXACT field names from the schema
 4. CRITICAL: Do NOT put any WHERE clause that references 'item' inside the CTE
 5. Document filtering should go in the CTE WHERE clause using dd.document_id
 6. Data filtering (on item fields) should go in the outer SELECT's WHERE clause
@@ -361,26 +361,34 @@ Respond with JSON only:"""
 - Report Type: {report_type}
 - Filters: {filters}
 
-## Data Structure - CRITICAL:
+## CRITICAL - USE EXACT FIELD NAMES:
+You MUST use the EXACT field names from the Verified Parameters above!
+- For Aggregation Field: Use exactly "{aggregation_field}" (e.g., item->>'Total Sales', NOT item->>'amount')
+- For Date Field: Use exactly "{date_field}" (e.g., item->>'Purchase Date', NOT item->>'date')
+- For Entity Field: Use exactly "{entity_field}" if specified
+- For Grouping Fields: Use the exact 'actual_field' values from the grouping_fields list
+
+DO NOT use generic field names like 'amount', 'description', 'date', 'quantity'.
+USE the actual field names: 'Total Sales', 'Product', 'Purchase Date', 'Customer Name', etc.
+
+## Data Structure:
 The documents_data table has TWO separate JSONB columns:
-- header_data (JSONB object): Document-level fields like transaction_date, store_name
-- line_items (JSONB array): Item-level fields like description, amount, quantity
+- header_data (JSONB object): Document-level fields
+- line_items (JSONB array): Item-level fields (for spreadsheet data, ALL fields are here)
 
-IMPORTANT: You MUST use the Date Field Source parameter above to determine where to access the date field!
-- If Date Field Source = 'header': Use header_data->>'{{date_field}}'
-- If Date Field Source = 'line_item': Use item->>'{{date_field}}' (for spreadsheet data where ALL fields are in line_items)
+## Field Access Rules based on Date Field Source = '{date_field_source}':
+- If Date Field Source = 'line_item': ALL fields are in line_items, use item->>'field_name'
+- If Date Field Source = 'header': Date is in header_data, other fields may be in line_items
 
-Access pattern rules:
-- Header fields (source='header'): Use header_data->>'field_name'
-- Line item fields (source='line_item'): Use item->>'field_name' after jsonb_array_elements()
+EXAMPLE for spreadsheet data (Date Field Source = 'line_item'):
+- Date access: item->>'{date_field}'
+- Amount access: item->>'{aggregation_field}'
+- Product access: item->>'Product'
 
-EXAMPLE when Date Field Source = 'line_item' (spreadsheet data):
-- Correct: EXTRACT(YEAR FROM (item->>'Purchase Date')::timestamp)
-- WRONG: EXTRACT(YEAR FROM (header_data->>'Purchase Date')::timestamp) -- field is NOT in header_data!
-
-EXAMPLE when Date Field Source = 'header' (receipts, invoices):
-- Correct: EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp)
-- WRONG: EXTRACT(YEAR FROM (item->>'transaction_date')::timestamp) -- field is NOT in line_items!
+## CRITICAL - WHERE clause placement:
+The 'item' column is ONLY available AFTER jsonb_array_elements() runs.
+- Document ID filter: Goes in CTE WHERE clause (WHERE dd.document_id IN (...))
+- Year/date filter on item fields: Goes in OUTER SELECT WHERE clause (WHERE EXTRACT(YEAR FROM (item->>'date')::timestamp) = 2024)
 
 ## CRITICAL - Time Filter vs Time Grouping:
 - If time_filter_only=true: Add a WHERE clause to filter by the time period, but do NOT group by time
