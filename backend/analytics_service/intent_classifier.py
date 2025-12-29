@@ -1,16 +1,22 @@
 """
 Intent Classifier for Analytics Queries
 
-Classifies user queries into different intent categories
-to route them appropriately.
+LLM-driven intent classification that routes queries to the appropriate service:
+- Document search (RAG/vector search)
+- Data analytics (SQL queries on extracted structured data)
+- Hybrid (both)
+- General (conversational)
 """
 
 import os
 import json
 import logging
+import re
 from enum import Enum
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel
+from datetime import datetime, timedelta
+import calendar
 
 logger = logging.getLogger(__name__)
 
@@ -35,61 +41,25 @@ class IntentClassification(BaseModel):
     detected_time_range: Optional[Dict[str, str]] = None
 
 
-# Keywords and patterns for rule-based classification
-ANALYTICS_KEYWORDS = [
-    "total", "sum", "average", "avg", "count", "how many", "how much",
-    "compare", "comparison", "versus", "vs", "trend", "growth",
-    "monthly", "weekly", "yearly", "quarterly", "by month", "by year",
-    "aggregate", "statistics", "stats", "report", "analysis",
-    "spending", "revenue", "sales", "expenses", "profit", "loss",
-    "top", "bottom", "highest", "lowest", "maximum", "minimum",
-    "percentage", "percent", "%", "ratio", "rate",
-]
-
-SEARCH_KEYWORDS = [
-    "find", "search", "look for", "show me", "where is", "locate",
-    "what is", "what does", "explain", "describe", "summarize",
-    "about", "regarding", "related to", "contains", "mentions",
-    "document", "file", "contract", "agreement", "report",
-]
-
-HYBRID_INDICATORS = [
-    "find and calculate", "search and sum", "list with totals",
-    "show documents and", "find all and aggregate",
-]
-
-GENERAL_KEYWORDS = [
-    "help", "how do i", "what can", "tutorial", "guide",
-    "hello", "hi", "thanks", "thank you", "bye",
-]
-
-# Schema-related keywords
-SCHEMA_KEYWORDS = {
-    "invoice": ["invoice", "bill", "billing", "invoiced"],
-    "receipt": ["receipt", "purchase", "bought", "paid", "spending", "spent", "meal", "meals", "food", "restaurant", "dining", "grocery", "groceries", "store", "shop"],
+# Minimal schema hints for fallback only
+SCHEMA_HINTS = {
+    "invoice": ["invoice", "invoices", "bill", "billing"],
+    "receipt": ["receipt", "receipts", "meal", "meals", "food", "restaurant", "dining", "grocery", "purchase"],
     "bank_statement": ["bank", "statement", "transaction", "account", "balance"],
     "purchase_order": ["purchase order", "po", "ordering"],
-    "expense_report": ["expense", "reimbursement", "travel expense", "expenses"],
+    "expense_report": ["expense", "expenses", "reimbursement", "travel"],
     "shipping_manifest": ["shipping", "shipment", "delivery", "manifest"],
-    "inventory_report": ["inventory", "stock", "warehouse", "item count"],
-}
-
-# Metric keywords
-METRIC_KEYWORDS = {
-    "total_amount": ["total", "amount", "sum", "grand total"],
-    "quantity": ["quantity", "qty", "count", "number of items"],
-    "tax": ["tax", "vat", "gst", "sales tax"],
-    "discount": ["discount", "reduction", "savings"],
-    "subtotal": ["subtotal", "sub-total", "before tax"],
+    "inventory_report": ["inventory", "stock", "warehouse"],
+    "spreadsheet": ["spreadsheet", "excel", "csv", "table"],
 }
 
 
 class IntentClassifier:
     """
-    Classifies user queries into intent categories.
+    LLM-driven intent classifier.
 
-    Supports both rule-based classification (fast, no LLM)
-    and LLM-based classification (more accurate, slower).
+    Uses LLM to understand query semantics rather than keyword matching.
+    Falls back to simple heuristics only when LLM is unavailable.
     """
 
     def __init__(self, llm_client=None):
@@ -97,10 +67,50 @@ class IntentClassifier:
         Initialize the intent classifier.
 
         Args:
-            llm_client: Optional LLM client for advanced classification
+            llm_client: Optional LLM client for classification
         """
         self.llm_client = llm_client
-        self.use_llm = os.getenv("ANALYTICS_AUTO_CLASSIFY_INTENT", "true").lower() == "true"
+        self._cached_llm_client = None
+
+    def _get_llm_client(self):
+        """Lazily initialize LLM client if not provided."""
+        if self.llm_client:
+            return self.llm_client
+
+        if self._cached_llm_client:
+            return self._cached_llm_client
+
+        try:
+            from rag_service.llm_service import get_llm_service
+            from langchain_core.messages import HumanMessage
+
+            llm_service = get_llm_service()
+            if not llm_service.is_available():
+                logger.warning("[IntentClassifier] LLM service not available")
+                return None
+
+            # Use a fast model for classification
+            chat_model = llm_service.get_query_model(
+                temperature=0.1,
+                num_ctx=2048,
+                num_predict=512
+            )
+
+            class LLMClientWrapper:
+                def __init__(self, model):
+                    self.model = model
+
+                def generate(self, prompt: str) -> str:
+                    response = self.model.invoke([HumanMessage(content=prompt)])
+                    return response.content
+
+            self._cached_llm_client = LLMClientWrapper(chat_model)
+            logger.info("[IntentClassifier] LLM client initialized")
+            return self._cached_llm_client
+
+        except Exception as e:
+            logger.warning(f"[IntentClassifier] Failed to create LLM client: {e}")
+            return None
 
     def classify(
         self,
@@ -109,102 +119,198 @@ class IntentClassifier:
         use_llm: Optional[bool] = None
     ) -> IntentClassification:
         """
-        Classify a user query.
+        Classify a user query using LLM.
 
         Args:
             query: User's natural language query
             available_schemas: List of schema types available for analytics
-            use_llm: Override default LLM usage setting
+            use_llm: Override default LLM usage (defaults to True)
 
         Returns:
             IntentClassification with intent and metadata
         """
-        query_lower = query.lower().strip()
+        should_use_llm = use_llm if use_llm is not None else True
+        llm_client = self._get_llm_client() if should_use_llm else None
 
-        # Always do rule-based first for speed
-        rule_result = self._rule_based_classify(query_lower, available_schemas)
+        if llm_client:
+            try:
+                return self._llm_classify(query, available_schemas, llm_client)
+            except Exception as e:
+                logger.warning(f"[IntentClassifier] LLM classification failed: {e}, using fallback")
 
-        # If high confidence or LLM disabled, return rule-based result
-        should_use_llm = use_llm if use_llm is not None else self.use_llm
-        if rule_result.confidence >= 0.85 or not should_use_llm or not self.llm_client:
-            return rule_result
+        # Fallback to simple heuristics
+        return self._fallback_classify(query, available_schemas)
 
-        # Use LLM for ambiguous cases
-        try:
-            llm_result = self._llm_classify(query, available_schemas)
-            return llm_result
-        except Exception as e:
-            logger.warning(f"LLM classification failed, using rule-based: {e}")
-            return rule_result
-
-    def _rule_based_classify(
+    def _llm_classify(
         self,
-        query_lower: str,
+        query: str,
+        available_schemas: Optional[List[str]],
+        llm_client
+    ) -> IntentClassification:
+        """
+        LLM-based intent classification.
+        """
+        schemas_str = ", ".join(available_schemas) if available_schemas else "invoice, receipt, bank_statement, expense_report, purchase_order, shipping_manifest, inventory_report, spreadsheet"
+
+        prompt = f"""You are an intent classifier for a document management system with OCR-extracted structured data.
+
+TASK: Analyze the user's query and determine how to route it.
+
+USER QUERY: "{query}"
+
+AVAILABLE DOCUMENT TYPES WITH EXTRACTED DATA: {schemas_str}
+
+ROUTING OPTIONS:
+
+1. DATA_ANALYTICS - Use when the query requires:
+   - Numerical aggregations: sum, total, average, count, max, min, etc.
+   - Comparisons between values or time periods
+   - Statistical analysis or trends
+   - Filtering and grouping data by fields
+   - Questions like "how many", "how much", "what is the total", "compare", "top N", "highest/lowest"
+   - ANY query asking about amounts, quantities, or numerical summaries
+
+2. DOCUMENT_SEARCH - Use when the query requires:
+   - Finding specific documents by content or keywords
+   - Reading or summarizing document text
+   - Searching for mentions of specific terms or topics
+   - Understanding what documents say or contain
+   - Questions like "find documents about", "what does X say", "show me documents mentioning"
+
+3. HYBRID - Use when the query requires BOTH:
+   - Finding documents AND performing calculations on them
+   - Example: "Find all invoices over $1000 and calculate the total"
+
+4. GENERAL - Use when:
+   - The query is a greeting, help request, or general question
+   - Not related to documents or data analysis
+
+IMPORTANT CONSIDERATIONS:
+- Abbreviations like "max", "min", "avg" mean maximum, minimum, average
+- Questions about "amounts", "totals", "prices", "costs" usually need DATA_ANALYTICS
+- "List the X" with filtering/aggregation criteria = DATA_ANALYTICS
+- "List documents about X" or "show me documents" = DOCUMENT_SEARCH
+- When in doubt between DOCUMENT_SEARCH and DATA_ANALYTICS, prefer DATA_ANALYTICS if the query mentions any numerical fields or aggregation concepts
+
+Respond with ONLY valid JSON (no markdown, no code blocks, no explanation):
+{{
+    "intent": "DATA_ANALYTICS|DOCUMENT_SEARCH|HYBRID|GENERAL",
+    "confidence": 0.0-1.0,
+    "reasoning": "Brief explanation of why this intent was chosen",
+    "requires_extracted_data": true/false,
+    "suggested_schemas": ["schema1"],
+    "detected_entities": ["entity names mentioned"],
+    "detected_metrics": ["metric types like total_amount, quantity, tax, etc."]
+}}"""
+
+        response = llm_client.generate(prompt)
+
+        # Parse JSON from response (handle potential markdown wrapping)
+        json_str = self._extract_json(response)
+        result = json.loads(json_str)
+
+        # Extract time range using helper
+        time_range = self._extract_time_range(query.lower())
+
+        intent = QueryIntent(result["intent"].lower())
+
+        return IntentClassification(
+            intent=intent,
+            confidence=float(result.get("confidence", 0.8)),
+            reasoning=result.get("reasoning", "LLM classification"),
+            requires_extracted_data=result.get("requires_extracted_data", intent in [QueryIntent.DATA_ANALYTICS, QueryIntent.HYBRID]),
+            suggested_schemas=result.get("suggested_schemas", []),
+            detected_entities=result.get("detected_entities", []),
+            detected_metrics=result.get("detected_metrics", []),
+            detected_time_range=time_range
+        )
+
+    def _extract_json(self, text: str) -> str:
+        """Extract JSON from LLM response, handling markdown code blocks."""
+        # Remove markdown code blocks if present
+        text = text.strip()
+        if text.startswith("```"):
+            # Remove opening ```json or ```
+            text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+            # Remove closing ```
+            text = re.sub(r'\n?```\s*$', '', text)
+
+        # Find JSON object
+        match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+        if match:
+            return match.group(0)
+
+        return text
+
+    def _fallback_classify(
+        self,
+        query: str,
         available_schemas: Optional[List[str]] = None
     ) -> IntentClassification:
         """
-        Rule-based intent classification.
-
-        Args:
-            query_lower: Lowercase query string
-            available_schemas: Available schema types
-
-        Returns:
-            IntentClassification result
+        Simple fallback classification when LLM is unavailable.
+        Uses minimal heuristics for basic routing.
         """
-        # Count keyword matches
-        analytics_score = sum(1 for kw in ANALYTICS_KEYWORDS if kw in query_lower)
-        search_score = sum(1 for kw in SEARCH_KEYWORDS if kw in query_lower)
-        general_score = sum(1 for kw in GENERAL_KEYWORDS if kw in query_lower)
+        query_lower = query.lower().strip()
 
-        # Check for hybrid indicators
-        has_hybrid_indicator = any(ind in query_lower for ind in HYBRID_INDICATORS)
-
-        # Detect mentioned schemas
+        # Detect schemas
         suggested_schemas = []
-        for schema, keywords in SCHEMA_KEYWORDS.items():
-            if any(kw in query_lower for kw in keywords):
+        for schema, hints in SCHEMA_HINTS.items():
+            if any(hint in query_lower for hint in hints):
                 if available_schemas is None or schema in available_schemas:
                     suggested_schemas.append(schema)
 
-        # Detect metrics
-        detected_metrics = []
-        for metric, keywords in METRIC_KEYWORDS.items():
-            if any(kw in query_lower for kw in keywords):
-                detected_metrics.append(metric)
+        # Simple pattern matching for analytics signals
+        analytics_patterns = [
+            r'\b(total|sum|average|avg|count|max|min|maximum|minimum)\b',
+            r'\b(how many|how much)\b',
+            r'\b(compare|comparison|versus|vs)\b',
+            r'\b(highest|lowest|top|bottom)\b',
+            r'\b(by month|by year|monthly|yearly|quarterly)\b',
+            r'\b(statistics|stats|aggregate)\b',
+        ]
 
-        # Detect entities (simple pattern matching for company names)
-        detected_entities = self._extract_entities(query_lower)
+        search_patterns = [
+            r'\b(find|search|look for|locate)\b',
+            r'\b(summarize|explain|describe)\b',
+            r'\b(what does|what is|tell me about)\b',
+            r'\b(show me documents|find documents)\b',
+        ]
 
-        # Detect time range
-        detected_time_range = self._extract_time_range(query_lower)
+        general_patterns = [
+            r'\b(hello|hi|hey|help|thanks|thank you)\b',
+            r'\b(how do i|what can you)\b',
+        ]
+
+        analytics_score = sum(1 for p in analytics_patterns if re.search(p, query_lower))
+        search_score = sum(1 for p in search_patterns if re.search(p, query_lower))
+        general_score = sum(1 for p in general_patterns if re.search(p, query_lower))
 
         # Determine intent
         if general_score > 0 and analytics_score == 0 and search_score == 0:
             intent = QueryIntent.GENERAL
-            confidence = min(0.9, 0.5 + general_score * 0.1)
-            reasoning = "Query appears to be a general question or greeting"
-
-        elif has_hybrid_indicator or (analytics_score > 0 and search_score > 0):
+            confidence = 0.7
+            reasoning = "Query appears to be a general greeting or help request"
+        elif analytics_score > 0 and search_score > 0:
             intent = QueryIntent.HYBRID
-            confidence = min(0.9, 0.6 + (analytics_score + search_score) * 0.05)
-            reasoning = "Query involves both document search and data aggregation"
-
+            confidence = 0.7
+            reasoning = "Query contains both analytics and search patterns"
         elif analytics_score > search_score:
             intent = QueryIntent.DATA_ANALYTICS
-            confidence = min(0.95, 0.5 + analytics_score * 0.1)
-            reasoning = f"Query contains analytics keywords: {analytics_score} matches"
-
+            confidence = min(0.85, 0.6 + analytics_score * 0.1)
+            reasoning = f"Query contains analytics patterns (score: {analytics_score})"
         elif search_score > 0:
             intent = QueryIntent.DOCUMENT_SEARCH
-            confidence = min(0.95, 0.5 + search_score * 0.1)
-            reasoning = f"Query contains search keywords: {search_score} matches"
-
+            confidence = min(0.85, 0.6 + search_score * 0.1)
+            reasoning = f"Query contains search patterns (score: {search_score})"
         else:
-            # Default to search if no clear signals
+            # Default to document search for ambiguous queries
             intent = QueryIntent.DOCUMENT_SEARCH
             confidence = 0.5
             reasoning = "No clear intent signals, defaulting to document search"
+
+        # Extract time range
+        time_range = self._extract_time_range(query_lower)
 
         return IntentClassification(
             intent=intent,
@@ -212,53 +318,15 @@ class IntentClassifier:
             reasoning=reasoning,
             requires_extracted_data=intent in [QueryIntent.DATA_ANALYTICS, QueryIntent.HYBRID],
             suggested_schemas=suggested_schemas,
-            detected_entities=detected_entities,
-            detected_metrics=detected_metrics,
-            detected_time_range=detected_time_range
+            detected_entities=[],
+            detected_metrics=[],
+            detected_time_range=time_range
         )
-
-    def _extract_entities(self, query_lower: str) -> List[str]:
-        """
-        Extract potential entity names from query.
-
-        Args:
-            query_lower: Lowercase query string
-
-        Returns:
-            List of detected entity names
-        """
-        entities = []
-
-        # Look for patterns like "Company A", "for ABC Corp"
-        import re
-
-        # Pattern: "for/from/to [Entity Name]"
-        patterns = [
-            r'(?:for|from|to|with|by)\s+([A-Z][a-zA-Z\s&]+?)(?:\s+(?:and|vs|versus|in|during|between)|$|,)',
-            r'company\s+([A-Z][a-zA-Z\s]+)',
-            r'([A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)*)\s+(?:invoice|receipt|order)',
-        ]
-
-        # Use original case query for entity extraction
-        for pattern in patterns:
-            matches = re.findall(pattern, query_lower, re.IGNORECASE)
-            entities.extend([m.strip() for m in matches if len(m.strip()) > 2])
-
-        return list(set(entities))[:5]  # Limit to 5 entities
 
     def _extract_time_range(self, query_lower: str) -> Optional[Dict[str, str]]:
         """
         Extract time range from query.
-
-        Args:
-            query_lower: Lowercase query string
-
-        Returns:
-            Dict with 'start' and 'end' dates, or None
         """
-        import re
-        from datetime import datetime, timedelta
-
         now = datetime.now()
         current_year = now.year
 
@@ -266,7 +334,7 @@ class IntentClassifier:
         year_match = re.search(r'\b(20\d{2})\b', query_lower)
         mentioned_year = int(year_match.group(1)) if year_match else current_year
 
-        # Check for month patterns
+        # Month mappings
         months = {
             'january': 1, 'jan': 1, 'february': 2, 'feb': 2,
             'march': 3, 'mar': 3, 'april': 4, 'apr': 4,
@@ -310,30 +378,21 @@ class IntentClassifier:
         elif 'this year' in query_lower:
             return {"start": f"{now.year}-01-01", "end": now.strftime("%Y-%m-%d")}
 
-        # Check for specific month mentions with proper word boundary matching
-        # Only match if the month is explicitly mentioned as a time reference
-        # e.g., "in March", "for January", "March 2024", but NOT "marching" or partial matches
-        import calendar
+        # Check for specific month mentions
         for month_name, month_num in months.items():
-            # Use word boundary regex to avoid partial matches
-            # Match patterns like: "in march", "for march", "march 2024", "march sales", etc.
-            # But require it to be a standalone word
             month_pattern = rf'\b{month_name}\b'
             if re.search(month_pattern, query_lower):
-                # Additional check: ensure it's used in a time context
-                # Look for patterns that indicate time reference
+                # Check for time context
                 time_context_patterns = [
-                    rf'\b(in|for|during|from|since|until|by|of)\s+{month_name}\b',  # "in march", "for january"
-                    rf'\b{month_name}\s+(20\d{{2}})\b',  # "march 2024"
-                    rf'\b{month_name}\s+(sales|report|data|summary|total|amount)\b',  # "march sales"
-                    rf'\b{month_name}\s+\d{{1,2}}',  # "march 15"
-                    rf'\d{{1,2}}\s+{month_name}',  # "15 march"
+                    rf'\b(in|for|during|from|since|until|by|of)\s+{month_name}\b',
+                    rf'\b{month_name}\s+(20\d{{2}})\b',
+                    rf'\b{month_name}\s+(sales|report|data|summary|total|amount)\b',
+                    rf'\b{month_name}\s+\d{{1,2}}',
+                    rf'\d{{1,2}}\s+{month_name}',
                 ]
 
                 is_time_reference = any(re.search(pat, query_lower) for pat in time_context_patterns)
 
-                # Only apply month filter if it's clearly a time reference
-                # or if the query is very short (likely just asking about a specific month)
                 if is_time_reference or len(query_lower.split()) <= 5:
                     last_day = calendar.monthrange(mentioned_year, month_num)[1]
                     return {
@@ -346,73 +405,3 @@ class IntentClassifier:
             return {"start": f"{mentioned_year}-01-01", "end": f"{mentioned_year}-12-31"}
 
         return None
-
-    def _llm_classify(
-        self,
-        query: str,
-        available_schemas: Optional[List[str]] = None
-    ) -> IntentClassification:
-        """
-        LLM-based intent classification for ambiguous queries.
-
-        Args:
-            query: User's query
-            available_schemas: Available schema types
-
-        Returns:
-            IntentClassification result
-        """
-        if not self.llm_client:
-            raise ValueError("LLM client not configured")
-
-        prompt = f"""Analyze the user's query and classify their intent.
-
-Query: {query}
-
-Available document types with extracted data: {available_schemas or ['invoice', 'receipt', 'bank_statement', 'purchase_order', 'expense_report']}
-
-Classification options:
-1. DOCUMENT_SEARCH: User wants to find, read, or summarize document content
-   Examples: "Find contracts mentioning liability", "Summarize the Q3 report"
-
-2. DATA_ANALYTICS: User wants numerical analysis, aggregations, comparisons
-   Examples: "Total sales by month", "Average invoice amount for Company A"
-   Requires: extracted structured data
-
-3. HYBRID: User needs both document search AND data aggregation
-   Examples: "Find all invoices over $10k and calculate total"
-
-4. GENERAL: General questions, help requests, or unclear intent
-   Examples: "What can you help me with?", "How do I upload files?"
-
-Respond ONLY with valid JSON (no markdown, no explanation):
-{{
-    "intent": "DOCUMENT_SEARCH|DATA_ANALYTICS|HYBRID|GENERAL",
-    "confidence": 0.0-1.0,
-    "reasoning": "Brief explanation",
-    "requires_extracted_data": true/false,
-    "suggested_schemas": ["schema1", "schema2"],
-    "detected_entities": ["Entity1", "Entity2"],
-    "detected_metrics": ["metric1", "metric2"]
-}}"""
-
-        try:
-            response = self.llm_client.generate(prompt)
-            result = json.loads(response)
-
-            return IntentClassification(
-                intent=QueryIntent(result["intent"].lower()),
-                confidence=float(result["confidence"]),
-                reasoning=result["reasoning"],
-                requires_extracted_data=result.get("requires_extracted_data", False),
-                suggested_schemas=result.get("suggested_schemas", []),
-                detected_entities=result.get("detected_entities", []),
-                detected_metrics=result.get("detected_metrics", []),
-                detected_time_range=self._extract_time_range(query.lower())
-            )
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM response: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"LLM classification error: {e}")
-            raise
