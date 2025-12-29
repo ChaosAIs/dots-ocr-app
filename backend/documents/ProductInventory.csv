@@ -1,0 +1,1001 @@
+ProductID,ProductName,Category,Brand,Price,StockQuantity,SKU
+P000001,Random House Children's Book Plus,Books,Random House,443.97,181,BOO-RAN-0001
+P000002,Kellogg's Pasta Premium,Groceries,Kellogg's,326.47,407,GRO-KEL-0002
+P000003,Pyrex Frying Pan Classic,Home & Kitchen,Pyrex,78.32,444,HOM-PYR-0003
+P000004,Scholastic Novel Premium,Books,Scholastic,842.06,298,BOO-SCH-0004
+P000005,Fisher-Price Board Game Lite,Toys,Fisher-Price,300.1,368,TOY-FIS-0005
+P000006,Dell Tablet Pro,Electronics,Dell,492.91,389,ELE-DEL-0006
+P000007,Random House Children's Book Lite,Books,Random House,76.9,122,BOO-RAN-0007
+P000008,H&M Jeans Lite,Clothing,H&M,179.96,121,CLO-H&M-0008
+P000009,Bosch Blender Lite,Home & Kitchen,Bosch,621.5,185,HOM-BOS-0009
+P000010,Sony Headphones Lite,Electronics,Sony,417.31,152,ELE-SON-0010
+P000011,Philips Coffee Maker Pro,Home & Kitchen,Philips,803.34,494,HOM-PHI-0011
+P000012,Nike Shoes Pro,Clothing,Nike,760.27,65,CLO-NIK-0012
+P000013,Nike T-Shirt Plus,Clothing,Nike,642.6,178,CLO-NIK-0013
+P000014,Wilson Basketball Classic,Sports,Wilson,830.37,188,SPO-WIL-0014
+P000015,L'Oreal Shampoo Pro,Beauty,L'Oreal,62.14,372,BEA-L'O-0015
+P000016,Fisher-Price Building Blocks,Toys,Fisher-Price,641.47,129,TOY-FIS-0016
+P000017,Coca-Cola Coffee Beans Plus,Groceries,Coca-Cola,500.12,378,GRO-COC-0017
+P000018,Levi's Jacket Plus,Clothing,Levi's,950.88,375,CLO-LEV-0018
+P000019,Mattel Doll,Toys,Mattel,957.59,113,TOY-MAT-0019
+P000020,Zara Jeans Pro,Clothing,Zara,746.72,474,CLO-ZAR-0020
+P000021,Revlon Shampoo,Beauty,Revlon,382.25,307,BEA-REV-0021
+P000022,Wilson Tennis Racket Plus,Sports,Wilson,901.71,319,SPO-WIL-0022
+P000023,LG Smartphone Pro,Electronics,LG,481.75,301,ELE-LG-0023
+P000024,Fisher-Price Doll Lite,Toys,Fisher-Price,862.74,135,TOY-FIS-0024
+P000025,Scholastic Biography Classic,Books,Scholastic,291.93,65,BOO-SCH-0025
+P000026,Under Armour Basketball Lite,Sports,Under Armour,656.65,233,SPO-UND-0026
+P000027,Apple Tablet Classic,Electronics,Apple,542.32,124,ELE-APP-0027
+P000028,Lego Doll Classic,Toys,Lego,942.13,349,TOY-LEG-0028
+P000029,Penguin Novel Premium,Books,Penguin,607.89,407,BOO-PEN-0029
+P000030,Bosch Microwave Premium,Home & Kitchen,Bosch,770.2,268,HOM-BOS-0030
+P000031,Philips Blender,Home & Kitchen,Philips,966.26,377,HOM-PHI-0031
+P000032,Apple Tablet Pro,Electronics,Apple,524.1,128,ELE-APP-0032
+P000033,Nestle Coffee Beans Classic,Groceries,Nestle,618.13,340,GRO-NES-0033
+P000034,Apple Smartphone Classic,Electronics,Apple,966.17,98,ELE-APP-0034
+P000035,H&M Dress Plus,Clothing,H&M,668.89,8,CLO-H&M-0035
+P000036,Mattel Puzzle,Toys,Mattel,666.88,189,TOY-MAT-0036
+P000037,Zara Hat Pro,Clothing,Zara,489.19,95,CLO-ZAR-0037
+P000038,Wilson Dumbbells Plus,Sports,Wilson,996.61,44,SPO-WIL-0038
+P000039,Fisher-Price Board Game Pro,Toys,Fisher-Price,202.95,220,TOY-FIS-0039
+P000040,Penguin Cookbook Pro,Books,Penguin,588.38,188,BOO-PEN-0040
+P000041,Samsung Camera Premium,Electronics,Samsung,365.07,437,ELE-SAM-0041
+P000042,Oxford Textbook Pro,Books,Oxford,47.6,49,BOO-OXF-0042
+P000043,Bosch Toaster Pro,Home & Kitchen,Bosch,938.61,309,HOM-BOS-0043
+P000044,Nike Dress,Clothing,Nike,424.4,249,CLO-NIK-0044
+P000045,Nivea Moisturizer Classic,Beauty,Nivea,810.35,307,BEA-NIV-0045
+P000046,Wilson Yoga Mat Premium,Sports,Wilson,333.1,341,SPO-WIL-0046
+P000047,HarperCollins Mystery Thriller Lite,Books,HarperCollins,286.32,108,BOO-HAR-0047
+P000048,Levi's T-Shirt,Clothing,Levi's,338.37,188,CLO-LEV-0048
+P000049,Kellogg's Chocolate Bar Premium,Groceries,Kellogg's,488.42,365,GRO-KEL-0049
+P000050,Under Armour Soccer Ball,Sports,Under Armour,543.23,447,SPO-UND-0050
+P000051,Unilever Cookies Pro,Groceries,Unilever,862.24,429,GRO-UNI-0051
+P000052,Lego Remote Car Classic,Toys,Lego,997.74,183,TOY-LEG-0052
+P000053,Coca-Cola Cereal Pro,Groceries,Coca-Cola,708.06,408,GRO-COC-0053
+P000054,P&G Olive Oil Lite,Groceries,P&G,526.27,289,GRO-P&G-0054
+P000055,Dell Camera,Electronics,Dell,986.48,30,ELE-DEL-0055
+P000056,Sony Smartphone Pro,Electronics,Sony,814.75,56,ELE-SON-0056
+P000057,LG Tablet Premium,Electronics,LG,354.4,117,ELE-LG-0057
+P000058,P&G Cereal Premium,Groceries,P&G,329.58,153,GRO-P&G-0058
+P000059,Pyrex Blender Premium,Home & Kitchen,Pyrex,193.95,319,HOM-PYR-0059
+P000060,Garnier Moisturizer Pro,Beauty,Garnier,217.82,75,BEA-GAR-0060
+P000061,Dell TV Classic,Electronics,Dell,581.65,56,ELE-DEL-0061
+P000062,Adidas Hat Classic,Clothing,Adidas,372.83,51,CLO-ADI-0062
+P000063,Bosch Blender Plus,Home & Kitchen,Bosch,886.15,224,HOM-BOS-0063
+P000064,Spalding Basketball,Sports,Spalding,130.67,385,SPO-SPA-0064
+P000065,Mattel Building Blocks Classic,Toys,Mattel,186.62,221,TOY-MAT-0065
+P000066,Oxford Biography Classic,Books,Oxford,784.26,120,BOO-OXF-0066
+P000067,Puma Tennis Racket,Sports,Puma,724.8,56,SPO-PUM-0067
+P000068,Hasbro Building Blocks Pro,Toys,Hasbro,488.4,456,TOY-HAS-0068
+P000069,Puma Soccer Ball Classic,Sports,Puma,300.4,142,SPO-PUM-0069
+P000070,Scholastic Textbook Plus,Books,Scholastic,108.68,193,BOO-SCH-0070
+P000071,Lego Board Game,Toys,Lego,619.49,163,TOY-LEG-0071
+P000072,Spalding Soccer Ball Plus,Sports,Spalding,909.27,390,SPO-SPA-0072
+P000073,Lego Building Blocks Plus,Toys,Lego,39.0,333,TOY-LEG-0073
+P000074,Levi's Jacket,Clothing,Levi's,572.71,82,CLO-LEV-0074
+P000075,P&G Chocolate Bar Pro,Groceries,P&G,216.43,99,GRO-P&G-0075
+P000076,Samsung Tablet Classic,Electronics,Samsung,571.77,378,ELE-SAM-0076
+P000077,Nivea Moisturizer,Beauty,Nivea,710.65,330,BEA-NIV-0077
+P000078,Oxford Novel Classic,Books,Oxford,278.39,245,BOO-OXF-0078
+P000079,Puma Tennis Racket Pro,Sports,Puma,334.36,53,SPO-PUM-0079
+P000080,Pyrex Vacuum Cleaner Classic,Home & Kitchen,Pyrex,509.38,292,HOM-PYR-0080
+P000081,Maybelline Perfume Pro,Beauty,Maybelline,246.9,142,BEA-MAY-0081
+P000082,Adidas T-Shirt,Clothing,Adidas,231.16,451,CLO-ADI-0082
+P000083,Scholastic Novel Plus,Books,Scholastic,164.89,284,BOO-SCH-0083
+P000084,Mattel Action Figure Premium,Toys,Mattel,282.71,288,TOY-MAT-0084
+P000085,Lego Board Game Premium,Toys,Lego,160.05,48,TOY-LEG-0085
+P000086,Nestle Pasta Premium,Groceries,Nestle,852.93,72,GRO-NES-0086
+P000087,P&G Coffee Beans Classic,Groceries,P&G,679.06,110,GRO-P&G-0087
+P000088,P&G Cookies Classic,Groceries,P&G,333.1,26,GRO-P&G-0088
+P000089,P&G Coffee Beans Premium,Groceries,P&G,284.97,20,GRO-P&G-0089
+P000090,Playmobil Remote Car Pro,Toys,Playmobil,237.75,435,TOY-PLA-0090
+P000091,Spalding Soccer Ball Plus,Sports,Spalding,460.09,267,SPO-SPA-0091
+P000092,Hasbro Building Blocks,Toys,Hasbro,30.11,306,TOY-HAS-0092
+P000093,Levi's Jeans Lite,Clothing,Levi's,600.82,268,CLO-LEV-0093
+P000094,Hasbro Board Game Pro,Toys,Hasbro,545.47,298,TOY-HAS-0094
+P000095,Pyrex Vacuum Cleaner Classic,Home & Kitchen,Pyrex,70.86,406,HOM-PYR-0095
+P000096,Hasbro Puzzle Classic,Toys,Hasbro,598.91,374,TOY-HAS-0096
+P000097,IKEA Microwave Classic,Home & Kitchen,IKEA,214.92,176,HOM-IKE-0097
+P000098,Zara Hat Premium,Clothing,Zara,209.77,329,CLO-ZAR-0098
+P000099,Tefal Vacuum Cleaner Lite,Home & Kitchen,Tefal,703.91,295,HOM-TEF-0099
+P000100,Mattel Doll Lite,Toys,Mattel,376.37,265,TOY-MAT-0100
+P000101,Coca-Cola Cereal,Groceries,Coca-Cola,882.1,62,GRO-COC-0101
+P000102,Adidas Jeans Classic,Clothing,Adidas,221.04,118,CLO-ADI-0102
+P000103,Mattel Building Blocks Pro,Toys,Mattel,931.09,205,TOY-MAT-0103
+P000104,Dell Tablet Classic,Electronics,Dell,186.78,312,ELE-DEL-0104
+P000105,L'Oreal Perfume Classic,Beauty,L'Oreal,477.1,61,BEA-L'O-0105
+P000106,Philips Vacuum Cleaner Pro,Home & Kitchen,Philips,655.88,182,HOM-PHI-0106
+P000107,Sony Headphones Plus,Electronics,Sony,147.28,224,ELE-SON-0107
+P000108,Reebok Basketball Pro,Sports,Reebok,728.34,455,SPO-REE-0108
+P000109,Zara Hat,Clothing,Zara,725.37,452,CLO-ZAR-0109
+P000110,Under Armour Dumbbells Lite,Sports,Under Armour,301.37,474,SPO-UND-0110
+P000111,Playmobil Building Blocks,Toys,Playmobil,962.27,253,TOY-PLA-0111
+P000112,Sony TV,Electronics,Sony,500.88,277,ELE-SON-0112
+P000113,Puma Yoga Mat,Sports,Puma,541.48,219,SPO-PUM-0113
+P000114,Samsung Tablet Premium,Electronics,Samsung,337.9,385,ELE-SAM-0114
+P000115,Nestle Cereal Plus,Groceries,Nestle,122.41,483,GRO-NES-0115
+P000116,Zara Hat Pro,Clothing,Zara,759.47,281,CLO-ZAR-0116
+P000117,IKEA Microwave Lite,Home & Kitchen,IKEA,335.83,421,HOM-IKE-0117
+P000118,Tefal Toaster Premium,Home & Kitchen,Tefal,405.9,443,HOM-TEF-0118
+P000119,IKEA Toaster Pro,Home & Kitchen,IKEA,244.78,83,HOM-IKE-0119
+P000120,Playmobil Action Figure Lite,Toys,Playmobil,331.84,497,TOY-PLA-0120
+P000121,Kellogg's Coffee Beans Pro,Groceries,Kellogg's,678.28,362,GRO-KEL-0121
+P000122,H&M Jacket Classic,Clothing,H&M,609.25,441,CLO-H&M-0122
+P000123,Nike Hat Classic,Clothing,Nike,29.74,335,CLO-NIK-0123
+P000124,Scholastic Biography Pro,Books,Scholastic,431.5,480,BOO-SCH-0124
+P000125,Puma Basketball Lite,Sports,Puma,706.17,42,SPO-PUM-0125
+P000126,Playmobil Building Blocks Plus,Toys,Playmobil,223.86,412,TOY-PLA-0126
+P000127,Nestle Cereal Plus,Groceries,Nestle,695.45,193,GRO-NES-0127
+P000128,P&G Coffee Beans Pro,Groceries,P&G,484.64,333,GRO-P&G-0128
+P000129,LG Headphones Premium,Electronics,LG,886.52,452,ELE-LG-0129
+P000130,IKEA Coffee Maker Lite,Home & Kitchen,IKEA,149.86,444,HOM-IKE-0130
+P000131,P&G Coffee Beans Lite,Groceries,P&G,364.29,231,GRO-P&G-0131
+P000132,Apple TV,Electronics,Apple,517.79,461,ELE-APP-0132
+P000133,Levi's Hat Premium,Clothing,Levi's,480.08,23,CLO-LEV-0133
+P000134,Adidas T-Shirt Pro,Clothing,Adidas,78.0,223,CLO-ADI-0134
+P000135,Scholastic Children's Book,Books,Scholastic,571.37,385,BOO-SCH-0135
+P000136,Revlon Shampoo Classic,Beauty,Revlon,831.65,412,BEA-REV-0136
+P000137,L'Oreal Mascara Pro,Beauty,L'Oreal,903.39,70,BEA-L'O-0137
+P000138,Zara T-Shirt Classic,Clothing,Zara,83.85,317,CLO-ZAR-0138
+P000139,Penguin Children's Book Lite,Books,Penguin,950.44,48,BOO-PEN-0139
+P000140,H&M Shoes Lite,Clothing,H&M,558.0,228,CLO-H&M-0140
+P000141,Kellogg's Cookies,Groceries,Kellogg's,611.94,184,GRO-KEL-0141
+P000142,Nestle Pasta Pro,Groceries,Nestle,365.81,273,GRO-NES-0142
+P000143,Maybelline Moisturizer Classic,Beauty,Maybelline,25.5,218,BEA-MAY-0143
+P000144,Nestle Chocolate Bar Lite,Groceries,Nestle,246.74,313,GRO-NES-0144
+P000145,Dell TV Lite,Electronics,Dell,13.91,188,ELE-DEL-0145
+P000146,Wilson Running Shoes Premium,Sports,Wilson,406.1,8,SPO-WIL-0146
+P000147,Maybelline Mascara Plus,Beauty,Maybelline,804.54,329,BEA-MAY-0147
+P000148,Samsung Camera,Electronics,Samsung,58.63,43,ELE-SAM-0148
+P000149,Zara Hat Plus,Clothing,Zara,427.37,159,CLO-ZAR-0149
+P000150,Levi's Shoes Premium,Clothing,Levi's,276.26,262,CLO-LEV-0150
+P000151,Nike Shoes Plus,Clothing,Nike,867.0,146,CLO-NIK-0151
+P000152,P&G Cereal Premium,Groceries,P&G,533.73,362,GRO-P&G-0152
+P000153,IKEA Microwave Premium,Home & Kitchen,IKEA,941.83,359,HOM-IKE-0153
+P000154,Nike Dress,Clothing,Nike,321.51,394,CLO-NIK-0154
+P000155,Pyrex Toaster Premium,Home & Kitchen,Pyrex,42.83,456,HOM-PYR-0155
+P000156,Hasbro Doll,Toys,Hasbro,324.05,123,TOY-HAS-0156
+P000157,Fisher-Price Action Figure Plus,Toys,Fisher-Price,895.43,93,TOY-FIS-0157
+P000158,Reebok Soccer Ball Classic,Sports,Reebok,388.7,385,SPO-REE-0158
+P000159,Playmobil Action Figure Premium,Toys,Playmobil,766.41,401,TOY-PLA-0159
+P000160,Nike Jeans Premium,Clothing,Nike,605.74,251,CLO-NIK-0160
+P000161,Random House Textbook Lite,Books,Random House,753.9,81,BOO-RAN-0161
+P000162,H&M Shoes Lite,Clothing,H&M,785.36,16,CLO-H&M-0162
+P000163,Scholastic Novel Classic,Books,Scholastic,76.71,338,BOO-SCH-0163
+P000164,Nestle Chocolate Bar,Groceries,Nestle,873.49,303,GRO-NES-0164
+P000165,Maybelline Lipstick Lite,Beauty,Maybelline,874.93,68,BEA-MAY-0165
+P000166,Scholastic Novel,Books,Scholastic,609.92,156,BOO-SCH-0166
+P000167,Scholastic Mystery Thriller Classic,Books,Scholastic,25.95,289,BOO-SCH-0167
+P000168,Garnier Moisturizer Pro,Beauty,Garnier,391.11,146,BEA-GAR-0168
+P000169,Mattel Remote Car Premium,Toys,Mattel,907.82,435,TOY-MAT-0169
+P000170,Adidas Dress,Clothing,Adidas,876.32,177,CLO-ADI-0170
+P000171,Nestle Cereal Lite,Groceries,Nestle,722.75,187,GRO-NES-0171
+P000172,Nivea Foundation,Beauty,Nivea,453.28,192,BEA-NIV-0172
+P000173,Coca-Cola Chocolate Bar Classic,Groceries,Coca-Cola,183.41,8,GRO-COC-0173
+P000174,Pyrex Toaster Classic,Home & Kitchen,Pyrex,971.93,8,HOM-PYR-0174
+P000175,P&G Pasta Plus,Groceries,P&G,145.82,143,GRO-P&G-0175
+P000176,Playmobil Board Game Plus,Toys,Playmobil,462.0,152,TOY-PLA-0176
+P000177,Oxford Mystery Thriller Premium,Books,Oxford,238.45,355,BOO-OXF-0177
+P000178,Nivea Lipstick Plus,Beauty,Nivea,19.0,267,BEA-NIV-0178
+P000179,Nike Shoes Lite,Clothing,Nike,166.64,77,CLO-NIK-0179
+P000180,Unilever Chocolate Bar Plus,Groceries,Unilever,32.43,483,GRO-UNI-0180
+P000181,Nivea Moisturizer Premium,Beauty,Nivea,564.43,49,BEA-NIV-0181
+P000182,Coca-Cola Chocolate Bar Classic,Groceries,Coca-Cola,692.29,497,GRO-COC-0182
+P000183,Reebok Yoga Mat Lite,Sports,Reebok,396.1,301,SPO-REE-0183
+P000184,Mattel Board Game Pro,Toys,Mattel,829.21,365,TOY-MAT-0184
+P000185,Zara Jacket Lite,Clothing,Zara,272.78,396,CLO-ZAR-0185
+P000186,Nivea Mascara Plus,Beauty,Nivea,284.76,464,BEA-NIV-0186
+P000187,Dell Camera,Electronics,Dell,247.76,9,ELE-DEL-0187
+P000188,Reebok Soccer Ball Classic,Sports,Reebok,358.33,418,SPO-REE-0188
+P000189,Coca-Cola Coffee Beans Premium,Groceries,Coca-Cola,580.0,359,GRO-COC-0189
+P000190,HarperCollins Cookbook Classic,Books,HarperCollins,417.95,200,BOO-HAR-0190
+P000191,Nestle Chocolate Bar Plus,Groceries,Nestle,522.47,491,GRO-NES-0191
+P000192,LG TV Premium,Electronics,LG,160.45,246,ELE-LG-0192
+P000193,L'Oreal Mascara,Beauty,L'Oreal,961.89,373,BEA-L'O-0193
+P000194,Tefal Toaster Classic,Home & Kitchen,Tefal,524.24,58,HOM-TEF-0194
+P000195,Unilever Cereal,Groceries,Unilever,669.48,427,GRO-UNI-0195
+P000196,Nivea Mascara Lite,Beauty,Nivea,83.46,310,BEA-NIV-0196
+P000197,Oxford Novel Pro,Books,Oxford,601.6,347,BOO-OXF-0197
+P000198,P&G Chocolate Bar Lite,Groceries,P&G,700.72,243,GRO-P&G-0198
+P000199,Apple Laptop Lite,Electronics,Apple,320.65,359,ELE-APP-0199
+P000200,Penguin Mystery Thriller Premium,Books,Penguin,224.45,213,BOO-PEN-0200
+P001001,Kellogg's Doll Premium,Groceries,Kellogg's,227.86,377,GRO-K-1001
+P001002,Playmobil Tablet Pro,Groceries,Playmobil,425.38,15,GRO-P-1002
+P001003,Mattel Building Blocks Pro,Groceries,Mattel,604.4,287,GRO-M-1003
+P001004,Playmobil Camera Premium,Toys,Playmobil,452.5,142,TOY-P-1004
+P001005,Nike Vacuum Cleaner Classic,Books,Nike,344.2,79,BOO-N-1005
+P001006,Under Armour Jeans Plus,Toys,Under Armour,383.64,183,TOY-UA-1006
+P001007,Maybelline Jacket Plus,Clothing,Maybelline,731.34,274,CLO-M-1007
+P001008,P&G Tablet Pro,Groceries,P&G,297.41,321,GRO-P-1008
+P001009,Tefal Basketball,Clothing,Tefal,75.13,338,CLO-T-1009
+P001010,Lego Tablet Premium,Toys,Lego,867.27,194,TOY-L-1010
+P001011,Unilever Perfume Lite,Electronics,Unilever,167.67,181,ELE-U-1011
+P001012,Apple Vacuum Cleaner,Toys,Apple,650.14,311,TOY-A-1012
+P001013,Playmobil Coffee Beans Premium,Home & Kitchen,Playmobil,465.48,138,HOM-P-1013
+P001014,Nestle Novel Premium,Toys,Nestle,822.86,412,TOY-N-1014
+P001015,Samsung Doll Plus,Clothing,Samsung,215.71,482,CLO-S-1015
+P001016,Mattel Mascara Classic,Clothing,Mattel,399.25,468,CLO-M-1016
+P001017,Philips Jacket Premium,Sports,Philips,251.14,287,SPO-P-1017
+P001018,Garnier Textbook Pro,Electronics,Garnier,402.99,112,ELE-G-1018
+P001019,Spalding Mystery Thriller Plus,Home & Kitchen,Spalding,757.24,440,HOM-S-1019
+P001020,Philips Perfume Premium,Groceries,Philips,793.32,216,GRO-P-1020
+P001021,P&G Soccer Ball Pro,Groceries,P&G,996.13,270,GRO-P-1021
+P001022,IKEA Children's Book,Electronics,IKEA,722.39,349,ELE-I-1022
+P001023,Under Armour Blender Lite,Electronics,Under Armour,438.15,232,ELE-UA-1023
+P001024,LG Chocolate Bar Premium,Books,LG,510.63,54,BOO-L-1024
+P001025,Spalding Puzzle Premium,Electronics,Spalding,157.91,390,ELE-S-1025
+P001026,Playmobil Cereal Plus,Home & Kitchen,Playmobil,601.34,250,HOM-P-1026
+P001027,Bosch Biography Lite,Books,Bosch,244.01,123,BOO-B-1027
+P001028,Dell Mystery Thriller Plus,Groceries,Dell,978.11,272,GRO-D-1028
+P001029,Sony Lipstick Classic,Home & Kitchen,Sony,947.16,84,HOM-S-1029
+P001030,Hasbro Puzzle Classic,Electronics,Hasbro,964.57,475,ELE-H-1030
+P001031,Penguin Cookbook,Toys,Penguin,651.97,224,TOY-P-1031
+P001032,Bosch Coffee Beans Premium,Sports,Bosch,69.63,10,SPO-B-1032
+P001033,Garnier Building Blocks Plus,Toys,Garnier,76.56,323,TOY-G-1033
+P001034,Zara Board Game Plus,Books,Zara,860.47,36,BOO-Z-1034
+P001035,Apple Lipstick Classic,Toys,Apple,218.94,67,TOY-A-1035
+P001036,Revlon Yoga Mat Classic,Sports,Revlon,195.26,49,SPO-R-1036
+P001037,Coca-Cola Textbook Classic,Beauty,Coca-Cola,470.21,373,BEA-C-1037
+P001038,H&M Novel Classic,Books,H&M,729.83,409,BOO-H-1038
+P001039,Revlon Basketball Premium,Groceries,Revlon,539.06,71,GRO-R-1039
+P001040,Wilson Doll Classic,Beauty,Wilson,254.3,472,BEA-W-1040
+P001041,HarperCollins Olive Oil Plus,Groceries,HarperCollins,56.27,276,GRO-H-1041
+P001042,Dell Coffee Beans Premium,Books,Dell,409.97,246,BOO-D-1042
+P001043,Samsung Novel Premium,Toys,Samsung,382.69,199,TOY-S-1043
+P001044,Unilever Hat Classic,Electronics,Unilever,698.4,374,ELE-U-1044
+P001045,Philips Basketball Lite,Sports,Philips,222.38,29,SPO-P-1045
+P001046,Nestle Novel Plus,Books,Nestle,586.66,257,BOO-N-1046
+P001047,Scholastic Chocolate Bar Plus,Home & Kitchen,Scholastic,852.22,35,HOM-S-1047
+P001048,Revlon Cookbook Plus,Groceries,Revlon,941.94,291,GRO-R-1048
+P001049,Garnier Puzzle Plus,Toys,Garnier,621.66,214,TOY-G-1049
+P001050,LG Shampoo,Clothing,LG,717.88,122,CLO-L-1050
+P001051,Samsung Headphones,Electronics,Samsung,647.62,234,ELE-S-1051
+P001052,Fisher-Price Children's Book Classic,Clothing,Fisher-Price,623.42,288,CLO-F-1052
+P001053,Fisher-Price Remote Car Premium,Groceries,Fisher-Price,508.84,67,GRO-F-1053
+P001054,Fisher-Price Coffee Beans Lite,Clothing,Fisher-Price,289.27,224,CLO-F-1054
+P001055,Reebok Mascara Pro,Electronics,Reebok,13.77,418,ELE-R-1055
+P001056,H&M Headphones Lite,Electronics,H&M,120.73,54,ELE-H-1056
+P001057,Apple Hat Pro,Home & Kitchen,Apple,215.36,175,HOM-A-1057
+P001058,LG Chocolate Bar Classic,Toys,LG,255.6,464,TOY-L-1058
+P001059,Dell Perfume Classic,Books,Dell,830.36,22,BOO-D-1059
+P001060,Under Armour Headphones,Books,Under Armour,979.91,82,BOO-UA-1060
+P001061,IKEA Textbook Pro,Sports,IKEA,15.6,38,SPO-I-1061
+P001062,Playmobil Frying Pan Lite,Home & Kitchen,Playmobil,585.0,75,HOM-P-1062
+P001063,Sony Frying Pan Lite,Beauty,Sony,368.45,477,BEA-S-1063
+P001064,Coca-Cola Shampoo,Books,Coca-Cola,254.02,52,BOO-C-1064
+P001065,IKEA Camera Pro,Clothing,IKEA,750.97,473,CLO-I-1065
+P001066,Nike T-Shirt Classic,Toys,Nike,30.63,377,TOY-N-1066
+P001067,Nivea Lipstick,Clothing,Nivea,811.87,136,CLO-N-1067
+P001068,H&M Soccer Ball Plus,Home & Kitchen,H&M,859.43,113,HOM-H-1068
+P001069,Unilever Smartphone Lite,Toys,Unilever,821.6,446,TOY-U-1069
+P001070,Zara Pasta,Toys,Zara,197.96,168,TOY-Z-1070
+P001071,Fisher-Price Doll Lite,Electronics,Fisher-Price,643.62,204,ELE-F-1071
+P001072,Kellogg's Blender Lite,Clothing,Kellogg's,183.49,492,CLO-K-1072
+P001073,Pyrex Jeans Pro,Electronics,Pyrex,437.95,373,ELE-P-1073
+P001074,Oxford Puzzle Pro,Clothing,Oxford,120.94,460,CLO-O-1074
+P001075,LG Frying Pan,Toys,LG,439.43,266,TOY-L-1075
+P001076,Levi's Textbook Plus,Toys,Levi's,949.17,471,TOY-L-1076
+P001077,Reebok Moisturizer,Clothing,Reebok,848.92,368,CLO-R-1077
+P001078,Spalding Microwave,Electronics,Spalding,411.93,206,ELE-S-1078
+P001079,IKEA Headphones Premium,Electronics,IKEA,423.91,481,ELE-I-1079
+P001080,Wilson Action Figure Pro,Beauty,Wilson,305.13,280,BEA-W-1080
+P001081,Penguin Hat Premium,Books,Penguin,433.3,296,BOO-P-1081
+P001082,Unilever Toaster Classic,Clothing,Unilever,677.56,261,CLO-U-1082
+P001083,Nike Lipstick Plus,Sports,Nike,288.07,339,SPO-N-1083
+P001084,Dell Coffee Beans,Clothing,Dell,314.55,412,CLO-D-1084
+P001085,Philips Pasta Plus,Toys,Philips,249.36,243,TOY-P-1085
+P001086,Unilever Camera,Groceries,Unilever,578.21,367,GRO-U-1086
+P001087,Puma Cookbook Premium,Beauty,Puma,152.68,352,BEA-P-1087
+P001088,H&M Textbook Premium,Books,H&M,180.82,490,BOO-H-1088
+P001089,Scholastic Olive Oil Premium,Sports,Scholastic,917.96,62,SPO-S-1089
+P001090,Sony Dress,Sports,Sony,533.94,286,SPO-S-1090
+P001091,HarperCollins Action Figure,Clothing,HarperCollins,892.66,218,CLO-H-1091
+P001092,Nike Yoga Mat Classic,Sports,Nike,263.63,126,SPO-N-1092
+P001093,Hasbro Mystery Thriller,Electronics,Hasbro,243.8,225,ELE-H-1093
+P001094,Lego Coffee Beans Lite,Groceries,Lego,339.82,457,GRO-L-1094
+P001095,Sony Coffee Maker Premium,Groceries,Sony,386.73,78,GRO-S-1095
+P001096,Fisher-Price Camera Classic,Toys,Fisher-Price,334.89,238,TOY-F-1096
+P001097,Scholastic Shampoo Classic,Beauty,Scholastic,393.13,394,BEA-S-1097
+P001098,Tefal Soccer Ball Classic,Books,Tefal,11.85,180,BOO-T-1098
+P001099,P&G Camera Pro,Electronics,P&G,749.02,279,ELE-P-1099
+P001100,Puma Building Blocks Lite,Toys,Puma,439.21,14,TOY-P-1100
+P001101,Under Armour Lipstick,Beauty,Under Armour,799.34,370,BEA-UA-1101
+P001102,Unilever Headphones Pro,Home & Kitchen,Unilever,536.91,464,HOM-U-1102
+P001103,Garnier TV,Beauty,Garnier,32.93,329,BEA-G-1103
+P001104,Sony Dress Premium,Beauty,Sony,55.97,194,BEA-S-1104
+P001105,Mattel Dress Lite,Clothing,Mattel,341.47,450,CLO-M-1105
+P001106,Apple Camera Lite,Beauty,Apple,835.89,240,BEA-A-1106
+P001107,Playmobil Novel Lite,Books,Playmobil,228.87,35,BOO-P-1107
+P001108,Kellogg's Coffee Beans Premium,Books,Kellogg's,840.18,318,BOO-K-1108
+P001109,Revlon Headphones Classic,Home & Kitchen,Revlon,671.43,288,HOM-R-1109
+P001110,Unilever Vacuum Cleaner Lite,Toys,Unilever,768.29,85,TOY-U-1110
+P001111,Nike Microwave Plus,Groceries,Nike,581.2,475,GRO-N-1111
+P001112,Tefal Foundation Classic,Electronics,Tefal,400.26,366,ELE-T-1112
+P001113,Fisher-Price Dumbbells,Toys,Fisher-Price,831.58,124,TOY-F-1113
+P001114,Penguin Foundation Pro,Groceries,Penguin,806.68,407,GRO-P-1114
+P001115,Coca-Cola Remote Car Classic,Books,Coca-Cola,663.54,35,BOO-C-1115
+P001116,Random House Camera Classic,Clothing,Random House,110.9,491,CLO-RH-1116
+P001117,Unilever Coffee Maker Classic,Clothing,Unilever,181.07,267,CLO-U-1117
+P001118,Reebok Remote Car Classic,Electronics,Reebok,468.07,422,ELE-R-1118
+P001119,Nestle Coffee Beans Plus,Electronics,Nestle,283.24,230,ELE-N-1119
+P001120,Unilever TV Pro,Toys,Unilever,670.17,172,TOY-U-1120
+P001121,Puma Moisturizer Premium,Books,Puma,490.61,181,BOO-P-1121
+P001122,Under Armour Doll Pro,Electronics,Under Armour,702.97,141,ELE-UA-1122
+P001123,Hasbro Basketball Plus,Books,Hasbro,245.9,208,BOO-H-1123
+P001124,IKEA Coffee Beans,Sports,IKEA,479.23,364,SPO-I-1124
+P001125,HarperCollins Pasta Plus,Sports,HarperCollins,298.46,207,SPO-H-1125
+P001126,Penguin Lipstick Pro,Toys,Penguin,372.8,283,TOY-P-1126
+P001127,Oxford Olive Oil Lite,Clothing,Oxford,355.69,232,CLO-O-1127
+P001128,Penguin Jacket Premium,Electronics,Penguin,125.92,98,ELE-P-1128
+P001129,Bosch Remote Car,Clothing,Bosch,190.03,110,CLO-B-1129
+P001130,Apple Dumbbells Pro,Sports,Apple,599.2,51,SPO-A-1130
+P001131,Lego Building Blocks Lite,Toys,Lego,184.35,7,TOY-L-1131
+P001132,Apple Frying Pan Plus,Home & Kitchen,Apple,556.03,357,HOM-A-1132
+P001133,Puma Jeans Plus,Home & Kitchen,Puma,576.61,240,HOM-P-1133
+P001134,HarperCollins Tennis Racket Premium,Sports,HarperCollins,965.69,129,SPO-H-1134
+P001135,Bosch Board Game Classic,Sports,Bosch,494.79,295,SPO-B-1135
+P001136,Philips Coffee Maker Pro,Books,Philips,949.42,43,BOO-P-1136
+P001137,Bosch Olive Oil Classic,Toys,Bosch,608.67,404,TOY-B-1137
+P001138,Hasbro Soccer Ball Classic,Toys,Hasbro,909.04,152,TOY-H-1138
+P001139,Penguin TV Pro,Beauty,Penguin,65.86,491,BEA-P-1139
+P001140,Mattel Perfume Premium,Groceries,Mattel,269.05,41,GRO-M-1140
+P001141,Revlon T-Shirt Pro,Home & Kitchen,Revlon,80.6,1,HOM-R-1141
+P001142,HarperCollins Vacuum Cleaner Pro,Beauty,HarperCollins,473.08,16,BEA-H-1142
+P001143,Lego Hat,Toys,Lego,860.44,36,TOY-L-1143
+P001144,LG Perfume Pro,Toys,LG,663.21,478,TOY-L-1144
+P001145,Oxford Blender Pro,Toys,Oxford,229.45,76,TOY-O-1145
+P001146,Philips Board Game Plus,Electronics,Philips,170.92,157,ELE-P-1146
+P001147,HarperCollins Blender Classic,Electronics,HarperCollins,690.54,358,ELE-H-1147
+P001148,Apple Chocolate Bar Pro,Beauty,Apple,496.82,41,BEA-A-1148
+P001149,Oxford Moisturizer Pro,Books,Oxford,254.86,46,BOO-O-1149
+P001150,Tefal Dumbbells Plus,Toys,Tefal,999.56,344,TOY-T-1150
+P001151,Tefal Frying Pan Premium,Electronics,Tefal,473.67,333,ELE-T-1151
+P001152,Apple T-Shirt Pro,Sports,Apple,439.26,416,SPO-A-1152
+P001153,Dell Yoga Mat Lite,Sports,Dell,411.89,164,SPO-D-1153
+P001154,Nike Tennis Racket Classic,Groceries,Nike,695.5,147,GRO-N-1154
+P001155,IKEA Frying Pan Classic,Beauty,IKEA,93.52,129,BEA-I-1155
+P001156,Bosch Cookbook Pro,Clothing,Bosch,825.97,0,CLO-B-1156
+P001157,Nivea Novel Premium,Sports,Nivea,521.32,318,SPO-N-1157
+P001158,HarperCollins Novel Premium,Sports,HarperCollins,271.44,67,SPO-H-1158
+P001159,HarperCollins Vacuum Cleaner Classic,Electronics,HarperCollins,126.69,498,ELE-H-1159
+P001160,Nike Microwave Pro,Toys,Nike,19.58,208,TOY-N-1160
+P001161,Zara Blender Classic,Groceries,Zara,947.37,331,GRO-Z-1161
+P001162,Puma Hat Pro,Home & Kitchen,Puma,707.17,212,HOM-P-1162
+P001163,Adidas Coffee Beans Classic,Sports,Adidas,553.95,196,SPO-A-1163
+P001164,Maybelline Chocolate Bar,Toys,Maybelline,880.04,442,TOY-M-1164
+P001165,Apple Camera Lite,Groceries,Apple,934.63,259,GRO-A-1165
+P001166,Random House Hat,Electronics,Random House,302.75,300,ELE-RH-1166
+P001167,Philips Toaster Pro,Sports,Philips,487.43,170,SPO-P-1167
+P001168,Unilever Moisturizer Premium,Beauty,Unilever,980.88,122,BEA-U-1168
+P001169,Zara Camera Plus,Beauty,Zara,322.26,242,BEA-Z-1169
+P001170,P&G Lipstick,Beauty,P&G,980.92,253,BEA-P-1170
+P001171,Sony Chocolate Bar Pro,Books,Sony,335.99,51,BOO-S-1171
+P001172,H&M Cereal Classic,Sports,H&M,21.25,73,SPO-H-1172
+P001173,Philips Board Game Classic,Beauty,Philips,782.83,135,BEA-P-1173
+P001174,Reebok Vacuum Cleaner Classic,Clothing,Reebok,651.93,436,CLO-R-1174
+P001175,Playmobil Soccer Ball Lite,Clothing,Playmobil,629.03,454,CLO-P-1175
+P001176,Playmobil Frying Pan Pro,Sports,Playmobil,74.0,323,SPO-P-1176
+P001177,Zara Tablet Classic,Electronics,Zara,978.46,389,ELE-Z-1177
+P001178,HarperCollins Shoes,Groceries,HarperCollins,303.66,14,GRO-H-1178
+P001179,Nestle Novel Lite,Books,Nestle,362.3,220,BOO-N-1179
+P001180,Revlon Cereal Classic,Home & Kitchen,Revlon,568.52,405,HOM-R-1180
+P001181,Nike T-Shirt Plus,Home & Kitchen,Nike,611.82,195,HOM-N-1181
+P001182,Puma Dumbbells Premium,Toys,Puma,236.79,326,TOY-P-1182
+P001183,Unilever Jacket,Electronics,Unilever,15.33,411,ELE-U-1183
+P001184,Lego Foundation Pro,Sports,Lego,163.02,226,SPO-L-1184
+P001185,Garnier Microwave,Clothing,Garnier,962.25,353,CLO-G-1185
+P001186,Unilever Microwave Premium,Electronics,Unilever,999.37,436,ELE-U-1186
+P001187,H&M Coffee Beans Classic,Sports,H&M,574.48,294,SPO-H-1187
+P001188,Lego Pasta,Electronics,Lego,399.42,4,ELE-L-1188
+P001189,Maybelline Mystery Thriller Lite,Books,Maybelline,777.08,117,BOO-M-1189
+P001190,Zara Perfume Premium,Clothing,Zara,623.16,347,CLO-Z-1190
+P001191,H&M Perfume,Home & Kitchen,H&M,45.18,403,HOM-H-1191
+P001192,Pyrex Dumbbells Lite,Sports,Pyrex,733.96,46,SPO-P-1192
+P001193,Nestle Camera Premium,Electronics,Nestle,205.58,402,ELE-N-1193
+P001194,Hasbro Chocolate Bar Lite,Clothing,Hasbro,831.48,131,CLO-H-1194
+P001195,Lego Tennis Racket Plus,Sports,Lego,471.51,38,SPO-L-1195
+P001196,Zara Foundation,Home & Kitchen,Zara,676.35,203,HOM-Z-1196
+P001197,Dell Cookbook Plus,Clothing,Dell,268.86,63,CLO-D-1197
+P001198,Levi's Foundation,Sports,Levi's,674.3,299,SPO-L-1198
+P001199,Levi's Jeans,Beauty,Levi's,238.41,12,BEA-L-1199
+P001200,Reebok Building Blocks,Clothing,Reebok,68.83,421,CLO-R-1200
+P001201,Adidas Remote Car Pro,Toys,Adidas,512.34,189,TOY-ADI-1201
+P001202,Sony Yoga Mat Lite,Sports,Sony,178.92,412,SPO-SON-1202
+P001203,Nestle Action Figure Plus,Toys,Nestle,845.67,56,GRO-NES-1203
+P001204,Philips T-Shirt Premium,Clothing,Philips,623.45,278,HOM-PHI-1204
+P001205,Lego Lipstick Classic,Beauty,Lego,389.12,134,TOY-LEG-1205
+P001206,H&M Blender Pro,Home & Kitchen,H&M,756.89,367,CLO-H&M-1206
+P001207,P&G Headphones Lite,Electronics,P&G,234.56,490,GRO-P&G-1207
+P001208,Zara Puzzle Premium,Toys,Zara,912.03,89,CLO-ZAR-1208
+P001209,Nike Coffee Maker Classic,Home & Kitchen,Nike,467.78,223,CLO-NIK-1209
+P001210,Revlon Tennis Racket Plus,Sports,Revlon,589.01,145,BEA-REV-1210
+P001211,Fisher-Price Jacket Lite,Clothing,Fisher-Price,334.89,401,TOY-FIS-1211
+P001212,Apple Cereal Pro,Groceries,Apple,678.45,312,ELE-APP-1212
+P001213,Unilever Vacuum Cleaner Premium,Home & Kitchen,Unilever,821.56,78,GRO-UNI-1213
+P001214,Scholastic Moisturizer Classic,Beauty,Scholastic,156.23,456,BOO-SCH-1214
+P001215,Bosch Hat Plus,Clothing,Bosch,445.67,190,HOM-BOS-1215
+P001216,Mattel Microwave Lite,Home & Kitchen,Mattel,723.89,267,TOY-MAT-1216
+P001217,L'Oreal Board Game Pro,Toys,L'Oreal,298.34,134,BEA-L'O-1217
+P001218,Pyrex Shoes Classic,Clothing,Pyrex,512.01,389,HOM-PYR-1218
+P001219,Coca-Cola Foundation Premium,Beauty,Coca-Cola,867.45,56,GRO-COC-1219
+P001220,HarperCollins Dumbbells Lite,Sports,HarperCollins,378.92,423,BOO-HAR-1220
+P001221,Levi's Camera Pro,Electronics,Levi's,945.23,178,CLO-LEV-1221
+P001222,Garnier Novel Plus,Books,Garnier,234.56,312,BEA-GAR-1222
+P001223,Spalding Perfume Classic,Beauty,Spalding,689.78,89,SPO-SPA-1223
+P001224,IKEA Basketball Premium,Sports,IKEA,456.12,467,HOM-IKE-1224
+P001225,Penguin Toaster Lite,Home & Kitchen,Penguin,789.34,201,BOO-PEN-1225
+P001226,Random House Pasta Pro,Groceries,Random House,345.67,378,BOO-RAN-1226
+P001227,Playmobil Dress Plus,Clothing,Playmobil,812.89,145,TOY-PLA-1227
+P001228,Under Armour Cookbook Classic,Books,Under Armour,567.01,423,SPO-UND-1228
+P001229,Nivea Remote Car Lite,Toys,Nivea,234.45,89,BEA-NIV-1229
+P001230,Tefal Jeans Pro,Clothing,Tefal,678.92,356,HOM-TEF-1230
+P001231,Oxford Chocolate Bar Premium,Groceries,Oxford,912.34,190,BOO-OXF-1231
+P001232,Wilson Tablet Classic,Electronics,Wilson,456.78,467,SPO-WIL-1232
+P001233,Maybelline Frying Pan Plus,Home & Kitchen,Maybelline,789.12,234,BEA-MAY-1233
+P001234,Kellogg's Mascara Lite,Beauty,Kellogg's,345.56,312,GRO-KEL-1234
+P001235,Dell Building Blocks Pro,Toys,Dell,823.89,178,ELE-DEL-1235
+P001236,LG Hat Classic,Clothing,LG,567.23,456,ELE-LG-1236
+P001237,Samsung Olive Oil Premium,Groceries,Samsung,912.45,89,ELE-SAM-1237
+P001238,Hasbro Shampoo Plus,Beauty,Hasbro,456.67,423,TOY-HAS-1238
+P001239,Puma Coffee Beans Lite,Groceries,Puma,789.01,201,SPO-PUM-1239
+P001240,Adidas Mystery Thriller Pro,Books,Adidas,234.34,378,CLO-ADI-1240
+P001241,Reebok TV Premium,Electronics,Reebok,678.92,145,SPO-REE-1241
+P001242,Zara Soccer Ball Classic,Sports,Zara,912.56,423,CLO-ZAR-1242
+P001243,Nestle Lipstick Pro,Beauty,Nestle,456.78,89,GRO-NES-1243
+P001244,Philips Action Figure Lite,Toys,Philips,789.12,356,HOM-PHI-1244
+P001245,Sony Children's Book Plus,Books,Sony,345.45,190,ELE-SON-1245
+P001246,H&M Yogurt Premium,Groceries,H&M,823.67,467,CLO-H&M-1246
+P001247,Nike Blender Classic,Home & Kitchen,Nike,567.89,234,CLO-NIK-1247
+P001248,Levi's Headphones Pro,Electronics,Levi's,912.01,312,CLO-LEV-1248
+P001249,Mattel Yogurt Lite,Groceries,Mattel,456.34,178,TOY-MAT-1249
+P001250,Fisher-Price Jacket Premium,Clothing,Fisher-Price,789.56,456,TOY-FIS-1250
+P001251,Apple Puzzle Plus,Toys,Apple,234.78,89,ELE-APP-1251
+P001252,Unilever Biography Classic,Books,Unilever,678.92,423,GRO-UNI-1252
+P001253,Scholastic Vacuum Cleaner Pro,Home & Kitchen,Scholastic,912.45,201,BOO-SCH-1253
+P001254,Bosch T-Shirt Lite,Clothing,Bosch,456.67,378,HOM-BOS-1254
+P001255,L'Oreal Dumbbells Premium,Sports,L'Oreal,789.01,145,BEA-L'O-1255
+P001256,Pyrex Novel Pro,Books,Pyrex,234.34,423,HOM-PYR-1256
+P001257,Coca-Cola Shoes Classic,Clothing,Coca-Cola,678.56,89,GRO-COC-1257
+P001258,HarperCollins Perfume Lite,Beauty,HarperCollins,912.89,356,BOO-HAR-1258
+P001259,Garnier Coffee Maker Plus,Home & Kitchen,Garnier,456.12,190,BEA-GAR-1259
+P001260,Spalding Hat Pro,Clothing,Spalding,789.34,467,SPO-SPA-1260
+P001261,IKEA Mascara Classic,Beauty,IKEA,234.56,234,HOM-IKE-1261
+P001262,Penguin Board Game Premium,Toys,Penguin,678.78,312,BOO-PEN-1262
+P001263,Random House Tennis Racket Lite,Sports,Random House,912.01,178,BOO-RAN-1263
+P001264,Playmobil Foundation Plus,Beauty,Playmobil,456.45,456,TOY-PLA-1264
+P001265,Under Armour Cereal Pro,Groceries,Under Armour,789.67,89,SPO-UND-1265
+P001266,Nivea Remote Car Classic,Toys,Nivea,234.89,423,BEA-NIV-1266
+P001267,Tefal Jeans Lite,Clothing,Tefal,678.12,201,HOM-TEF-1267
+P001268,Oxford Chocolate Bar Plus,Groceries,Oxford,912.34,378,BOO-OXF-1268
+P001269,Wilson Tablet Pro,Electronics,Wilson,456.56,145,SPO-WIL-1269
+P001270,Maybelline Frying Pan Classic,Home & Kitchen,Maybelline,789.78,423,BEA-MAY-1270
+P001271,Kellogg's Lipstick Premium,Beauty,Kellogg's,234.01,89,GRO-KEL-1271
+P001272,Dell Building Blocks Lite,Toys,Dell,678.45,356,ELE-DEL-1272
+P001273,LG Hat Plus,Clothing,LG,912.67,190,ELE-LG-1273
+P001274,Samsung Olive Oil Classic,Groceries,Samsung,456.89,467,ELE-SAM-1274
+P001275,Hasbro Shampoo Pro,Beauty,Hasbro,789.12,234,TOY-HAS-1275
+P001276,Puma Coffee Beans Premium,Groceries,Puma,234.34,312,SPO-PUM-1276
+P001277,Adidas Mystery Thriller Lite,Books,Adidas,678.56,178,CLO-ADI-1277
+P001278,Reebok TV Plus,Electronics,Reebok,912.78,456,SPO-REE-1278
+P001279,Zara Soccer Ball Pro,Sports,Zara,456.01,89,CLO-ZAR-1279
+P001280,Nestle Lipstick Classic,Beauty,Nestle,789.45,423,GRO-NES-1280
+P001281,Philips Action Figure Premium,Toys,Philips,234.67,201,HOM-PHI-1281
+P001282,Sony Children's Book Lite,Books,Sony,678.89,378,ELE-SON-1282
+P001283,H&M Cereal Plus,Groceries,H&M,912.12,145,CLO-H&M-1283
+P001284,Nike Blender Pro,Home & Kitchen,Nike,456.34,423,CLO-NIK-1284
+P001285,Levi's Headphones Classic,Electronics,Levi's,789.56,89,CLO-LEV-1285
+P001286,Mattel Pasta Lite,Groceries,Mattel,234.78,356,TOY-MAT-1286
+P001287,Fisher-Price Jacket Pro,Clothing,Fisher-Price,678.01,190,TOY-FIS-1287
+P001288,Apple Puzzle Classic,Toys,Apple,912.45,467,ELE-APP-1288
+P001289,Unilever Biography Premium,Books,Unilever,456.67,234,GRO-UNI-1289
+P001290,Scholastic Vacuum Cleaner Lite,Home & Kitchen,Scholastic,789.89,312,BOO-SCH-1290
+P001291,Bosch T-Shirt Plus,Clothing,Bosch,234.12,178,HOM-BOS-1291
+P001292,L'Oreal Dumbbells Classic,Sports,L'Oreal,678.34,456,BEA-L'O-1292
+P001293,Pyrex Novel Lite,Books,Pyrex,912.56,89,HOM-PYR-1293
+P001294,Coca-Cola Shoes Pro,Clothing,Coca-Cola,456.78,423,GRO-COC-1294
+P001295,HarperCollins Perfume Plus,Beauty,HarperCollins,789.01,201,BOO-HAR-1295
+P001296,Garnier Coffee Maker Classic,Home & Kitchen,Garnier,234.45,378,BEA-GAR-1296
+P001297,Spalding Hat Lite,Clothing,Spalding,678.67,145,SPO-SPA-1297
+P001298,IKEA Mascara Pro,Beauty,IKEA,912.89,423,HOM-IKE-1298
+P001299,Penguin Board Game Lite,Toys,Penguin,456.12,89,BOO-PEN-1299
+P001300,Random House Tennis Racket Classic,Sports,Random House,789.34,356,BOO-RAN-1300
+P001301,Playmobil Foundation Premium,Beauty,Playmobil,234.56,190,TOY-PLA-1301
+P001302,Under Armour Cereal Lite,Groceries,Under Armour,678.78,467,SPO-UND-1302
+P001303,Nivea Remote Car Plus,Toys,Nivea,912.01,234,BEA-NIV-1303
+P001304,Tefal Jeans Classic,Clothing,Tefal,456.45,312,HOM-TEF-1304
+P001305,Oxford Chocolate Bar Pro,Groceries,Oxford,789.67,178,BOO-OXF-1305
+P001306,Wilson Tablet Lite,Electronics,Wilson,234.89,456,SPO-WIL-1306
+P001307,Maybelline Frying Pan Premium,Home & Kitchen,Maybelline,678.12,89,BEA-MAY-1307
+P001308,Kellogg's Lipstick Plus,Beauty,Kellogg's,912.34,423,GRO-KEL-1308
+P001309,Dell Building Blocks Classic,Toys,Dell,456.56,201,ELE-DEL-1309
+P001310,LG Hat Pro,Clothing,LG,789.78,378,ELE-LG-1310
+P001311,Samsung Olive Oil Lite,Groceries,Samsung,234.01,145,ELE-SAM-1311
+P001312,Hasbro Shampoo Classic,Beauty,Hasbro,678.45,423,TOY-HAS-1312
+P001313,Puma Coffee Beans Plus,Groceries,Puma,912.67,89,SPO-PUM-1313
+P001314,Adidas Mystery Thriller Premium,Books,Adidas,456.89,356,CLO-ADI-1314
+P001315,Reebok TV Classic,Electronics,Reebok,789.12,190,SPO-REE-1315
+P001316,Zara Soccer Ball Lite,Sports,Zara,234.34,467,CLO-ZAR-1316
+P001317,Nestle Lipstick Plus,Beauty,Nestle,678.56,234,GRO-NES-1317
+P001318,Philips Action Figure Classic,Toys,Philips,912.78,312,HOM-PHI-1318
+P001319,Sony Children's Book Pro,Books,Sony,456.01,178,ELE-SON-1319
+P001320,H&M Cereal Classic,Groceries,H&M,789.45,456,CLO-H&M-1320
+P001321,Nike Blender Lite,Home & Kitchen,Nike,234.67,89,CLO-NIK-1321
+P001322,Levi's Headphones Plus,Electronics,Levi's,678.89,423,CLO-LEV-1322
+P001323,Mattel Pasta Pro,Groceries,Mattel,912.12,201,TOY-MAT-1323
+P001324,Fisher-Price Jacket Classic,Clothing,Fisher-Price,456.34,378,TOY-FIS-1324
+P001325,Apple Puzzle Lite,Toys,Apple,789.56,145,ELE-APP-1325
+P001326,Unilever Biography Plus,Books,Unilever,234.78,423,GRO-UNI-1326
+P001327,Scholastic Vacuum Cleaner Classic,Home & Kitchen,Scholastic,678.01,89,BOO-SCH-1327
+P001328,Bosch T-Shirt Pro,Clothing,Bosch,912.45,356,HOM-BOS-1328
+P001329,L'Oreal Dumbbells Lite,Sports,L'Oreal,456.67,190,BEA-L'O-1329
+P001330,Pyrex Novel Classic,Books,Pyrex,789.89,467,HOM-PYR-1330
+P001331,Coca-Cola Shoes Lite,Clothing,Coca-Cola,234.12,234,GRO-COC-1331
+P001332,HarperCollins Perfume Pro,Beauty,HarperCollins,678.34,312,BOO-HAR-1332
+P001333,Garnier Coffee Maker Lite,Home & Kitchen,Garnier,912.56,178,BEA-GAR-1333
+P001334,Spalding Hat Classic,Clothing,Spalding,456.78,456,SPO-SPA-1334
+P001335,IKEA Mascara Plus,Beauty,IKEA,789.01,89,HOM-IKE-1335
+P001336,Penguin Board Game Classic,Toys,Penguin,234.45,423,BOO-PEN-1336
+P001337,Random House Tennis Racket Pro,Sports,Random House,678.67,201,BOO-RAN-1337
+P001338,Playmobil Foundation Lite,Beauty,Playmobil,912.89,378,TOY-PLA-1338
+P001339,Under Armour Cereal Classic,Groceries,Under Armour,456.12,145,SPO-UND-1339
+P001340,Nivea Remote Car Pro,Toys,Nivea,789.34,423,BEA-NIV-1340
+P001341,Tefal Jeans Plus,Clothing,Tefal,234.56,89,HOM-TEF-1341
+P001342,Oxford Chocolate Bar Lite,Groceries,Oxford,678.78,356,BOO-OXF-1342
+P001343,Wilson Tablet Classic,Electronics,Wilson,912.01,190,SPO-WIL-1343
+P001344,Maybelline Frying Pan Pro,Home & Kitchen,Maybelline,456.45,467,BEA-MAY-1344
+P001345,Kellogg's Lipstick Classic,Beauty,Kellogg's,789.67,234,GRO-KEL-1345
+P001346,Dell Building Blocks Plus,Toys,Dell,234.89,312,ELE-DEL-1346
+P001347,LG Hat Lite,Clothing,LG,678.12,178,ELE-LG-1347
+P001348,Samsung Olive Oil Pro,Groceries,Samsung,912.34,456,ELE-SAM-1348
+P001349,Hasbro Shampoo Lite,Beauty,Hasbro,456.56,89,TOY-HAS-1349
+P001350,Puma Coffee Beans Classic,Groceries,Puma,789.78,423,SPO-PUM-1350
+P001351,Adidas Mystery Thriller Plus,Books,Adidas,234.01,201,CLO-ADI-1351
+P001352,Reebok TV Lite,Electronics,Reebok,678.45,378,SPO-REE-1352
+P001353,Zara Soccer Ball Premium,Sports,Zara,912.67,145,CLO-ZAR-1353
+P001354,Nestle Lipstick Lite,Beauty,Nestle,456.89,423,GRO-NES-1354
+P001355,Philips Action Figure Plus,Toys,Philips,789.12,89,HOM-PHI-1355
+P001356,Sony Children's Book Classic,Books,Sony,234.34,356,ELE-SON-1356
+P001357,H&M Cereal Lite,Groceries,H&M,678.56,190,CLO-H&M-1357
+P001358,Nike Blender Classic,Home & Kitchen,Nike,912.78,467,CLO-NIK-1358
+P001359,Levi's Headphones Pro,Electronics,Levi's,456.01,234,CLO-LEV-1359
+P001360,Mattel Pasta Classic,Groceries,Mattel,789.45,312,TOY-MAT-1360
+P001361,Fisher-Price Jacket Lite,Clothing,Fisher-Price,234.67,178,TOY-FIS-1361
+P001362,Apple Puzzle Pro,Toys,Apple,678.89,456,ELE-APP-1362
+P001363,Unilever Biography Lite,Books,Unilever,912.12,89,GRO-UNI-1363
+P001364,Scholastic Vacuum Cleaner Plus,Home & Kitchen,Scholastic,456.34,423,BOO-SCH-1364
+P001365,Bosch T-Shirt Classic,Clothing,Bosch,789.56,201,HOM-BOS-1365
+P001366,L'Oreal Dumbbells Pro,Sports,L'Oreal,234.78,378,BEA-L'O-1366
+P001367,Pyrex Novel Plus,Books,Pyrex,678.01,145,HOM-PYR-1367
+P001368,Coca-Cola Shoes Classic,Clothing,Coca-Cola,912.45,423,GRO-COC-1368
+P001369,HarperCollins Perfume Lite,Beauty,HarperCollins,456.67,89,BOO-HAR-1369
+P001370,Garnier Coffee Maker Pro,Home & Kitchen,Garnier,789.89,356,BEA-GAR-1370
+P001371,Spalding Hat Plus,Clothing,Spalding,234.12,190,SPO-SPA-1371
+P001372,IKEA Mascara Lite,Beauty,IKEA,678.34,467,HOM-IKE-1372
+P001373,Penguin Board Game Plus,Toys,Penguin,912.56,234,BOO-PEN-1373
+P001374,Random House Tennis Racket Lite,Sports,Random House,456.78,312,BOO-RAN-1374
+P001375,Playmobil Foundation Classic,Beauty,Playmobil,789.01,178,TOY-PLA-1375
+P001376,Under Armour Cereal Plus,Groceries,Under Armour,234.45,456,SPO-UND-1376
+P001377,Nivea Remote Car Lite,Toys,Nivea,678.67,89,BEA-NIV-1377
+P001378,Tefal Jeans Pro,Clothing,Tefal,912.89,423,HOM-TEF-1378
+P001379,Oxford Chocolate Bar Classic,Groceries,Oxford,456.12,201,BOO-OXF-1379
+P001380,Wilson Tablet Plus,Electronics,Wilson,789.34,378,SPO-WIL-1380
+P001381,Maybelline Frying Pan Lite,Home & Kitchen,Maybelline,234.56,145,BEA-MAY-1381
+P001382,Kellogg's Lipstick Pro,Beauty,Kellogg's,678.78,423,GRO-KEL-1382
+P001383,Dell Building Blocks Lite,Toys,Dell,912.01,89,ELE-DEL-1383
+P001384,LG Hat Classic,Clothing,LG,456.45,356,ELE-LG-1384
+P001385,Samsung Olive Oil Plus,Groceries,Samsung,789.67,190,ELE-SAM-1385
+P001386,Hasbro Shampoo Premium,Beauty,Hasbro,234.89,467,TOY-HAS-1386
+P001387,Puma Coffee Beans Lite,Groceries,Puma,678.12,234,SPO-PUM-1387
+P001388,Adidas Mystery Thriller Classic,Books,Adidas,912.34,312,CLO-ADI-1388
+P001389,Reebok TV Pro,Electronics,Reebok,456.56,178,SPO-REE-1389
+P001390,Zara Soccer Ball Plus,Sports,Zara,789.78,456,CLO-ZAR-1390
+P001391,Nestle Lipstick Premium,Beauty,Nestle,234.01,89,GRO-NES-1391
+P001392,Philips Action Figure Lite,Toys,Philips,678.45,423,HOM-PHI-1392
+P001393,Sony Children's Book Plus,Books,Sony,912.67,201,ELE-SON-1393
+P001394,H&M Cereal Pro,Groceries,H&M,456.89,378,CLO-H&M-1394
+P001395,Nike Blender Plus,Home & Kitchen,Nike,789.12,145,CLO-NIK-1395
+P001396,Levi's Headphones Lite,Electronics,Levi's,234.34,423,CLO-LEV-1396
+P001397,Mattel Pasta Plus,Groceries,Mattel,678.56,89,TOY-MAT-1397
+P001398,Fisher-Price Jacket Plus,Clothing,Fisher-Price,912.78,356,TOY-FIS-1398
+P001399,Apple Puzzle Classic,Toys,Apple,456.01,190,ELE-APP-1399
+P001400,Unilever Biography Pro,Books,Unilever,789.45,467,GRO-UNI-1400
+P001401,Scholastic Toaster Premium,Home & Kitchen,Scholastic,567.23,412,BOO-SCH-1401
+P001402,Bosch Yoga Mat Classic,Sports,Bosch,892.45,156,HOM-BOS-1402
+P001403,L'Oreal Remote Car Plus,Toys,L'Oreal,345.78,289,BEA-L'O-1403
+P001404,Pyrex Biography Lite,Books,Pyrex,678.91,378,HOM-PYR-1404
+P001405,Coca-Cola Jeans Pro,Clothing,Coca-Cola,123.56,467,GRO-COC-1405
+P001406,HarperCollins Blender Classic,Home & Kitchen,HarperCollins,890.12,234,BOO-HAR-1406
+P001407,Garnier Puzzle Premium,Toys,Garnier,456.89,312,BEA-GAR-1407
+P001408,Spalding Lipstick Plus,Beauty,Spalding,789.34,178,SPO-SPA-1408
+P001409,IKEA Action Figure Lite,Toys,IKEA,234.67,456,HOM-IKE-1409
+P001410,Penguin Coffee Maker Pro,Home & Kitchen,Penguin,912.01,89,BOO-PEN-1410
+P001411,Random House Soccer Ball Classic,Sports,Random House,567.45,423,BOO-RAN-1411
+P001412,Playmobil Children's Book Plus,Books,Playmobil,234.89,201,TOY-PLA-1412
+P001413,Under Armour Cereal Premium,Groceries,Under Armour,678.12,378,SPO-UND-1413
+P001414,Nivea Frying Pan Lite,Home & Kitchen,Nivea,912.34,145,BEA-NIV-1414
+P001415,Tefal Mystery Thriller Pro,Books,Tefal,456.56,423,HOM-TEF-1415
+P001416,Oxford Hat Classic,Clothing,Oxford,789.78,89,BOO-OXF-1416
+P001417,Wilson Olive Oil Plus,Groceries,Wilson,234.01,356,SPO-WIL-1417
+P001418,Maybelline Building Blocks Lite,Toys,Maybelline,678.45,190,BEA-MAY-1418
+P001419,Kellogg's Shampoo Premium,Beauty,Kellogg's,912.67,467,GRO-KEL-1419
+P001420,Dell TV Classic,Electronics,Dell,456.89,234,ELE-DEL-1420
+P001421,LG Coffee Beans Pro,Groceries,LG,789.12,312,ELE-LG-1421
+P001422,Samsung Pasta Lite,Groceries,Samsung,234.34,178,ELE-SAM-1422
+P001423,Hasbro Headphones Plus,Electronics,Hasbro,678.56,456,TOY-HAS-1423
+P001424,Puma Jacket Classic,Clothing,Puma,912.78,89,SPO-PUM-1424
+P001425,Adidas Perfume Pro,Beauty,Adidas,456.01,423,CLO-ADI-1425
+P001426,Reebok Novel Lite,Books,Reebok,789.45,201,SPO-REE-1426
+P001427,Zara Dumbbells Premium,Sports,Zara,234.67,378,CLO-ZAR-1427
+P001428,Nestle Shoes Plus,Clothing,Nestle,678.89,145,GRO-NES-1428
+P001429,Philips Mascara Classic,Beauty,Philips,912.12,423,HOM-PHI-1429
+P001430,Sony Board Game Lite,Toys,Sony,456.34,89,ELE-SON-1430
+P001431,H&M Foundation Pro,Beauty,H&M,789.56,356,CLO-H&M-1431
+P001432,Nike Tennis Racket Classic,Sports,Nike,234.78,190,CLO-NIK-1432
+P001433,Levi's Vacuum Cleaner Plus,Home & Kitchen,Levi's,678.01,467,CLO-LEV-1433
+P001434,Mattel Chocolate Bar Lite,Groceries,Mattel,912.45,234,TOY-MAT-1434
+P001435,Fisher-Price T-Shirt Premium,Clothing,Fisher-Price,456.67,312,TOY-FIS-1435
+P001436,Apple Hat Pro,Clothing,Apple,789.89,178,ELE-APP-1436
+P001437,Unilever Cookbook Classic,Books,Unilever,234.12,456,GRO-UNI-1437
+P001438,Scholastic Remote Car Lite,Toys,Scholastic,678.34,89,BOO-SCH-1438
+P001439,Bosch Lipstick Plus,Beauty,Bosch,912.56,423,HOM-BOS-1439
+P001440,L'Oreal Jeans Classic,Clothing,L'Oreal,456.78,201,BEA-L'O-1440
+P001441,Pyrex Biography Premium,Books,Pyrex,789.01,378,HOM-PYR-1441
+P001442,Coca-Cola Blender Lite,Home & Kitchen,Coca-Cola,234.45,145,GRO-COC-1442
+P001443,HarperCollins Puzzle Pro,Toys,HarperCollins,678.67,423,BOO-HAR-1443
+P001444,Garnier Action Figure Classic,Toys,Garnier,912.89,89,BEA-GAR-1444
+P001445,Spalding Coffee Maker Plus,Home & Kitchen,Spalding,456.12,356,SPO-SPA-1445
+P001446,IKEA Soccer Ball Lite,Sports,IKEA,789.34,190,HOM-IKE-1446
+P001447,Penguin Children's Book Pro,Books,Penguin,234.56,467,BOO-PEN-1447
+P001448,Random House Cereal Classic,Groceries,Random House,678.78,234,BOO-RAN-1448
+P001449,Playmobil Frying Pan Premium,Home & Kitchen,Playmobil,912.01,312,TOY-PLA-1449
+P001450,Under Armour Mystery Thriller Lite,Books,Under Armour,456.45,178,SPO-UND-1450
+P001451,Nivea Hat Plus,Clothing,Nivea,789.67,456,BEA-NIV-1451
+P001452,Tefal Olive Oil Classic,Groceries,Tefal,234.89,89,HOM-TEF-1452
+P001453,Oxford Building Blocks Pro,Toys,Oxford,678.12,423,BOO-OXF-1453
+P001454,Wilson TV Lite,Electronics,Wilson,912.34,201,SPO-WIL-1454
+P001455,Maybelline Coffee Beans Classic,Groceries,Maybelline,456.56,378,BEA-MAY-1455
+P001456,Kellogg's Shampoo Plus,Beauty,Kellogg's,789.78,145,GRO-KEL-1456
+P001457,Dell Headphones Premium,Electronics,Dell,234.01,423,ELE-DEL-1457
+P001458,LG Jacket Lite,Clothing,LG,678.45,89,ELE-LG-1458
+P001459,Samsung Perfume Classic,Beauty,Samsung,912.67,356,ELE-SAM-1459
+P001460,Hasbro Novel Pro,Books,Hasbro,456.89,190,TOY-HAS-1460
+P001461,Puma Dumbbells Lite,Sports,Puma,789.12,467,SPO-PUM-1461
+P001462,Adidas Shoes Classic,Clothing,Adidas,234.34,234,CLO-ADI-1462
+P001463,Reebok Mascara Premium,Beauty,Reebok,678.56,312,SPO-REE-1463
+P001464,Zara Board Game Plus,Toys,Zara,912.78,178,CLO-ZAR-1464
+P001465,Nestle Foundation Lite,Beauty,Nestle,456.01,456,GRO-NES-1465
+P001466,Philips Tennis Racket Pro,Sports,Philips,789.45,89,HOM-PHI-1466
+P001467,Sony Vacuum Cleaner Classic,Home & Kitchen,Sony,234.67,423,ELE-SON-1467
+P001468,H&M Chocolate Bar Premium,Groceries,H&M,678.89,201,CLO-H&M-1468
+P001469,Nike T-Shirt Lite,Clothing,Nike,912.12,378,CLO-NIK-1469
+P001470,Levi's Remote Car Plus,Toys,Levi's,456.34,145,CLO-LEV-1470
+P001471,Mattel Hat Classic,Clothing,Mattel,789.56,423,TOY-MAT-1471
+P001472,Fisher-Price Cookbook Pro,Books,Fisher-Price,234.78,89,TOY-FIS-1472
+P001473,Apple Lipstick Lite,Beauty,Apple,678.01,356,ELE-APP-1473
+P001474,Unilever Jeans Premium,Clothing,Unilever,912.45,190,GRO-UNI-1474
+P001475,Scholastic Blender Plus,Home & Kitchen,Scholastic,456.67,467,BOO-SCH-1475
+P001476,Bosch Puzzle Classic,Toys,Bosch,789.89,234,HOM-BOS-1476
+P001477,L'Oreal Action Figure Pro,Toys,L'Oreal,234.12,312,BEA-L'O-1477
+P001478,Pyrex Coffee Maker Lite,Home & Kitchen,Pyrex,678.34,178,HOM-PYR-1478
+P001479,Coca-Cola Soccer Ball Premium,Sports,Coca-Cola,912.56,456,GRO-COC-1479
+P001480,HarperCollins Children's Book Classic,Books,HarperCollins,456.78,89,BOO-HAR-1480
+P001481,Garnier Frying Pan Plus,Home & Kitchen,Garnier,789.01,423,BEA-GAR-1481
+P001482,Spalding Mystery Thriller Premium,Books,Spalding,234.45,201,SPO-SPA-1482
+P001483,IKEA Hat Lite,Clothing,IKEA,678.67,378,HOM-IKE-1483
+P001484,Penguin Olive Oil Pro,Groceries,Penguin,912.89,145,BOO-PEN-1484
+P001485,Random House Building Blocks Classic,Toys,Random House,456.12,423,BOO-RAN-1485
+P001486,Playmobil TV Premium,Electronics,Playmobil,789.34,89,TOY-PLA-1486
+P001487,Under Armour Coffee Beans Lite,Groceries,Under Armour,234.56,356,SPO-UND-1487
+P001488,Nivea Shampoo Classic,Beauty,Nivea,678.78,190,BEA-NIV-1488
+P001489,Tefal Headphones Pro,Electronics,Tefal,912.01,467,HOM-TEF-1489
+P001490,Oxford Jacket Plus,Clothing,Oxford,456.45,234,BOO-OXF-1490
+P001491,Wilson Perfume Lite,Beauty,Wilson,789.67,312,SPO-WIL-1491
+P001492,Maybelline Novel Classic,Books,Maybelline,234.89,178,BEA-MAY-1492
+P001493,Kellogg's Dumbbells Pro,Sports,Kellogg's,678.12,456,GRO-KEL-1493
+P001494,Dell Shoes Premium,Clothing,Dell,912.34,89,ELE-DEL-1494
+P001495,LG Mascara Plus,Beauty,LG,456.56,423,ELE-LG-1495
+P001496,Samsung Board Game Classic,Toys,Samsung,789.78,201,ELE-SAM-1496
+P001497,Hasbro Foundation Pro,Beauty,Hasbro,234.01,378,TOY-HAS-1497
+P001498,Puma Tennis Racket Lite,Sports,Puma,678.45,145,SPO-PUM-1498
+P001499,Adidas Vacuum Cleaner Premium,Home & Kitchen,Adidas,912.67,423,CLO-ADI-1499
+P001500,Reebok Chocolate Bar Classic,Groceries,Reebok,456.89,89,SPO-REE-1500
+P001501,Zara T-Shirt Pro,Clothing,Zara,789.12,356,CLO-ZAR-1501
+P001502,Nestle Remote Car Lite,Toys,Nestle,234.34,190,GRO-NES-1502
+P001503,Philips Hat Premium,Clothing,Philips,678.56,467,HOM-PHI-1503
+P001504,Sony Cookbook Plus,Books,Sony,912.78,234,ELE-SON-1504
+P001505,H&M Lipstick Classic,Beauty,H&M,456.01,312,CLO-H&M-1505
+P001506,Nike Jeans Lite,Clothing,Nike,789.45,178,CLO-NIK-1506
+P001507,Levi's Blender Pro,Home & Kitchen,Levi's,234.67,456,CLO-LEV-1507
+P001508,Mattel Puzzle Lite,Toys,Mattel,678.89,89,TOY-MAT-1508
+P001509,Fisher-Price Action Figure Classic,Toys,Fisher-Price,912.12,423,TOY-FIS-1509
+P001510,Apple Coffee Maker Premium,Home & Kitchen,Apple,456.34,201,ELE-APP-1510
+P001511,Unilever Soccer Ball Plus,Sports,Unilever,789.56,378,GRO-UNI-1511
+P001512,Scholastic Children's Book Lite,Books,Scholastic,234.78,145,BOO-SCH-1512
+P001513,Bosch Frying Pan Classic,Home & Kitchen,Bosch,678.01,423,HOM-BOS-1513
+P001514,L'Oreal Mystery Thriller Plus,Books,L'Oreal,912.45,89,BEA-L'O-1514
+P001515,Pyrex Hat Pro,Clothing,Pyrex,456.67,356,HOM-PYR-1515
+P001516,Coca-Cola Olive Oil Lite,Groceries,Coca-Cola,789.89,190,GRO-COC-1516
+P001517,HarperCollins Building Blocks Premium,Toys,HarperCollins,234.12,467,BOO-HAR-1517
+P001518,Garnier TV Classic,Electronics,Garnier,678.34,234,BEA-GAR-1518
+P001519,Spalding Coffee Beans Pro,Groceries,Spalding,912.56,312,SPO-SPA-1519
+P001520,IKEA Shampoo Lite,Beauty,IKEA,456.78,178,HOM-IKE-1520
+P001521,Penguin Headphones Classic,Electronics,Penguin,789.01,456,BOO-PEN-1521
+P001522,Random House Jacket Premium,Clothing,Random House,234.45,89,BOO-RAN-1522
+P001523,Playmobil Perfume Plus,Beauty,Playmobil,678.67,423,TOY-PLA-1523
+P001524,Under Armour Novel Lite,Books,Under Armour,912.89,201,SPO-UND-1524
+P001525,Nivea Dumbbells Classic,Sports,Nivea,456.12,378,BEA-NIV-1525
+P001526,Tefal Shoes Pro,Clothing,Tefal,789.34,145,HOM-TEF-1526
+P001527,Oxford Mascara Premium,Beauty,Oxford,234.56,423,BOO-OXF-1527
+P001528,Wilson Board Game Lite,Toys,Wilson,678.78,89,SPO-WIL-1528
+P001529,Maybelline Foundation Classic,Beauty,Maybelline,912.01,356,BEA-MAY-1529
+P001530,Kellogg's Tennis Racket Pro,Sports,Kellogg's,456.45,190,GRO-KEL-1530
+P001531,Dell Vacuum Cleaner Lite,Home & Kitchen,Dell,789.67,467,ELE-DEL-1531
+P001532,LG Chocolate Bar Plus,Groceries,LG,234.89,234,ELE-LG-1532
+P001533,Samsung T-Shirt Classic,Clothing,Samsung,678.12,312,ELE-SAM-1533
+P001534,Hasbro Remote Car Premium,Toys,Hasbro,912.34,178,TOY-HAS-1534
+P001535,Puma Hat Lite,Clothing,Puma,456.56,456,SPO-PUM-1535
+P001536,Adidas Cookbook Pro,Books,Adidas,789.78,89,CLO-ADI-1536
+P001537,Reebok Lipstick Premium,Beauty,Reebok,234.01,423,SPO-REE-1537
+P001538,Zara Jeans Classic,Clothing,Zara,678.45,201,CLO-ZAR-1538
+P001539,Nestle Blender Lite,Home & Kitchen,Nestle,912.67,378,GRO-NES-1539
+P001540,Philips Puzzle Plus,Toys,Philips,456.89,145,HOM-PHI-1540
+P001541,Sony Action Figure Pro,Toys,Sony,789.12,423,ELE-SON-1541
+P001542,H&M Coffee Maker Classic,Home & Kitchen,H&M,234.34,89,CLO-H&M-1542
+P001543,Nike Soccer Ball Premium,Sports,Nike,678.56,356,CLO-NIK-1543
+P001544,Levi's Children's Book Lite,Books,Levi's,912.78,190,CLO-LEV-1544
+P001545,Mattel Frying Pan Plus,Home & Kitchen,Mattel,456.01,467,TOY-MAT-1545
+P001546,Fisher-Price Mystery Thriller Classic,Books,Fisher-Price,789.45,234,TOY-FIS-1546
+P001547,Apple Hat Premium,Clothing,Apple,234.67,312,ELE-APP-1547
+P001548,Unilever Olive Oil Pro,Groceries,Unilever,678.89,178,GRO-UNI-1548
+P001549,Scholastic Building Blocks Lite,Toys,Scholastic,912.12,456,BOO-SCH-1549
+P001550,Bosch TV Plus,Electronics,Bosch,456.34,89,HOM-BOS-1550
+P001551,L'Oreal Coffee Beans Classic,Groceries,L'Oreal,789.56,423,BEA-L'O-1551
+P001552,Pyrex Shampoo Pro,Beauty,Pyrex,234.78,201,HOM-PYR-1552
+P001553,Coca-Cola Headphones Lite,Electronics,Coca-Cola,678.01,378,GRO-COC-1553
+P001554,HarperCollins Jacket Classic,Clothing,HarperCollins,912.45,145,BOO-HAR-1554
+P001555,Garnier Perfume Premium,Beauty,Garnier,456.67,423,BEA-GAR-1555
+P001556,Spalding Novel Plus,Books,Spalding,789.89,89,SPO-SPA-1556
+P001557,IKEA Dumbbells Lite,Sports,IKEA,234.12,356,HOM-IKE-1557
+P001558,Penguin Shoes Classic,Clothing,Penguin,678.34,190,BOO-PEN-1558
+P001559,Random House Mascara Pro,Beauty,Random House,912.56,467,BOO-RAN-1559
+P001560,Playmobil Board Game Premium,Toys,Playmobil,456.78,234,TOY-PLA-1560
+P001561,Under Armour Foundation Lite,Beauty,Under Armour,789.01,312,SPO-UND-1561
+P001562,Nivea Tennis Racket Classic,Sports,Nivea,234.45,178,BEA-NIV-1562
+P001563,Tefal Vacuum Cleaner Pro,Home & Kitchen,Tefal,678.67,456,HOM-TEF-1563
+P001564,Oxford Chocolate Bar Plus,Groceries,Oxford,912.89,89,BOO-OXF-1564
+P001565,Wilson T-Shirt Lite,Clothing,Wilson,456.12,423,SPO-WIL-1565
+P001566,Maybelline Remote Car Classic,Toys,Maybelline,789.34,201,BEA-MAY-1566
+P001567,Kellogg's Hat Pro,Clothing,Kellogg's,234.56,378,GRO-KEL-1567
+P001568,Dell Cookbook Premium,Books,Dell,678.78,145,ELE-DEL-1568
+P001569,LG Lipstick Lite,Beauty,LG,912.01,423,ELE-LG-1569
+P001570,Samsung Jeans Plus,Clothing,Samsung,456.45,89,ELE-SAM-1570
+P001571,Hasbro Blender Classic,Home & Kitchen,Hasbro,789.67,356,TOY-HAS-1571
+P001572,Puma Puzzle Pro,Toys,Puma,234.89,190,SPO-PUM-1572
+P001573,Adidas Action Figure Lite,Toys,Adidas,678.12,467,CLO-ADI-1573
+P001574,Reebok Coffee Maker Premium,Home & Kitchen,Reebok,912.34,234,SPO-REE-1574
+P001575,Zara Soccer Ball Classic,Sports,Zara,456.56,312,CLO-ZAR-1575
+P001576,Nestle Children's Book Pro,Books,Nestle,789.78,178,GRO-NES-1576
+P001577,Philips Frying Pan Lite,Home & Kitchen,Philips,234.01,456,HOM-PHI-1577
+P001578,Sony Mystery Thriller Plus,Books,Sony,678.45,89,ELE-SON-1578
+P001579,H&M Hat Classic,Clothing,H&M,912.67,423,CLO-H&M-1579
+P001580,Nike Olive Oil Premium,Groceries,Nike,456.89,201,CLO-NIK-1580
+P001581,Levi's Building Blocks Lite,Toys,Levi's,789.12,378,CLO-LEV-1581
+P001582,Mattel TV Pro,Electronics,Mattel,234.34,145,TOY-MAT-1582
+P001583,Fisher-Price Coffee Beans Classic,Groceries,Fisher-Price,678.56,423,TOY-FIS-1583
+P001584,Apple Shampoo Plus,Beauty,Apple,912.78,89,ELE-APP-1584
+P001585,Unilever Headphones Premium,Electronics,Unilever,456.01,356,GRO-UNI-1585
+P001586,Scholastic Jacket Lite,Clothing,Scholastic,789.45,190,BOO-SCH-1586
+P001587,Bosch Perfume Classic,Beauty,Bosch,234.67,467,HOM-BOS-1587
+P001588,L'Oreal Novel Pro,Books,L'Oreal,678.89,234,BEA-L'O-1588
+P001589,Pyrex Dumbbells Plus,Sports,Pyrex,912.12,312,HOM-PYR-1589
+P001590,Coca-Cola Shoes Premium,Clothing,Coca-Cola,456.34,178,GRO-COC-1590
+P001591,HarperCollins Mascara Lite,Beauty,HarperCollins,789.56,456,BOO-HAR-1591
+P001592,Garnier Board Game Classic,Toys,Garnier,234.78,89,BEA-GAR-1592
+P001593,Spalding Foundation Pro,Beauty,Spalding,678.01,423,SPO-SPA-1593
+P001594,IKEA Tennis Racket Plus,Sports,IKEA,912.45,201,HOM-IKE-1594
+P001595,Penguin Vacuum Cleaner Lite,Home & Kitchen,Penguin,456.67,378,BOO-PEN-1595
+P001596,Random House Chocolate Bar Classic,Groceries,Random House,789.89,145,BOO-RAN-1596
+P001597,Playmobil T-Shirt Premium,Clothing,Playmobil,234.12,423,TOY-PLA-1597
+P001598,Under Armour Remote Car Pro,Toys,Under Armour,678.34,89,SPO-UND-1598
+P001599,Nivea Hat Lite,Clothing,Nivea,912.56,356,BEA-NIV-1599
+P001600,Tefal Cookbook Classic,Books,Tefal,456.78,190,HOM-TEF-1600
+P001601,Oxford Action Figure Premium,Toys,Oxford,567.89,278,BOO-OXF-1601
+P001602,Wilson Coffee Maker Lite,Home & Kitchen,Wilson,892.34,156,SPO-WIL-1602
+P001603,Maybelline Soccer Ball Classic,Sports,Maybelline,345.67,412,BEA-MAY-1603
+P001604,Kellogg's Children's Book Pro,Books,Kellogg's,678.12,189,GRO-KEL-1604
+P001605,Dell Frying Pan Plus,Home & Kitchen,Dell,123.45,467,ELE-DEL-1605
+P001606,LG Mystery Thriller Premium,Books,LG,890.56,234,ELE-LG-1606
+P001607,Samsung Hat Lite,Clothing,Samsung,456.78,312,ELE-SAM-1607
+P001608,Hasbro Olive Oil Classic,Groceries,Hasbro,789.01,178,TOY-HAS-1608
+P001609,Puma Building Blocks Pro,Toys,Puma,234.89,456,SPO-PUM-1609
+P001610,Adidas TV Premium,Electronics,Adidas,912.34,89,CLO-ADI-1610
+P001611,Reebok Coffee Beans Lite,Groceries,Reebok,567.56,423,SPO-REE-1611
+P001612,Zara Shampoo Plus,Beauty,Zara,234.12,201,CLO-ZAR-1612
+P001613,Nestle Headphones Classic,Electronics,Nestle,678.45,378,GRO-NES-1613
+P001614,Philips Jacket Pro,Clothing,Philips,912.67,145,HOM-PHI-1614
+P001615,Sony Perfume Lite,Beauty,Sony,456.89,423,ELE-SON-1615
+P001616,H&M Dumbbells Premium,Sports,H&M,789.12,89,CLO-H&M-1616
+P001617,Nike Shoes Classic,Clothing,Nike,234.34,356,CLO-NIK-1617
+P001618,Levi's Mascara Pro,Beauty,Levi's,678.56,190,CLO-LEV-1618
+P001619,Mattel Board Game Lite,Toys,Mattel,912.78,467,TOY-MAT-1619
+P001620,Fisher-Price Foundation Classic,Beauty,Fisher-Price,456.01,234,TOY-FIS-1620
+P001621,Apple Tennis Racket Plus,Sports,Apple,789.45,312,ELE-APP-1621
+P001622,Unilever Vacuum Cleaner Pro,Home & Kitchen,Unilever,234.67,178,GRO-UNI-1622
+P001623,Scholastic Chocolate Bar Premium,Groceries,Scholastic,678.89,456,BOO-SCH-1623
+P001624,Bosch T-Shirt Lite,Clothing,Bosch,912.12,89,HOM-BOS-1624
+P001625,L'Oreal Remote Car Classic,Toys,L'Oreal,456.34,423,BEA-L'O-1625
+P001626,Pyrex Hat Premium,Clothing,Pyrex,789.56,201,HOM-PYR-1626
+P001627,Coca-Cola Cookbook Pro,Books,Coca-Cola,234.78,378,GRO-COC-1627
+P001628,HarperCollins Lipstick Lite,Beauty,HarperCollins,678.01,145,BOO-HAR-1628
+P001629,Garnier Jeans Plus,Clothing,Garnier,912.45,423,BEA-GAR-1629
+P001630,Spalding Blender Classic,Home & Kitchen,Spalding,456.67,89,SPO-SPA-1630
+P001631,IKEA Puzzle Pro,Toys,IKEA,789.89,356,HOM-IKE-1631
+P001632,Penguin Action Figure Lite,Toys,Penguin,234.12,190,BOO-PEN-1632
+P001633,Random House Coffee Maker Premium,Home & Kitchen,Random House,678.34,467,BOO-RAN-1633
+P001634,Playmobil Soccer Ball Plus,Sports,Playmobil,912.56,234,TOY-PLA-1634
+P001635,Under Armour Children's Book Classic,Books,Under Armour,456.78,312,SPO-UND-1635
+P001636,Nivea Frying Pan Pro,Home & Kitchen,Nivea,789.01,178,BEA-NIV-1636
+P001637,Tefal Mystery Thriller Lite,Books,Tefal,234.45,456,HOM-TEF-1637
+P001638,Oxford Hat Classic,Clothing,Oxford,678.67,89,BOO-OXF-1638
+P001639,Wilson Olive Oil Premium,Groceries,Wilson,912.89,423,SPO-WIL-1639
+P001640,Maybelline Building Blocks Lite,Toys,Maybelline,456.12,201,BEA-MAY-1640
+P001641,Kellogg's TV Pro,Electronics,Kellogg's,789.34,378,GRO-KEL-1641
+P001642,Dell Coffee Beans Classic,Groceries,Dell,234.56,145,ELE-DEL-1642
+P001643,LG Shampoo Lite,Beauty,LG,678.78,423,ELE-LG-1643
+P001644,Samsung Headphones Plus,Electronics,Samsung,912.01,89,ELE-SAM-1644
+P001645,Hasbro Jacket Premium,Clothing,Hasbro,456.45,356,TOY-HAS-1645
+P001646,Puma Perfume Classic,Beauty,Puma,789.67,190,SPO-PUM-1646
+P001647,Adidas Dumbbells Lite,Sports,Adidas,234.89,467,CLO-ADI-1647
+P001648,Reebok Shoes Pro,Clothing,Reebok,678.12,234,SPO-REE-1648
+P001649,Zara Mascara Classic,Beauty,Zara,912.34,312,CLO-ZAR-1649
+P001650,Nestle Board Game Premium,Toys,Nestle,456.56,178,GRO-NES-1650
+P001651,Philips Foundation Lite,Beauty,Philips,789.78,456,HOM-PHI-1651
+P001652,Sony Tennis Racket Classic,Sports,Sony,234.01,89,ELE-SON-1652
+P001653,H&M Vacuum Cleaner Plus,Home & Kitchen,H&M,678.45,423,CLO-H&M-1653
+P001654,Nike Chocolate Bar Pro,Groceries,Nike,912.67,201,CLO-NIK-1654
+P001655,Levi's T-Shirt Classic,Clothing,Levi's,456.89,378,CLO-LEV-1655
+P001656,Mattel Remote Car Lite,Toys,Mattel,789.12,145,TOY-MAT-1656
+P001657,Fisher-Price Hat Plus,Clothing,Fisher-Price,234.34,423,TOY-FIS-1657
+P001658,Apple Cookbook Premium,Books,Apple,678.56,89,ELE-APP-1658
+P001659,Unilever Lipstick Classic,Beauty,Unilever,912.78,356,GRO-UNI-1659
+P001660,Scholastic Jeans Lite,Clothing,Scholastic,456.01,190,BOO-SCH-1660
+P001661,Bosch Blender Pro,Home & Kitchen,Bosch,789.45,467,HOM-BOS-1661
+P001662,L'Oreal Puzzle Classic,Toys,L'Oreal,234.67,234,BEA-L'O-1662
+P001663,Pyrex Action Figure Plus,Toys,Pyrex,678.89,312,HOM-PYR-1663
+P001664,Coca-Cola Coffee Maker Lite,Home & Kitchen,Coca-Cola,912.12,178,GRO-COC-1664
+P001665,HarperCollins Soccer Ball Premium,Sports,HarperCollins,456.34,456,BOO-HAR-1665
+P001666,Garnier Children's Book Pro,Books,Garnier,789.56,89,BEA-GAR-1666
+P001667,Spalding Frying Pan Classic,Home & Kitchen,Spalding,234.78,423,SPO-SPA-1667
+P001668,IKEA Mystery Thriller Plus,Books,IKEA,678.01,201,HOM-IKE-1668
+P001669,Penguin Hat Lite,Clothing,Penguin,912.45,378,BOO-PEN-1669
+P001670,Random House Olive Oil Classic,Groceries,Random House,456.67,145,BOO-RAN-1670
+P001671,Playmobil Building Blocks Premium,Toys,Playmobil,789.89,423,TOY-PLA-1671
+P001672,Under Armour TV Lite,Electronics,Under Armour,234.12,89,SPO-UND-1672
+P001673,Nivea Coffee Beans Pro,Groceries,Nivea,678.34,356,BEA-NIV-1673
+P001674,Tefal Shampoo Classic,Beauty,Tefal,912.56,190,HOM-TEF-1674
+P001675,Oxford Headphones Lite,Electronics,Oxford,456.78,467,BOO-OXF-1675
+P001676,Wilson Jacket Plus,Clothing,Wilson,789.01,234,SPO-WIL-1676
+P001677,Maybelline Perfume Premium,Beauty,Maybelline,234.45,312,BEA-MAY-1677
+P001678,Kellogg's Dumbbells Classic,Sports,Kellogg's,678.67,178,GRO-KEL-1678
+P001679,Dell Shoes Lite,Clothing,Dell,912.89,456,ELE-DEL-1679
+P001680,LG Mascara Pro,Beauty,LG,456.12,89,ELE-LG-1680
+P001681,Samsung Board Game Classic,Toys,Samsung,789.34,423,ELE-SAM-1681
+P001682,Hasbro Foundation Plus,Beauty,Hasbro,234.56,201,TOY-HAS-1682
+P001683,Puma Tennis Racket Lite,Sports,Puma,678.78,378,SPO-PUM-1683
+P001684,Adidas Vacuum Cleaner Classic,Home & Kitchen,Adidas,912.01,145,CLO-ADI-1684
+P001685,Reebok Chocolate Bar Premium,Groceries,Reebok,456.45,423,SPO-REE-1685
+P001686,Zara T-Shirt Lite,Clothing,Zara,789.67,89,CLO-ZAR-1686
+P001687,Nestle Remote Car Pro,Toys,Nestle,234.89,356,GRO-NES-1687
+P001688,Philips Hat Classic,Clothing,Philips,678.12,190,HOM-PHI-1688
+P001689,Sony Cookbook Lite,Books,Sony,912.34,467,ELE-SON-1689
+P001690,H&M Lipstick Plus,Beauty,H&M,456.56,234,CLO-H&M-1690
+P001691,Nike Jeans Premium,Clothing,Nike,789.78,312,CLO-NIK-1691
+P001692,Levi's Blender Classic,Home & Kitchen,Levi's,234.01,178,CLO-LEV-1692
+P001693,Mattel Puzzle Pro,Toys,Mattel,678.45,456,TOY-MAT-1693
+P001694,Fisher-Price Action Figure Lite,Toys,Fisher-Price,912.67,89,TOY-FIS-1694
+P001695,Apple Coffee Maker Plus,Home & Kitchen,Apple,456.89,423,ELE-APP-1695
+P001696,Unilever Soccer Ball Classic,Sports,Unilever,789.12,201,GRO-UNI-1696
+P001697,Scholastic Children's Book Premium,Books,Scholastic,234.34,378,BOO-SCH-1697
+P001698,Bosch Frying Pan Lite,Home & Kitchen,Bosch,678.56,145,HOM-BOS-1698
+P001699,L'Oreal Mystery Thriller Classic,Books,L'Oreal,912.78,423,BEA-L'O-1699
+P001700,Pyrex Hat Pro,Clothing,Pyrex,456.01,89,HOM-PYR-1700
+P001701,Coca-Cola Olive Oil Lite,Groceries,Coca-Cola,789.45,356,GRO-COC-1701
+P001702,HarperCollins Building Blocks Plus,Toys,HarperCollins,234.67,190,BOO-HAR-1702
+P001703,Garnier TV Premium,Electronics,Garnier,678.89,467,BEA-GAR-1703
+P001704,Spalding Coffee Beans Classic,Groceries,Spalding,912.12,234,SPO-SPA-1704
+P001705,IKEA Shampoo Pro,Beauty,IKEA,456.34,312,HOM-IKE-1705
+P001706,Penguin Headphones Lite,Electronics,Penguin,789.56,178,BOO-PEN-1706
+P001707,Random House Jacket Classic,Clothing,Random House,234.78,456,BOO-RAN-1707
+P001708,Playmobil Perfume Lite,Beauty,Playmobil,678.01,89,TOY-PLA-1708
+P001709,Under Armour Novel Premium,Books,Under Armour,912.45,423,SPO-UND-1709
+P001710,Nivea Dumbbells Pro,Sports,Nivea,456.67,201,BEA-NIV-1710
+P001711,Tefal Shoes Classic,Clothing,Tefal,789.89,378,HOM-TEF-1711
+P001712,Oxford Mascara Lite,Beauty,Oxford,234.12,145,BOO-OXF-1712
+P001713,Wilson Board Game Plus,Toys,Wilson,678.34,423,SPO-WIL-1713
+P001714,Maybelline Foundation Premium,Beauty,Maybelline,912.56,89,BEA-MAY-1714
+P001715,Kellogg's Tennis Racket Classic,Sports,Kellogg's,456.78,356,GRO-KEL-1715
+P001716,Dell Vacuum Cleaner Pro,Home & Kitchen,Dell,789.01,190,ELE-DEL-1716
+P001717,LG Chocolate Bar Lite,Groceries,LG,234.45,467,ELE-LG-1717
+P001718,Samsung T-Shirt Plus,Clothing,Samsung,678.67,234,ELE-SAM-1718
+P001719,Hasbro Remote Car Classic,Toys,Hasbro,912.89,312,TOY-HAS-1719
+P001720,Puma Hat Premium,Clothing,Puma,456.12,178,SPO-PUM-1720
+P001721,Adidas Cookbook Lite,Books,Adidas,789.34,456,CLO-ADI-1721
+P001722,Reebok Lipstick Pro,Beauty,Reebok,234.56,89,SPO-REE-1722
+P001723,Zara Jeans Plus,Clothing,Zara,678.78,423,CLO-ZAR-1723
+P001724,Nestle Blender Premium,Home & Kitchen,Nestle,912.01,201,GRO-NES-1724
+P001725,Philips Puzzle Classic,Toys,Philips,456.45,378,HOM-PHI-1725
+P001726,Sony Action Figure Pro,Toys,Sony,789.67,145,ELE-SON-1726
+P001727,H&M Coffee Maker Lite,Home & Kitchen,H&M,234.89,423,CLO-H&M-1727
+P001728,Nike Soccer Ball Plus,Sports,Nike,678.12,89,CLO-NIK-1728
+P001729,Levi's Children's Book Classic,Books,Levi's,912.34,356,CLO-LEV-1729
+P001730,Mattel Frying Pan Premium,Home & Kitchen,Mattel,456.56,190,TOY-MAT-1730
+P001731,Fisher-Price Mystery Thriller Pro,Books,Fisher-Price,789.78,467,TOY-FIS-1731
+P001732,Apple Hat Lite,Clothing,Apple,234.01,234,ELE-APP-1732
+P001733,Unilever Olive Oil Plus,Groceries,Unilever,678.45,312,GRO-UNI-1733
+P001734,Scholastic Building Blocks Classic,Toys,Scholastic,912.67,178,BOO-SCH-1734
+P001735,Bosch TV Lite,Electronics,Bosch,456.89,456,HOM-BOS-1735
+P001736,L'Oreal Coffee Beans Premium,Groceries,L'Oreal,789.12,89,BEA-L'O-1736
+P001737,Pyrex Shampoo Classic,Beauty,Pyrex,234.34,423,HOM-PYR-1737
+P001738,Coca-Cola Headphones Pro,Electronics,Coca-Cola,678.56,201,GRO-COC-1738
+P001739,HarperCollins Jacket Plus,Clothing,HarperCollins,912.78,378,BOO-HAR-1739
+P001740,Garnier Perfume Classic,Beauty,Garnier,456.01,145,BEA-GAR-1740
+P001741,Spalding Novel Lite,Books,Spalding,789.45,423,SPO-SPA-1741
+P001742,IKEA Dumbbells Premium,Sports,IKEA,234.67,89,HOM-IKE-1742
+P001743,Penguin Shoes Pro,Clothing,Penguin,678.89,356,BOO-PEN-1743
+P001744,Random House Mascara Plus,Beauty,Random House,912.12,190,BOO-RAN-1744
+P001745,Playmobil Board Game Classic,Toys,Playmobil,456.34,467,TOY-PLA-1745
+P001746,Under Armour Foundation Pro,Beauty,Under Armour,789.56,234,SPO-UND-1746
+P001747,Nivea Tennis Racket Premium,Sports,Nivea,234.78,312,BEA-NIV-1747
+P001748,Tefal Vacuum Cleaner Classic,Home & Kitchen,Tefal,678.01,178,HOM-TEF-1748
+P001749,Oxford Chocolate Bar Lite,Groceries,Oxford,912.45,456,BOO-OXF-1749
+P001750,Wilson T-Shirt Premium,Clothing,Wilson,456.67,89,SPO-WIL-1750
+P001751,Maybelline Remote Car Plus,Toys,Maybelline,789.89,423,BEA-MAY-1751
+P001752,Kellogg's Hat Classic,Clothing,Kellogg's,234.12,201,GRO-KEL-1752
+P001753,Dell Cookbook Pro,Books,Dell,678.34,378,ELE-DEL-1753
+P001754,LG Lipstick Premium,Beauty,LG,912.56,145,ELE-LG-1754
+P001755,Samsung Jeans Lite,Clothing,Samsung,456.78,423,ELE-SAM-1755
+P001756,Hasbro Blender Plus,Home & Kitchen,Hasbro,789.01,89,TOY-HAS-1756
+P001757,Puma Puzzle Lite,Toys,Puma,234.45,356,SPO-PUM-1757
+P001758,Adidas Action Figure Classic,Toys,Adidas,678.67,190,CLO-ADI-1758
+P001759,Reebok Coffee Maker Pro,Home & Kitchen,Reebok,912.89,467,SPO-REE-1759
+P001760,Zara Soccer Ball Lite,Sports,Zara,456.12,234,CLO-ZAR-1760
+P001761,Nestle Children's Book Plus,Books,Nestle,789.34,312,GRO-NES-1761
+P001762,Philips Frying Pan Classic,Home & Kitchen,Philips,234.56,178,HOM-PHI-1762
+P001763,Sony Mystery Thriller Lite,Books,Sony,678.78,456,ELE-SON-1763
+P001764,H&M Hat Premium,Clothing,H&M,912.01,89,CLO-H&M-1764
+P001765,Nike Olive Oil Classic,Groceries,Nike,456.45,423,CLO-NIK-1765
+P001766,Levi's Building Blocks Pro,Toys,Levi's,789.67,201,CLO-LEV-1766
+P001767,Mattel TV Classic,Electronics,Mattel,234.89,378,TOY-MAT-1767
+P001768,Fisher-Price Coffee Beans Lite,Groceries,Fisher-Price,678.12,145,TOY-FIS-1768
+P001769,Apple Shampoo Premium,Beauty,Apple,912.34,423,ELE-APP-1769
+P001770,Unilever Headphones Classic,Electronics,Unilever,456.56,89,GRO-UNI-1770
+P001771,Scholastic Jacket Pro,Clothing,Scholastic,789.78,356,BOO-SCH-1771
+P001772,Bosch Perfume Lite,Beauty,Bosch,234.01,190,HOM-BOS-1772
+P001773,L'Oreal Novel Classic,Books,L'Oreal,678.45,467,BEA-L'O-1773
+P001774,Pyrex Dumbbells Lite,Sports,Pyrex,912.67,234,HOM-PYR-1774
+P001775,Coca-Cola Shoes Plus,Clothing,Coca-Cola,456.89,312,GRO-COC-1775
+P001776,HarperCollins Mascara Pro,Beauty,HarperCollins,789.12,178,BOO-HAR-1776
+P001777,Garnier Board Game Lite,Toys,Garnier,234.34,456,BEA-GAR-1777
+P001778,Spalding Foundation Classic,Beauty,Spalding,678.56,89,SPO-SPA-1778
+P001779,IKEA Tennis Racket Premium,Sports,IKEA,912.78,423,HOM-IKE-1779
+P001780,Penguin Vacuum Cleaner Plus,Home & Kitchen,Penguin,456.01,201,BOO-PEN-1780
+P001781,Random House Chocolate Bar Pro,Groceries,Random House,789.45,378,BOO-RAN-1781
+P001782,Playmobil T-Shirt Classic,Clothing,Playmobil,234.67,145,TOY-PLA-1782
+P001783,Under Armour Remote Car Lite,Toys,Under Armour,678.89,423,SPO-UND-1783
+P001784,Nivea Hat Plus,Clothing,Nivea,912.12,89,BEA-NIV-1784
+P001785,Tefal Cookbook Premium,Books,Tefal,456.34,356,HOM-TEF-1785
+P001786,Oxford Action Figure Classic,Toys,Oxford,789.56,190,BOO-OXF-1786
+P001787,Wilson Coffee Maker Pro,Home & Kitchen,Wilson,234.78,467,SPO-WIL-1787
+P001788,Maybelline Soccer Ball Lite,Sports,Maybelline,678.01,234,BEA-MAY-1788
+P001789,Kellogg's Children's Book Plus,Books,Kellogg's,912.45,312,GRO-KEL-1789
+P001790,Dell Frying Pan Classic,Home & Kitchen,Dell,456.67,178,ELE-DEL-1790
+P001791,LG Mystery Thriller Pro,Books,LG,789.89,456,ELE-LG-1791
+P001792,Samsung Hat Premium,Clothing,Samsung,234.12,89,ELE-SAM-1792
+P001793,Hasbro Olive Oil Lite,Groceries,Hasbro,678.34,423,TOY-HAS-1793
+P001794,Puma Building Blocks Classic,Toys,Puma,912.56,201,SPO-PUM-1794
+P001795,Adidas TV Plus,Electronics,Adidas,456.78,378,CLO-ADI-1795
+P001796,Reebok Coffee Beans Premium,Groceries,Reebok,789.01,145,SPO-REE-1796
+P001797,Zara Shampoo Classic,Beauty,Zara,234.45,423,CLO-ZAR-1797
+P001798,Nestle Headphones Lite,Electronics,Nestle,678.67,89,GRO-NES-1798
+P001799,Philips Jacket Lite,Clothing,Philips,912.89,356,HOM-PHI-1799
+P001800,Sony Perfume Pro,Beauty,Sony,456.12,190,ELE-SON-1800

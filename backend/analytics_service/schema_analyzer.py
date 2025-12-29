@@ -212,7 +212,7 @@ Return ONLY valid JSON in this exact format:
         headers: List[str],
         sample_data: List[Dict[str, Any]]
     ) -> Dict[str, FieldMapping]:
-        """Fallback heuristic-based schema analysis."""
+        """Fallback heuristic-based schema analysis, if llm sevice is unavailable."""
         import re
 
         # Semantic patterns (ordered by priority)
