@@ -168,24 +168,70 @@ Analyze the query and identify:
    - If user asks for "average", "mean" -> aggregation_type = "avg"
    - If user asks for "count", "how many" -> aggregation_type = "count"
 7. CRITICAL - Report type detection:
-   - "detail": User wants to see INDIVIDUAL ITEMS/RECORDS. Keywords: "details", "list", "show all", "each", "every", "items", "individual", "breakdown", "itemized", "what items", "what did we buy"
-   - "summary": User wants AGGREGATED totals only. Keywords: "total", "sum", "how much", "aggregate"
+   - "detail": User wants to see INDIVIDUAL LINE ITEMS/RECORDS with their details. Keywords: "details", "included details", "include details", "with details", "list", "show all", "each", "every", "items", "individual", "breakdown", "itemized", "what items", "what did we buy", "line items"
+   - "summary": User wants AGGREGATED totals only (no individual line items). Keywords: "total only", "sum only", "just the total", "aggregate only"
    - "comparison": User wants to compare different groups
+
+   IMPORTANT for MIN/MAX queries with details:
+   - "max and min receipts with details" -> report_type="detail" (show the receipts AND their line items)
+   - "max and min receipts included their details" -> report_type="detail"
+   - "max and min receipts" -> report_type="summary" (just show receipt totals, no line items)
+
+## CRITICAL - Time Filter vs Time Grouping:
+This is VERY important for MIN/MAX queries:
+
+**Time FILTER** (time_filter_only=true): User wants to FILTER data to a time period, NOT group by it.
+- "in 2025" = filter to 2025, don't group by year
+- "for 2025" = filter to 2025, don't group by year
+- "maximum receipt in 2025" = find the ONE maximum across all of 2025
+- "minimum and maximum in January" = find ONE min and ONE max for January
+
+**Time GROUPING** (time_filter_only=false): User wants to GROUP results by time period.
+- "by month" = group results by month
+- "per year" = group results by year
+- "monthly breakdown" = group by month
+- "maximum receipt per month in 2025" = find max FOR EACH month
+- "compare months" = group by month
+
+Examples:
+- "max and min receipts in 2025" -> time_filter_only=true, time_granularity=null (just filter to 2025, return ONE max and ONE min overall)
+- "max and min receipts by month in 2025" -> time_filter_only=false, time_granularity="monthly" (return max/min FOR EACH month)
+- "max and min receipts per month" -> time_filter_only=false, time_granularity="monthly"
+- "total sales in Q1 2025" -> time_filter_only=true (filter to Q1, return ONE total)
+- "total sales by quarter in 2025" -> time_filter_only=false, time_granularity="quarterly" (return total FOR EACH quarter)
+
+## CRITICAL - Understanding "each meal" / "each receipt" / "per receipt":
+When user asks about "each meal", "each receipt", "per meal", "per receipt", they are asking about DOCUMENT-LEVEL aggregation (each receipt/document), NOT line item level:
+- "average amount for each meal in 2025" = average TOTAL per receipt (first sum line items per receipt, then average across receipts)
+- "average per receipt" = average TOTAL per receipt
+- "total for each meal" = total per receipt (NOT per line item)
+- "how much did each meal cost" = total per receipt
+
+The correct approach for "average per receipt":
+1. First calculate the TOTAL for each receipt (sum of line items within each receipt)
+2. Then calculate the AVERAGE of those receipt totals
+
+This is different from "average per line item" which would just be AVG(item amount).
 
 ## Important:
 - Pay close attention to ordering keywords like "first", "then", "under each", "within"
 - "Group by X, then by Y" means X is the primary grouping, Y is secondary
 - "Show Y under each X" means X is primary, Y is secondary
-- For MIN/MAX queries, identify which entity (customer, vendor, product) should be shown with the min/max value
+- For MIN/MAX queries, identify which entity (customer, vendor, product, receipt) should be shown with the min/max value
 - IMPORTANT: If user says "list details", "show details", "list items", they want report_type="detail"
+- For receipt-based queries, entity_field should typically be "receipt_number" to identify individual receipts
+- When user asks "average for each meal/receipt", they want the average TOTAL per receipt, not average per line item
 
 ## Response Format (JSON only):
 {{
-    "grouping_order": ["primary_field", "secondary_field"],  // In order of hierarchy
+    "grouping_order": ["primary_field", "secondary_field"],  // In order of hierarchy - EMPTY [] if no grouping wanted
     "time_granularity": "yearly" | "monthly" | "quarterly" | null,
+    "time_filter_only": true | false,  // TRUE = just filter by time, FALSE = group by time
+    "time_filter_year": 2025 | null,  // The year to filter by if time_filter_only is true
+    "time_filter_period": "Q1" | "January" | null,  // Optional: specific quarter or month to filter
     "aggregation_field": "field_name_to_sum",
     "aggregation_type": "sum" | "min" | "max" | "min_max" | "avg" | "count",
-    "entity_field": "field_to_show_with_min_max",  // For min/max queries, which field identifies the entity (e.g., "Customer Name")
+    "entity_field": "field_to_show_with_min_max",  // For min/max queries, which field identifies the entity (e.g., "receipt_number")
     "filters": {{}},  // Any filter conditions
     "report_type": "summary" | "detail" | "comparison",
     "explanation": "Brief explanation of what the user wants"
@@ -304,6 +350,9 @@ Respond with JSON only:"""
 ## Verified Parameters:
 - Grouping Fields (in order): {grouping_fields}
 - Time Grouping: {time_grouping}
+- Time Filter Only: {time_filter_only}
+- Time Filter Year: {time_filter_year}
+- Time Filter Period: {time_filter_period}
 - Aggregation Field: {aggregation_field}
 - Aggregation Type: {aggregation_type}
 - Entity Field: {entity_field}
@@ -324,6 +373,10 @@ IMPORTANT: You must access fields from the correct source:
 For example, if the date is in header_data:
 - Correct: EXTRACT(YEAR FROM (dd.header_data->>'transaction_date')::timestamp)
 - WRONG: EXTRACT(YEAR FROM (item->>'transaction_date')::timestamp) -- date is NOT in line_items!
+
+## CRITICAL - Time Filter vs Time Grouping:
+- If time_filter_only=true: Add a WHERE clause to filter by the time period, but do NOT group by time
+- If time_filter_only=false and time_grouping is set: Group results by the time period
 
 ## SQL Templates by Report Type and Aggregation Type:
 
@@ -375,8 +428,169 @@ ORDER BY {{ORDER_BY_FIELDS}}
 ```
 NOTE: Access header fields as: header_data->>'field_name', line item fields as: item->>'field_name'
 
-### For aggregation_type = "min_max" (finding entities with min AND max values per grouping):
-Use a CTE approach with window functions to find BOTH min and max entities per group:
+### For aggregation_type = "avg" when asking about "average per receipt/meal" (DOCUMENT-LEVEL average):
+**CRITICAL**: When user asks "average for each meal", "average per receipt", "average meal cost", they want the average TOTAL per receipt, NOT average per line item.
+This requires a TWO-STEP aggregation:
+1. First calculate the TOTAL for each receipt (sum line items within each receipt)
+2. Then calculate the AVERAGE of those receipt totals
+
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+),
+receipt_totals AS (
+    SELECT
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
+        header_data->>'store_name' as store_name,
+        (header_data->>'transaction_date')::date as transaction_date,
+        ROUND(SUM((item->>'amount')::numeric), 2) as receipt_total
+    FROM expanded_items
+    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
+)
+SELECT
+    ROUND(AVG(receipt_total), 2) as average_per_receipt,
+    COUNT(*) as total_receipts,
+    ROUND(SUM(receipt_total), 2) as grand_total,
+    ROUND(MIN(receipt_total), 2) as min_receipt,
+    ROUND(MAX(receipt_total), 2) as max_receipt
+FROM receipt_totals
+```
+NOTE: This returns a SINGLE ROW with the average across all receipts. Include receipt count and grand total for context.
+
+### For aggregation_type = "avg" with LIST of each receipt (show individual receipts with totals, plus overall average):
+When user wants to see each receipt AND the average:
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+),
+receipt_totals AS (
+    SELECT
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
+        header_data->>'store_name' as store_name,
+        (header_data->>'transaction_date')::date as transaction_date,
+        ROUND(SUM((item->>'amount')::numeric), 2) as receipt_total
+    FROM expanded_items
+    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
+)
+SELECT
+    receipt_number,
+    store_name,
+    transaction_date,
+    receipt_total,
+    ROUND(AVG(receipt_total) OVER (), 2) as overall_average
+FROM receipt_totals
+ORDER BY transaction_date, receipt_number
+```
+NOTE: This returns EACH receipt with its total, plus an overall_average column showing the average across all receipts.
+
+### For aggregation_type = "min_max" WITH time_filter_only=true AND report_type="summary" (OVERALL min AND max, no details):
+When user wants the SINGLE min and SINGLE max across all data without line item details (e.g., "min and max receipts in 2025"):
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+),
+receipt_totals AS (
+    SELECT
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
+        header_data->>'store_name' as store_name,
+        (header_data->>'transaction_date')::date as transaction_date,
+        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
+    FROM expanded_items
+    WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{FILTER_YEAR}}
+    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
+),
+min_max AS (
+    (SELECT receipt_number, store_name, transaction_date, total_amount, 'MIN' as record_type
+     FROM receipt_totals ORDER BY total_amount ASC LIMIT 1)
+    UNION ALL
+    (SELECT receipt_number, store_name, transaction_date, total_amount, 'MAX' as record_type
+     FROM receipt_totals ORDER BY total_amount DESC LIMIT 1)
+)
+SELECT * FROM min_max ORDER BY record_type
+```
+NOTE: This returns exactly 2 rows - the single MIN and single MAX across the entire filtered period.
+
+### For aggregation_type = "min_max" WITH time_filter_only=true AND report_type="detail" (OVERALL min AND max WITH line item details):
+**CRITICAL: USE THIS TEMPLATE when user asks for min/max receipts WITH details/items.**
+When user wants the SINGLE min and SINGLE max receipts WITH their individual line items (e.g., "min and max receipts with details in 2025", "include their details"):
+
+**IMPORTANT**: You MUST include ALL relevant header_data fields in the output (store_name, transaction_date, store_address, payment_method, etc.)
+- Do NOT skip header fields - include all available header information in the final SELECT
+- The receipt_totals CTE should extract ALL header fields that exist in the schema
+- Join back to get both header info AND line item details
+
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+),
+receipt_totals AS (
+    SELECT
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
+        header_data->>'store_name' as store_name,
+        header_data->>'store_address' as store_address,
+        (header_data->>'transaction_date')::date as transaction_date,
+        header_data->>'payment_method' as payment_method,
+        header_data->>'currency' as currency,
+        -- Include ALL other header fields that exist in the schema
+        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
+    FROM expanded_items
+    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name',
+             header_data->>'store_address', header_data->>'transaction_date', header_data->>'payment_method',
+             header_data->>'currency'
+),
+min_max_receipts AS (
+    (SELECT receipt_number, 'MIN' as record_type FROM receipt_totals ORDER BY total_amount ASC LIMIT 1)
+    UNION ALL
+    (SELECT receipt_number, 'MAX' as record_type FROM receipt_totals ORDER BY total_amount DESC LIMIT 1)
+)
+SELECT
+    mm.record_type,
+    rt.receipt_number,
+    rt.store_name,
+    rt.store_address,
+    rt.transaction_date,
+    rt.payment_method,
+    rt.currency,
+    rt.total_amount as receipt_total,
+    -- Include ALL line item fields
+    ei.item->>'description' as item_description,
+    COALESCE(ei.item->>'quantity', '1') as quantity,
+    ROUND((ei.item->>'unit_price')::numeric, 2) as unit_price,
+    ROUND((ei.item->>'amount')::numeric, 2) as item_amount
+FROM min_max_receipts mm
+JOIN receipt_totals rt ON mm.receipt_number = rt.receipt_number
+JOIN expanded_items ei ON COALESCE(ei.header_data->>'receipt_number', ei.header_data->>'invoice_number', 'Unknown') = mm.receipt_number
+ORDER BY mm.record_type DESC, rt.receipt_number, ei.item->>'description'
+```
+**CRITICAL NOTES**:
+- This query uses THREE CTEs and requires THREE JOINs in the final SELECT
+- The receipt_totals CTE MUST extract header fields (store_name, transaction_date, etc.) - adapt based on available schema fields
+- The final SELECT MUST include header fields from rt (receipt_totals) AND line item fields from ei (expanded_items)
+- Returns the MIN and MAX receipts WITH all their line items (multiple rows per receipt)
+- Adapt the header fields based on the actual schema - include ALL available header fields, not just the ones shown
+
+### For aggregation_type = "min_max" WITH time_filter_only=false (min AND max PER time period):
+When user wants min/max FOR EACH time period (e.g., "min and max receipts by month in 2025"):
 ```sql
 WITH expanded_items AS (
     SELECT
@@ -389,10 +603,11 @@ WITH expanded_items AS (
 aggregated AS (
     SELECT
         {{TIME_GROUP_FIELD}} as group_period,
-        item->>'{{ENTITY_FIELD}}' as entity_name,
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as entity_name,
+        header_data->>'store_name' as store_name,
         ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
     FROM expanded_items
-    GROUP BY group_period, entity_name
+    GROUP BY group_period, header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name'
 ),
 ranked AS (
     SELECT *,
@@ -403,6 +618,7 @@ ranked AS (
 SELECT
     group_period,
     entity_name,
+    store_name,
     total_amount,
     CASE
         WHEN min_rank = 1 THEN 'MIN'
@@ -414,8 +630,33 @@ ORDER BY group_period, record_type DESC
 ```
 NOTE: For time grouping from header_data, use: header_data->>'transaction_date' (NOT item!)
 
-### For aggregation_type = "min" (finding entity with minimum value per grouping):
-Use window functions to find the entity with the minimum amount per group:
+### For aggregation_type = "min" WITH time_filter_only=true (SINGLE minimum overall):
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+),
+receipt_totals AS (
+    SELECT
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
+        header_data->>'store_name' as store_name,
+        (header_data->>'transaction_date')::date as transaction_date,
+        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
+    FROM expanded_items
+    WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{FILTER_YEAR}}
+    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
+)
+SELECT receipt_number, store_name, transaction_date, total_amount, 'MIN' as record_type
+FROM receipt_totals
+ORDER BY total_amount ASC
+LIMIT 1
+```
+
+### For aggregation_type = "min" WITH time_filter_only=false (minimum per time period):
 ```sql
 WITH expanded_items AS (
     SELECT
@@ -428,10 +669,10 @@ WITH expanded_items AS (
 aggregated AS (
     SELECT
         {{TIME_GROUP_FIELD}} as group_period,
-        item->>'{{ENTITY_FIELD}}' as entity_name,
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as entity_name,
         ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
     FROM expanded_items
-    GROUP BY group_period, entity_name
+    GROUP BY group_period, header_data->>'receipt_number', header_data->>'invoice_number'
 ),
 ranked AS (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY group_period ORDER BY total_amount ASC) as rn
@@ -443,7 +684,33 @@ WHERE rn = 1
 ORDER BY group_period
 ```
 
-### For aggregation_type = "max" (finding entity with maximum value per grouping):
+### For aggregation_type = "max" WITH time_filter_only=true (SINGLE maximum overall):
+```sql
+WITH expanded_items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+),
+receipt_totals AS (
+    SELECT
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
+        header_data->>'store_name' as store_name,
+        (header_data->>'transaction_date')::date as transaction_date,
+        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
+    FROM expanded_items
+    WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{FILTER_YEAR}}
+    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
+)
+SELECT receipt_number, store_name, transaction_date, total_amount, 'MAX' as record_type
+FROM receipt_totals
+ORDER BY total_amount DESC
+LIMIT 1
+```
+
+### For aggregation_type = "max" WITH time_filter_only=false (maximum per time period):
 ```sql
 WITH expanded_items AS (
     SELECT
@@ -456,10 +723,10 @@ WITH expanded_items AS (
 aggregated AS (
     SELECT
         {{TIME_GROUP_FIELD}} as group_period,
-        item->>'{{ENTITY_FIELD}}' as entity_name,
+        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as entity_name,
         ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
     FROM expanded_items
-    GROUP BY group_period, entity_name
+    GROUP BY group_period, header_data->>'receipt_number', header_data->>'invoice_number'
 ),
 ranked AS (
     SELECT *, ROW_NUMBER() OVER (PARTITION BY group_period ORDER BY total_amount DESC) as rn
@@ -472,20 +739,39 @@ ORDER BY group_period
 ```
 
 ## Requirements:
-1. FIRST check report_type:
+1. CRITICAL - For MIN/MAX queries, check BOTH time_filter_only AND report_type:
+   - If aggregation_type is "min", "max", or "min_max":
+     a) Check time_filter_only first:
+        - time_filter_only=true: Find OVERALL min/max (not per time period)
+        - time_filter_only=false: Find min/max PER time period
+     b) Then check report_type:
+        - report_type="detail": Include LINE ITEM details (description, quantity, unit_price, item_amount) for each receipt
+        - report_type="summary": Just show receipt totals (no line items)
+
+   Template selection for min_max queries:
+   - time_filter_only=true + report_type="summary" -> Use "OVERALL min AND max, no details" template
+   - time_filter_only=true + report_type="detail" -> Use "OVERALL min AND max WITH line item details" template
+   - time_filter_only=false + report_type="summary" -> Use "min AND max PER time period" template
+   - time_filter_only=false + report_type="detail" -> Use "min AND max PER time period WITH details" template (similar pattern)
+
+2. For non-MIN/MAX queries, check report_type:
    - If report_type = "detail": Use the DETAIL template to show INDIVIDUAL ITEMS with date, store, description, amount. NO GROUP BY.
    - If report_type = "summary": Use the aggregation templates with GROUP BY.
-2. Choose the appropriate SQL template based on aggregation_type (for summary reports)
-3. CRITICAL - For time groupings, check the source of the date field:
+
+3. For time groupings, check the source of the date field:
    - If date is in header_data (source='header'): Use header_data->>'date_field'
    - If date is in line_items (source='line_item'): Use item->>'date_field'
    - yearly: EXTRACT(YEAR FROM (header_data->>'date_field')::timestamp)::int
    - monthly: TO_CHAR((header_data->>'date_field')::timestamp, 'YYYY-MM')
    - quarterly: CONCAT(EXTRACT(YEAR FROM ...)::int, '-Q', EXTRACT(QUARTER FROM ...)::int)
+
 4. Non-time groupings: Check the source! Use header_data->>'field' or item->>'field' accordingly
+
 5. CRITICAL: Do NOT add any WHERE clause inside the base CTE (WITH ... AS block). Document filtering will be added automatically.
-6. For MIN/MAX queries: You MUST use the window function templates above to return ONLY the min/max records, not all records.
-7. ALWAYS include header_data in the CTE SELECT so you can access header fields in outer queries.
+
+6. ALWAYS include header_data in the CTE SELECT so you can access header fields in outer queries.
+
+7. When time_filter_only=true and time_filter_year is provided, add a WHERE clause to filter by that year in the aggregation CTE.
 
 ## Response Format (JSON only):
 {{
@@ -801,11 +1087,17 @@ Respond with JSON only:"""
         entity_field = query_analysis.get('entity_field', '')
         report_type = query_analysis.get('report_type', 'summary')
 
+        # Extract time filter vs grouping parameters (NEW)
+        time_filter_only = query_analysis.get('time_filter_only', False)
+        time_filter_year = query_analysis.get('time_filter_year')
+        time_filter_period = query_analysis.get('time_filter_period')
+
         logger.info(f"[LLM SQL] Round 1 result: grouping_order={query_analysis.get('grouping_order')}, "
                    f"time={query_analysis.get('time_granularity')}, "
                    f"aggregation={query_analysis.get('aggregation_field')}, "
                    f"aggregation_type={aggregation_type}, entity_field={entity_field}, "
-                   f"report_type={report_type}")
+                   f"report_type={report_type}, time_filter_only={time_filter_only}, "
+                   f"time_filter_year={time_filter_year}")
 
         # ========== Round 2: Field Mapping ==========
         logger.info(f"[LLM SQL] Round 2: Mapping fields to schema...")
@@ -867,6 +1159,9 @@ Respond with JSON only:"""
             user_query=user_query,
             grouping_fields=json.dumps(grouping_fields_desc),
             time_grouping=time_grouping_info,
+            time_filter_only=time_filter_only,
+            time_filter_year=time_filter_year or 'null',
+            time_filter_period=time_filter_period or 'null',
             aggregation_field=field_mapping_result.get('aggregation_field', {}).get('actual_field', 'amount'),
             aggregation_type=final_aggregation_type,
             entity_field=entity_field_actual or 'description',
@@ -1503,46 +1798,53 @@ FROM expanded_items
 ## Instructions:
 1. Directly answer the user's question based on the data above
 2. If they asked for minimum/maximum values, clearly identify who has the min and max amounts for each year/grouping
-3. Format amounts with $ and proper number formatting (e.g., $1,234.56)
+3. Format monetary amounts with $ and proper number formatting (e.g., $1,234.56)
+   - IMPORTANT: Only add $ to MONETARY fields (amounts, totals, prices, costs, averages of money)
+   - Do NOT add $ to COUNT fields like "total_receipts", "item_count", "num_records" - these are INTEGER counts, not money!
+   - Example: "7 receipts" or "Total Receipts: 7" (NOT "$7.00")
+   - Example: "Average per Receipt: $142.12" (this IS money, so use $)
+   - Example: "Grand Total: $994.84" (this IS money, so use $)
 {detail_instruction}
 5. Use markdown formatting for readability
 
-## CRITICAL - Hierarchical/Tree Layout for Grouped Data:
-When showing detailed items, use a TREE/HIERARCHICAL structure instead of a flat table with duplicate values:
+## CRITICAL - Recognize AGGREGATE vs DETAIL Results:
+FIRST, check what type of data you received:
+
+**AGGREGATE/SUMMARY Results** (1 row with statistics like average, total, count):
+- If the data has columns like "average_per_receipt", "total_receipts", "grand_total", "min_receipt", "max_receipt"
+- This is SUMMARY DATA - just present the statistics directly
+- Do NOT invent "Receipt #1" or similar - there are no individual receipts in this data!
+- Example output for average query:
+  ## Average Meal Cost for 2025
+  - **Average per Receipt:** $142.12
+  - **Total Receipts:** 7
+  - **Grand Total:** $994.84
+  - **Minimum Receipt:** $66.99
+  - **Maximum Receipt:** $228.00
+
+**DETAIL Results** (multiple rows with actual receipt data):
+- If the data has columns like "receipt_number", "store_name", "item_description"
+- This is DETAIL DATA - use hierarchical layout with actual receipt numbers
+
+## CRITICAL - Hierarchical/Tree Layout for DETAIL Data Only:
+When showing detailed items (NOT aggregate summaries), use a TREE/HIERARCHICAL structure:
 - If multiple items share the same receipt number, date, or restaurant, group them together
 - Show the parent group (e.g., receipt number, restaurant, date) ONCE as a header
 - List the child items (individual line items) indented under their parent
-- This avoids repeating the same information multiple times
 
-IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier, NOT the month!
+IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier!
 - If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
+- NEVER invent receipt numbers like "Receipt #1" - only use values that exist in the data!
 
-## CRITICAL - NO DUPLICATES:
+## CRITICAL - NO DUPLICATES and NO INVENTED DATA:
 - NEVER show the same receipt/invoice/document more than once
+- NEVER invent receipt numbers, item numbers, or any identifiers that don't exist in the data
 - Each unique receipt_number should appear EXACTLY ONCE in your output
-- If you see multiple rows with the same receipt_number, they are LINE ITEMS of that receipt - group them under ONE receipt header
-- Before outputting, verify that each receipt_number appears only once as a header
+- If the data is aggregate/summary, just present the numbers - don't create fake detail rows
 
-Example of GOOD tree layout (using actual receipt number):
-### Receipt #INV-2025-001 - YU SEAFOOD (2025-06-18)
-**Address:** 123 Main St
-| Item Name | Amount |
-|-----------|--------|
-| Crispy Milk Tart | $5.99 |
-| Ginger Beef Puff | $5.99 |
-**Subtotal:** $xx.xx
+6. For detail reports, include subtotals for each group and a grand total at the end
 
-### Receipt #INV-2025-002 - Mr. Congee Garden LTD (2025-11-08)
-**Address:** 456 Oak Ave
-| Item Name | Amount |
-|-----------|--------|
-| Shrimp Fried Rice | $18.75 |
-**Subtotal:** $xx.xx
-
-
-6. Always include subtotals for each group and a grand total at the end
-
-Write the {report_type} report in markdown format using hierarchical layout when appropriate:"""
+Write the {report_type} report in markdown format:"""
 
             response = self.llm_client.generate(prompt)
 
@@ -1635,29 +1937,53 @@ Write the {report_type} report in markdown format using hierarchical layout when
 ## Instructions:
 1. Directly answer the user's question based on the data above
 2. If they asked for minimum/maximum values, clearly identify who has the min and max amounts for each year/grouping
-3. Format amounts with $ and proper number formatting (e.g., $1,234.56)
+3. Format monetary amounts with $ and proper number formatting (e.g., $1,234.56)
+   - IMPORTANT: Only add $ to MONETARY fields (amounts, totals, prices, costs, averages of money)
+   - Do NOT add $ to COUNT fields like "total_receipts", "item_count", "num_records" - these are INTEGER counts, not money!
+   - Example: "7 receipts" or "Total Receipts: 7" (NOT "$7.00")
+   - Example: "Average per Receipt: $142.12" (this IS money, so use $)
+   - Example: "Grand Total: $994.84" (this IS money, so use $)
 {detail_instruction}
 5. Use markdown formatting for readability
 
-## CRITICAL - Hierarchical/Tree Layout for Grouped Data:
-When showing detailed items, use a TREE/HIERARCHICAL structure instead of a flat table with duplicate values:
+## CRITICAL - Recognize AGGREGATE vs DETAIL Results:
+FIRST, check what type of data you received:
+
+**AGGREGATE/SUMMARY Results** (1 row with statistics like average, total, count):
+- If the data has columns like "average_per_receipt", "total_receipts", "grand_total", "min_receipt", "max_receipt"
+- This is SUMMARY DATA - just present the statistics directly
+- Do NOT invent "Receipt #1" or similar - there are no individual receipts in this data!
+- Example output for average query:
+  ## Average Meal Cost for 2025
+  - **Average per Receipt:** $142.12
+  - **Total Receipts:** 7
+  - **Grand Total:** $994.84
+  - **Minimum Receipt:** $66.99
+  - **Maximum Receipt:** $228.00
+
+**DETAIL Results** (multiple rows with actual receipt data):
+- If the data has columns like "receipt_number", "store_name", "item_description"
+- This is DETAIL DATA - use hierarchical layout with actual receipt numbers
+
+## CRITICAL - Hierarchical/Tree Layout for DETAIL Data Only:
+When showing detailed items (NOT aggregate summaries), use a TREE/HIERARCHICAL structure:
 - If multiple items share the same receipt number, date, or restaurant, group them together
 - Show the parent group (e.g., receipt number, restaurant, date) ONCE as a header
 - List the child items (individual line items) indented under their parent
-- This avoids repeating the same information multiple times
 
-IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier, NOT the month!
+IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier!
 - If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
+- NEVER invent receipt numbers like "Receipt #1" - only use values that exist in the data!
 
-## CRITICAL - NO DUPLICATES:
+## CRITICAL - NO DUPLICATES and NO INVENTED DATA:
 - NEVER show the same receipt/invoice/document more than once
+- NEVER invent receipt numbers, item numbers, or any identifiers that don't exist in the data
 - Each unique receipt_number should appear EXACTLY ONCE in your output
-- If you see multiple rows with the same receipt_number, they are LINE ITEMS of that receipt - group them under ONE receipt header
-- Before outputting, verify that each receipt_number appears only once as a header
+- If the data is aggregate/summary, just present the numbers - don't create fake detail rows
 
-6. Always include subtotals for each group and a grand total at the end
+6. For detail reports, include subtotals for each group and a grand total at the end
 
-Write the {report_type} report in markdown format using hierarchical layout when appropriate:"""
+Write the {report_type} report in markdown format:"""
 
             # Stream the response
             in_code_block = False
