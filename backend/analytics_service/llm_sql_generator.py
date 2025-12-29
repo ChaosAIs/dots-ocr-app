@@ -56,14 +56,19 @@ class LLMSQLGenerator:
     SQL_GENERATION_PROMPT = """You are a SQL expert. Generate a PostgreSQL query to answer the user's question.
 
 ## Data Structure
-The data is stored in a PostgreSQL table with TWO separate JSONB columns:
-- Table: documents_data (alias: dd)
-- Column: header_data (JSONB object) - Contains document-level fields like transaction_date, store_name
-- Column: line_items (JSONB array) - Contains item-level fields like description, amount, quantity
+The data is stored in PostgreSQL tables. Line items can be stored in two ways:
+1. **Inline storage**: line_items JSONB array in documents_data table
+2. **External storage**: Separate documents_data_line_items table (for large datasets)
+
+### Tables:
+- documents_data (alias: dd) - Document metadata and optional inline line_items
+- documents_data_line_items (alias: li) - External line items storage (data JSONB column)
+
+Storage type for this query: {storage_type}
 
 CRITICAL: Fields have different sources:
 - source='header': Access via dd.header_data->>'field_name'
-- source='line_item': Access via item->>'field_name' after jsonb_array_elements()
+- source='line_item': Access via data->>'field_name' (external) or item->>'field_name' (inline)
 
 ### Available Fields and Their Types:
 {field_schema}
@@ -71,18 +76,35 @@ CRITICAL: Fields have different sources:
 ## User Query:
 "{user_query}"
 
-## Requirements:
-1. Use jsonb_array_elements(dd.line_items) to expand line_items array
-2. For header fields (source='header'): Use dd.header_data->>'field_name'
-3. For line_item fields (source='line_item'): Use item->>'field_name'
-4. Use proper type casting: ::numeric for numbers, ::timestamp for dates
-5. For date grouping (usually from header_data):
-   - Yearly: EXTRACT(YEAR FROM (dd.header_data->>'date_field')::timestamp)
-   - Monthly: TO_CHAR((dd.header_data->>'date_field')::timestamp, 'YYYY-MM')
-   - Quarterly: CONCAT(EXTRACT(YEAR FROM ...)::int, '-Q', EXTRACT(QUARTER FROM ...)::int)
-6. Use ROUND() for monetary values to 2 decimal places
-7. Always include COUNT(*) as item_count in aggregations
-8. Order results logically (by date ascending, then by category)
+## Requirements (based on storage type):
+### For EXTERNAL storage (use documents_data_line_items):
+```sql
+WITH items AS (
+    SELECT dd.header_data, li.data as item
+    FROM documents_data dd
+    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+    {{WHERE_CLAUSE}}
+)
+SELECT ... FROM items ...
+```
+
+### For INLINE storage (use jsonb_array_elements):
+```sql
+WITH expanded_items AS (
+    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    {{WHERE_CLAUSE}}
+)
+SELECT ... FROM expanded_items ...
+```
+
+### Common requirements:
+1. For header fields (source='header'): Use dd.header_data->>'field_name' or header_data->>'field_name'
+2. For line_item fields (source='line_item'): Use item->>'field_name'
+3. Use proper type casting: ::numeric for numbers, ::timestamp for dates
+4. Use ROUND() for monetary values to 2 decimal places
+5. Always include COUNT(*) as item_count in aggregations
+6. Order results logically
 
 ## Response Format:
 Return ONLY a JSON object with this exact structure:
@@ -159,7 +181,35 @@ Analyze the query and identify:
 2. What is the ORDER of groupings? (e.g., "first by customer, then by year" means customer is primary, year is secondary)
 3. What metric/amount should be aggregated? (e.g., total sales, total amount, count)
 4. What time granularity if any? (yearly, monthly, quarterly, or none)
-5. Any filters or conditions?
+5. Any filters or conditions? IMPORTANT - Extract ALL filter conditions from the query:
+
+   **Comparison operators:**
+   - "stock < 50", "less than 50", "under 50", "below 50" -> {{"operator": "<", "value": 50}}
+   - "stock > 100", "more than 100", "above 100", "over 100" -> {{"operator": ">", "value": 100}}
+   - "stock = 0", "equals 0", "is 0", "exactly 0" -> {{"operator": "=", "value": 0}}
+   - "stock <= 50", "at most 50", "50 or less", "no more than 50" -> {{"operator": "<=", "value": 50}}
+   - "stock >= 100", "at least 100", "100 or more", "no less than 100" -> {{"operator": ">=", "value": 100}}
+
+   **Range operator (BETWEEN):**
+   - "price between 50 and 100", "price from 50 to 100", "price 50-100" -> {{"operator": "between", "value": [50, 100]}}
+   - "stock between 10 and 50" -> {{"operator": "between", "value": [10, 50]}}
+
+   **List operator (IN):**
+   - "category in Electronics, Books, Toys" -> {{"operator": "in", "value": ["Electronics", "Books", "Toys"]}}
+   - "brand is Nike or Adidas or Puma" -> {{"operator": "in", "value": ["Nike", "Adidas", "Puma"]}}
+   - "category is Electronics or Books" -> {{"operator": "in", "value": ["Electronics", "Books"]}}
+
+   **NOT operators:**
+   - "category not Electronics" -> {{"operator": "!=", "value": "Electronics"}}
+   - "category not in Electronics, Books" -> {{"operator": "not_in", "value": ["Electronics", "Books"]}}
+
+   **String matching:**
+   - "name contains Apple", "name like Apple" -> {{"operator": "like", "value": "%Apple%"}}
+   - "name starts with A" -> {{"operator": "like", "value": "A%"}}
+
+   **Filter format:** filters = {{"FieldName": {{"operator": "op", "value": value}}}}
+   - Match filter field to actual schema field name (e.g., "stock" matches "StockQuantity", "category" matches "Category")
+   - For multiple filters: filters = {{"Field1": {{...}}, "Field2": {{...}}}}
 6. What type of aggregation? Pay special attention to:
    - If user asks for "minimum", "lowest", "smallest", "least" -> aggregation_type = "min"
    - If user asks for "maximum", "highest", "largest", "most", "top" -> aggregation_type = "max"
@@ -361,6 +411,37 @@ Respond with JSON only:"""
 - Report Type: {report_type}
 - Filters: {filters}
 
+## CRITICAL - HOW TO USE FILTERS:
+If filters are provided (not empty {{}}), you MUST apply them in the query!
+- Apply filters in the OUTER SELECT WHERE clause (after the CTE), NOT inside the CTE
+- For line_item fields, use item->>'FieldName' with appropriate casting
+
+**Filter SQL patterns by operator:**
+
+1. **Comparison operators (<, >, =, <=, >=, !=):**
+   - {{"StockQuantity": {{"operator": "<", "value": 50}}}} -> WHERE (item->>'StockQuantity')::numeric < 50
+   - {{"Price": {{"operator": ">=", "value": 100}}}} -> WHERE (item->>'Price')::numeric >= 100
+   - {{"Status": {{"operator": "=", "value": "Active"}}}} -> WHERE item->>'Status' = 'Active'
+
+2. **BETWEEN operator:**
+   - {{"Price": {{"operator": "between", "value": [50, 100]}}}} -> WHERE (item->>'Price')::numeric BETWEEN 50 AND 100
+   - {{"StockQuantity": {{"operator": "between", "value": [10, 50]}}}} -> WHERE (item->>'StockQuantity')::numeric BETWEEN 10 AND 50
+
+3. **IN operator (for lists):**
+   - {{"Category": {{"operator": "in", "value": ["Electronics", "Books"]}}}} -> WHERE item->>'Category' IN ('Electronics', 'Books')
+   - {{"Brand": {{"operator": "in", "value": ["Nike", "Adidas"]}}}} -> WHERE item->>'Brand' IN ('Nike', 'Adidas')
+
+4. **NOT IN operator:**
+   - {{"Category": {{"operator": "not_in", "value": ["Electronics", "Books"]}}}} -> WHERE item->>'Category' NOT IN ('Electronics', 'Books')
+
+5. **LIKE operator (string matching):**
+   - {{"ProductName": {{"operator": "like", "value": "%Apple%"}}}} -> WHERE item->>'ProductName' ILIKE '%Apple%'
+   - {{"SKU": {{"operator": "like", "value": "BOO-%"}}}} -> WHERE item->>'SKU' LIKE 'BOO-%'
+
+**Multiple filters:** Combine with AND
+- filters = {{"Price": {{"operator": ">", "value": 100}}, "Category": {{"operator": "=", "value": "Electronics"}}}}
+- -> WHERE (item->>'Price')::numeric > 100 AND item->>'Category' = 'Electronics'
+
 ## CRITICAL - USE EXACT FIELD NAMES:
 You MUST use the EXACT field names from the Verified Parameters above!
 - For Aggregation Field: Use exactly "{aggregation_field}" (e.g., item->>'Total Sales', NOT item->>'amount')
@@ -421,6 +502,31 @@ WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{YEAR}
 ORDER BY (header_data->>'transaction_date')::timestamp, item->>'description'
 ```
 NOTE: The receipt_number/invoice_number field is CRITICAL - it uniquely identifies each receipt/invoice document.
+
+### For report_type = "detail" with PRODUCT INVENTORY data (no header_data dates/receipts):
+When the schema has product fields like ProductID, ProductName, StockQuantity, Price, Category, Brand:
+```sql
+WITH items AS (
+    SELECT
+        dd.header_data,
+        jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+)
+SELECT
+    item->>'ProductID' as product_id,
+    item->>'ProductName' as product_name,
+    item->>'Category' as category,
+    item->>'Brand' as brand,
+    (item->>'Price')::numeric as price,
+    (item->>'StockQuantity')::numeric as stock_quantity,
+    item->>'SKU' as sku
+FROM items
+WHERE (item->>'StockQuantity')::numeric < {{FILTER_VALUE}}
+ORDER BY (item->>'StockQuantity')::numeric ASC
+```
+NOTE: Apply any numeric filters in the WHERE clause using item->>'FieldName'. Adapt field names to match the actual schema.
 
 ## SQL Templates by Aggregation Type (for summary reports):
 
@@ -647,6 +753,53 @@ WHERE min_rank = 1 OR max_rank = 1
 ORDER BY group_period, record_type DESC
 ```
 NOTE: For time grouping from header_data, use: header_data->>'transaction_date' (NOT item!)
+
+### For LINE-ITEM LEVEL min/max (e.g., "which product has lowest inventory", "find the item with highest price"):
+CRITICAL: Use this template when there is NO header-level grouping needed (like receipts/invoices).
+This is for flat line-item data like product catalogs, inventory lists, etc.
+
+For MINIMUM (single item with lowest value):
+```sql
+WITH items AS (
+    SELECT li.data as item
+    FROM documents_data dd
+    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+)
+SELECT
+    item->>'ProductID' as product_id,
+    item->>'ProductName' as product_name,
+    item->>'Category' as category,
+    item->>'Brand' as brand,
+    (item->>'StockQuantity')::numeric as stock_quantity,
+    (item->>'Price')::numeric as price
+FROM items
+ORDER BY (item->>'{{VALUE_FIELD}}')::numeric ASC
+LIMIT 1
+```
+
+For MAXIMUM (single item with highest value):
+```sql
+WITH items AS (
+    SELECT li.data as item
+    FROM documents_data dd
+    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+    JOIN documents d ON dd.document_id = d.id
+    {{WHERE_CLAUSE}}
+)
+SELECT
+    item->>'ProductID' as product_id,
+    item->>'ProductName' as product_name,
+    item->>'Category' as category,
+    item->>'Brand' as brand,
+    (item->>'StockQuantity')::numeric as stock_quantity,
+    (item->>'Price')::numeric as price
+FROM items
+ORDER BY (item->>'{{VALUE_FIELD}}')::numeric DESC
+LIMIT 1
+```
+NOTE: Adapt field names based on the actual schema. The key is: NO GROUP BY, just ORDER BY the value field and LIMIT 1.
 
 ### For aggregation_type = "min" WITH time_filter_only=true (SINGLE minimum overall):
 ```sql
@@ -1039,7 +1192,8 @@ Respond with JSON only:"""
         self,
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
-        table_filter: Optional[str] = None
+        table_filter: Optional[str] = None,
+        storage_type: str = "inline"
     ) -> SQLGenerationResult:
         """
         Generate SQL query based on user query and field mappings.
@@ -1053,28 +1207,170 @@ Respond with JSON only:"""
             user_query: User's natural language query
             field_mappings: Dynamic field mappings from extracted data
             table_filter: Optional WHERE clause filter for specific documents
+            storage_type: "inline" or "external" - determines SQL query structure
 
         Returns:
             SQLGenerationResult with generated SQL and metadata
         """
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] ========== SQL GENERATION START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[SQL Generator] User Query: {user_query}")
+        logger.info(f"[SQL Generator] Field Mappings: {len(field_mappings)} fields")
+        logger.info(f"[SQL Generator] Table Filter: {table_filter or 'None'}")
+        logger.info(f"[SQL Generator] Storage Type: {storage_type}")
+        logger.info("-" * 80)
+
         if not self.llm_client:
-            logger.warning("No LLM client available, using heuristic SQL generation")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
+            logger.warning("[SQL Generator] No LLM client available")
+            logger.info("[SQL Generator] Using HEURISTIC SQL generation (fallback)...")
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
 
         try:
+            logger.info("[SQL Generator] LLM client available - using MULTI-ROUND analysis")
             # Use multi-round LLM analysis for better accuracy
-            return self._generate_sql_multi_round(user_query, field_mappings, table_filter)
+            return self._generate_sql_multi_round(user_query, field_mappings, table_filter, storage_type)
 
         except Exception as e:
-            logger.error(f"Multi-round LLM SQL generation failed: {e}")
+            logger.error(f"[SQL Generator] Multi-round LLM SQL generation failed: {e}")
+            logger.info("[SQL Generator] Falling back to HEURISTIC generation...")
             # Fallback to heuristic
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
+
+    def generate_min_max_separate_queries(
+        self,
+        user_query: str,
+        field_mappings: Dict[str, Dict[str, Any]],
+        table_filter: Optional[str] = None,
+        storage_type: str = "inline"
+    ) -> Tuple[Optional[SQLGenerationResult], Optional[SQLGenerationResult]]:
+        """
+        Generate two separate SQL queries for MIN and MAX aggregations.
+
+        This is used when the user asks for both min and max values (e.g., "which products
+        have max inventory and min inventory"). Instead of generating one complex UNION ALL
+        query, we generate two simple queries and let the executor run them separately.
+
+        Args:
+            user_query: User's natural language query
+            field_mappings: Dynamic field mappings from extracted data
+            table_filter: Optional WHERE clause filter for specific documents
+            storage_type: "inline" or "external" - determines SQL query structure
+
+        Returns:
+            Tuple of (min_query_result, max_query_result)
+        """
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] ========== GENERATING SEPARATE MIN/MAX QUERIES ==========")
+        logger.info("=" * 80)
+
+        # Generate MIN query by modifying the user query
+        min_query = self._modify_query_for_aggregation(user_query, "min")
+        max_query = self._modify_query_for_aggregation(user_query, "max")
+
+        logger.info(f"[SQL Generator] MIN query: {min_query}")
+        logger.info(f"[SQL Generator] MAX query: {max_query}")
+
+        # Generate both queries
+        min_result = None
+        max_result = None
+
+        try:
+            logger.info("[SQL Generator] Generating MIN query...")
+            min_result = self.generate_sql(min_query, field_mappings, table_filter, storage_type)
+        except Exception as e:
+            logger.error(f"[SQL Generator] MIN query generation failed: {e}")
+
+        try:
+            logger.info("[SQL Generator] Generating MAX query...")
+            max_result = self.generate_sql(max_query, field_mappings, table_filter, storage_type)
+        except Exception as e:
+            logger.error(f"[SQL Generator] MAX query generation failed: {e}")
+
+        logger.info("[SQL Generator] Separate MIN/MAX queries generation complete")
+        return (min_result, max_result)
+
+    def _modify_query_for_aggregation(self, user_query: str, aggregation_type: str) -> str:
+        """
+        Modify a user query to ask for only MIN or MAX.
+
+        Transforms queries like "which products have max and min inventory" into
+        explicit queries that ask for the single product/item with the lowest/highest value.
+
+        Args:
+            user_query: Original user query with both min and max
+            aggregation_type: "min" or "max"
+
+        Returns:
+            Modified query for single aggregation
+        """
+        query_lower = user_query.lower()
+
+        if aggregation_type == "min":
+            # Replace max/min combination with explicit min request
+            modified = query_lower
+            # Remove "max" references and make explicit
+            modified = re.sub(r'\bmax(?:imum)?\s+(?:and|&)\s+min(?:imum)?\b', 'the single lowest', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\bmin(?:imum)?\s+(?:and|&)\s+max(?:imum)?\b', 'the single lowest', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\bhighest\s+(?:and|&)\s+lowest\b', 'the single lowest', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\blowest\s+(?:and|&)\s+highest\b', 'the single lowest', modified, flags=re.IGNORECASE)
+            # Handle "max xxx and min xxx" patterns - make more explicit
+            modified = re.sub(r'\bmax(?:imum)?\s+(\w+)\s+(?:and|&)\s+min(?:imum)?\s+\1\b', r'the single lowest \1', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\bmin(?:imum)?\s+(\w+)\s+(?:and|&)\s+max(?:imum)?\s+\1\b', r'the single lowest \1', modified, flags=re.IGNORECASE)
+            # Add clarification suffix
+            if 'single' not in modified:
+                modified = modified + ' (return only the 1 item with the minimum value, ORDER BY ASC LIMIT 1)'
+            return modified
+        else:  # max
+            modified = query_lower
+            # Remove "min" references and make explicit
+            modified = re.sub(r'\bmax(?:imum)?\s+(?:and|&)\s+min(?:imum)?\b', 'the single highest', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\bmin(?:imum)?\s+(?:and|&)\s+max(?:imum)?\b', 'the single highest', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\bhighest\s+(?:and|&)\s+lowest\b', 'the single highest', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\blowest\s+(?:and|&)\s+highest\b', 'the single highest', modified, flags=re.IGNORECASE)
+            # Handle "max xxx and min xxx" patterns - make more explicit
+            modified = re.sub(r'\bmax(?:imum)?\s+(\w+)\s+(?:and|&)\s+min(?:imum)?\s+\1\b', r'the single highest \1', modified, flags=re.IGNORECASE)
+            modified = re.sub(r'\bmin(?:imum)?\s+(\w+)\s+(?:and|&)\s+max(?:imum)?\s+\1\b', r'the single highest \1', modified, flags=re.IGNORECASE)
+            # Add clarification suffix
+            if 'single' not in modified:
+                modified = modified + ' (return only the 1 item with the maximum value, ORDER BY DESC LIMIT 1)'
+            return modified
+
+    def is_min_max_query(self, user_query: str) -> bool:
+        """
+        Detect if a user query is asking for both MIN and MAX values.
+
+        Args:
+            user_query: User's natural language query
+
+        Returns:
+            True if the query asks for both min and max
+        """
+        query_lower = user_query.lower()
+
+        # Patterns that indicate both min and max are requested
+        patterns = [
+            r'\bmax(?:imum)?\s+(?:and|&)\s+min(?:imum)?\b',
+            r'\bmin(?:imum)?\s+(?:and|&)\s+max(?:imum)?\b',
+            r'\bhighest\s+(?:and|&)\s+lowest\b',
+            r'\blowest\s+(?:and|&)\s+highest\b',
+            r'\bmax(?:imum)?\s+\w+\s+(?:and|&)\s+min(?:imum)?\s+\w+\b',
+            r'\bmin(?:imum)?\s+\w+\s+(?:and|&)\s+max(?:imum)?\s+\w+\b',
+        ]
+
+        for pattern in patterns:
+            if re.search(pattern, query_lower):
+                logger.info(f"[SQL Generator] Detected MIN/MAX query pattern: {pattern}")
+                return True
+
+        return False
 
     def _generate_sql_multi_round(
         self,
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
-        table_filter: Optional[str] = None
+        table_filter: Optional[str] = None,
+        storage_type: str = "inline"
     ) -> SQLGenerationResult:
         """
         Generate SQL using multi-round LLM analysis.
@@ -1087,18 +1383,24 @@ Respond with JSON only:"""
         field_schema_json = self._format_field_schema_json(field_mappings)
 
         # ========== Round 1: Query Analysis ==========
-        logger.info(f"[LLM SQL] Round 1: Analyzing query intent...")
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] ========== ROUND 1: QUERY ANALYSIS ==========")
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] Analyzing user intent and grouping requirements...")
+
         analysis_prompt = self.QUERY_ANALYSIS_PROMPT.format(
             user_query=user_query,
             field_schema=field_schema_json
         )
+        logger.debug(f"[SQL Generator] Analysis prompt length: {len(analysis_prompt)} chars")
 
         analysis_response = self.llm_client.generate(analysis_prompt)
         query_analysis = self._parse_json_response(analysis_response)
 
         if not query_analysis:
-            logger.warning("[LLM SQL] Round 1 failed, falling back to heuristic")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
+            logger.warning("[SQL Generator] Round 1 FAILED - could not parse LLM response")
+            logger.info("[SQL Generator] Falling back to heuristic generation...")
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
 
         # Extract aggregation type, entity field, and report type from Round 1
         aggregation_type = query_analysis.get('aggregation_type', 'sum')
@@ -1110,15 +1412,25 @@ Respond with JSON only:"""
         time_filter_year = query_analysis.get('time_filter_year')
         time_filter_period = query_analysis.get('time_filter_period')
 
-        logger.info(f"[LLM SQL] Round 1 result: grouping_order={query_analysis.get('grouping_order')}, "
-                   f"time={query_analysis.get('time_granularity')}, "
-                   f"aggregation={query_analysis.get('aggregation_field')}, "
-                   f"aggregation_type={aggregation_type}, entity_field={entity_field}, "
-                   f"report_type={report_type}, time_filter_only={time_filter_only}, "
-                   f"time_filter_year={time_filter_year}")
+        logger.info("-" * 80)
+        logger.info("[SQL Generator] ROUND 1 RESULT:")
+        logger.info(f"[SQL Generator]   - Grouping Order: {query_analysis.get('grouping_order')}")
+        logger.info(f"[SQL Generator]   - Time Granularity: {query_analysis.get('time_granularity')}")
+        logger.info(f"[SQL Generator]   - Aggregation Field: {query_analysis.get('aggregation_field')}")
+        logger.info(f"[SQL Generator]   - Aggregation Type: {aggregation_type}")
+        logger.info(f"[SQL Generator]   - Entity Field: {entity_field or 'None'}")
+        logger.info(f"[SQL Generator]   - Report Type: {report_type}")
+        logger.info(f"[SQL Generator]   - Time Filter Only: {time_filter_only}")
+        logger.info(f"[SQL Generator]   - Time Filter Year: {time_filter_year}")
+        logger.info(f"[SQL Generator]   - Explanation: {query_analysis.get('explanation', 'N/A')}")
+        logger.info("-" * 80)
 
         # ========== Round 2: Field Mapping ==========
-        logger.info(f"[LLM SQL] Round 2: Mapping fields to schema...")
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] ========== ROUND 2: FIELD MAPPING ==========")
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] Mapping user terms to actual schema fields...")
+
         mapping_prompt = self.FIELD_MAPPING_PROMPT.format(
             requested_groupings=json.dumps(query_analysis.get('grouping_order', [])),
             requested_aggregation=query_analysis.get('aggregation_field', 'amount'),
@@ -1132,15 +1444,25 @@ Respond with JSON only:"""
         field_mapping_result = self._parse_json_response(mapping_response)
 
         if not field_mapping_result or not field_mapping_result.get('success', True):
-            logger.warning("[LLM SQL] Round 2 failed, falling back to heuristic")
+            logger.warning("[SQL Generator] Round 2 FAILED - field mapping unsuccessful")
+            logger.info("[SQL Generator] Falling back to heuristic generation...")
             return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
 
-        logger.info(f"[LLM SQL] Round 2 result: grouping_fields={field_mapping_result.get('grouping_fields')}, "
-                   f"aggregation={field_mapping_result.get('aggregation_field')}, "
-                   f"date_field={field_mapping_result.get('date_field')}")
+        logger.info("-" * 80)
+        logger.info("[SQL Generator] ROUND 2 RESULT:")
+        logger.info(f"[SQL Generator]   - Grouping Fields: {field_mapping_result.get('grouping_fields')}")
+        logger.info(f"[SQL Generator]   - Aggregation Field: {field_mapping_result.get('aggregation_field')}")
+        logger.info(f"[SQL Generator]   - Date Field: {field_mapping_result.get('date_field')}")
+        logger.info(f"[SQL Generator]   - Entity Field: {field_mapping_result.get('entity_field')}")
+        if field_mapping_result.get('unmapped_fields'):
+            logger.warning(f"[SQL Generator]   - Unmapped Fields: {field_mapping_result.get('unmapped_fields')}")
+        logger.info("-" * 80)
 
         # ========== Round 3: SQL Generation ==========
-        logger.info(f"[LLM SQL] Round 3: Generating SQL...")
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] ========== ROUND 3: SQL GENERATION ==========")
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] Generating SQL with verified parameters...")
 
         # Prepare grouping fields description
         grouping_fields_desc = []
@@ -1173,6 +1495,16 @@ Respond with JSON only:"""
         if date_field in field_mappings:
             date_field_source = field_mappings[date_field].get('source', 'header')
 
+        logger.info(f"[SQL Generator] SQL Generation Parameters:")
+        logger.info(f"[SQL Generator]   - Grouping Fields: {grouping_fields_desc}")
+        logger.info(f"[SQL Generator]   - Time Grouping: {time_grouping_info}")
+        logger.info(f"[SQL Generator]   - Time Filter Only: {time_filter_only}")
+        logger.info(f"[SQL Generator]   - Aggregation Field: {field_mapping_result.get('aggregation_field', {}).get('actual_field', 'amount')}")
+        logger.info(f"[SQL Generator]   - Aggregation Type: {final_aggregation_type}")
+        logger.info(f"[SQL Generator]   - Entity Field: {entity_field_actual or 'description'}")
+        logger.info(f"[SQL Generator]   - Date Field: {date_field} (source: {date_field_source})")
+        logger.info(f"[SQL Generator]   - Report Type: {report_type}")
+
         sql_prompt = self.VERIFIED_SQL_PROMPT.format(
             user_query=user_query,
             grouping_fields=json.dumps(grouping_fields_desc),
@@ -1189,18 +1521,29 @@ Respond with JSON only:"""
             filters=json.dumps(query_analysis.get('filters', {}))
         )
 
+        logger.info("[SQL Generator] Calling LLM to generate SQL...")
         sql_response = self.llm_client.generate(sql_prompt)
         sql_result = self._parse_json_response(sql_response)
 
         if not sql_result or not sql_result.get('sql'):
-            logger.warning("[LLM SQL] Round 3 failed, falling back to heuristic")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
+            logger.warning("[SQL Generator] Round 3 FAILED - could not generate valid SQL")
+            logger.info("[SQL Generator] Falling back to heuristic generation...")
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
 
         # Build result
         sql_query = sql_result.get('sql', '')
 
+        # Note: We no longer try to fix UNION syntax. For min_max queries,
+        # the executor will run separate queries and combine results.
+
+        # Convert to external storage SQL if needed
+        if storage_type == 'external':
+            logger.info("[SQL Generator] Converting SQL for external storage...")
+            sql_query = self._convert_to_external_storage_sql(sql_query)
+
         # Add table filter if provided
         if table_filter:
+            logger.info(f"[SQL Generator] Adding table filter: {table_filter[:50]}...")
             sql_query = self._add_table_filter(sql_query, table_filter)
 
         # Extract grouping field names for result
@@ -1210,7 +1553,24 @@ Respond with JSON only:"""
             if not gf.get('is_time_grouping')
         ]
 
-        logger.info(f"[LLM SQL] Round 3 complete. Generated SQL:\n{sql_query[:200]}...")
+        logger.info("-" * 80)
+        logger.info("[SQL Generator] ROUND 3 RESULT:")
+        logger.info(f"[SQL Generator]   - SQL Generated: YES")
+        logger.info(f"[SQL Generator]   - Explanation: {sql_result.get('explanation', 'N/A')[:100]}")
+        logger.info("-" * 80)
+        logger.info("[SQL Generator] Generated SQL Query:")
+        logger.info("-" * 80)
+        # Log SQL in chunks for readability
+        sql_lines = sql_query.split('\n')
+        for line in sql_lines[:20]:  # First 20 lines
+            logger.info(f"[SQL]   {line}")
+        if len(sql_lines) > 20:
+            logger.info(f"[SQL]   ... ({len(sql_lines) - 20} more lines)")
+        logger.info("-" * 80)
+
+        logger.info("=" * 80)
+        logger.info("[SQL Generator] ========== SQL GENERATION COMPLETE ==========")
+        logger.info("=" * 80)
 
         return SQLGenerationResult(
             sql_query=sql_query,
@@ -1388,6 +1748,251 @@ Respond with JSON only:"""
             logger.error(f"Failed to parse LLM response: {e}")
             return None
 
+    def _convert_to_external_storage_sql(self, sql: str) -> str:
+        """
+        Convert SQL from inline line_items (jsonb_array_elements) to external storage
+        (documents_data_line_items table).
+
+        This is a post-processing step that rewrites SQL generated for inline storage
+        to work with external storage.
+
+        Inline pattern:
+            jsonb_array_elements(dd.line_items) as item
+
+        External pattern:
+            JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+            ... li.data as item
+
+        Args:
+            sql: SQL query using inline storage pattern
+
+        Returns:
+            SQL query using external storage pattern
+        """
+        # Pattern: SELECT ... jsonb_array_elements(dd.line_items) as item FROM documents_data dd
+        # Convert to: SELECT ... li.data as item FROM documents_data dd JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+
+        if 'jsonb_array_elements' not in sql.lower():
+            logger.info("[SQL Converter] No jsonb_array_elements found, skipping conversion")
+            return sql
+
+        # Step 1: Replace jsonb_array_elements(dd.line_items) or jsonb_array_elements(line_items) with li.data as item
+        converted = re.sub(
+            r'jsonb_array_elements\s*\(\s*(?:dd\.)?line_items\s*\)\s+as\s+item',
+            'li.data as item',
+            sql,
+            flags=re.IGNORECASE
+        )
+
+        # Step 2: Add JOIN to documents_data_line_items after FROM documents_data
+        # Handle multiple cases for different alias patterns
+        if 'JOIN documents_data_line_items' in converted:
+            # Already has the JOIN, skip
+            pass
+        elif re.search(r'FROM\s+documents_data\s+dd\s+JOIN\s+documents\s+d\s+ON', converted, re.IGNORECASE):
+            # Pattern: FROM documents_data dd JOIN documents d ON ...
+            converted = re.sub(
+                r'FROM\s+documents_data\s+dd\s+JOIN\s+documents\s+d\s+ON',
+                'FROM documents_data dd\n    JOIN documents_data_line_items li ON li.documents_data_id = dd.id\n    JOIN documents d ON',
+                converted,
+                flags=re.IGNORECASE
+            )
+        elif re.search(r'FROM\s+documents_data\s+JOIN\s+documents\s+ON', converted, re.IGNORECASE):
+            # Pattern: FROM documents_data JOIN documents ON ... (no alias)
+            # First add alias to documents_data
+            converted = re.sub(
+                r'FROM\s+documents_data\s+JOIN\s+documents\s+ON\s+documents_data\.document_id',
+                'FROM documents_data dd\n    JOIN documents_data_line_items li ON li.documents_data_id = dd.id\n    JOIN documents d ON dd.document_id',
+                converted,
+                flags=re.IGNORECASE
+            )
+        elif re.search(r'FROM\s+documents_data\s+dd\b', converted, re.IGNORECASE):
+            # Pattern: FROM documents_data dd (with alias, no JOIN to documents)
+            converted = re.sub(
+                r'FROM\s+documents_data\s+dd\b',
+                'FROM documents_data dd\n    JOIN documents_data_line_items li ON li.documents_data_id = dd.id',
+                converted,
+                flags=re.IGNORECASE
+            )
+        elif re.search(r'FROM\s+documents_data\b', converted, re.IGNORECASE):
+            # Pattern: FROM documents_data (no alias)
+            converted = re.sub(
+                r'FROM\s+documents_data\b',
+                'FROM documents_data dd\n    JOIN documents_data_line_items li ON li.documents_data_id = dd.id',
+                converted,
+                flags=re.IGNORECASE
+            )
+
+        # Step 3: Fix any remaining alias issues
+        # Replace "documents.id" with "d.id" when "documents d" alias is used
+        if 'JOIN documents d ON' in converted or 'JOIN documents d ' in converted:
+            converted = re.sub(r'\bdocuments\.id\b', 'd.id', converted)
+            converted = re.sub(r'\bdocuments\.document_id\b', 'd.document_id', converted)
+
+        # Replace "documents_data." with "dd." when alias is used
+        if 'documents_data dd' in converted:
+            converted = re.sub(r'\bdocuments_data\.([\w]+)', r'dd.\1', converted)
+
+        # Step 4: Fix WHERE clause references to 'item' - replace with 'li.data'
+        # In external storage, 'item' is just an alias defined in SELECT, can't be used in WHERE
+        # We need to replace 'item' with 'li.data' ONLY in WHERE clauses (not in SELECT)
+        if 'li.data as item' in converted:
+            # Split SQL into parts: before WHERE, WHERE clause, after WHERE
+            # Find the WHERE clause within the CTE and fix item references there
+
+            # Pattern to match item->>'field' or (item->>'field')
+            # Replace with li.data->>'field' or (li.data->>'field')
+            # But ONLY in WHERE clauses, not in the outer SELECT
+
+            # Find CTEs with WHERE clauses and fix them
+            def fix_cte_where(match):
+                cte_content = match.group(0)
+                # Replace item references in WHERE part only
+                # Find WHERE ... ) pattern within CTE
+                where_pattern = r'(WHERE\s+.+?)(\)\s*$|\)\s*SELECT)'
+
+                def replace_item_refs(where_match):
+                    where_clause = where_match.group(1)
+                    ending = where_match.group(2)
+                    # Replace item->>' with li.data->>'
+                    fixed = re.sub(r'\bitem\s*->>\'', "li.data->>'", where_clause)
+                    fixed = re.sub(r'\bitem\s*->\'', "li.data->'", fixed)
+                    fixed = re.sub(r'\(item->>', "(li.data->>'", fixed)
+                    fixed = re.sub(r'\(item->', "(li.data->", fixed)
+                    return fixed + ending
+
+                return re.sub(where_pattern, replace_item_refs, cte_content, flags=re.IGNORECASE | re.DOTALL)
+
+            # Match CTE definitions and fix item references in WHERE clauses inside CTEs only
+            # Use a smarter approach: find CTEs and only replace item->li.data within them
+
+            # Pattern to find CTE content including nested parentheses
+            def find_and_fix_cte_where(sql_text):
+                """Find CTEs and replace item with li.data in their WHERE clauses only."""
+                # Split by 'FROM items' or similar to separate CTE from outer query
+                # We only want to replace item->li.data inside the CTE WHERE, not in outer SELECT
+
+                # Find the CTE block (everything between AS ( and the matching closing ))
+                cte_pattern = r'(WITH\s+\w+\s+AS\s*\()(.*?)(\)\s*SELECT)'
+
+                def fix_cte_content(match):
+                    cte_start = match.group(1)
+                    cte_body = match.group(2)
+                    cte_end = match.group(3)
+
+                    # Only replace item->li.data in the WHERE clause of the CTE body
+                    # Look for WHERE ... that's inside the CTE
+                    where_pattern = r'(WHERE\s+)(.*?)($)'
+
+                    def fix_where(where_match):
+                        where_keyword = where_match.group(1)
+                        where_content = where_match.group(2)
+                        where_end = where_match.group(3)
+
+                        # Replace item references with li.data in WHERE content
+                        fixed = re.sub(r'\bitem\s*->>\'', "li.data->>'", where_content)
+                        fixed = re.sub(r'\bitem\s*->\'', "li.data->'", fixed)
+                        fixed = re.sub(r'\(item->>', "(li.data->>'", fixed)
+                        fixed = re.sub(r'\(item->', "(li.data->", fixed)
+                        return where_keyword + fixed + where_end
+
+                    fixed_body = re.sub(where_pattern, fix_where, cte_body, flags=re.IGNORECASE | re.DOTALL)
+                    return cte_start + fixed_body + cte_end
+
+                return re.sub(cte_pattern, fix_cte_content, sql_text, flags=re.IGNORECASE | re.DOTALL)
+
+            converted = find_and_fix_cte_where(converted)
+
+            # DO NOT replace item->li.data in outer SELECT/WHERE - 'item' is valid there as CTE alias
+
+        logger.info(f"[SQL Converter] Converted SQL for external storage")
+        logger.debug(f"[SQL Converter] Original:\n{sql[:200]}...")
+        logger.debug(f"[SQL Converter] Converted:\n{converted[:200]}...")
+
+        return converted
+
+    def _fix_union_syntax(self, sql: str) -> str:
+        """
+        Fix common UNION ALL syntax errors where ORDER BY/LIMIT appears before UNION.
+
+        In PostgreSQL, when using UNION ALL with ORDER BY/LIMIT on individual parts,
+        each part must be wrapped in parentheses as a subquery.
+
+        Invalid:
+            SELECT ... ORDER BY x LIMIT 1 UNION ALL SELECT ... ORDER BY y LIMIT 1
+
+        Valid:
+            (SELECT ... ORDER BY x LIMIT 1) UNION ALL (SELECT ... ORDER BY y LIMIT 1)
+
+        Args:
+            sql: SQL query that may have invalid UNION syntax
+
+        Returns:
+            Fixed SQL query
+        """
+        if 'UNION' not in sql.upper():
+            return sql
+
+        # Check if there's an ORDER BY or LIMIT before UNION
+        # Pattern: ... ORDER BY ... LIMIT ... UNION
+        pattern = r'(ORDER\s+BY\s+[^\)]+?\s+LIMIT\s+\d+)\s*(UNION\s+ALL|UNION)'
+
+        if not re.search(pattern, sql, re.IGNORECASE | re.DOTALL):
+            return sql
+
+        logger.info("[SQL Fixer] Detected ORDER BY/LIMIT before UNION, fixing syntax...")
+
+        # Split by UNION ALL (case insensitive)
+        parts = re.split(r'\s+(UNION\s+ALL|UNION)\s+', sql, flags=re.IGNORECASE)
+
+        if len(parts) < 3:
+            return sql
+
+        # Reconstruct with parentheses
+        fixed_parts = []
+        for i, part in enumerate(parts):
+            part = part.strip()
+            if part.upper() in ('UNION ALL', 'UNION'):
+                fixed_parts.append(part)
+            elif part:
+                # Remove any trailing ORDER BY that applies to the whole query
+                # (appears after the last UNION part)
+                if i == len(parts) - 1:
+                    # Check if there's a final ORDER BY after the subquery
+                    # Pattern: subquery content ORDER BY ... (at the end)
+                    final_order_match = re.search(
+                        r'^(.+?LIMIT\s+\d+)\s+(ORDER\s+BY\s+.+)$',
+                        part,
+                        re.IGNORECASE | re.DOTALL
+                    )
+                    if final_order_match:
+                        subquery = final_order_match.group(1).strip()
+                        final_order = final_order_match.group(2).strip()
+                        fixed_parts.append(f"({subquery})")
+                        fixed_parts.append(final_order)
+                    else:
+                        fixed_parts.append(f"({part})")
+                else:
+                    fixed_parts.append(f"({part})")
+
+        # Join back together
+        result_parts = []
+        i = 0
+        while i < len(fixed_parts):
+            if fixed_parts[i].upper() in ('UNION ALL', 'UNION'):
+                result_parts.append(f"\n{fixed_parts[i]}\n")
+            elif fixed_parts[i].upper().startswith('ORDER BY'):
+                result_parts.append(f"\n{fixed_parts[i]}")
+            else:
+                result_parts.append(fixed_parts[i])
+            i += 1
+
+        fixed_sql = ''.join(result_parts)
+        logger.info("[SQL Fixer] Fixed UNION syntax")
+        logger.debug(f"[SQL Fixer] Fixed SQL:\n{fixed_sql[:300]}...")
+
+        return fixed_sql
+
     def _add_table_filter(self, sql: str, table_filter: str) -> str:
         """Add table filter to SQL query.
 
@@ -1469,7 +2074,8 @@ Respond with JSON only:"""
         self,
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
-        table_filter: Optional[str] = None
+        table_filter: Optional[str] = None,
+        storage_type: str = "inline"
     ) -> SQLGenerationResult:
         """
         Generate SQL using heuristics when LLM is not available.
@@ -1704,6 +2310,11 @@ FROM expanded_items
 
         if order_by_parts:
             sql += f"ORDER BY {', '.join(order_by_parts)}"
+
+        # Convert to external storage SQL if needed
+        if storage_type == 'external':
+            logger.info("[SQL Heuristic] Converting SQL for external storage...")
+            sql = self._convert_to_external_storage_sql(sql)
 
         return SQLGenerationResult(
             sql_query=sql.strip(),

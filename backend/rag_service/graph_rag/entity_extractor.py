@@ -235,22 +235,34 @@ class EntityExtractor:
         all_relationships: List[Relationship] = []
         additional_responses: List[str] = []
 
+        logger.info("-" * 60)
+        logger.info("[Entity Extractor] EXTRACTION WITH GLEANING")
+        logger.info("-" * 60)
+        logger.info(f"[Entity Extractor] Chunk ID: {chunk_id}")
+        logger.info(f"[Entity Extractor] Text length: {len(text)} chars")
+        logger.info(f"[Entity Extractor] Max gleaning iterations: {max_iterations}")
+        logger.info(f"[Entity Extractor] Min entity score: {self.min_entity_score}")
+
         # Step 1: Initial extraction
+        logger.info("[Entity Extractor] Step 1: Initial extraction via LLM...")
         entities, relationships, initial_response = await self._initial_extraction(
             text, chunk_id
         )
         all_entities.extend(entities)
         all_relationships.extend(relationships)
+        logger.info(f"[Entity Extractor]   - Initial: {len(entities)} entities, {len(relationships)} relationships")
 
         # Step 2-4: Gleaning loop
         for iteration in range(max_iterations):
+            logger.info(f"[Entity Extractor] Step {iteration + 2}: Gleaning iteration {iteration + 1}...")
+
             # Build conversation history
             history = self._build_history(text, initial_response, additional_responses)
 
             # Check if we should continue
             should_continue = await self._check_should_continue(history)
             if not should_continue:
-                logger.info(f"Gleaning complete after {iteration} iterations")
+                logger.info(f"[Entity Extractor]   - LLM says no more entities, stopping")
                 break
 
             # Continue extraction
@@ -259,7 +271,7 @@ class EntityExtractor:
             )
 
             if not entities and not relationships:
-                logger.info("No new entities found, stopping gleaning")
+                logger.info("[Entity Extractor]   - No new entities found, stopping")
                 break
 
             all_entities.extend(entities)
@@ -267,7 +279,7 @@ class EntityExtractor:
             additional_responses.append(response)
 
             logger.info(
-                f"Gleaning iteration {iteration + 1}: "
+                f"[Entity Extractor]   - Gleaning {iteration + 1}: "
                 f"+{len(entities)} entities, +{len(relationships)} relationships"
             )
 
@@ -275,10 +287,16 @@ class EntityExtractor:
         final_entities = deduplicate_entities(all_entities)
         final_relationships = deduplicate_relationships(all_relationships)
 
-        logger.info(
-            f"Final extraction: {len(final_entities)} entities, "
-            f"{len(final_relationships)} relationships"
-        )
+        logger.info("-" * 60)
+        logger.info("[Entity Extractor] EXTRACTION RESULT:")
+        logger.info(f"[Entity Extractor]   - Final entities: {len(final_entities)}")
+        logger.info(f"[Entity Extractor]   - Final relationships: {len(final_relationships)}")
+        if final_entities:
+            entity_types = {}
+            for e in final_entities:
+                t = e.entity_type
+                entity_types[t] = entity_types.get(t, 0) + 1
+            logger.info(f"[Entity Extractor]   - Entity types: {entity_types}")
 
         return final_entities, final_relationships
 
@@ -292,8 +310,22 @@ class EntityExtractor:
 
         Use this for faster extraction when thoroughness is not critical.
         """
+        logger.info("-" * 60)
+        logger.info("[Entity Extractor] SIMPLE EXTRACTION (no gleaning)")
+        logger.info("-" * 60)
+        logger.info(f"[Entity Extractor] Chunk ID: {chunk_id}")
+        logger.info(f"[Entity Extractor] Text length: {len(text)} chars")
+        logger.info(f"[Entity Extractor] Min entity score: {self.min_entity_score}")
+
         entities, relationships, _ = await self._initial_extraction(text, chunk_id)
-        return deduplicate_entities(entities), deduplicate_relationships(relationships)
+        final_entities = deduplicate_entities(entities)
+        final_relationships = deduplicate_relationships(relationships)
+
+        logger.info(f"[Entity Extractor] EXTRACTION RESULT:")
+        logger.info(f"[Entity Extractor]   - Final entities: {len(final_entities)}")
+        logger.info(f"[Entity Extractor]   - Final relationships: {len(final_relationships)}")
+
+        return final_entities, final_relationships
 
     async def extract_batch(
         self,
@@ -310,6 +342,13 @@ class EntityExtractor:
         Returns:
             Tuple of (all_entities, all_relationships)
         """
+        logger.info("=" * 80)
+        logger.info("[Entity Extractor] ========== BATCH EXTRACTION START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Entity Extractor] Total chunks: {len(chunks)}")
+        logger.info(f"[Entity Extractor] Use gleaning: {use_gleaning}")
+        logger.info("-" * 80)
+
         all_entities: List[Entity] = []
         all_relationships: List[Relationship] = []
 
@@ -318,9 +357,10 @@ class EntityExtractor:
             content = chunk.get("page_content", "")
 
             if not content.strip():
+                logger.debug(f"[Entity Extractor] Skipping empty chunk {i + 1}/{len(chunks)}")
                 continue
 
-            logger.info(f"Processing chunk {i + 1}/{len(chunks)}: {chunk_id}")
+            logger.info(f"[Entity Extractor] Processing chunk {i + 1}/{len(chunks)}: {chunk_id}")
 
             try:
                 if use_gleaning:
@@ -336,17 +376,20 @@ class EntityExtractor:
                 all_relationships.extend(relationships)
 
             except Exception as e:
-                logger.error(f"Failed to extract from chunk {chunk_id}: {e}")
+                logger.error(f"[Entity Extractor] FAILED chunk {chunk_id}: {e}")
                 continue
 
         # Final deduplication across all chunks
         final_entities = deduplicate_entities(all_entities)
         final_relationships = deduplicate_relationships(all_relationships)
 
-        logger.info(
-            f"Batch extraction complete: {len(final_entities)} entities, "
-            f"{len(final_relationships)} relationships from {len(chunks)} chunks"
-        )
+        logger.info("-" * 80)
+        logger.info("[Entity Extractor] ========== BATCH EXTRACTION COMPLETE ==========")
+        logger.info("[Entity Extractor] FINAL SUMMARY:")
+        logger.info(f"[Entity Extractor]   - Total Entities: {len(final_entities)}")
+        logger.info(f"[Entity Extractor]   - Total Relationships: {len(final_relationships)}")
+        logger.info(f"[Entity Extractor]   - Chunks Processed: {len(chunks)}")
+        logger.info("=" * 80)
 
         return final_entities, final_relationships
 

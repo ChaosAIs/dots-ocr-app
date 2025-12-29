@@ -388,9 +388,23 @@ def unified_vector_search(
     if include_parent_chunks is None:
         include_parent_chunks = PARENT_CHUNK_AUTO_INCLUDE
 
+    logger.info("=" * 80)
+    logger.info("[VectorSearch] ========== UNIFIED VECTOR SEARCH START ==========")
+    logger.info("=" * 80)
+    logger.info(f"[VectorSearch] Query: {query[:80]}...")
+    logger.info(f"[VectorSearch] Parameters:")
+    logger.info(f"[VectorSearch]   - Document IDs: {len(document_ids) if document_ids else 0}")
+    logger.info(f"[VectorSearch]   - K (chunks to retrieve): {k}")
+    logger.info(f"[VectorSearch]   - Fetch K (MMR candidates): {fetch_k}")
+    logger.info(f"[VectorSearch]   - Lambda Mult (diversity): {lambda_mult}")
+    logger.info(f"[VectorSearch]   - Per-Document Selection: {per_document_selection}")
+    logger.info(f"[VectorSearch]   - Include Parent Chunks: {include_parent_chunks}")
+    logger.info("-" * 80)
+
     # Security check - block if no document_ids provided
     if document_ids is None or len(document_ids) == 0:
-        logger.warning("[UnifiedSearch] No accessible documents - returning empty results for security")
+        logger.warning("[VectorSearch] BLOCKED: No accessible documents - returning empty results for security")
+        logger.info("=" * 80)
         return UnifiedSearchResult(
             chunks=[],
             parent_chunks=[],
@@ -403,7 +417,7 @@ def unified_vector_search(
             }
         )
 
-    logger.info(f"[UnifiedSearch] Starting search: query='{query[:50]}...', docs={len(document_ids)}, k={k}")
+    logger.info(f"[VectorSearch] Access Control: {len(document_ids)} documents accessible")
 
     vectorstore = get_vectorstore()
     all_chunks = []
@@ -470,10 +484,20 @@ def unified_vector_search(
 
         total_count = len(all_chunks) + len(parent_chunks)
 
-        logger.info(
-            f"[UnifiedSearch] Complete: {len(all_chunks)} chunks + {len(parent_chunks)} parent chunks "
-            f"from {len(sources)} sources"
-        )
+        logger.info("-" * 80)
+        logger.info("[VectorSearch] SEARCH RESULTS:")
+        logger.info(f"[VectorSearch]   - Total Chunks: {len(all_chunks)}")
+        logger.info(f"[VectorSearch]   - Parent Chunks Added: {len(parent_chunks)}")
+        logger.info(f"[VectorSearch]   - Sources: {len(sources)}")
+        logger.info(f"[VectorSearch]   - Chunk Types:")
+        logger.info(f"[VectorSearch]       - Parent: {parent_count}")
+        logger.info(f"[VectorSearch]       - Child: {child_count}")
+        logger.info(f"[VectorSearch]       - Atomic: {atomic_count}")
+        if sources:
+            logger.info(f"[VectorSearch]   - Source Names: {list(sources)[:5]}{'...' if len(sources) > 5 else ''}")
+        logger.info("=" * 80)
+        logger.info("[VectorSearch] ========== UNIFIED VECTOR SEARCH COMPLETE ==========")
+        logger.info("=" * 80)
 
         return UnifiedSearchResult(
             chunks=all_chunks,
@@ -484,7 +508,11 @@ def unified_vector_search(
         )
 
     except Exception as e:
-        logger.error(f"[UnifiedSearch] Search failed: {e}")
+        logger.error("=" * 80)
+        logger.error("[VectorSearch] ========== SEARCH FAILED ==========")
+        logger.error("=" * 80)
+        logger.error(f"[VectorSearch] Error: {e}")
+        logger.error("=" * 80)
         return UnifiedSearchResult(
             chunks=[],
             parent_chunks=[],

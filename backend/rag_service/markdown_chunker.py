@@ -18,9 +18,9 @@ import logging
 import re
 import uuid
 import os
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from langchain_text_splitters import (
     MarkdownHeaderTextSplitter,
@@ -59,6 +59,12 @@ class ChunkingResult:
     """Result of chunking a markdown file."""
     chunks: List[Document]
     file_summary: str = ""
+    # V2.0: Skip info for tabular documents
+    skip_info: Dict[str, Any] = field(default_factory=lambda: {
+        "skip_row_chunking": False,
+        "reason": "not_analyzed",
+        "analysis": {}
+    })
 
 # Headers to split on for markdown documents
 HEADERS_TO_SPLIT_ON = [
@@ -619,13 +625,37 @@ def chunk_markdown_adaptive(
             force_strategy=force_strategy,
         )
 
-        logger.info(
-            f"[Adaptive] Chunked {source_name}: {len(result.chunks)} chunks "
-            f"using {result.profile.recommended_strategy} strategy "
-            f"(type: {result.profile.document_type}, domain: {result.profile.document_domain})"
-        )
+        # V2.0: Log tabular skip information
+        skip_info = getattr(result, 'skip_info', {
+            "skip_row_chunking": False,
+            "reason": "not_analyzed",
+            "analysis": {}
+        })
 
-        return ChunkingResult(chunks=result.chunks)
+        if skip_info.get("skip_row_chunking"):
+            logger.info(
+                f"[Adaptive] Chunked {source_name}: {len(result.chunks)} SUMMARY chunks "
+                f"(row chunking SKIPPED - {skip_info.get('reason', 'unknown')})"
+            )
+            logger.info(
+                f"[Adaptive] Document type: {result.profile.document_type}, "
+                f"strategy: {result.profile.recommended_strategy}"
+            )
+            # V2.0: Update document with tabular flags
+            _update_document_tabular_flags(
+                source_name=source_name,
+                is_tabular=True,
+                processing_path="tabular",
+                skip_info=skip_info
+            )
+        else:
+            logger.info(
+                f"[Adaptive] Chunked {source_name}: {len(result.chunks)} chunks "
+                f"using {result.profile.recommended_strategy} strategy "
+                f"(type: {result.profile.document_type}, domain: {result.profile.document_domain})"
+            )
+
+        return ChunkingResult(chunks=result.chunks, skip_info=skip_info)
 
     except Exception as e:
         logger.error(f"Adaptive chunking failed for {md_path}, falling back: {e}")
@@ -734,3 +764,92 @@ def list_available_strategies() -> List[str]:
 def is_adaptive_chunking_available() -> bool:
     """Check if adaptive chunking is available."""
     return ADAPTIVE_CHUNKING_AVAILABLE
+
+
+# ============================================================================
+# V2.0: TABULAR DOCUMENT FLAG UPDATE HELPER
+# ============================================================================
+
+def _update_document_tabular_flags(
+    source_name: str,
+    is_tabular: bool,
+    processing_path: str,
+    skip_info: Dict[str, Any]
+) -> None:
+    """
+    Update document record with tabular processing information.
+
+    This function updates the document's is_tabular_data and processing_path
+    flags in the database after tabular skip analysis determines the document
+    should use the tabular processing path.
+
+    Args:
+        source_name: The document source name (filename without extension)
+        is_tabular: Whether the document is tabular
+        processing_path: The processing path ("tabular" or "standard")
+        skip_info: Dictionary with skip analysis results
+    """
+    try:
+        from db.database import get_db_session
+        from db.models import Document
+
+        with get_db_session() as db:
+            import re
+
+            # Clean source_name - remove _page_X suffix if present
+            clean_source_name = re.sub(r'_page_\d+$', '', source_name)
+
+            # Try multiple lookup strategies
+            doc = None
+
+            # Strategy 1: Try clean source name with any extension
+            if not doc:
+                doc = db.query(Document).filter(
+                    Document.filename.like(f"{clean_source_name}.%")
+                ).first()
+
+            # Strategy 2: Try exact match with clean source name
+            if not doc:
+                doc = db.query(Document).filter(
+                    Document.filename == clean_source_name
+                ).first()
+
+            # Strategy 3: Try original source name with any extension
+            if not doc and source_name != clean_source_name:
+                doc = db.query(Document).filter(
+                    Document.filename.like(f"{source_name}.%")
+                ).first()
+
+            # Strategy 4: Filename contains source name (for partial matches)
+            if not doc:
+                doc = db.query(Document).filter(
+                    Document.filename.contains(clean_source_name)
+                ).first()
+
+            if doc:
+                # Update tabular flags
+                doc.is_tabular_data = is_tabular
+                doc.processing_path = processing_path
+
+                # Store skip analysis in indexing_details
+                if not doc.indexing_details:
+                    doc.indexing_details = {}
+
+                doc.indexing_details["tabular_skip"] = {
+                    "skipped": skip_info.get("skip_row_chunking", False),
+                    "reason": skip_info.get("reason", ""),
+                    "analysis": skip_info.get("analysis", {})
+                }
+
+                db.commit()
+                logger.info(
+                    f"[Tabular] Updated document flags for {source_name}: "
+                    f"is_tabular_data={is_tabular}, processing_path={processing_path}"
+                )
+            else:
+                logger.warning(
+                    f"[Tabular] Could not find document to update: {source_name}"
+                )
+
+    except Exception as e:
+        logger.error(f"[Tabular] Failed to update document flags for {source_name}: {e}")

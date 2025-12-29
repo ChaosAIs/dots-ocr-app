@@ -192,71 +192,130 @@ IMPORTANT:
         Returns:
             DocumentData model or None if extraction failed
         """
+        logger.info("=" * 80)
+        logger.info("[Extraction] ========== DOCUMENT EXTRACTION START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Extraction] Document ID: {document_id}")
+        logger.info(f"[Extraction] Force re-extraction: {force}")
+        logger.info("-" * 80)
+
         start_time = time.time()
 
         # Check if already extracted
+        logger.info("[Extraction] STEP 1: Checking for existing extraction...")
         existing = self.db.query(DocumentData).filter(
             DocumentData.document_id == document_id
         ).first()
 
         if existing and not force:
-            logger.info(f"Document {document_id} already extracted, skipping")
+            logger.info(f"[Extraction] Found existing extraction:")
+            logger.info(f"[Extraction]   - Schema type: {existing.schema_type}")
+            logger.info(f"[Extraction]   - Line items count: {existing.line_items_count}")
+            logger.info(f"[Extraction]   - Extraction method: {existing.extraction_method}")
+            logger.info("[Extraction] Skipping re-extraction (use force=True to override)")
+            logger.info("=" * 80)
             # Ensure status is marked as completed if data exists
             self._update_extraction_status(document_id, "completed")
             return existing
 
         # Check eligibility
+        logger.info("-" * 80)
+        logger.info("[Extraction] STEP 2: Checking extraction eligibility...")
         eligible, schema_type, reason = self.eligibility_checker.check_eligibility(document_id)
+        logger.info(f"[Extraction] Eligibility result:")
+        logger.info(f"[Extraction]   - Eligible: {eligible}")
+        logger.info(f"[Extraction]   - Schema type: {schema_type}")
+        logger.info(f"[Extraction]   - Reason: {reason}")
+
         if not eligible:
-            logger.info(f"Document {document_id} not eligible: {reason}")
+            logger.info("[Extraction] Document NOT eligible for extraction")
+            logger.info("=" * 80)
             self._update_extraction_status(document_id, "skipped", error=reason)
             return None
 
         # Determine strategy
+        logger.info("-" * 80)
+        logger.info("[Extraction] STEP 3: Determining extraction strategy...")
         strategy, strategy_metadata = self.eligibility_checker.determine_strategy(document_id)
+        logger.info(f"[Extraction] Strategy selected: {strategy.value}")
+        if strategy_metadata:
+            logger.info(f"[Extraction] Strategy metadata: {strategy_metadata}")
 
-        logger.info(f"Extracting document {document_id} with strategy {strategy.value}")
+        logger.info("-" * 80)
+        logger.info("[Extraction] STEP 4: Starting extraction process...")
         self._update_extraction_status(document_id, "processing")
 
         try:
             # Get document content
+            logger.info("[Extraction] Loading document content...")
             document = self.db.query(Document).filter(Document.id == document_id).first()
+            logger.info(f"[Extraction] Document filename: {document.filename if document else 'N/A'}")
             content = self._get_document_content(document)
 
             if not content:
                 raise ValueError("Could not retrieve document content")
 
+            content_length = len(content)
+            logger.info(f"[Extraction] Content loaded: {content_length} characters")
+
             # Get schema and extraction prompt (LLM-driven)
+            logger.info("-" * 80)
+            logger.info("[Extraction] STEP 5: Getting schema and extraction prompt...")
             formal_schema, extraction_prompt, schema_field_mappings = self._get_schema_and_prompt(schema_type)
+            logger.info(f"[Extraction] Schema source: {'formal' if formal_schema else 'dynamic/legacy'}")
+            if schema_field_mappings:
+                logger.info(f"[Extraction] Pre-defined field mappings: {len(schema_field_mappings)} fields")
 
             # Execute extraction based on strategy
+            logger.info("-" * 80)
+            logger.info("[Extraction] STEP 6: Executing extraction...")
+            logger.info(f"[Extraction] Using strategy: {strategy.value}")
+
             if strategy == ExtractionStrategy.LLM_DIRECT:
+                logger.info("[Extraction] Running LLM_DIRECT extraction (single LLM call)...")
                 result = self._extract_llm_direct(content, schema_type, extraction_prompt)
             elif strategy == ExtractionStrategy.LLM_CHUNKED:
+                logger.info("[Extraction] Running LLM_CHUNKED extraction (parallel chunked calls)...")
                 result = self._extract_llm_chunked(content, schema_type, strategy_metadata, extraction_prompt)
             elif strategy == ExtractionStrategy.HYBRID:
+                logger.info("[Extraction] Running HYBRID extraction (LLM for headers, rules for data)...")
                 result = self._extract_hybrid(content, schema_type, strategy_metadata, extraction_prompt)
             elif strategy == ExtractionStrategy.PARSED:
+                logger.info("[Extraction] Running PARSED extraction (pure pattern matching)...")
                 result = self._extract_parsed(content, schema_type, document)
             else:
+                logger.info("[Extraction] Running default LLM_DIRECT extraction...")
                 result = self._extract_llm_direct(content, schema_type, extraction_prompt)
 
             # Validate and save
             if result:
                 duration_ms = int((time.time() - start_time) * 1000)
+                line_items_count = len(result.get("line_items", []))
+                header_fields = len(result.get("header_data", {}).keys())
+
+                logger.info("-" * 80)
+                logger.info("[Extraction] STEP 7: Extraction result summary:")
+                logger.info(f"[Extraction]   - Header fields: {header_fields}")
+                logger.info(f"[Extraction]   - Line items: {line_items_count}")
+                logger.info(f"[Extraction]   - Duration: {duration_ms}ms")
 
                 # Build field_mappings for caching in extraction_metadata
+                logger.info("-" * 80)
+                logger.info("[Extraction] STEP 8: Building field mappings...")
                 final_field_mappings = self._build_field_mappings(
                     result=result,
                     schema_field_mappings=schema_field_mappings,
                     formal_schema=formal_schema
                 )
+                logger.info(f"[Extraction] Field mappings generated: {len(final_field_mappings)} categories")
 
                 # Add field_mappings to metadata for caching
                 enhanced_metadata = strategy_metadata.copy() if strategy_metadata else {}
                 enhanced_metadata['schema_source'] = 'formal' if formal_schema else 'dynamic'
                 enhanced_metadata['schema_version'] = formal_schema.schema_version if formal_schema else 'inferred'
 
+                logger.info("-" * 80)
+                logger.info("[Extraction] STEP 9: Saving extraction result to database...")
                 document_data = self._save_extraction_result(
                     document_id=document_id,
                     schema_type=schema_type,
@@ -268,13 +327,30 @@ IMPORTANT:
                 )
 
                 self._update_extraction_status(document_id, "completed")
-                logger.info(f"Document {document_id} extracted successfully in {duration_ms}ms")
+
+                logger.info("=" * 80)
+                logger.info("[Extraction] ========== DOCUMENT EXTRACTION COMPLETE ==========")
+                logger.info("=" * 80)
+                logger.info(f"[Extraction] FINAL SUMMARY:")
+                logger.info(f"[Extraction]   - Document ID: {document_id}")
+                logger.info(f"[Extraction]   - Schema type: {schema_type}")
+                logger.info(f"[Extraction]   - Strategy: {strategy.value}")
+                logger.info(f"[Extraction]   - Line items extracted: {line_items_count}")
+                logger.info(f"[Extraction]   - Total duration: {duration_ms}ms")
+                logger.info(f"[Extraction]   - Status: COMPLETED")
+                logger.info("=" * 80)
+
                 return document_data
             else:
                 raise ValueError("Extraction returned empty result")
 
         except Exception as e:
-            logger.error(f"Extraction failed for document {document_id}: {e}")
+            logger.error("=" * 80)
+            logger.error("[Extraction] ========== DOCUMENT EXTRACTION FAILED ==========")
+            logger.error("=" * 80)
+            logger.error(f"[Extraction] Document ID: {document_id}")
+            logger.error(f"[Extraction] Error: {e}")
+            logger.error("=" * 80)
             self._update_extraction_status(document_id, "failed", error=str(e))
             return None
 

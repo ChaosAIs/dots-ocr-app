@@ -3,14 +3,19 @@ Adaptive chunker that orchestrates domain-aware document processing.
 
 This module provides the main entry point for intelligent document chunking,
 combining document classification with strategy-based splitting.
+
+V2.0 Enhancement: Tabular Skip Analysis
+- After classification, if strategy is "table_preserving", analyze whether to skip row-level chunking
+- For pure tabular documents (high table ratio, tabular document types), generate 1-3 summary chunks
+- Hybrid documents (research papers with tables) continue with full chunking
 """
 
 import logging
 import re
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-from dataclasses import dataclass
+from typing import List, Dict, Any, Optional, Tuple
+from dataclasses import dataclass, field
 
 from langchain_core.documents import Document
 
@@ -38,6 +43,32 @@ logger = logging.getLogger(__name__)
 BASE64_PATTERN = re.compile(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]{100,}')
 BASE64_LIKE_PATTERN = re.compile(r'[A-Za-z0-9+/=]{200,}')
 
+# ============================================================================
+# TABULAR SKIP ANALYSIS CONFIGURATION (V2.0)
+# ============================================================================
+
+# Document types that strongly indicate tabular data - favor skipping row chunking
+STRONG_TABULAR_TYPES = {
+    'spreadsheet', 'invoice', 'receipt', 'bank_statement',
+    'credit_card_statement', 'expense_report', 'inventory_report',
+    'purchase_order', 'sales_order', 'payroll', 'financial_statement',
+    'price_list', 'data_export', 'transaction_log', 'shipping_manifest'
+}
+
+# Document types that should NEVER skip chunking even with tables
+NEVER_SKIP_TYPES = {
+    'research_paper', 'academic_article', 'thesis', 'dissertation',
+    'contract', 'agreement', 'legal_document', 'terms_of_service',
+    'technical_spec', 'user_manual', 'documentation', 'tutorial',
+    'news_article', 'blog_post', 'report'  # General reports have narrative
+}
+
+# Threshold for skip decision (score >= threshold -> skip)
+TABULAR_SKIP_THRESHOLD = float(os.environ.get("TABULAR_SKIP_THRESHOLD", "0.6"))
+
+# Enable/disable tabular skip feature
+TABULAR_SKIP_ENABLED = os.environ.get("TABULAR_SKIP_ENABLED", "true").lower() == "true"
+
 
 @dataclass
 class AdaptiveChunkingResult:
@@ -46,6 +77,12 @@ class AdaptiveChunkingResult:
     profile: ChunkingProfile
     file_summary: str = ""
     stats: Dict[str, Any] = None
+    # V2.0: Skip info for tabular documents
+    skip_info: Dict[str, Any] = field(default_factory=lambda: {
+        "skip_row_chunking": False,
+        "reason": "not_analyzed",
+        "analysis": {}
+    })
 
     def __post_init__(self):
         if self.stats is None:
@@ -54,6 +91,8 @@ class AdaptiveChunkingResult:
                 "strategy_used": self.profile.recommended_strategy,
                 "document_type": self.profile.document_type,
                 "document_domain": self.profile.document_domain,
+                "skip_row_chunking": self.skip_info.get("skip_row_chunking", False),
+                "skip_reason": self.skip_info.get("reason", ""),
             }
 
 
@@ -172,8 +211,19 @@ class AdaptiveChunker:
         Returns:
             AdaptiveChunkingResult with chunks and metadata
         """
+        logger.info("=" * 80)
+        logger.info("[Chunker] ========== ADAPTIVE CHUNKING START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Chunker] Source: {source_name}")
+        logger.info(f"[Chunker] File Path: {file_path or 'N/A'}")
+        logger.info(f"[Chunker] Content Length: {len(content) if content else 0} chars")
+        logger.info(f"[Chunker] Force Strategy: {force_strategy or 'None'}")
+        logger.info(f"[Chunker] Skip Classification: {skip_classification}")
+        logger.info("-" * 80)
+
         if not content or not content.strip():
-            logger.warning(f"Empty content for {source_name}")
+            logger.warning(f"[Chunker] Empty content for {source_name} - returning empty result")
+            logger.info("=" * 80)
             return AdaptiveChunkingResult(
                 chunks=[],
                 profile=ChunkingProfile(
@@ -184,10 +234,16 @@ class AdaptiveChunker:
             )
 
         # Pre-process content
+        logger.info("[Chunker] STEP 1: Pre-processing content...")
+        original_length = len(content)
         content = self._preprocess_content(content)
+        logger.info(f"[Chunker] Pre-processing: {original_length} -> {len(content)} chars")
 
-        # Step 1: Classify document (unless forcing strategy)
+        # Step 2: Classify document (unless forcing strategy)
+        logger.info("-" * 80)
+        logger.info("[Chunker] STEP 2: Document classification...")
         if force_strategy:
+            logger.info(f"[Chunker] Using forced strategy: {force_strategy}")
             profile = ChunkingProfile(
                 document_type="unknown",
                 document_domain="general",
@@ -202,38 +258,140 @@ class AdaptiveChunker:
             profile.total_tokens = len(content) // 4
         else:
             use_llm = self.use_llm_classification and not skip_classification
+            logger.info(f"[Chunker] Classification method: {'LLM' if use_llm else 'Rule-based'}")
             profile = self.classifier.classify(
                 content=content,
                 filename=source_name,
                 use_llm=use_llm,
             )
 
-        logger.info(
-            f"[AdaptiveChunker] Document: {source_name} | "
-            f"Type: {profile.document_type} | Domain: {profile.document_domain} | "
-            f"Strategy: {profile.recommended_strategy} | "
-            f"Size: {profile.total_tokens} tokens"
-        )
+        logger.info(f"[Chunker] Classification result:")
+        logger.info(f"[Chunker]   - Document Type: {profile.document_type}")
+        logger.info(f"[Chunker]   - Document Domain: {profile.document_domain}")
+        logger.info(f"[Chunker]   - Recommended Strategy: {profile.recommended_strategy}")
+        logger.info(f"[Chunker]   - Chunk Size: {profile.recommended_chunk_size}")
+        logger.info(f"[Chunker]   - Overlap %: {profile.recommended_overlap_percent}")
+        logger.info(f"[Chunker]   - Total Tokens: {profile.total_tokens}")
+        logger.info(f"[Chunker]   - Confidence: {profile.confidence}")
+        logger.info(f"[Chunker]   - Reasoning: {profile.reasoning}")
 
-        # Step 2: Get appropriate strategy
+        # ========== V2.0: STEP 3 - TABULAR SKIP ANALYSIS ==========
+        skip_info = {
+            "skip_row_chunking": False,
+            "reason": "not_analyzed",
+            "analysis": {}
+        }
+
+        if TABULAR_SKIP_ENABLED and profile.recommended_strategy == "table_preserving":
+            logger.info("-" * 80)
+            logger.info("[Chunker] STEP 3: Tabular Skip Analysis...")
+            logger.info(f"[Chunker] Strategy is 'table_preserving' - analyzing if row chunking should be skipped")
+
+            should_skip, reason, analysis = self._analyze_tabular_skip(
+                profile=profile,
+                content=content,
+                source_name=source_name
+            )
+
+            skip_info = {
+                "skip_row_chunking": should_skip,
+                "reason": reason,
+                "analysis": analysis
+            }
+
+            logger.info(f"[Chunker] Skip Analysis Result:")
+            logger.info(f"[Chunker]   - Should Skip Row Chunking: {should_skip}")
+            logger.info(f"[Chunker]   - Reason: {reason}")
+            logger.info(f"[Chunker]   - Skip Score: {analysis.get('skip_score', 0):.2f}")
+            logger.info(f"[Chunker]   - Table Content Ratio: {analysis.get('table_content_ratio', 0):.2f}")
+            logger.info(f"[Chunker]   - Row Count Estimate: {analysis.get('row_count_estimate', 0)}")
+
+            if should_skip:
+                # Generate summary chunks instead of row chunks
+                logger.info("-" * 80)
+                logger.info("[Chunker] STEP 3b: Generating Summary Chunks (skipping row chunking)...")
+
+                chunks = self._generate_tabular_summary_chunks(
+                    content=content,
+                    source_name=source_name,
+                    profile=profile,
+                    analysis=analysis,
+                    file_path=file_path,
+                    existing_metadata=existing_metadata
+                )
+
+                logger.info(f"[Chunker] Generated {len(chunks)} summary chunks (row chunking skipped)")
+
+                # Build stats and return early
+                stats = {
+                    "total_chunks": len(chunks),
+                    "strategy_used": "tabular_summary",
+                    "document_type": profile.document_type,
+                    "document_domain": profile.document_domain,
+                    "chunk_size_used": profile.recommended_chunk_size,
+                    "classification_confidence": profile.confidence,
+                    "is_atomic": True,  # Summary chunks are atomic
+                    "skip_row_chunking": True,
+                    "skip_reason": reason,
+                }
+
+                logger.info("=" * 80)
+                logger.info("[Chunker] ========== ADAPTIVE CHUNKING COMPLETE (TABULAR SUMMARY) ==========")
+                logger.info("=" * 80)
+                logger.info(f"[Chunker] FINAL SUMMARY:")
+                logger.info(f"[Chunker]   - Source: {source_name}")
+                logger.info(f"[Chunker]   - Document Type: {profile.document_type}")
+                logger.info(f"[Chunker]   - Processing: TABULAR SUMMARY (row chunking skipped)")
+                logger.info(f"[Chunker]   - Total Chunks: {len(chunks)}")
+                logger.info(f"[Chunker]   - Skip Reason: {reason}")
+                logger.info("=" * 80)
+
+                return AdaptiveChunkingResult(
+                    chunks=chunks,
+                    profile=profile,
+                    stats=stats,
+                    skip_info=skip_info,
+                )
+        else:
+            if not TABULAR_SKIP_ENABLED:
+                logger.info("-" * 80)
+                logger.info("[Chunker] STEP 3: Tabular skip analysis disabled (TABULAR_SKIP_ENABLED=false)")
+            elif profile.recommended_strategy != "table_preserving":
+                logger.info("-" * 80)
+                logger.info(f"[Chunker] STEP 3: Skipping tabular analysis (strategy is '{profile.recommended_strategy}', not 'table_preserving')")
+
+        # Step 4: Get appropriate strategy (was Step 3)
+        logger.info("-" * 80)
+        logger.info("[Chunker] STEP 4: Selecting chunking strategy...")
         try:
             strategy = get_strategy_for_profile(profile)
+            logger.info(f"[Chunker] Strategy selected: {strategy.strategy_name}")
         except Exception as e:
-            logger.warning(f"Failed to get strategy for profile, using fallback: {e}")
+            logger.warning(f"[Chunker] Failed to get strategy for profile: {e}")
+            logger.info(f"[Chunker] Using fallback strategy: {self.fallback_strategy}")
             strategy = get_strategy_by_name(
                 self.fallback_strategy,
                 chunk_size=self.default_chunk_size,
                 chunk_overlap=self.default_overlap,
             )
 
-        # Step 3: Apply date normalization if available
+        # Step 5: Apply date normalization if available (was Step 4)
+        logger.info("-" * 80)
+        logger.info("[Chunker] STEP 5: Date normalization...")
         if DATE_NORMALIZER_AVAILABLE:
             normalized_dates = find_and_normalize_dates(content)
             if normalized_dates:
-                logger.info(f"[AdaptiveChunker] Found {len(normalized_dates)} dates in {source_name}")
+                logger.info(f"[Chunker] Found {len(normalized_dates)} dates to normalize")
                 content = augment_text_with_dates(content, normalized_dates)
+            else:
+                logger.info("[Chunker] No dates found to normalize")
+        else:
+            logger.info("[Chunker] Date normalizer not available")
 
-        # Step 4: Chunk content
+        # Step 6: Chunk content (was Step 5)
+        logger.info("-" * 80)
+        logger.info("[Chunker] STEP 6: Executing chunking...")
+        logger.info(f"[Chunker] Strategy: {strategy.strategy_name}")
         try:
             chunks = strategy.chunk(
                 content=content,
@@ -241,16 +399,22 @@ class AdaptiveChunker:
                 file_path=file_path,
                 existing_metadata=existing_metadata,
             )
+            logger.info(f"[Chunker] Chunking successful: {len(chunks)} chunks created")
         except Exception as e:
-            logger.error(f"Chunking failed with {strategy.strategy_name}, using fallback: {e}")
+            logger.error(f"[Chunker] Chunking failed with {strategy.strategy_name}: {e}")
+            logger.info("[Chunker] Falling back to SemanticHeaderStrategy...")
             fallback = SemanticHeaderStrategy(
                 chunk_size=self.default_chunk_size,
                 chunk_overlap=self.default_overlap,
             )
             chunks = fallback.chunk(content, source_name, file_path, existing_metadata)
+            logger.info(f"[Chunker] Fallback chunking: {len(chunks)} chunks created")
 
-        # Step 5: Post-process chunks (enhance metadata)
+        # Step 7: Post-process chunks (enhance metadata) (was Step 6)
+        logger.info("-" * 80)
+        logger.info("[Chunker] STEP 7: Post-processing chunks...")
         chunks = self._postprocess_chunks(chunks, profile, source_name)
+        logger.info(f"[Chunker] Post-processing complete")
 
         # Build stats
         stats = {
@@ -263,15 +427,40 @@ class AdaptiveChunker:
             "is_atomic": profile.is_atomic_unit,
         }
 
-        logger.info(
-            f"[AdaptiveChunker] Completed: {source_name} -> {len(chunks)} chunks "
-            f"using {profile.recommended_strategy}"
-        )
+        # Log chunk details
+        if chunks:
+            logger.info("-" * 80)
+            logger.info("[Chunker] CHUNK DETAILS:")
+            total_chars = sum(len(c.page_content) for c in chunks)
+            avg_chars = total_chars // len(chunks) if chunks else 0
+            logger.info(f"[Chunker]   - Total chunks: {len(chunks)}")
+            logger.info(f"[Chunker]   - Total chars in chunks: {total_chars}")
+            logger.info(f"[Chunker]   - Average chunk size: {avg_chars} chars")
+            # Log first 3 chunk previews
+            for i, chunk in enumerate(chunks[:3]):
+                preview = chunk.page_content[:80].replace('\n', ' ')
+                logger.info(f"[Chunker]   - Chunk {i+1}: '{preview}...'")
+            if len(chunks) > 3:
+                logger.info(f"[Chunker]   ... and {len(chunks) - 3} more chunks")
+
+        logger.info("=" * 80)
+        logger.info("[Chunker] ========== ADAPTIVE CHUNKING COMPLETE ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Chunker] FINAL SUMMARY:")
+        logger.info(f"[Chunker]   - Source: {source_name}")
+        logger.info(f"[Chunker]   - Document Type: {profile.document_type}")
+        logger.info(f"[Chunker]   - Strategy Used: {profile.recommended_strategy}")
+        logger.info(f"[Chunker]   - Total Chunks: {len(chunks)}")
+        logger.info(f"[Chunker]   - Chunk Size Setting: {profile.recommended_chunk_size}")
+        logger.info(f"[Chunker]   - Is Atomic: {profile.is_atomic_unit}")
+        logger.info(f"[Chunker]   - Row Chunking Skipped: {skip_info.get('skip_row_chunking', False)}")
+        logger.info("=" * 80)
 
         return AdaptiveChunkingResult(
             chunks=chunks,
             profile=profile,
             stats=stats,
+            skip_info=skip_info,
         )
 
     def _preprocess_content(self, content: str) -> str:
@@ -349,6 +538,380 @@ class AdaptiveChunker:
             score += 0.2
 
         return min(1.0, score)
+
+    # ========================================================================
+    # V2.0: TABULAR SKIP ANALYSIS METHODS
+    # ========================================================================
+
+    def _analyze_tabular_skip(
+        self,
+        profile: ChunkingProfile,
+        content: str,
+        source_name: str
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Analyze whether to skip row-level chunking for tabular documents.
+
+        This function is called AFTER document classification, when we already
+        know the recommended_strategy is "table_preserving".
+
+        Returns:
+            Tuple of (should_skip, reason, analysis_details)
+        """
+        document_type = profile.document_type or ""
+        doc_type_lower = document_type.lower()
+
+        analysis = {
+            "document_type": document_type,
+            "table_content_ratio": 0.0,
+            "row_count_estimate": 0,
+            "avg_row_length": 0.0,
+            "narrative_ratio": 0.0,
+            "skip_score": 0.0,
+            "doc_type_score": 0.0,
+            "table_score": 0.0,
+            "row_score": 0.0,
+        }
+
+        # ========== CHECK 1: Never-skip document types ==========
+        if doc_type_lower in NEVER_SKIP_TYPES:
+            logger.info(f"[Tabular] Document type '{doc_type_lower}' is in NEVER_SKIP_TYPES - will not skip")
+            return False, f"document_type_excluded:{doc_type_lower}", analysis
+
+        # ========== FACTOR 1: Document Type Score (Weight: 40%) ==========
+        if doc_type_lower in STRONG_TABULAR_TYPES:
+            doc_type_score = 0.4
+            logger.info(f"[Tabular] Document type '{doc_type_lower}' in STRONG_TABULAR_TYPES: score=0.4")
+        else:
+            doc_type_score = 0.1
+            logger.info(f"[Tabular] Document type '{doc_type_lower}' not in STRONG_TABULAR_TYPES: score=0.1")
+
+        analysis["doc_type_score"] = doc_type_score
+
+        # ========== FACTOR 2: Table Content Ratio (Weight: 35%) ==========
+        table_ratio = self._calculate_table_content_ratio(content)
+        analysis["table_content_ratio"] = table_ratio
+        analysis["narrative_ratio"] = 1.0 - table_ratio
+
+        if table_ratio < 0.5:
+            table_score = 0.0
+            logger.info(f"[Tabular] Table ratio {table_ratio:.2f} < 0.5: score=0.0 (hybrid document)")
+        elif table_ratio < 0.7:
+            table_score = 0.15
+            logger.info(f"[Tabular] Table ratio {table_ratio:.2f} in [0.5, 0.7): score=0.15")
+        elif table_ratio < 0.85:
+            table_score = 0.25
+            logger.info(f"[Tabular] Table ratio {table_ratio:.2f} in [0.7, 0.85): score=0.25")
+        else:
+            table_score = 0.35
+            logger.info(f"[Tabular] Table ratio {table_ratio:.2f} >= 0.85: score=0.35")
+
+        analysis["table_score"] = table_score
+
+        # ========== FACTOR 3: Row Density Analysis (Weight: 25%) ==========
+        row_count, avg_row_length = self._analyze_table_rows(content)
+        analysis["row_count_estimate"] = row_count
+        analysis["avg_row_length"] = avg_row_length
+
+        # Many short rows = typical dataset (high skip benefit)
+        # Few long rows = formatted tables in document (low skip benefit)
+        if row_count > 50 and avg_row_length < 200:
+            row_score = 0.25
+            logger.info(f"[Tabular] Row count {row_count} > 50, avg_length {avg_row_length:.0f} < 200: score=0.25 (dataset)")
+        elif row_count > 20 and avg_row_length < 300:
+            row_score = 0.15
+            logger.info(f"[Tabular] Row count {row_count} > 20, avg_length {avg_row_length:.0f} < 300: score=0.15")
+        elif row_count > 10:
+            row_score = 0.1
+            logger.info(f"[Tabular] Row count {row_count} > 10: score=0.1")
+        else:
+            row_score = 0.0
+            logger.info(f"[Tabular] Row count {row_count} <= 10: score=0.0 (too few rows)")
+
+        analysis["row_score"] = row_score
+
+        # ========== CALCULATE FINAL SCORE ==========
+        total_score = doc_type_score + table_score + row_score
+        analysis["skip_score"] = total_score
+
+        should_skip = total_score >= TABULAR_SKIP_THRESHOLD
+
+        reason = f"score:{total_score:.2f}|doc_type:{doc_type_score:.2f}|table:{table_score:.2f}|rows:{row_score:.2f}"
+
+        logger.info(f"[Tabular] Final score: {total_score:.2f} (threshold: {TABULAR_SKIP_THRESHOLD})")
+        logger.info(f"[Tabular] Decision: {'SKIP row chunking' if should_skip else 'KEEP row chunking'}")
+
+        return should_skip, reason, analysis
+
+    def _calculate_table_content_ratio(self, content: str) -> float:
+        """Calculate what percentage of content is markdown tables."""
+        if not content:
+            return 0.0
+
+        lines = content.split('\n')
+        total_chars = len(content)
+        table_chars = 0
+
+        for line in lines:
+            # Markdown table line: | col1 | col2 | col3 |
+            if '|' in line and line.strip().startswith('|'):
+                table_chars += len(line)
+            # Table separator: |---|---|---|
+            elif '|' in line and '-' in line and line.count('-') > 5:
+                table_chars += len(line)
+
+        return table_chars / max(total_chars, 1)
+
+    def _analyze_table_rows(self, content: str) -> Tuple[int, float]:
+        """Count table rows and calculate average row length."""
+        lines = content.split('\n')
+        table_rows = []
+
+        for line in lines:
+            if '|' in line and line.strip().startswith('|'):
+                # Skip separator lines (|---|---|---|)
+                if not (line.count('-') > 5 and '|' in line):
+                    table_rows.append(line)
+
+        if not table_rows:
+            return 0, 0.0
+
+        avg_length = sum(len(row) for row in table_rows) / len(table_rows)
+        return len(table_rows), avg_length
+
+    def _generate_tabular_summary_chunks(
+        self,
+        content: str,
+        source_name: str,
+        profile: ChunkingProfile,
+        analysis: Dict[str, Any],
+        file_path: str = "",
+        existing_metadata: Optional[Dict[str, Any]] = None
+    ) -> List[Document]:
+        """
+        Generate 1-3 summary chunks for tabular document discovery.
+
+        Instead of creating 100+ row chunks, create strategic summary chunks
+        that enable document discovery via vector search.
+        """
+        chunks = []
+
+        # Extract table structure info
+        headers = self._extract_table_headers(content)
+        row_count = analysis.get("row_count_estimate", 0)
+        table_ratio = analysis.get("table_content_ratio", 0)
+
+        # Common metadata for all chunks
+        base_metadata = {
+            "source": source_name,
+            "file_path": file_path,
+            # Classification metadata (important for consistency)
+            "document_type": profile.document_type,
+            "document_domain": profile.document_domain,
+            # Tabular-specific metadata
+            "chunk_type": "tabular_summary",
+            "is_tabular": True,
+            "is_summary_chunk": True,
+            "skip_row_chunking": True,
+            "schema_type": "spreadsheet",
+            "row_count": row_count,
+            "column_count": len(headers),
+            "columns": headers[:20] if headers else [],  # Limit to first 20 columns
+            "table_content_ratio": table_ratio,
+            # Processing info
+            "recommended_strategy": profile.recommended_strategy,
+            "skip_score": analysis.get("skip_score", 0),
+            "skip_reason": f"score:{analysis.get('skip_score', 0):.2f}",
+        }
+
+        # Merge with existing metadata if provided
+        if existing_metadata:
+            base_metadata.update(existing_metadata)
+
+        # ===== CHUNK 1: Document Summary =====
+        summary_text = self._generate_document_summary_text(
+            source_name=source_name,
+            headers=headers,
+            row_count=row_count,
+            content=content,
+            profile=profile
+        )
+
+        chunk1_metadata = {**base_metadata, "chunk_type": "tabular_summary", "chunk_index": 0}
+        chunks.append(Document(
+            page_content=summary_text,
+            metadata=chunk1_metadata
+        ))
+        logger.info(f"[Tabular] Generated summary chunk: {len(summary_text)} chars")
+
+        # ===== CHUNK 2: Schema Description =====
+        schema_text = self._generate_schema_description_text(
+            headers=headers,
+            row_count=row_count,
+            content=content
+        )
+
+        chunk2_metadata = {**base_metadata, "chunk_type": "tabular_schema", "chunk_index": 1}
+        chunks.append(Document(
+            page_content=schema_text,
+            metadata=chunk2_metadata
+        ))
+        logger.info(f"[Tabular] Generated schema chunk: {len(schema_text)} chars")
+
+        # ===== CHUNK 3: Sample Data Context (optional, if enough rows) =====
+        if row_count > 5:
+            sample_text = self._generate_sample_data_text(content, headers)
+            if sample_text and len(sample_text) > 50:
+                chunk3_metadata = {**base_metadata, "chunk_type": "tabular_sample", "chunk_index": 2}
+                chunks.append(Document(
+                    page_content=sample_text,
+                    metadata=chunk3_metadata
+                ))
+                logger.info(f"[Tabular] Generated sample data chunk: {len(sample_text)} chars")
+
+        return chunks
+
+    def _extract_table_headers(self, content: str) -> List[str]:
+        """Extract column headers from markdown table."""
+        lines = content.split('\n')
+        headers = []
+
+        for line in lines:
+            # Look for header row (first table row before separator)
+            if '|' in line and line.strip().startswith('|'):
+                # Skip separator lines
+                if line.count('-') > 5:
+                    continue
+                # Parse headers
+                parts = [p.strip() for p in line.split('|')]
+                parts = [p for p in parts if p]  # Remove empty parts
+                if parts and not headers:  # First non-separator row
+                    headers = parts
+                    break
+
+        return headers
+
+    def _generate_document_summary_text(
+        self,
+        source_name: str,
+        headers: List[str],
+        row_count: int,
+        content: str,
+        profile: ChunkingProfile
+    ) -> str:
+        """Generate a natural language summary of the tabular document."""
+        doc_type = profile.document_type or "tabular data"
+
+        # Build summary
+        summary_parts = [
+            f"# {source_name}",
+            f"",
+            f"This is a {doc_type} document containing {row_count} data rows.",
+        ]
+
+        if headers:
+            summary_parts.append(f"")
+            summary_parts.append(f"## Columns ({len(headers)} fields)")
+            summary_parts.append(f"The data includes the following fields: {', '.join(headers[:15])}")
+            if len(headers) > 15:
+                summary_parts.append(f"...and {len(headers) - 15} more columns.")
+
+        # Try to infer content type from headers/source name
+        source_lower = source_name.lower()
+        if any(kw in source_lower for kw in ["sales", "revenue", "transaction", "order"]):
+            summary_parts.append(f"")
+            summary_parts.append("This appears to be sales/transaction data suitable for revenue analysis.")
+        elif any(kw in source_lower for kw in ["inventory", "stock", "product", "sku"]):
+            summary_parts.append(f"")
+            summary_parts.append("This appears to be inventory/product data suitable for stock analysis.")
+        elif any(kw in source_lower for kw in ["employee", "hr", "payroll", "staff"]):
+            summary_parts.append(f"")
+            summary_parts.append("This appears to be HR/employee data.")
+        elif any(kw in source_lower for kw in ["invoice", "receipt", "billing"]):
+            summary_parts.append(f"")
+            summary_parts.append("This appears to be financial/billing data.")
+
+        return '\n'.join(summary_parts)
+
+    def _generate_schema_description_text(
+        self,
+        headers: List[str],
+        row_count: int,
+        content: str
+    ) -> str:
+        """Generate a schema description for the tabular data."""
+        schema_parts = [
+            f"## Data Schema",
+            f"",
+            f"Tabular dataset with {len(headers)} columns and {row_count} rows.",
+            f"",
+            f"### Column Names",
+        ]
+
+        for i, header in enumerate(headers[:20], 1):
+            schema_parts.append(f"{i}. {header}")
+
+        if len(headers) > 20:
+            schema_parts.append(f"...and {len(headers) - 20} more columns")
+
+        # Try to identify field types from header names
+        amount_fields = [h for h in headers if any(kw in h.lower() for kw in
+            ["amount", "price", "cost", "total", "sum", "revenue", "value", "qty", "quantity"])]
+        date_fields = [h for h in headers if any(kw in h.lower() for kw in
+            ["date", "time", "created", "updated", "timestamp", "day", "month", "year"])]
+        category_fields = [h for h in headers if any(kw in h.lower() for kw in
+            ["category", "type", "status", "group", "class", "department", "region"])]
+
+        if amount_fields or date_fields or category_fields:
+            schema_parts.append(f"")
+            schema_parts.append(f"### Field Types (inferred)")
+
+        if amount_fields:
+            schema_parts.append(f"- **Numeric/Amount fields** (for aggregation): {', '.join(amount_fields[:5])}")
+        if date_fields:
+            schema_parts.append(f"- **Date fields** (for time-based analysis): {', '.join(date_fields[:5])}")
+        if category_fields:
+            schema_parts.append(f"- **Category fields** (for grouping): {', '.join(category_fields[:5])}")
+
+        return '\n'.join(schema_parts)
+
+    def _generate_sample_data_text(self, content: str, headers: List[str]) -> str:
+        """Generate sample data context from first few rows."""
+        lines = content.split('\n')
+        sample_rows = []
+        found_header = False
+
+        for line in lines:
+            if '|' in line and line.strip().startswith('|'):
+                # Skip separator lines
+                if line.count('-') > 5:
+                    found_header = True
+                    continue
+                if found_header and len(sample_rows) < 5:
+                    sample_rows.append(line)
+
+        if not sample_rows:
+            return ""
+
+        sample_parts = [
+            f"## Sample Data",
+            f"",
+            f"First {len(sample_rows)} rows of data:",
+            f"",
+        ]
+
+        # Add header row if we have headers
+        if headers:
+            sample_parts.append("| " + " | ".join(headers[:10]) + " |")
+            sample_parts.append("|" + "|".join(["---"] * min(len(headers), 10)) + "|")
+
+        for row in sample_rows[:5]:
+            # Truncate very long rows
+            if len(row) > 200:
+                row = row[:200] + "..."
+            sample_parts.append(row)
+
+        return '\n'.join(sample_parts)
 
 
 def chunk_document_adaptive(

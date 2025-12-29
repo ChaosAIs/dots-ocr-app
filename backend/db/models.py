@@ -380,6 +380,19 @@ class Document(Base):
     skip_graphrag = Column(Boolean, default=False, nullable=False)
     skip_graphrag_reason = Column(String(100), nullable=True)  # e.g., "file_type:.xlsx", "document_type:invoice"
 
+    # ==========================================
+    # Tabular Data Processing (Optimized Pathway)
+    # ==========================================
+    # Flag to identify tabular/dataset-style documents (CSV, Excel, invoices, receipts, etc.)
+    is_tabular_data = Column(Boolean, default=False, nullable=False)
+
+    # Processing path indicator: "standard" (full chunking), "tabular" (summary-only), "hybrid"
+    processing_path = Column(String(50), default="standard", nullable=False)
+
+    # Track summary chunk IDs for tabular documents (1-3 chunks instead of many row chunks)
+    # Example: ["doc-uuid_summary", "doc-uuid_schema", "doc-uuid_context"]
+    summary_chunk_ids = Column(ARRAY(String), nullable=True)
+
     # Structured Data Extraction status (for extracting tabular data from spreadsheets, invoices, etc.)
     extraction_eligible = Column(Boolean, nullable=True)
     extraction_status = Column(String(20), default='pending')  # pending, processing, completed, failed, skipped
@@ -436,6 +449,10 @@ class Document(Base):
             "ocr_status": self.ocr_status.value if self.ocr_status else None,
             "vector_status": self.vector_status.value if self.vector_status else None,
             "graphrag_status": self.graphrag_status.value if self.graphrag_status else None,
+            # Tabular data processing fields
+            "is_tabular_data": self.is_tabular_data,
+            "processing_path": self.processing_path,
+            "summary_chunk_ids": self.summary_chunk_ids,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }

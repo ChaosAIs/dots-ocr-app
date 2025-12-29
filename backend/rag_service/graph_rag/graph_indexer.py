@@ -150,12 +150,21 @@ class GraphRAGIndexer:
             Tuple of (num_entities, num_relationships)
         """
         if not GRAPH_RAG_INDEX_ENABLED:
-            logger.debug("[GraphRAG] GraphRAG is disabled, skipping entity extraction")
+            logger.debug("[GraphRAG Index] GraphRAG is disabled, skipping entity extraction")
             return 0, 0
 
-        await self._init_storage()
+        logger.info("=" * 80)
+        logger.info("[GraphRAG Index] ========== GRAPH RAG INDEXING START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[GraphRAG Index] Document: {source_name}")
+        logger.info(f"[GraphRAG Index] Total chunks: {len(chunks)}")
+        logger.info(f"[GraphRAG Index] Use gleaning: {use_gleaning}")
+        logger.info(f"[GraphRAG Index] Embeddings enabled: {self._embeddings_enabled}")
+        logger.info("-" * 80)
 
-        logger.info(f"[GraphRAG] Starting indexing for {source_name}: {len(chunks)} chunks")
+        logger.info("[GraphRAG Index] STEP 1: Initializing Neo4j storage...")
+        await self._init_storage()
+        logger.info("[GraphRAG Index]   - Neo4j storage initialized")
 
         # Get document from database for granular status tracking
         doc = None
@@ -186,6 +195,8 @@ class GraphRAGIndexer:
         skipped_empty = 0
 
         # Process each chunk and save to Neo4j immediately
+        logger.info("[GraphRAG Index] STEP 2: Processing chunks...")
+        logger.info("-" * 80)
         for i, chunk in enumerate(chunks):
             chunk_id = chunk.get("id", f"chunk_{i}")
             content = chunk.get("page_content", "")
@@ -197,7 +208,7 @@ class GraphRAGIndexer:
 
             # Skip empty chunks
             if not content.strip():
-                logger.debug(f"[GraphRAG] Skipping empty chunk {chunk_id}")
+                logger.debug(f"[GraphRAG Index] Skipping empty chunk {chunk_id}")
                 skipped_empty += 1
 
                 # Update status: chunk skipped
@@ -217,7 +228,8 @@ class GraphRAGIndexer:
 
                 continue
 
-            logger.info(f"[GraphRAG] Processing chunk {i + 1}/{len(chunks)}: {chunk_id}")
+            logger.info(f"[GraphRAG Index] Chunk {i + 1}/{len(chunks)}: {chunk_id} (page: {page_number})")
+            logger.info(f"[GraphRAG Index]   - Content length: {len(content)} chars")
 
             try:
                 # Extract entities and relationships from this chunk
@@ -230,8 +242,10 @@ class GraphRAGIndexer:
                         content, chunk_id
                     )
 
+                logger.info(f"[GraphRAG Index]   - Extracted: {len(entities)} entities, {len(relationships)} relationships")
+
                 if not entities and not relationships:
-                    logger.debug(f"[GraphRAG] No entities/relationships in chunk {chunk_id}")
+                    logger.debug(f"[GraphRAG Index]   - No entities/relationships found, skipping")
                     continue
 
                 # Post-process date entities: Add normalized date properties
@@ -325,10 +339,7 @@ class GraphRAGIndexer:
 
                 total_relationships += len(relationships)
 
-                logger.info(
-                    f"[GraphRAG] Chunk {chunk_id}: saved {len(entities)} entities, "
-                    f"{len(relationships)} relationships to Neo4j"
-                )
+                logger.info(f"[GraphRAG Index]   - Saved to Neo4j: {len(entities)} entities, {len(relationships)} relationships")
 
                 # Update status: chunk succeeded
                 if filename_with_ext:
@@ -347,14 +358,14 @@ class GraphRAGIndexer:
                                     relationships=len(relationships),
                                     page_number=page_number
                                 )
-                                logger.info(f"[GraphRAG] Updated chunk {chunk_id} status: success ({len(entities)} entities, {len(relationships)} relationships)")
+                                logger.debug(f"[GraphRAG Index]   - Updated chunk status: success")
                             else:
-                                logger.error(f"[GraphRAG] Could not find document: {filename_with_ext}")
+                                logger.error(f"[GraphRAG Index]   - Could not find document: {filename_with_ext}")
                     except Exception as e:
-                        logger.error(f"Could not update GraphRAG success status: {e}", exc_info=True)
+                        logger.error(f"[GraphRAG Index]   - Could not update success status: {e}", exc_info=True)
 
             except Exception as e:
-                logger.error(f"[GraphRAG] Failed to process chunk {chunk_id}: {e}", exc_info=True)
+                logger.error(f"[GraphRAG Index]   - FAILED to process chunk {chunk_id}: {e}", exc_info=True)
 
                 # Update status: chunk failed
                 if filename_with_ext:
@@ -379,11 +390,15 @@ class GraphRAGIndexer:
 
         # Log summary
         processed_chunks = len(chunks) - skipped_empty
-        logger.info(
-            f"[GraphRAG] Indexing complete for {source_name}: "
-            f"{total_entities} entities, {total_relationships} relationships | "
-            f"Processed {processed_chunks}/{len(chunks)} chunks (skipped {skipped_empty} empty)"
-        )
+        logger.info("-" * 80)
+        logger.info("[GraphRAG Index] ========== GRAPH RAG INDEXING COMPLETE ==========")
+        logger.info("[GraphRAG Index] FINAL SUMMARY:")
+        logger.info(f"[GraphRAG Index]   - Document: {source_name}")
+        logger.info(f"[GraphRAG Index]   - Total Entities: {total_entities}")
+        logger.info(f"[GraphRAG Index]   - Total Relationships: {total_relationships}")
+        logger.info(f"[GraphRAG Index]   - Chunks Processed: {processed_chunks}/{len(chunks)}")
+        logger.info(f"[GraphRAG Index]   - Chunks Skipped (empty): {skipped_empty}")
+        logger.info("=" * 80)
 
         return total_entities, total_relationships
 

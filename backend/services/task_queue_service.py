@@ -13,7 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from db.models import Document, ConvertStatus, IndexStatus
+from db.models import Document, ConvertStatus, IndexStatus, TaskStatus
 from db.document_repository import DocumentRepository
 from db.database import get_db_session
 
@@ -252,6 +252,11 @@ class TaskQueueService:
                         f"Page markdown not found after OCR. Expected: "
                         f"{base_name}_nohf.md or {base_name}_page_{page_task.page_number}_nohf.md"
                     )
+
+                # V2.0: Tabular detection moved to AdaptiveChunker
+                # The chunker will analyze content and decide whether to skip row chunking
+                # and generate summary chunks instead. This allows content-based detection
+                # instead of just extension-based detection at upload time.
 
                 # Read the page content and create chunks
                 logger.info(f"📚 Chunking page {page_task.page_number} content...")

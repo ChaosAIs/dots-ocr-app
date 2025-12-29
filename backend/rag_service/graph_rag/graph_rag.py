@@ -345,24 +345,38 @@ class GraphRAG:
                 enhanced_query=query,
             )
 
+        logger.info("=" * 80)
+        logger.info("[GraphRAG Query] ========== GRAPH RAG QUERY START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[GraphRAG Query] Query: {query[:100]}{'...' if len(query) > 100 else ''}")
+        logger.info(f"[GraphRAG Query] Mode requested: {mode or 'auto'}")
+        logger.info("-" * 80)
+
         await self._init_storage()
 
         params = params or QueryParam()
 
         # Check if iterative reasoning is enabled (Graph-R1 paper design)
         if params.max_steps > 1:
-            logger.info(f"[GraphRAG] Iterative reasoning enabled: max_steps={params.max_steps}")
+            logger.info("[GraphRAG Query] STEP 1: Iterative reasoning mode detected")
+            logger.info(f"[GraphRAG Query]   - Max steps: {params.max_steps}")
             return await self._iterative_reasoning_query(query, mode, params)
 
         # Single-step retrieval (original behavior)
+        logger.info("[GraphRAG Query] STEP 1: Detecting query mode...")
         # Determine query mode
         if mode and mode != "auto":
             query_mode = QueryMode(mode.lower())
             enhanced_query = query
+            logger.info(f"[GraphRAG Query]   - Mode: {query_mode.value} (explicitly set)")
         else:
             query_mode, enhanced_query = await self.query_mode_detector.detect_mode(query)
+            logger.info(f"[GraphRAG Query]   - Mode: {query_mode.value} (auto-detected)")
+            if enhanced_query != query:
+                logger.info(f"[GraphRAG Query]   - Enhanced query: {enhanced_query[:80]}...")
 
-        logger.info(f"[GraphRAG] Processing query with mode: {query_mode.value}")
+        logger.info("-" * 80)
+        logger.info(f"[GraphRAG Query] STEP 2: Executing {query_mode.value.upper()} retrieval...")
 
         # Retrieve based on mode (all modes now include vector search)
         if query_mode == QueryMode.LOCAL:
@@ -375,11 +389,14 @@ class GraphRAG:
         context.mode = query_mode
         context.enhanced_query = enhanced_query
 
-        logger.info(
-            f"[GraphRAG] Retrieved {len(context.entities)} entities, "
-            f"{len(context.relationships)} relationships, "
-            f"{len(context.chunks)} chunks"
-        )
+        logger.info("-" * 80)
+        logger.info("[GraphRAG Query] ========== GRAPH RAG QUERY COMPLETE ==========")
+        logger.info("[GraphRAG Query] FINAL SUMMARY:")
+        logger.info(f"[GraphRAG Query]   - Query Mode: {query_mode.value}")
+        logger.info(f"[GraphRAG Query]   - Entities Retrieved: {len(context.entities)}")
+        logger.info(f"[GraphRAG Query]   - Relationships Retrieved: {len(context.relationships)}")
+        logger.info(f"[GraphRAG Query]   - Chunks Retrieved: {len(context.chunks)}")
+        logger.info("=" * 80)
 
         return context
 
@@ -883,6 +900,10 @@ class GraphRAG:
         3. Retrieve source chunks for matched entities from Qdrant
         4. ALWAYS include direct Qdrant vector search results for the query
         """
+        logger.info("-" * 60)
+        logger.info("[GraphRAG Query] LOCAL MODE RETRIEVAL")
+        logger.info("-" * 60)
+
         # Ensure storage is initialized (may be called directly by UnifiedRetriever)
         await self._init_storage()
 
@@ -892,12 +913,14 @@ class GraphRAG:
         accessible_doc_ids_list = None
         if params.accessible_doc_ids is not None:
             accessible_doc_ids_list = [str(doc_id) for doc_id in params.accessible_doc_ids]
+            logger.info(f"[GraphRAG Query]   - Access control: {len(accessible_doc_ids_list)} accessible docs")
 
         # Try vector search first
+        logger.info("[GraphRAG Query] Step 2.1: Entity vector search in Neo4j...")
         if self._vector_search_enabled:
             query_embedding = await self._get_query_embedding(query)
             if query_embedding:
-                logger.debug("[GraphRAG Query] LOCAL mode - using vector search")
+                logger.info("[GraphRAG Query]   - Using vector similarity search")
                 try:
                     entities = await self._graph_storage.vector_search_entities(
                         query_embedding=query_embedding,
@@ -906,15 +929,15 @@ class GraphRAG:
                         source_names=params.source_names,
                         accessible_doc_ids=accessible_doc_ids_list,
                     )
-                    logger.debug(f"[GraphRAG Query] LOCAL mode - vector search found {len(entities)} entities")
+                    logger.info(f"[GraphRAG Query]   - Vector search found: {len(entities)} entities")
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Vector search failed: {e}")
+                    logger.warning(f"[GraphRAG Query]   - Vector search failed: {e}")
                     entities = []
 
         # Fall back to text matching if vector search didn't find results
         if not entities:
             entity_names = extract_entity_names_from_query(query)
-            logger.debug(f"[GraphRAG Query] LOCAL mode - text search for: {entity_names}")
+            logger.info(f"[GraphRAG Query] Step 2.2: Fallback text search for: {entity_names[:5]}...")
 
             for name in entity_names[:10]:  # Limit to top 10 names
                 try:
@@ -930,28 +953,34 @@ class GraphRAG:
                         if entity not in entities:
                             entities.append(entity)
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Error finding entity '{name}': {e}")
+                    logger.warning(f"[GraphRAG Query]   - Error finding entity '{name}': {e}")
+
+            logger.info(f"[GraphRAG Query]   - Text search found: {len(entities)} entities")
 
         # Limit entities to top_k
         entities = entities[:params.top_k]
-        logger.debug(f"[GraphRAG Query] LOCAL mode - found {len(entities)} entities")
 
         # Retrieve source chunks for the found entities (with access control)
+        logger.info("[GraphRAG Query] Step 2.3: Retrieving source chunks from Qdrant...")
         entity_chunks = self._get_chunks_for_entities(
             entities,
             accessible_doc_ids=params.accessible_doc_ids
         )
+        logger.info(f"[GraphRAG Query]   - Entity chunks retrieved: {len(entity_chunks)}")
 
         # ALWAYS include direct Qdrant vector search results (with optional source and access control filtering)
+        logger.info("[GraphRAG Query] Step 2.4: Direct vector search in Qdrant...")
         vector_chunks = await self._get_vector_search_chunks(
             query,
             params.top_k,
             source_names=params.source_names,
             accessible_doc_ids=params.accessible_doc_ids
         )
+        logger.info(f"[GraphRAG Query]   - Vector chunks retrieved: {len(vector_chunks)}")
 
         # Combine and deduplicate chunks
         chunks = self._merge_chunks(entity_chunks, vector_chunks)
+        logger.info(f"[GraphRAG Query] LOCAL MODE RESULT: {len(entities)} entities, {len(chunks)} chunks")
 
         return GraphRAGContext(
             entities=entities,
@@ -975,6 +1004,10 @@ class GraphRAG:
         4. Fall back to text-based entity search if needed
         5. Retrieve source chunks for context
         """
+        logger.info("-" * 60)
+        logger.info("[GraphRAG Query] GLOBAL MODE RETRIEVAL")
+        logger.info("-" * 60)
+
         # Ensure storage is initialized (may be called directly by UnifiedRetriever)
         await self._init_storage()
 
@@ -985,12 +1018,14 @@ class GraphRAG:
         accessible_doc_ids_list = None
         if params.accessible_doc_ids is not None:
             accessible_doc_ids_list = [str(doc_id) for doc_id in params.accessible_doc_ids]
+            logger.info(f"[GraphRAG Query]   - Access control: {len(accessible_doc_ids_list)} accessible docs")
 
         # Try vector search for relationships first
+        logger.info("[GraphRAG Query] Step 2.1: Relationship vector search in Neo4j...")
         if self._vector_search_enabled:
             query_embedding = await self._get_query_embedding(query)
             if query_embedding:
-                logger.debug("[GraphRAG Query] GLOBAL mode - using relationship vector search")
+                logger.info("[GraphRAG Query]   - Using vector similarity search")
                 try:
                     rel_results = await self._graph_storage.vector_search_relationships(
                         query_embedding=query_embedding,
@@ -1007,14 +1042,14 @@ class GraphRAG:
                             "keywords": rel.get("keywords", ""),
                             "_score": rel.get("_score", 0),
                         })
-                    logger.debug(f"[GraphRAG Query] GLOBAL mode - vector search found {len(relationships)} relationships")
+                    logger.info(f"[GraphRAG Query]   - Vector search found: {len(relationships)} relationships")
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Relationship vector search failed: {e}")
+                    logger.warning(f"[GraphRAG Query]   - Relationship vector search failed: {e}")
 
         # Fall back to entity-based relationship search
         if not relationships:
             entity_names = extract_entity_names_from_query(query)
-            logger.debug(f"[GraphRAG Query] GLOBAL mode - text search for: {entity_names}")
+            logger.info(f"[GraphRAG Query] Step 2.2: Fallback entity-based search for: {entity_names[:5]}...")
 
             for name in entity_names[:5]:  # Limit traversal
                 try:
@@ -1058,33 +1093,35 @@ class GraphRAG:
                                 if rel not in relationships:
                                     relationships.append(rel)
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Error finding entity '{name}': {e}")
+                    logger.warning(f"[GraphRAG Query]   - Error finding entity '{name}': {e}")
+
+            logger.info(f"[GraphRAG Query]   - Text search found: {len(entities)} entities, {len(relationships)} relationships")
 
         # Limit to top_k
         entities = entities[:params.top_k]
         relationships = relationships[:params.top_k]
 
-        logger.debug(
-            f"[GraphRAG Query] GLOBAL mode - found {len(entities)} entities, "
-            f"{len(relationships)} relationships"
-        )
-
         # Retrieve source chunks for the found entities (with access control)
+        logger.info("[GraphRAG Query] Step 2.3: Retrieving source chunks from Qdrant...")
         entity_chunks = self._get_chunks_for_entities(
             entities,
             accessible_doc_ids=params.accessible_doc_ids
         )
+        logger.info(f"[GraphRAG Query]   - Entity chunks retrieved: {len(entity_chunks)}")
 
         # ALWAYS include direct Qdrant vector search results (with optional source and access control filtering)
+        logger.info("[GraphRAG Query] Step 2.4: Direct vector search in Qdrant...")
         vector_chunks = await self._get_vector_search_chunks(
             query,
             params.top_k,
             source_names=params.source_names,
             accessible_doc_ids=params.accessible_doc_ids
         )
+        logger.info(f"[GraphRAG Query]   - Vector chunks retrieved: {len(vector_chunks)}")
 
         # Combine and deduplicate chunks
         chunks = self._merge_chunks(entity_chunks, vector_chunks)
+        logger.info(f"[GraphRAG Query] GLOBAL MODE RESULT: {len(entities)} entities, {len(relationships)} relationships, {len(chunks)} chunks")
 
         return GraphRAGContext(
             entities=entities,
@@ -1106,6 +1143,10 @@ class GraphRAG:
         2. Expand via graph traversal from matched entities
         3. Retrieve source chunks for context
         """
+        logger.info("-" * 60)
+        logger.info("[GraphRAG Query] HYBRID MODE RETRIEVAL")
+        logger.info("-" * 60)
+
         # Ensure storage is initialized (may be called directly by UnifiedRetriever)
         await self._init_storage()
 
@@ -1117,12 +1158,14 @@ class GraphRAG:
         accessible_doc_ids_list = None
         if params.accessible_doc_ids is not None:
             accessible_doc_ids_list = [str(doc_id) for doc_id in params.accessible_doc_ids]
+            logger.info(f"[GraphRAG Query]   - Access control: {len(accessible_doc_ids_list)} accessible docs")
 
         # Try vector search for both entities and relationships
+        logger.info("[GraphRAG Query] Step 2.1: Entity + Relationship vector search in Neo4j...")
         if self._vector_search_enabled:
             query_embedding = await self._get_query_embedding(query)
             if query_embedding:
-                logger.debug("[GraphRAG Query] HYBRID mode - using vector search")
+                logger.info("[GraphRAG Query]   - Using vector similarity search")
 
                 # Vector search for entities
                 try:
@@ -1138,8 +1181,9 @@ class GraphRAG:
                         if entity_id and entity_id not in seen_entity_ids:
                             entities.append(entity)
                             seen_entity_ids.add(entity_id)
+                    logger.info(f"[GraphRAG Query]   - Entity vector search found: {len(entities)} entities")
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Entity vector search failed: {e}")
+                    logger.warning(f"[GraphRAG Query]   - Entity vector search failed: {e}")
 
                 # Vector search for relationships
                 try:
@@ -1159,10 +1203,13 @@ class GraphRAG:
                             "_score": rel.get("_score", 0),
                             "source_doc": rel.get("source_doc"),
                         })
+                    logger.info(f"[GraphRAG Query]   - Relationship vector search found: {len(relationships)} relationships")
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Relationship vector search failed: {e}")
+                    logger.warning(f"[GraphRAG Query]   - Relationship vector search failed: {e}")
 
         # Expand via graph traversal from matched entities
+        logger.info("[GraphRAG Query] Step 2.2: Expanding via graph traversal...")
+        expansion_count = 0
         for entity in list(entities):  # Copy list to avoid modification during iteration
             entity_id = entity.get("id")
             if entity_id:
@@ -1209,13 +1256,16 @@ class GraphRAG:
                                         continue
                                 entities.append(neighbor)
                                 seen_entity_ids.add(neighbor_id)
+                                expansion_count += 1
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Error expanding entity {entity_id}: {e}")
+                    logger.warning(f"[GraphRAG Query]   - Error expanding entity {entity_id}: {e}")
+
+        logger.info(f"[GraphRAG Query]   - Graph expansion added: {expansion_count} neighbor entities")
 
         # Fall back to text search if no results from vector search
         if not entities and not relationships:
             entity_names = extract_entity_names_from_query(query)
-            logger.debug(f"[GraphRAG Query] HYBRID mode - fallback text search: {entity_names}")
+            logger.info(f"[GraphRAG Query] Step 2.3: Fallback text search for: {entity_names[:5]}...")
 
             for name in entity_names[:5]:
                 try:
@@ -1233,7 +1283,9 @@ class GraphRAG:
                             entities.append(entity)
                             seen_entity_ids.add(entity_id)
                 except Exception as e:
-                    logger.warning(f"[GraphRAG Query] Error in text search for '{name}': {e}")
+                    logger.warning(f"[GraphRAG Query]   - Error in text search for '{name}': {e}")
+
+            logger.info(f"[GraphRAG Query]   - Text search found: {len(entities)} entities")
 
         # Filter entities and relationships by document_id if access control is enabled
         if accessible_doc_ids_list:
@@ -1276,27 +1328,27 @@ class GraphRAG:
         entities = entities[:params.top_k]
         relationships = relationships[:params.top_k]
 
-        logger.debug(
-            f"[GraphRAG Query] HYBRID mode - found {len(entities)} entities, "
-            f"{len(relationships)} relationships"
-        )
-
         # Retrieve source chunks for the found entities (with access control)
+        logger.info("[GraphRAG Query] Step 2.4: Retrieving source chunks from Qdrant...")
         entity_chunks = self._get_chunks_for_entities(
             entities,
             accessible_doc_ids=params.accessible_doc_ids
         )
+        logger.info(f"[GraphRAG Query]   - Entity chunks retrieved: {len(entity_chunks)}")
 
         # ALWAYS include direct Qdrant vector search results (with optional source and access control filtering)
+        logger.info("[GraphRAG Query] Step 2.5: Direct vector search in Qdrant...")
         vector_chunks = await self._get_vector_search_chunks(
             query,
             params.top_k,
             source_names=params.source_names,
             accessible_doc_ids=params.accessible_doc_ids
         )
+        logger.info(f"[GraphRAG Query]   - Vector chunks retrieved: {len(vector_chunks)}")
 
         # Combine and deduplicate chunks
         chunks = self._merge_chunks(entity_chunks, vector_chunks)
+        logger.info(f"[GraphRAG Query] HYBRID MODE RESULT: {len(entities)} entities, {len(relationships)} relationships, {len(chunks)} chunks")
 
         return GraphRAGContext(
             entities=entities,

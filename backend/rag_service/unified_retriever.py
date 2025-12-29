@@ -120,18 +120,49 @@ class UnifiedRetriever:
         Returns:
             RetrievalResult with entities, relationships, and chunks
         """
+        logger.info("=" * 80)
+        logger.info("[Retriever] ========== UNIFIED RETRIEVAL START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Retriever] Query: {query[:100]}...")
+        logger.info(f"[Retriever] Top K: {top_k}")
+        logger.info(f"[Retriever] Mode: {mode}")
+        logger.info(f"[Retriever] Workspace ID: {self.workspace_id}")
+        if self.accessible_doc_ids:
+            logger.info(f"[Retriever] Accessible Doc IDs: {len(self.accessible_doc_ids)} documents")
+        if self.source_names:
+            logger.info(f"[Retriever] Source Filters: {self.source_names}")
+        logger.info("-" * 80)
+
         await self._init_graphrag()
 
-        # Debug: Log retrieval decision
-        logger.info(f"[UnifiedRetriever] Retrieve decision debug:")
-        logger.info(f"[UnifiedRetriever]   - graphrag_enabled: {self.graphrag_enabled}")
-        logger.info(f"[UnifiedRetriever]   - _graphrag instance: {self._graphrag is not None}")
-        logger.info(f"[UnifiedRetriever]   - Will use: {'graph_retrieval' if (self.graphrag_enabled and self._graphrag) else 'vector_only'}")
+        # Retrieval decision
+        logger.info("[Retriever] RETRIEVAL DECISION:")
+        logger.info(f"[Retriever]   - GraphRAG Enabled: {self.graphrag_enabled}")
+        logger.info(f"[Retriever]   - GraphRAG Instance: {'Available' if self._graphrag else 'Not Available'}")
+
+        retrieval_method = 'graph_retrieval' if (self.graphrag_enabled and self._graphrag) else 'vector_only'
+        logger.info(f"[Retriever]   - Selected Method: {retrieval_method.upper()}")
+        logger.info("-" * 80)
 
         if self.graphrag_enabled and self._graphrag:
-            return await self._graph_retrieval(query, top_k, mode)
+            result = await self._graph_retrieval(query, top_k, mode)
         else:
-            return await self._vector_only_retrieval(query, top_k)
+            result = await self._vector_only_retrieval(query, top_k)
+
+        # Log results
+        logger.info("-" * 80)
+        logger.info("[Retriever] RETRIEVAL RESULTS:")
+        logger.info(f"[Retriever]   - Chunks Retrieved: {len(result.chunks)}")
+        logger.info(f"[Retriever]   - Parent Chunks: {len(result.parent_chunks)}")
+        logger.info(f"[Retriever]   - Entities: {len(result.entities)}")
+        logger.info(f"[Retriever]   - Relationships: {len(result.relationships)}")
+        logger.info(f"[Retriever]   - Sources: {len(result.sources)}")
+        logger.info(f"[Retriever]   - Retrieval Mode Used: {result.retrieval_mode}")
+        if result.sources:
+            logger.info(f"[Retriever]   - Source Names: {list(result.sources)[:5]}{'...' if len(result.sources) > 5 else ''}")
+        logger.info("=" * 80)
+
+        return result
 
     async def _vector_only_retrieval(
         self,

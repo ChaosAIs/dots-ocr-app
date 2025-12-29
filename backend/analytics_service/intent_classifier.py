@@ -129,17 +129,51 @@ class IntentClassifier:
         Returns:
             IntentClassification with intent and metadata
         """
+        logger.info("=" * 80)
+        logger.info("[Intent Classifier] ========== INTENT CLASSIFICATION START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Intent Classifier] Query: {query}")
+        logger.info(f"[Intent Classifier] Available Schemas: {available_schemas or 'None (using defaults)'}")
+        logger.info(f"[Intent Classifier] Use LLM Override: {use_llm}")
+        logger.info("-" * 80)
+
         should_use_llm = use_llm if use_llm is not None else True
         llm_client = self._get_llm_client() if should_use_llm else None
 
         if llm_client:
+            logger.info("[Intent Classifier] LLM client available - using LLM classification")
             try:
-                return self._llm_classify(query, available_schemas, llm_client)
+                result = self._llm_classify(query, available_schemas, llm_client)
+                logger.info("-" * 80)
+                logger.info("[Intent Classifier] CLASSIFICATION RESULT (LLM):")
+                logger.info(f"[Intent Classifier]   - Intent: {result.intent.value}")
+                logger.info(f"[Intent Classifier]   - Confidence: {result.confidence:.2f}")
+                logger.info(f"[Intent Classifier]   - Reasoning: {result.reasoning}")
+                logger.info(f"[Intent Classifier]   - Requires Extracted Data: {result.requires_extracted_data}")
+                logger.info(f"[Intent Classifier]   - Suggested Schemas: {result.suggested_schemas}")
+                logger.info(f"[Intent Classifier]   - Detected Entities: {result.detected_entities}")
+                logger.info(f"[Intent Classifier]   - Detected Metrics: {result.detected_metrics}")
+                logger.info(f"[Intent Classifier]   - Time Range: {result.detected_time_range}")
+                logger.info("=" * 80)
+                return result
             except Exception as e:
-                logger.warning(f"[IntentClassifier] LLM classification failed: {e}, using fallback")
+                logger.warning(f"[Intent Classifier] LLM classification failed: {e}")
+                logger.info("[Intent Classifier] Falling back to heuristic classification...")
+        else:
+            logger.info("[Intent Classifier] No LLM client - using heuristic classification")
 
         # Fallback to simple heuristics
-        return self._fallback_classify(query, available_schemas)
+        result = self._fallback_classify(query, available_schemas)
+        logger.info("-" * 80)
+        logger.info("[Intent Classifier] CLASSIFICATION RESULT (Heuristic):")
+        logger.info(f"[Intent Classifier]   - Intent: {result.intent.value}")
+        logger.info(f"[Intent Classifier]   - Confidence: {result.confidence:.2f}")
+        logger.info(f"[Intent Classifier]   - Reasoning: {result.reasoning}")
+        logger.info(f"[Intent Classifier]   - Requires Extracted Data: {result.requires_extracted_data}")
+        logger.info(f"[Intent Classifier]   - Suggested Schemas: {result.suggested_schemas}")
+        logger.info(f"[Intent Classifier]   - Time Range: {result.detected_time_range}")
+        logger.info("=" * 80)
+        return result
 
     def _llm_classify(
         self,

@@ -70,7 +70,13 @@ class QueryModeDetector:
         Returns:
             Tuple of (QueryMode, enhanced_query)
         """
+        logger.info("-" * 60)
+        logger.info("[Query Mode Detector] MODE DETECTION")
+        logger.info("-" * 60)
+        logger.info(f"[Query Mode Detector] Query: {query[:80]}{'...' if len(query) > 80 else ''}")
+
         try:
+            logger.info("[Query Mode Detector] Calling LLM for mode detection...")
             llm = self._get_llm_client()
             prompt = QUERY_MODE_DETECTION_PROMPT.format(query=query)
 
@@ -81,11 +87,14 @@ class QueryModeDetector:
             # Parse JSON response
             mode, enhanced_query = self._parse_response(result, query)
 
-            logger.info(f"Query mode detected: {mode.value} for query: {query[:50]}...")
+            logger.info("[Query Mode Detector] DETECTION RESULT:")
+            logger.info(f"[Query Mode Detector]   - Mode: {mode.value}")
+            if enhanced_query != query:
+                logger.info(f"[Query Mode Detector]   - Enhanced query: {enhanced_query[:60]}...")
             return mode, enhanced_query
 
         except Exception as e:
-            logger.warning(f"Query mode detection failed: {e}, falling back to HYBRID")
+            logger.warning(f"[Query Mode Detector] Detection failed: {e}, falling back to HYBRID")
             return QueryMode.HYBRID, query
 
     def _parse_response(self, response: str, original_query: str) -> Tuple[QueryMode, str]:
@@ -136,6 +145,11 @@ class QueryModeDetector:
         2. LOCAL - Single entity focus ("who is X", "what is X")
         3. HYBRID - Default for complex queries (mechanism, explanation, comparison)
         """
+        logger.info("-" * 60)
+        logger.info("[Query Mode Detector] HEURISTIC MODE DETECTION")
+        logger.info("-" * 60)
+        logger.info(f"[Query Mode Detector] Query: {query[:80]}{'...' if len(query) > 80 else ''}")
+
         query_lower = query.lower()
 
         # GLOBAL patterns - cross-entity relationships (most specific, check first)
@@ -162,14 +176,19 @@ class QueryModeDetector:
         # Check GLOBAL first (most specific)
         for pattern in global_patterns:
             if re.search(pattern, query_lower):
+                logger.info("[Query Mode Detector] DETECTION RESULT:")
+                logger.info(f"[Query Mode Detector]   - Mode: GLOBAL (matched pattern: {pattern})")
                 return QueryMode.GLOBAL, query
 
         # Check LOCAL (single entity focus)
         for pattern in local_patterns:
             if re.search(pattern, query_lower):
+                logger.info("[Query Mode Detector] DETECTION RESULT:")
+                logger.info(f"[Query Mode Detector]   - Mode: LOCAL (matched pattern: {pattern})")
                 return QueryMode.LOCAL, query
 
         # Default to HYBRID for all other queries
-        # This includes: explanations, comparisons, "how does X work", lists, counts, etc.
+        logger.info("[Query Mode Detector] DETECTION RESULT:")
+        logger.info("[Query Mode Detector]   - Mode: HYBRID (default)")
         return QueryMode.HYBRID, query
 

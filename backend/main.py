@@ -792,6 +792,12 @@ async def upload_file(
                 doc.skip_graphrag_reason = skip_reason
                 logger.info(f"📊 Document {file.filename} will skip GraphRAG indexing: {skip_reason}")
 
+            # V2.0: Tabular detection moved to chunking phase (AdaptiveChunker)
+            # Document flags (is_tabular_data, processing_path) will be set after
+            # document classification during chunking, not at upload time.
+            # This allows content-based detection, not just extension-based.
+            logger.info(f"[Upload] Document will be classified during chunking phase")
+
             db.commit()
 
             if owner_id:

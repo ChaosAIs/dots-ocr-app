@@ -901,6 +901,146 @@ class DocumentTypeClassifier:
         )
 
 
+# ============================================================================
+# TABULAR DATA DETECTION
+# ============================================================================
+
+# File extensions that indicate tabular/dataset-style data
+TABULAR_FILE_EXTENSIONS = {
+    '.csv', '.tsv', '.xlsx', '.xls', '.xlsm', '.xlsb', '.ods'
+}
+
+# Document types that use the optimized tabular data pathway
+# These types have structured rows and benefit from SQL-based analytics
+TABULAR_DOCUMENT_TYPES = {
+    'spreadsheet', 'invoice', 'receipt', 'bank_statement',
+    'credit_card_statement', 'expense_report', 'inventory_report',
+    'purchase_order', 'sales_order', 'payroll', 'financial_statement',
+    'price_list', 'data_export', 'transaction_log', 'shipping_manifest'
+}
+
+
+class TabularDataDetector:
+    """
+    Detector for tabular/dataset-style documents.
+
+    Used to determine if a document should use the optimized tabular workflow:
+    - Skip row-level chunking
+    - Generate summary/metadata embeddings only (1-3 chunks)
+    - Route queries through SQL-based analytics
+    """
+
+    @staticmethod
+    def is_tabular_data(
+        filename: str = None,
+        document_type: str = None,
+        content: str = None
+    ) -> Tuple[bool, str]:
+        """
+        Determine if document should use the tabular data pathway.
+
+        Args:
+            filename: Document filename
+            document_type: Detected document type
+            content: Optional document content for analysis
+
+        Returns:
+            Tuple of (is_tabular, reason)
+            - is_tabular: True if document should use tabular pathway
+            - reason: Explanation for the decision
+        """
+        # Check 1: File extension
+        if filename:
+            ext = os.path.splitext(filename.lower())[1]
+            if ext in TABULAR_FILE_EXTENSIONS:
+                return True, f"file_extension:{ext}"
+
+        # Check 2: Document type
+        if document_type:
+            doc_type_lower = document_type.lower().strip()
+            # Check direct match
+            if doc_type_lower in TABULAR_DOCUMENT_TYPES:
+                return True, f"document_type:{doc_type_lower}"
+            # Check aliases
+            resolved = TYPE_ALIASES.get(doc_type_lower)
+            if resolved and resolved in TABULAR_DOCUMENT_TYPES:
+                return True, f"document_type:{resolved}"
+
+        # Check 3: Content analysis (if provided)
+        if content:
+            table_density = TabularDataDetector._calculate_table_density(content)
+            if table_density > 0.6:
+                return True, f"table_density:{table_density:.2f}"
+
+            numeric_density = TabularDataDetector._calculate_numeric_density(content)
+            if numeric_density > 0.4:
+                return True, f"numeric_density:{numeric_density:.2f}"
+
+        return False, "not_tabular"
+
+    @staticmethod
+    def _calculate_table_density(content: str) -> float:
+        """Calculate ratio of content that is markdown/HTML tables."""
+        if not content:
+            return 0.0
+
+        lines = content.split('\n')
+        if not lines:
+            return 0.0
+
+        # Count lines that look like table rows
+        table_lines = 0
+        for line in lines:
+            line = line.strip()
+            # Markdown table: | col1 | col2 |
+            if '|' in line and line.count('|') >= 2:
+                table_lines += 1
+            # CSV-like: value, value, value
+            elif ',' in line and line.count(',') >= 2:
+                parts = line.split(',')
+                if len(parts) >= 3:
+                    table_lines += 1
+
+        return table_lines / max(len(lines), 1)
+
+    @staticmethod
+    def _calculate_numeric_density(content: str) -> float:
+        """Calculate ratio of numeric characters in content."""
+        if not content:
+            return 0.0
+
+        import re
+        numeric_chars = len(re.findall(r'[\d.,]', content))
+        return numeric_chars / max(len(content), 1)
+
+    @staticmethod
+    def get_processing_path(
+        filename: str = None,
+        document_type: str = None,
+        content: str = None
+    ) -> str:
+        """
+        Determine the processing path for a document.
+
+        Returns:
+            "tabular" - Use optimized tabular workflow (summary-only indexing)
+            "standard" - Use full chunking workflow
+            "hybrid" - Document has both narrative and tabular content
+        """
+        is_tabular, reason = TabularDataDetector.is_tabular_data(
+            filename=filename,
+            document_type=document_type,
+            content=content
+        )
+
+        if is_tabular:
+            return "tabular"
+
+        # Future: Could detect hybrid documents here
+        # For now, everything else is standard
+        return "standard"
+
+
 # Convenience functions for backward compatibility
 def get_document_type_info(document_type: str) -> Optional[DocumentTypeInfo]:
     """Get info for a document type."""

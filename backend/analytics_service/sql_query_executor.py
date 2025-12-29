@@ -1175,7 +1175,7 @@ class SQLQueryExecutor:
                         logger.warning(f"[Dynamic SQL] Max correction attempts ({max_correction_attempts}) reached")
                     break
 
-        # All attempts failed
+        # All attempts failed (sync version)
         return {
             "data": [],
             "summary": {"error": last_error or "SQL execution failed after all correction attempts"},
@@ -1187,6 +1187,155 @@ class SQLQueryExecutor:
                 "correction_attempts": attempt,
                 "correction_history": correction_history
             }
+        }
+
+    async def _execute_min_max_queries_async(
+        self,
+        generator,
+        query: str,
+        field_mappings: Dict[str, Dict[str, Any]],
+        doc_filter: str,
+        storage_type: str,
+        send_progress
+    ) -> Dict[str, Any]:
+        """
+        Execute separate MIN and MAX queries and combine results.
+
+        This method is called when the user asks for both min and max values (e.g.,
+        "which products have max inventory and min inventory"). Instead of trying
+        to execute one complex UNION ALL query, we run two simple queries and
+        combine their results.
+
+        Args:
+            generator: LLMSQLGenerator instance
+            query: Original user query
+            field_mappings: Field mappings for SQL generation
+            doc_filter: Document filter WHERE clause
+            storage_type: "inline" or "external"
+            send_progress: Async progress callback function
+
+        Returns:
+            Combined query results with both MIN and MAX data
+        """
+        logger.info("[Dynamic SQL] Executing separate MIN/MAX queries")
+
+        # Generate separate MIN and MAX queries
+        min_result, max_result = generator.generate_min_max_separate_queries(
+            query, field_mappings, doc_filter, storage_type
+        )
+
+        combined_data = []
+        min_data = []
+        max_data = []
+        min_sql = None
+        max_sql = None
+        errors = []
+
+        # Execute MIN query
+        if min_result and min_result.success and min_result.sql_query:
+            await send_progress("Running MIN query...")
+            min_sql = min_result.sql_query
+            logger.info(f"[Dynamic SQL] Executing MIN query:\n{min_sql[:200]}...")
+            try:
+                result = self.db.execute(text(min_sql))
+                rows = result.fetchall()
+                columns = result.keys()
+                min_data = [dict(zip(columns, row)) for row in rows]
+                # Add record_type marker to each row
+                for row in min_data:
+                    row['record_type'] = 'MIN'
+                logger.info(f"[Dynamic SQL] MIN query returned {len(min_data)} rows")
+            except Exception as e:
+                logger.error(f"[Dynamic SQL] MIN query failed: {e}")
+                errors.append(f"MIN query error: {str(e)}")
+                # Rollback on error
+                try:
+                    self.db.rollback()
+                except:
+                    pass
+        else:
+            errors.append("Failed to generate MIN query")
+
+        # Execute MAX query
+        if max_result and max_result.success and max_result.sql_query:
+            await send_progress("Running MAX query...")
+            max_sql = max_result.sql_query
+            logger.info(f"[Dynamic SQL] Executing MAX query:\n{max_sql[:200]}...")
+            try:
+                result = self.db.execute(text(max_sql))
+                rows = result.fetchall()
+                columns = result.keys()
+                max_data = [dict(zip(columns, row)) for row in rows]
+                # Add record_type marker to each row
+                for row in max_data:
+                    row['record_type'] = 'MAX'
+                logger.info(f"[Dynamic SQL] MAX query returned {len(max_data)} rows")
+            except Exception as e:
+                logger.error(f"[Dynamic SQL] MAX query failed: {e}")
+                errors.append(f"MAX query error: {str(e)}")
+                # Rollback on error
+                try:
+                    self.db.rollback()
+                except:
+                    pass
+        else:
+            errors.append("Failed to generate MAX query")
+
+        # Combine results (MIN records first, then MAX records)
+        combined_data = min_data + max_data
+
+        if not combined_data and errors:
+            return {
+                "data": [],
+                "summary": {"error": "; ".join(errors)},
+                "metadata": {"query": query}
+            }
+
+        # Calculate stats
+        await send_progress(f"Found {len(combined_data)} records, preparing results...")
+
+        # Find amount column for stats
+        amount_col = None
+        if combined_data:
+            for col in combined_data[0].keys():
+                col_lower = col.lower()
+                if any(kw in col_lower for kw in ['amount', 'total', 'sales', 'sum', 'price', 'value', 'inventory', 'quantity']):
+                    amount_col = col
+                    break
+
+        # Calculate min/max values
+        min_value = None
+        max_value = None
+        if amount_col:
+            if min_data:
+                min_value = min(float(r.get(amount_col, 0) or 0) for r in min_data)
+            if max_data:
+                max_value = max(float(r.get(amount_col, 0) or 0) for r in max_data)
+
+        return {
+            "data": combined_data,
+            "summary": {
+                "report_title": "MIN/MAX Query Results",
+                "min_value": min_value,
+                "max_value": max_value,
+                "min_records": len(min_data),
+                "max_records": len(max_data),
+                "total_records": len(combined_data),
+            },
+            "metadata": {
+                "query": query,
+                "generated_sql": f"MIN Query:\n{min_sql}\n\nMAX Query:\n{max_sql}",
+                "explanation": "Executed as two separate queries for MIN and MAX",
+                "grouping_fields": min_result.grouping_fields if min_result else [],
+                "aggregation_fields": min_result.aggregation_fields if min_result else [],
+                "time_granularity": min_result.time_granularity if min_result else None,
+                "row_count": len(combined_data),
+                "is_min_max_query": True,
+                "errors": errors if errors else None
+            },
+            # Include generator and field_mappings for streaming report
+            "_stream_generator": generator,
+            "_field_mappings": field_mappings
         }
 
     async def execute_dynamic_sql_query_async(
@@ -1235,9 +1384,10 @@ class SQLQueryExecutor:
             else:
                 logger.warning(f"[Dynamic SQL] No progress_callback available, skipping: '{message}'")
 
-        # Step 1: Get field mappings
+        # Step 1: Get field mappings and storage type
         await send_progress("Analyzing data structure...")
-        field_mappings = self._get_available_field_mappings(accessible_doc_ids)
+        field_mappings, storage_type = self._get_field_mappings_and_storage_type(accessible_doc_ids)
+        logger.info(f"[Dynamic SQL] Storage type detected: {storage_type}")
 
         if not field_mappings:
             logger.warning("[Dynamic SQL] No field mappings available")
@@ -1251,10 +1401,19 @@ class SQLQueryExecutor:
         doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
         doc_filter = f"dd.document_id IN ({doc_ids_str})"
 
-        # Step 2: Generate SQL using LLM
+        # Step 2: Generate SQL using LLM (with storage type for proper table selection)
         await send_progress("Building database query...")
         generator = LLMSQLGenerator(llm_client)
-        sql_result = generator.generate_sql(query, field_mappings, doc_filter)
+
+        # Check if this is a min_max query - if so, generate and execute separate queries
+        if generator.is_min_max_query(query):
+            logger.info("[Dynamic SQL] Detected MIN/MAX query - using separate query approach")
+            await send_progress("Generating separate MIN and MAX queries...")
+            return await self._execute_min_max_queries_async(
+                generator, query, field_mappings, doc_filter, storage_type, send_progress
+            )
+
+        sql_result = generator.generate_sql(query, field_mappings, doc_filter, storage_type)
 
         logger.info(f"[Dynamic SQL] Generated SQL:\n{sql_result.sql_query}")
         logger.info(f"[Dynamic SQL] Explanation: {sql_result.explanation}")
@@ -1370,7 +1529,7 @@ class SQLQueryExecutor:
                         logger.warning(f"[Dynamic SQL] Max correction attempts ({max_correction_attempts}) reached")
                     break
 
-        # All attempts failed
+        # All attempts failed (async version)
         return {
             "data": [],
             "summary": {"error": last_error or "SQL execution failed after all correction attempts"},
@@ -1391,12 +1550,54 @@ class SQLQueryExecutor:
         If explicit field_mappings don't exist, dynamically infer them from
         the actual data structure (header_data and line_items).
         """
+        mappings, _ = self._get_field_mappings_and_storage_type(accessible_doc_ids)
+        return mappings
+
+    def _get_storage_type(self, accessible_doc_ids: List[UUID]) -> str:
+        """
+        Get the storage type (inline or external) for the given documents.
+
+        Returns:
+            "inline" or "external"
+        """
         try:
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
 
-            # First try: Look for explicit field_mappings
             result = self.db.execute(text(f"""
-                SELECT header_data->'field_mappings' as field_mappings
+                SELECT line_items_storage, line_items_count
+                FROM documents_data
+                WHERE document_id IN ({doc_ids_str})
+                AND line_items_count > 0
+                LIMIT 1
+            """))
+
+            row = result.fetchone()
+            if row:
+                storage_type = row[0] or 'inline'
+                logger.info(f"[Storage Type] Detected storage type: {storage_type} ({row[1]} items)")
+                return storage_type
+
+            return 'inline'  # Default
+
+        except Exception as e:
+            logger.error(f"Failed to get storage type: {e}")
+            return 'inline'
+
+    def _get_field_mappings_and_storage_type(self, accessible_doc_ids: List[UUID]) -> Tuple[Dict[str, Dict[str, Any]], str]:
+        """
+        Get field mappings and storage type from documents with extracted data.
+
+        Returns:
+            Tuple of (field_mappings, storage_type)
+        """
+        storage_type = 'inline'  # Default
+
+        try:
+            doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
+
+            # First try: Look for explicit field_mappings and get storage type
+            result = self.db.execute(text(f"""
+                SELECT header_data->'field_mappings' as field_mappings, line_items_storage
                 FROM documents_data
                 WHERE document_id IN ({doc_ids_str})
                 AND header_data->'field_mappings' IS NOT NULL
@@ -1405,16 +1606,22 @@ class SQLQueryExecutor:
 
             row = result.fetchone()
             if row and row[0]:
-                logger.info(f"[Field Mappings] Found explicit field mappings with {len(row[0])} fields")
-                return dict(row[0])
+                storage_type = row[1] or 'inline'
+                logger.info(f"[Field Mappings] Found explicit field mappings with {len(row[0])} fields, storage={storage_type}")
+                return dict(row[0]), storage_type
 
             # Second: Dynamically infer field mappings from actual data structure
             logger.info("[Field Mappings] No explicit mappings found, inferring from data structure...")
-            return self._infer_field_mappings_from_data(accessible_doc_ids)
+            field_mappings = self._infer_field_mappings_from_data(accessible_doc_ids)
+
+            # Get storage type separately
+            storage_type = self._get_storage_type(accessible_doc_ids)
+
+            return field_mappings, storage_type
 
         except Exception as e:
             logger.error(f"Failed to get field mappings: {e}")
-            return {}
+            return {}, 'inline'
 
     def _infer_field_mappings_from_data(self, accessible_doc_ids: List[UUID]) -> Dict[str, Dict[str, Any]]:
         """
@@ -1425,20 +1632,28 @@ class SQLQueryExecutor:
 
         For spreadsheet data, uses flexible matching to map column headers
         like "Total Sales", "Purchase Date", etc. to semantic types.
+
+        Supports both inline line_items (JSONB) and external storage
+        (documents_data_line_items table).
         """
         try:
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
 
-            # Get sample document to analyze structure
+            # First, try to get document with inline line_items
             result = self.db.execute(text(f"""
                 SELECT
-                    schema_type,
-                    header_data,
-                    line_items->0 as sample_line_item
-                FROM documents_data
-                WHERE document_id IN ({doc_ids_str})
-                AND line_items IS NOT NULL
-                AND jsonb_array_length(line_items) > 0
+                    dd.id,
+                    dd.schema_type,
+                    dd.header_data,
+                    dd.line_items->0 as sample_line_item,
+                    dd.line_items_storage,
+                    dd.line_items_count
+                FROM documents_data dd
+                WHERE dd.document_id IN ({doc_ids_str})
+                AND (
+                    (dd.line_items_storage = 'inline' AND dd.line_items IS NOT NULL AND jsonb_array_length(dd.line_items) > 0)
+                    OR (dd.line_items_storage = 'external' AND dd.line_items_count > 0)
+                )
                 LIMIT 1
             """))
 
@@ -1447,9 +1662,29 @@ class SQLQueryExecutor:
                 logger.warning("[Field Mappings] No documents with line items found")
                 return {}
 
-            schema_type = row[0]
-            header_data = row[1] or {}
-            sample_item = row[2] or {}
+            documents_data_id = row[0]
+            schema_type = row[1]
+            header_data = row[2] or {}
+            sample_item = row[3] or {}
+            line_items_storage = row[4]
+            line_items_count = row[5]
+
+            # If external storage, fetch sample from documents_data_line_items table
+            if line_items_storage == 'external' and not sample_item:
+                logger.info(f"[Field Mappings] Line items stored externally ({line_items_count} items), fetching sample...")
+                ext_result = self.db.execute(text(f"""
+                    SELECT data FROM documents_data_line_items
+                    WHERE documents_data_id = '{documents_data_id}'
+                    ORDER BY line_number
+                    LIMIT 1
+                """))
+                ext_row = ext_result.fetchone()
+                if ext_row:
+                    sample_item = ext_row[0] or {}
+                    logger.info(f"[Field Mappings] Retrieved sample from external storage: {list(sample_item.keys())}")
+                else:
+                    logger.warning("[Field Mappings] No sample found in external line items table")
+                    return {}
 
             # Build field mappings based on discovered fields
             field_mappings = {}

@@ -1171,8 +1171,15 @@ def trigger_embedding_for_document(
     Trigger two-phase indexing for a document after conversion completes.
     Both phases run in background without blocking the main thread.
 
-    Phase 1: Chunk embedding to Qdrant (makes document queryable)
-    Phase 2: GraphRAG entity extraction to Neo4j (runs after Phase 1 completes)
+    For TABULAR documents (CSV, Excel, invoices, etc.):
+    - Routes to TabularExtractionService for optimized processing
+    - Skips row-level chunking
+    - Creates 1-3 summary chunks for discovery
+    - Extracts structured data to PostgreSQL
+
+    For STANDARD documents:
+    - Phase 1: Chunk embedding to Qdrant (makes document queryable)
+    - Phase 2: GraphRAG entity extraction to Neo4j (runs after Phase 1 completes)
 
     This approach allows users to query the document immediately after Phase 1,
     even while GraphRAG processing is still running in the background.
@@ -1191,6 +1198,97 @@ def trigger_embedding_for_document(
     except ImportError:
         IndexStatus = None
 
+    # ========== CHECK FOR TABULAR DATA DOCUMENT ==========
+    # Route tabular documents to optimized TabularExtractionService
+    logger.info("=" * 80)
+    logger.info("[Indexer] ========== DOCUMENT ROUTING DECISION ==========")
+    logger.info("=" * 80)
+    logger.info(f"[Indexer] Source Name: {source_name}")
+    logger.info(f"[Indexer] Filename: {filename}")
+    logger.info(f"[Indexer] Output Dir: {output_dir}")
+    logger.info(f"[Indexer] Conversion ID: {conversion_id}")
+    logger.info("-" * 80)
+
+    is_tabular = False
+    processing_path = "standard"
+    detection_source = "none"
+
+    if DB_AVAILABLE and filename:
+        logger.info("[Indexer] Checking database for tabular document flags...")
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                doc = repo.get_by_filename(filename)
+                if doc:
+                    is_tabular = doc.is_tabular_data
+                    processing_path = doc.processing_path or "standard"
+                    detection_source = "database"
+                    logger.info(f"[Indexer] Database lookup result:")
+                    logger.info(f"[Indexer]   - is_tabular_data: {is_tabular}")
+                    logger.info(f"[Indexer]   - processing_path: {processing_path}")
+                else:
+                    logger.info(f"[Indexer] Document not found in database by filename")
+        except Exception as e:
+            logger.warning(f"[Indexer] Could not check tabular status for {filename}: {e}")
+
+    # If not in database, check by filename extension
+    if not is_tabular and filename:
+        logger.info("[Indexer] Checking filename extension for tabular detection...")
+        from common.document_type_classifier import TabularDataDetector
+        is_tabular, reason = TabularDataDetector.is_tabular_data(filename=filename)
+        if is_tabular:
+            processing_path = TabularDataDetector.get_processing_path(filename=filename)
+            detection_source = "filename_extension"
+            logger.info(f"[Indexer] Filename extension detection result:")
+            logger.info(f"[Indexer]   - is_tabular: {is_tabular}")
+            logger.info(f"[Indexer]   - reason: {reason}")
+            logger.info(f"[Indexer]   - processing_path: {processing_path}")
+        else:
+            logger.info(f"[Indexer] Not detected as tabular by filename: {reason if reason else 'no match'}")
+
+    logger.info("-" * 80)
+    logger.info(f"[Indexer] ROUTING DECISION:")
+    logger.info(f"[Indexer]   - Is Tabular: {is_tabular}")
+    logger.info(f"[Indexer]   - Processing Path: {processing_path}")
+    logger.info(f"[Indexer]   - Detection Source: {detection_source}")
+
+    # Route tabular documents to TabularExtractionService
+    if is_tabular and processing_path == "tabular":
+        logger.info("=" * 80)
+        logger.info("[Indexer] ========== ROUTING TO TABULAR EXTRACTION SERVICE ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Indexer] Document will use OPTIMIZED TABULAR PATHWAY:")
+        logger.info(f"[Indexer]   - Row-level chunking: SKIPPED")
+        logger.info(f"[Indexer]   - GraphRAG indexing: SKIPPED")
+        logger.info(f"[Indexer]   - Summary-only indexing: ENABLED (1-3 chunks)")
+        logger.info(f"[Indexer]   - Structured data extraction: ENABLED")
+        logger.info("-" * 80)
+        try:
+            from services.tabular_extraction_service import trigger_tabular_extraction
+            trigger_tabular_extraction(
+                source_name=source_name,
+                output_dir=output_dir,
+                filename=filename,
+                conversion_id=conversion_id,
+                broadcast_callback=broadcast_callback
+            )
+            logger.info("[Indexer] Successfully triggered TabularExtractionService")
+            logger.info("=" * 80)
+            return  # Exit - tabular service handles everything
+        except Exception as e:
+            logger.error(f"[Indexer] Failed to trigger tabular extraction: {e}")
+            logger.error("[Indexer] Falling back to STANDARD processing pathway...")
+            # Fall through to standard processing
+    else:
+        logger.info("=" * 80)
+        logger.info("[Indexer] ========== ROUTING TO STANDARD PROCESSING ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Indexer] Document will use STANDARD PATHWAY:")
+        logger.info(f"[Indexer]   - Phase 1: Full chunking + Qdrant embedding")
+        logger.info(f"[Indexer]   - Phase 2: GraphRAG entity extraction (if enabled)")
+        logger.info("-" * 80)
+
+    # ========== STANDARD DOCUMENT PROCESSING ==========
     def _two_phase_indexing_task():
         try:
             logger.info(f"[Two-Phase Indexing] Starting for: {source_name}")
