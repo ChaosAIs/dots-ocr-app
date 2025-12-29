@@ -233,6 +233,27 @@ class WorkspaceService {
       { name: "File", value: "file", icon: "pi pi-file" }
     ];
   }
+
+  /**
+   * Save markdown content to a workspace
+   * @param {string} content - The markdown content to save
+   * @param {string} filename - The filename (without extension)
+   * @param {string} workspaceId - The target workspace ID
+   * @returns {Promise} - Save response with document_id and filename
+   */
+  async saveMarkdownToWorkspace(content, filename, workspaceId) {
+    try {
+      const response = await http.post(`${this.baseUrl}/save-markdown`, {
+        content,
+        filename,
+        workspace_id: workspaceId
+      });
+      return response.data;
+    } catch (error) {
+      console.error("Error saving markdown to workspace:", error);
+      throw error;
+    }
+  }
 }
 
 const workspaceService = new WorkspaceService();

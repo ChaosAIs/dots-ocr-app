@@ -212,8 +212,8 @@ class DocumentService:
             repo = DocumentRepository(db)
             doc = repo.get_by_filename(filename)
             if not doc:
-                # Try common extensions
-                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                # Try common extensions including .md for markdown files saved from chat
+                for ext in ['.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
                     doc = repo.get_by_filename(filename + ext)
                     if doc:
                         break
@@ -309,7 +309,8 @@ class DocumentService:
             repo = DocumentRepository(db)
             doc = repo.get_by_filename(filename)
             if not doc:
-                for ext in ['.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                # Try common extensions including .md for markdown files saved from chat
+                for ext in ['.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
                     doc = repo.get_by_filename(filename + ext)
                     if doc:
                         break

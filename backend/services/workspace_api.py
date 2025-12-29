@@ -569,3 +569,250 @@ def sync_workspace_folders(
         "orphaned_folders": results["orphaned_folders"],
         "errors": results["errors"]
     }
+
+
+class SaveMarkdownRequest(BaseModel):
+    """Request model for saving markdown content to workspace."""
+    content: str = Field(..., min_length=1)
+    filename: str = Field(..., min_length=1, max_length=255)
+    workspace_id: UUID
+
+
+class SaveMarkdownResponse(BaseModel):
+    """Response model for save markdown operation."""
+    success: bool
+    message: str
+    document_id: Optional[UUID] = None
+    filename: str
+
+
+@router.post("/save-markdown", response_model=SaveMarkdownResponse)
+def save_markdown_to_workspace(
+    request: SaveMarkdownRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Save markdown content as a file to a workspace.
+
+    This endpoint:
+    1. Creates markdown file directly in the output folder (skipping OCR)
+    2. Creates proper folder structure: output/{username}/{workspace}/{doc_name}/
+    3. Creates both {name}.md and {name}_nohf.md files
+    4. Registers document in database with OCR status = SKIPPED
+    5. Creates task queue page entry with OCR already completed (SKIPPED)
+    6. Triggers indexing process (vector embedding, GraphRAG, data extraction)
+    """
+    import os
+    import re
+    import threading
+    from datetime import datetime, timezone
+    from db.document_repository import DocumentRepository
+    from services.permission_service import PermissionService
+    from db.models import UploadStatus, ConvertStatus, IndexStatus, TaskStatus
+
+    # Get the workspace
+    service = WorkspaceService(db)
+    workspace = service.get_workspace(request.workspace_id)
+
+    if not workspace:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Workspace not found"
+        )
+
+    # Check ownership
+    if workspace.user_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+
+    if workspace.is_system:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot save files to system workspace"
+        )
+
+    # Sanitize filename - remove extension if present, we'll add .md
+    import re
+    base_name = re.sub(r'[<>:"/\\|?*]', '_', request.filename)
+    # Remove .md extension if present (we'll add it properly)
+    if base_name.endswith('.md'):
+        base_name = base_name[:-3]
+
+    # Get directory paths
+    input_dir = os.environ.get('INPUT_DIR', './input')
+    output_dir = os.environ.get('OUTPUT_DIR', './output')
+
+    # Build paths following the pattern: output/{username}/{workspace_folder}/{doc_name}/
+    # workspace.folder_path is like "username/workspace_folder"
+    workspace_output_path = os.path.join(output_dir, workspace.folder_path)
+
+    # Create unique document folder name
+    doc_folder_name = base_name
+    doc_output_path = os.path.join(workspace_output_path, doc_folder_name)
+
+    # Make folder name unique if it already exists
+    if os.path.exists(doc_output_path):
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        doc_folder_name = f"{base_name}_{timestamp}"
+        doc_output_path = os.path.join(workspace_output_path, doc_folder_name)
+
+    # Create the output folder
+    os.makedirs(doc_output_path, exist_ok=True)
+
+    # Validate path to prevent directory traversal
+    if not os.path.abspath(doc_output_path).startswith(os.path.abspath(output_dir)):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file path"
+        )
+
+    # File paths
+    md_filename = f"{doc_folder_name}.md"
+    nohf_filename = f"{doc_folder_name}_nohf.md"
+    md_path = os.path.join(doc_output_path, md_filename)
+    nohf_path = os.path.join(doc_output_path, nohf_filename)
+
+    # Also save to input folder for consistency with upload flow
+    input_workspace_path = os.path.join(input_dir, workspace.folder_path)
+    os.makedirs(input_workspace_path, exist_ok=True)
+    input_file_path = os.path.join(input_workspace_path, md_filename)
+
+    try:
+        # Write markdown content to all locations
+        with open(md_path, 'w', encoding='utf-8') as f:
+            f.write(request.content)
+
+        with open(nohf_path, 'w', encoding='utf-8') as f:
+            f.write(request.content)
+
+        with open(input_file_path, 'w', encoding='utf-8') as f:
+            f.write(request.content)
+
+        file_size = os.path.getsize(md_path)
+        relative_input_path = os.path.join(workspace.folder_path, md_filename)
+        relative_output_path = os.path.join(workspace.folder_path, doc_folder_name)
+
+        # Create document record in database
+        doc_repo = DocumentRepository(db)
+        doc, created = doc_repo.get_or_create(
+            filename=md_filename,
+            original_filename=md_filename,
+            file_path=relative_input_path,
+            file_size=file_size,
+        )
+
+        # Set document properties - mark as already converted (skip OCR)
+        doc.workspace_id = workspace.id
+        doc.owner_id = current_user.id
+        doc.visibility = 'private'
+        doc.total_pages = 1
+        doc.mime_type = 'text/markdown'
+        doc.output_path = relative_output_path
+        doc.upload_status = UploadStatus.UPLOADED
+        doc.convert_status = ConvertStatus.CONVERTED
+        doc.index_status = IndexStatus.PENDING  # Ready for indexing
+        # Set OCR status to SKIPPED since markdown files bypass OCR
+        doc.ocr_status = TaskStatus.SKIPPED
+        doc.ocr_completed_at = datetime.now(timezone.utc)
+
+        db.commit()
+
+        # Grant owner permission
+        perm_service = PermissionService(db)
+        perm_service.grant_owner_permission(user_id=current_user.id, document_id=doc.id)
+
+        # Update workspace document count
+        service.workspace_repo.recalculate_document_count(workspace.id)
+
+        # Create task queue page entry with OCR already completed (SKIPPED)
+        # This allows vector/graphrag workers to pick up the document
+        try:
+            from queue_service.models import TaskQueuePage
+
+            # Relative path for page_file_path (relative to output_dir)
+            relative_nohf_path = os.path.join(relative_output_path, nohf_filename)
+
+            # Check if page already exists
+            existing_page = db.query(TaskQueuePage).filter(
+                TaskQueuePage.document_id == doc.id,
+                TaskQueuePage.page_number == 0
+            ).first()
+
+            if not existing_page:
+                page_task = TaskQueuePage(
+                    document_id=doc.id,
+                    page_number=0,
+                    page_file_path=relative_nohf_path,
+                    # OCR is SKIPPED (intentionally bypassed for markdown files)
+                    ocr_status=TaskStatus.SKIPPED,
+                    ocr_completed_at=datetime.now(timezone.utc),
+                    # Vector and GraphRAG are pending, ready to be picked up by workers
+                    vector_status=TaskStatus.PENDING,
+                    graphrag_status=TaskStatus.PENDING,
+                )
+                db.add(page_task)
+                db.commit()
+                logger.info(f"Created task queue page entry for markdown document: {md_filename} (OCR=SKIPPED)")
+            else:
+                logger.info(f"Task queue page entry already exists for: {md_filename}")
+        except Exception as e:
+            logger.warning(f"Could not create task queue page entry: {e}")
+            # Continue - the document is still saved, just may not be picked up by queue workers
+
+        logger.info(f"Saved markdown file '{md_filename}' to workspace '{workspace.name}' for user {current_user.username}")
+        logger.info(f"Output path: {doc_output_path}")
+
+        # Trigger indexing in background thread
+        doc_id = doc.id
+        def trigger_indexing():
+            try:
+                # Import here to avoid circular imports
+                from rag_service.indexer import trigger_embedding_for_document
+
+                logger.info(f"Triggering indexing for markdown document: {md_filename}")
+                # source_name must be the full relative path from output_dir
+                # e.g., "fyang/test_copy_markdown/Meal Receipt Details for 2025"
+                trigger_embedding_for_document(
+                    source_name=relative_output_path,
+                    output_dir=output_dir,
+                    filename=md_filename,
+                    conversion_id=f"md-{doc_id}",
+                    broadcast_callback=None
+                )
+                logger.info(f"Indexing triggered successfully for: {md_filename}")
+            except Exception as e:
+                logger.error(f"Failed to trigger indexing for {md_filename}: {e}")
+
+        # Start indexing in background
+        indexing_thread = threading.Thread(target=trigger_indexing, daemon=True)
+        indexing_thread.start()
+
+        return SaveMarkdownResponse(
+            success=True,
+            message="Markdown saved successfully. Indexing started.",
+            document_id=doc.id,
+            filename=md_filename
+        )
+
+    except Exception as e:
+        logger.error(f"Failed to save markdown to workspace: {e}")
+        # Clean up files if they were created
+        for path in [md_path, nohf_path, input_file_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except:
+                    pass
+        # Clean up folder if empty
+        if os.path.exists(doc_output_path):
+            try:
+                os.rmdir(doc_output_path)
+            except:
+                pass
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to save markdown: {str(e)}"
+        )

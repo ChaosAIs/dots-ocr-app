@@ -1860,7 +1860,8 @@ async def stream_agent_response(
     session_context: Optional[Dict[str, Any]] = None,
     is_retry: bool = False,
     accessible_doc_ids: Optional[set] = None,
-    analytics_context: Optional[str] = None
+    analytics_context: Optional[str] = None,
+    document_context_changed: bool = False
 ):
     """
     Stream the agent response for a query.
@@ -1873,6 +1874,7 @@ async def stream_agent_response(
         is_retry: If True, user clicked retry button - always trigger new document search.
         accessible_doc_ids: Optional set of document IDs the user has access to (for access control filtering).
         analytics_context: Optional pre-computed analytics context for hybrid queries (from SQL aggregation).
+        document_context_changed: If True, the document/workspace selection has changed - force new search.
 
     Yields:
         Chunks of the response text.
@@ -1896,8 +1898,13 @@ async def stream_agent_response(
     else:
         logger.warning("[Access Control] accessible_doc_ids is None - searches will be blocked for security")
 
+    # Force NEW_SEARCH if document context has changed (user changed workspace/document selection)
+    force_new_search = document_context_changed
+    if document_context_changed:
+        logger.info(f"[Document Context] Document/workspace selection changed - forcing new document search")
+
     # Classify query with conversation context and retry flag
-    query_classification = _classify_query_with_context(query, conversation_history, is_retry=is_retry)
+    query_classification = _classify_query_with_context(query, conversation_history, is_retry=is_retry or force_new_search)
     logger.info(f"[Query Classification] Query: '{query}' -> {query_classification}")
 
     # Handle CONVERSATION_ONLY queries - answer directly from conversation history without document search

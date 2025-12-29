@@ -1,18 +1,29 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { InputTextarea } from "primereact/inputtextarea";
+import { InputText } from "primereact/inputtext";
 import { Button } from "primereact/button";
 import { Card } from "primereact/card";
 import { ProgressSpinner } from "primereact/progressspinner";
 import { Toast } from "primereact/toast";
 import { Dialog } from "primereact/dialog";
+import { RadioButton } from "primereact/radiobutton";
+import { Dropdown } from "primereact/dropdown";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
 import authService from "../../services/authService";
+import workspaceService from "../../services/workspaceService";
 import { ChatHistory } from "./ChatHistory";
 import { WorkspaceBrowser } from "./WorkspaceBrowser";
 import { useTranslation } from "react-i18next";
 import { useAuth } from "../../core/auth/components/authProvider";
+import {
+  exportAsMarkdown,
+  exportAsPdf,
+  exportAsWord,
+  exportAsExcel,
+  generateFilename,
+} from "../../utils/exportUtils";
 import "./AgenticChatBot.scss";
 
 // Get WebSocket URL from environment or use default
@@ -38,6 +49,21 @@ export const AgenticChatBot = () => {
   const [markdownEditorContent, setMarkdownEditorContent] = useState("");
   const [markdownEditorMessageIndex, setMarkdownEditorMessageIndex] = useState(null);
   const [markdownEditorPreview, setMarkdownEditorPreview] = useState(false);
+
+  // Export/Download dialog state
+  const [exportDialogVisible, setExportDialogVisible] = useState(false);
+  const [exportContent, setExportContent] = useState("");
+  const [exportOption, setExportOption] = useState("markdown");
+  const [exportFilename, setExportFilename] = useState("");
+  const [workspaces, setWorkspaces] = useState([]);
+  const [selectedWorkspaceForExport, setSelectedWorkspaceForExport] = useState(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [loadingWorkspaces, setLoadingWorkspaces] = useState(false);
+
+  // Create new workspace state (within export dialog)
+  const [showCreateWorkspace, setShowCreateWorkspace] = useState(false);
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [isCreatingWorkspace, setIsCreatingWorkspace] = useState(false);
 
   // Progress step tracking for better UX
   const [progressStep, setProgressStep] = useState(null);
@@ -671,6 +697,171 @@ export const AgenticChatBot = () => {
     setMarkdownEditorPreview(false);
   }, []);
 
+  // Open export dialog for assistant message
+  const handleOpenExportDialog = useCallback(async (content) => {
+    setExportContent(content);
+    setExportOption("markdown");
+    setSelectedWorkspaceForExport(null);
+    setShowCreateWorkspace(false);
+    setNewWorkspaceName("");
+    // Generate default filename from content
+    setExportFilename(generateFilename(content));
+    setExportDialogVisible(true);
+
+    // Load workspaces for "Copy to workspace" option
+    setLoadingWorkspaces(true);
+    try {
+      const result = await workspaceService.getWorkspaces(false);
+      // The API returns a list directly, not wrapped in {workspaces: []}
+      setWorkspaces(Array.isArray(result) ? result : (result.workspaces || []));
+    } catch (error) {
+      console.error("Error loading workspaces:", error);
+      setWorkspaces([]);
+    } finally {
+      setLoadingWorkspaces(false);
+    }
+  }, []);
+
+  // Close export dialog
+  const handleCloseExportDialog = useCallback(() => {
+    setExportDialogVisible(false);
+    setExportContent("");
+    setExportOption("markdown");
+    setExportFilename("");
+    setSelectedWorkspaceForExport(null);
+    setShowCreateWorkspace(false);
+    setNewWorkspaceName("");
+  }, []);
+
+  // Create new workspace from export dialog
+  const handleCreateWorkspaceForExport = useCallback(async () => {
+    if (!newWorkspaceName.trim()) {
+      toast.current?.show({
+        severity: "warn",
+        summary: t("Workspace.NameRequired"),
+        detail: t("Workspace.NameRequired"),
+        life: 3000,
+      });
+      return;
+    }
+
+    setIsCreatingWorkspace(true);
+    try {
+      const newWorkspace = await workspaceService.createWorkspace({
+        name: newWorkspaceName.trim(),
+        color: "#6366f1",
+        icon: "folder"
+      });
+
+      // Add new workspace to the list and select it
+      setWorkspaces(prev => [...prev, newWorkspace]);
+      setSelectedWorkspaceForExport(newWorkspace.id);
+      setShowCreateWorkspace(false);
+      setNewWorkspaceName("");
+
+      toast.current?.show({
+        severity: "success",
+        summary: t("Workspace.CreateSuccess"),
+        detail: t("Workspace.CreateSuccess"),
+        life: 3000,
+      });
+    } catch (error) {
+      console.error("Error creating workspace:", error);
+      toast.current?.show({
+        severity: "error",
+        summary: t("Workspace.CreateFailed"),
+        detail: error.response?.data?.detail || t("Workspace.CreateFailed"),
+        life: 5000,
+      });
+    } finally {
+      setIsCreatingWorkspace(false);
+    }
+  }, [newWorkspaceName, t]);
+
+  // Handle export action
+  const handleExport = useCallback(async () => {
+    if (!exportContent) return;
+
+    // Use the user-specified filename or fallback to generated one
+    const filename = exportFilename.trim() || generateFilename(exportContent);
+
+    if (exportOption === "markdown") {
+      exportAsMarkdown(exportContent, filename);
+      handleCloseExportDialog();
+      toast.current?.show({
+        severity: "success",
+        summary: t("Chat.ExportSuccess"),
+        detail: t("Chat.ExportedAsMarkdown"),
+        life: 3000,
+      });
+    } else if (exportOption === "pdf") {
+      exportAsPdf(exportContent, filename);
+      handleCloseExportDialog();
+      toast.current?.show({
+        severity: "success",
+        summary: t("Chat.ExportSuccess"),
+        detail: t("Chat.ExportedAsPdf"),
+        life: 3000,
+      });
+    } else if (exportOption === "word") {
+      exportAsWord(exportContent, filename);
+      handleCloseExportDialog();
+      toast.current?.show({
+        severity: "success",
+        summary: t("Chat.ExportSuccess"),
+        detail: t("Chat.ExportedAsWord"),
+        life: 3000,
+      });
+    } else if (exportOption === "excel") {
+      exportAsExcel(exportContent, filename);
+      handleCloseExportDialog();
+      toast.current?.show({
+        severity: "success",
+        summary: t("Chat.ExportSuccess"),
+        detail: t("Chat.ExportedAsExcel"),
+        life: 3000,
+      });
+    } else if (exportOption === "workspace") {
+      if (!selectedWorkspaceForExport) {
+        toast.current?.show({
+          severity: "warn",
+          summary: t("Chat.SelectWorkspace"),
+          detail: t("Chat.PleaseSelectWorkspace"),
+          life: 3000,
+        });
+        return;
+      }
+
+      setIsExporting(true);
+      try {
+        // Use the new backend API to save markdown to workspace
+        await workspaceService.saveMarkdownToWorkspace(
+          exportContent,
+          filename,
+          selectedWorkspaceForExport
+        );
+
+        handleCloseExportDialog();
+        toast.current?.show({
+          severity: "success",
+          summary: t("Chat.ExportSuccess"),
+          detail: t("Chat.SavedToWorkspace"),
+          life: 3000,
+        });
+      } catch (error) {
+        console.error("Error saving to workspace:", error);
+        toast.current?.show({
+          severity: "error",
+          summary: t("Chat.ExportFailed"),
+          detail: error.response?.data?.detail || t("Chat.FailedToSaveToWorkspace"),
+          life: 5000,
+        });
+      } finally {
+        setIsExporting(false);
+      }
+    }
+  }, [exportContent, exportOption, exportFilename, selectedWorkspaceForExport, handleCloseExportDialog, t]);
+
   // Save markdown editor content
   const handleSaveMarkdownEditor = useCallback(async () => {
     if (markdownEditorMessageIndex === null || !sessionId || isSavingCorrection) return;
@@ -887,7 +1078,7 @@ export const AgenticChatBot = () => {
     }
   };
 
-  const clearChat = () => {
+  const clearChat = async () => {
     // Clear current session and messages
     // New session will be created when user sends first message
 
@@ -920,6 +1111,22 @@ export const AgenticChatBot = () => {
     setStreamingContent("");
     setIsConnected(false);
 
+    // Reset workspace/document selection to user preferences for new chat
+    // This ensures new chat starts with user's default document sources
+    try {
+      const result = await authService.getChatPreferences();
+      if (result.success && result.chat) {
+        const prefWorkspaceIds = result.chat.selectedWorkspaceIds || [];
+        const prefDocumentIds = result.chat.selectedDocumentIds || [];
+        console.log("[AgenticChatBot] New chat - restoring user preferences:", prefWorkspaceIds);
+        setSelectedWorkspaceIds(prefWorkspaceIds);
+        setSelectedDocumentIds(prefDocumentIds);
+      }
+    } catch (error) {
+      console.error("[AgenticChatBot] Error loading chat preferences for new chat:", error);
+      // On error, keep current selection rather than clearing it
+    }
+
     // Reload chat history to show the new session will be created
     if (chatHistoryRef.current) {
       chatHistoryRef.current.loadSessions();
@@ -937,8 +1144,12 @@ export const AgenticChatBot = () => {
     if (newSessionId === sessionId) return;
 
     try {
-      // Load messages for the selected session
-      const history = await chatService.getSessionMessages(newSessionId);
+      // Load messages and session details in parallel
+      const [history, sessionDetails] = await Promise.all([
+        chatService.getSessionMessages(newSessionId),
+        chatService.getSession(newSessionId)
+      ]);
+
       const loadedMessages = history.map((msg) => ({
         id: msg.id,  // Include message ID for retry functionality
         role: msg.role,
@@ -975,6 +1186,27 @@ export const AgenticChatBot = () => {
       // Now update session ID - this will trigger useEffect to create new connection
       setMessages(loadedMessages);
       setSessionId(newSessionId);
+
+      // Restore workspace/document selection from session metadata (if available)
+      // This allows reopening a chat with the same document context it was using
+      // Note: This does NOT update user preferences - only applies to this session
+      if (sessionDetails?.session_metadata) {
+        const metadata = sessionDetails.session_metadata;
+        const sessionWorkspaceIds = metadata._prev_workspace_ids;
+        const sessionDocumentIds = metadata._prev_document_ids;
+
+        if (sessionWorkspaceIds && sessionWorkspaceIds.length > 0) {
+          console.log("[AgenticChatBot] Restoring workspace selection from session:", sessionWorkspaceIds);
+          setSelectedWorkspaceIds(sessionWorkspaceIds);
+        }
+        if (sessionDocumentIds && sessionDocumentIds.length > 0) {
+          console.log("[AgenticChatBot] Restoring document selection from session:", sessionDocumentIds);
+          setSelectedDocumentIds(sessionDocumentIds);
+        }
+
+        // If session has no stored selection, keep current selection (user preferences)
+        // This handles old sessions created before this feature was added
+      }
 
       // Check if title needs regeneration (do this in background)
       chatService.regenerateSessionTitle(newSessionId)
@@ -1158,15 +1390,25 @@ export const AgenticChatBot = () => {
                         />
                       </>
                     ) : (
-                      // Assistant message actions - open markdown editor popup
-                      <Button
-                        icon="pi pi-pencil"
-                        className="p-button-text p-button-sm edit-button"
-                        onClick={() => handleOpenMarkdownEditor(idx, msg.content)}
-                        tooltip={t("Chat.EditResponse")}
-                        tooltipOptions={{ position: "top" }}
-                        disabled={isLoading || markdownEditorVisible || !msg.id}
-                      />
+                      // Assistant message actions - edit and download
+                      <>
+                        <Button
+                          icon="pi pi-pencil"
+                          className="p-button-text p-button-sm edit-button"
+                          onClick={() => handleOpenMarkdownEditor(idx, msg.content)}
+                          tooltip={t("Chat.EditResponse")}
+                          tooltipOptions={{ position: "top" }}
+                          disabled={isLoading || markdownEditorVisible || !msg.id}
+                        />
+                        <Button
+                          icon="pi pi-download"
+                          className="p-button-text p-button-sm download-button"
+                          onClick={() => handleOpenExportDialog(msg.content)}
+                          tooltip={t("Chat.DownloadResponse")}
+                          tooltipOptions={{ position: "top" }}
+                          disabled={isLoading || exportDialogVisible}
+                        />
+                      </>
                     )}
                   </div>
                 </>
@@ -1334,6 +1576,220 @@ export const AgenticChatBot = () => {
               placeholder={t("Chat.MarkdownPlaceholder")}
               disabled={isSavingCorrection}
             />
+          )}
+        </div>
+      </Dialog>
+
+      {/* Export/Download Dialog */}
+      <Dialog
+        visible={exportDialogVisible}
+        onHide={handleCloseExportDialog}
+        header={t("Chat.ExportDialogTitle")}
+        className="export-dialog"
+        style={{ width: "450px" }}
+        modal
+        draggable={false}
+        resizable={false}
+        footer={
+          <div className="export-dialog-footer">
+            <Button
+              label={t("Chat.Cancel")}
+              icon="pi pi-times"
+              className="p-button-text p-button-secondary"
+              onClick={handleCloseExportDialog}
+              disabled={isExporting}
+            />
+            <Button
+              label={exportOption === "workspace" ? t("Chat.SaveToWorkspace") : t("Chat.Download")}
+              icon={isExporting ? "pi pi-spin pi-spinner" : (exportOption === "workspace" ? "pi pi-upload" : "pi pi-download")}
+              className="p-button-primary"
+              onClick={handleExport}
+              disabled={isExporting || (exportOption === "workspace" && !selectedWorkspaceForExport)}
+            />
+          </div>
+        }
+      >
+        <div className="export-dialog-content">
+          {/* Filename input */}
+          <div className="export-filename-section">
+            <label htmlFor="export-filename" className="export-filename-label">
+              {t("Chat.Filename")}
+            </label>
+            <InputText
+              id="export-filename"
+              value={exportFilename}
+              onChange={(e) => setExportFilename(e.target.value)}
+              placeholder={t("Chat.FilenamePlaceholder")}
+              className="export-filename-input"
+            />
+          </div>
+
+          <p className="export-description">{t("Chat.ExportDescription")}</p>
+
+          <div className="export-options">
+            <div className="export-option" onClick={() => setExportOption("markdown")}>
+              <RadioButton
+                inputId="export-markdown"
+                name="exportOption"
+                value="markdown"
+                checked={exportOption === "markdown"}
+                onChange={(e) => setExportOption(e.value)}
+              />
+              <label htmlFor="export-markdown" className="export-option-label">
+                <i className="pi pi-file" />
+                <span>{t("Chat.ExportMarkdown")}</span>
+              </label>
+            </div>
+
+            <div className="export-option" onClick={() => setExportOption("pdf")}>
+              <RadioButton
+                inputId="export-pdf"
+                name="exportOption"
+                value="pdf"
+                checked={exportOption === "pdf"}
+                onChange={(e) => setExportOption(e.value)}
+              />
+              <label htmlFor="export-pdf" className="export-option-label">
+                <i className="pi pi-file-pdf" />
+                <span>{t("Chat.ExportPdf")}</span>
+              </label>
+            </div>
+
+            <div className="export-option" onClick={() => setExportOption("word")}>
+              <RadioButton
+                inputId="export-word"
+                name="exportOption"
+                value="word"
+                checked={exportOption === "word"}
+                onChange={(e) => setExportOption(e.value)}
+              />
+              <label htmlFor="export-word" className="export-option-label">
+                <i className="pi pi-file-word" />
+                <span>{t("Chat.ExportWord")}</span>
+              </label>
+            </div>
+
+            <div className="export-option" onClick={() => setExportOption("excel")}>
+              <RadioButton
+                inputId="export-excel"
+                name="exportOption"
+                value="excel"
+                checked={exportOption === "excel"}
+                onChange={(e) => setExportOption(e.value)}
+              />
+              <label htmlFor="export-excel" className="export-option-label">
+                <i className="pi pi-file-excel" />
+                <span>{t("Chat.ExportExcel")}</span>
+              </label>
+            </div>
+
+            <div className="export-option" onClick={() => setExportOption("workspace")}>
+              <RadioButton
+                inputId="export-workspace"
+                name="exportOption"
+                value="workspace"
+                checked={exportOption === "workspace"}
+                onChange={(e) => setExportOption(e.value)}
+              />
+              <label htmlFor="export-workspace" className="export-option-label">
+                <i className="pi pi-folder" />
+                <span>{t("Chat.ExportToWorkspace")}</span>
+              </label>
+            </div>
+          </div>
+
+          {exportOption === "workspace" && (
+            <div className="workspace-selector">
+              {loadingWorkspaces ? (
+                <div className="loading-workspaces">
+                  <ProgressSpinner style={{ width: "30px", height: "30px" }} />
+                  <span>{t("Chat.LoadingWorkspaces")}</span>
+                </div>
+              ) : (
+                <>
+                  {workspaces.length > 0 && (
+                    <Dropdown
+                      value={selectedWorkspaceForExport}
+                      options={workspaces}
+                      onChange={(e) => setSelectedWorkspaceForExport(e.value)}
+                      optionLabel="name"
+                      optionValue="id"
+                      placeholder={t("Chat.SelectWorkspacePlaceholder")}
+                      className="workspace-dropdown"
+                      disabled={showCreateWorkspace}
+                      itemTemplate={(option) => (
+                        <div className="workspace-dropdown-item">
+                          <i className="pi pi-folder" style={{ color: option.color }} />
+                          <span>{option.name}</span>
+                        </div>
+                      )}
+                      valueTemplate={(option) => {
+                        if (!option) return <span>{t("Chat.SelectWorkspacePlaceholder")}</span>;
+                        return (
+                          <div className="workspace-dropdown-item">
+                            <i className="pi pi-folder" style={{ color: option.color }} />
+                            <span>{option.name}</span>
+                          </div>
+                        );
+                      }}
+                    />
+                  )}
+
+                  {workspaces.length === 0 && !showCreateWorkspace && (
+                    <div className="no-workspaces">
+                      <i className="pi pi-info-circle" />
+                      <span>{t("Chat.NoWorkspacesAvailable")}</span>
+                    </div>
+                  )}
+
+                  {/* Create New Workspace Section */}
+                  {showCreateWorkspace ? (
+                    <div className="create-workspace-form">
+                      <div className="create-workspace-input-group">
+                        <InputText
+                          value={newWorkspaceName}
+                          onChange={(e) => setNewWorkspaceName(e.target.value)}
+                          placeholder={t("Chat.NewWorkspaceName")}
+                          className="create-workspace-input"
+                          disabled={isCreatingWorkspace}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter" && !isCreatingWorkspace) {
+                              handleCreateWorkspaceForExport();
+                            }
+                          }}
+                        />
+                        <Button
+                          icon={isCreatingWorkspace ? "pi pi-spin pi-spinner" : "pi pi-check"}
+                          className="p-button-success p-button-sm"
+                          onClick={handleCreateWorkspaceForExport}
+                          disabled={isCreatingWorkspace || !newWorkspaceName.trim()}
+                          tooltip={t("Chat.CreateWorkspace")}
+                          tooltipOptions={{ position: "top" }}
+                        />
+                        <Button
+                          icon="pi pi-times"
+                          className="p-button-secondary p-button-sm"
+                          onClick={() => {
+                            setShowCreateWorkspace(false);
+                            setNewWorkspaceName("");
+                          }}
+                          disabled={isCreatingWorkspace}
+                          tooltip={t("Chat.Cancel")}
+                          tooltipOptions={{ position: "top" }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <Button
+                      label={t("Chat.CreateNewWorkspace")}
+                      icon="pi pi-plus"
+                      className="p-button-text p-button-sm create-workspace-button"
+                      onClick={() => setShowCreateWorkspace(true)}
+                    />
+                  )}
+                </>
+              )}
+            </div>
           )}
         </div>
       </Dialog>

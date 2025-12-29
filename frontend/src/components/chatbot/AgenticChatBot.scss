@@ -226,6 +226,14 @@
         color: var(--primary-color);
       }
     }
+
+    .download-button {
+      color: var(--text-color-secondary);
+
+      &:hover {
+        color: var(--primary-color);
+      }
+    }
   }
 
   .message:hover .message-actions {
@@ -886,6 +894,224 @@
     }
 
     .markdown-editor-footer {
+      flex-wrap: wrap;
+      justify-content: center;
+
+      .p-button {
+        flex: 1;
+        min-width: 100px;
+      }
+    }
+  }
+}
+
+// Export Dialog Styles
+.export-dialog {
+  .p-dialog-header {
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid var(--surface-border);
+
+    .p-dialog-title {
+      font-size: 1.25rem;
+      font-weight: 600;
+    }
+  }
+
+  .p-dialog-content {
+    padding: 1.5rem;
+  }
+
+  .export-dialog-content {
+    .export-filename-section {
+      margin-bottom: 1.25rem;
+
+      .export-filename-label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+        color: var(--text-color);
+        font-size: 0.95rem;
+      }
+
+      .export-filename-input {
+        width: 100%;
+        padding: 0.625rem 0.875rem;
+        font-size: 0.95rem;
+
+        &:focus {
+          border-color: var(--primary-color);
+          box-shadow: 0 0 0 2px var(--primary-color-transparent, rgba(var(--primary-color-rgb), 0.1));
+        }
+      }
+    }
+
+    .export-description {
+      color: var(--text-color-secondary);
+      margin-bottom: 1.25rem;
+      font-size: 0.95rem;
+    }
+
+    .export-options {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+
+      .export-option {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.75rem 1rem;
+        border: 1px solid var(--surface-border);
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+
+        &:hover {
+          background-color: var(--surface-hover);
+          border-color: var(--primary-color);
+        }
+
+        &:has(.p-radiobutton-checked) {
+          background-color: var(--primary-color-transparent, rgba(var(--primary-color-rgb), 0.08));
+          border-color: var(--primary-color);
+        }
+
+        .export-option-label {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+          cursor: pointer;
+          flex: 1;
+
+          i {
+            font-size: 1.25rem;
+            color: var(--text-color-secondary);
+            width: 24px;
+            text-align: center;
+          }
+
+          span {
+            font-size: 0.95rem;
+            color: var(--text-color);
+          }
+        }
+
+        .p-radiobutton {
+          .p-radiobutton-box {
+            border-color: var(--surface-border);
+          }
+        }
+      }
+    }
+
+    .workspace-selector {
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--surface-border);
+
+      .loading-workspaces {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.5rem 0;
+        color: var(--text-color-secondary);
+
+        span {
+          font-size: 0.9rem;
+        }
+      }
+
+      .no-workspaces {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.75rem;
+        background-color: var(--surface-ground);
+        border-radius: 8px;
+        color: var(--text-color-secondary);
+
+        i {
+          font-size: 1rem;
+        }
+
+        span {
+          font-size: 0.9rem;
+        }
+      }
+
+      .workspace-dropdown {
+        width: 100%;
+
+        .workspace-dropdown-item {
+          display: flex;
+          align-items: center;
+          gap: 0.5rem;
+
+          i {
+            font-size: 1rem;
+          }
+
+          span {
+            font-size: 0.95rem;
+          }
+        }
+      }
+
+      .create-workspace-button {
+        margin-top: 0.75rem;
+        width: 100%;
+        justify-content: center;
+        color: var(--primary-color);
+
+        &:hover {
+          background-color: var(--surface-hover);
+        }
+      }
+
+      .create-workspace-form {
+        margin-top: 0.75rem;
+
+        .create-workspace-input-group {
+          display: flex;
+          gap: 0.5rem;
+          align-items: center;
+
+          .create-workspace-input {
+            flex: 1;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.9rem;
+          }
+
+          .p-button {
+            flex-shrink: 0;
+            width: 36px;
+            height: 36px;
+          }
+        }
+      }
+    }
+  }
+
+  .p-dialog-footer {
+    padding: 1rem 1.5rem;
+    border-top: 1px solid var(--surface-border);
+  }
+
+  .export-dialog-footer {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: flex-end;
+    align-items: center;
+  }
+}
+
+// Responsive styles for export dialog
+@media (max-width: 768px) {
+  .export-dialog {
+    width: 95vw !important;
+    max-width: 95vw !important;
+
+    .export-dialog-footer {
       flex-wrap: wrap;
       justify-content: center;
 

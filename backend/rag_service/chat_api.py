@@ -200,6 +200,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     context_info = {}
                     session_context = {}
                     enhanced_message = message
+                    document_context_changed = False  # Track if document/workspace selection changed
 
                     try:
                         context = conv_manager.get_conversation_context(UUID(session_id))
@@ -211,6 +212,26 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                         # Get session metadata for context
                         session_context = context.get("session_metadata", {})
+
+                        # Check if document/workspace selection has changed from previous message in THIS session
+                        # This is important to force a new document search when user changes filters mid-conversation
+                        # Note: For NEW sessions, the initial selection comes from user preferences (users table)
+                        #       and we don't need to force a new search for the first message
+                        prev_workspace_ids = session_context.get("_prev_workspace_ids", [])
+                        prev_document_ids = session_context.get("_prev_document_ids", [])
+
+                        # Normalize current selections to sorted lists for comparison
+                        curr_workspace_ids = sorted(workspace_ids) if workspace_ids else []
+                        curr_document_ids = sorted(document_ids) if document_ids else []
+
+                        # Only detect change if there was a previous selection stored in this session
+                        # This means user has sent at least one message before and is now changing the filter
+                        if prev_workspace_ids or prev_document_ids:
+                            if curr_workspace_ids != prev_workspace_ids or curr_document_ids != prev_document_ids:
+                                document_context_changed = True
+                                logger.info(f"[Document Context] Selection changed mid-conversation!")
+                                logger.info(f"[Document Context]   Previous: workspaces={prev_workspace_ids[:3]}{'...' if len(prev_workspace_ids) > 3 else ''}, docs={prev_document_ids[:3]}{'...' if len(prev_document_ids) > 3 else ''}")
+                                logger.info(f"[Document Context]   Current: workspaces={curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}, docs={curr_document_ids[:3]}{'...' if len(curr_document_ids) > 3 else ''}")
 
                         # ENHANCEMENT: Analyze context for pronouns and entities
                         if CHAT_ENABLE_CONTEXT_ANALYSIS:
@@ -536,7 +557,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     session_context=session_context,
                                     is_retry=is_retry,
                                     accessible_doc_ids=accessible_doc_ids,
-                                    analytics_context=hybrid_context  # Pass analytics context for hybrid queries
+                                    analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
+                                    document_context_changed=document_context_changed  # Force new search if selection changed
                                 ):
                                     chunk_count += 1
                                     full_response += chunk
@@ -602,12 +624,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             logger.info(f"[WebSocket] Not saving assistant message due to streaming error - user can retry")
 
                         # Update session metadata with context information
-                        if CHAT_ENABLE_METADATA_TRACKING and context_info:
-                            try:
-                                session = conv_manager.get_session(UUID(session_id))
-                                if session:
-                                    current_metadata = session.session_metadata or {}
+                        # ALWAYS save document context (workspace/document selection) for change detection
+                        try:
+                            session = conv_manager.get_session(UUID(session_id))
+                            if session:
+                                current_metadata = session.session_metadata or {}
 
+                                # Context tracking (entities, topics) - only if enabled
+                                if CHAT_ENABLE_METADATA_TRACKING and context_info:
                                     # Merge entities (keep last N of each type)
                                     for entity_type, values in context_info.get("entities", {}).items():
                                         if values:  # Only process if there are values
@@ -631,17 +655,26 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                                     # Update last message info for quick context display
                                     current_metadata["last_message_preview"] = message[:100]
-                                    current_metadata["last_response_preview"] = full_response[:100]
+                                    current_metadata["last_response_preview"] = full_response[:100] if full_response else ""
 
-                                    # Update metadata in database
-                                    conv_manager.update_session_metadata(UUID(session_id), current_metadata)
-                                    db.commit()
+                                # Save current workspace/document selection to session metadata for two purposes:
+                                # 1. Detect mid-conversation filter changes (force new search when user changes selection)
+                                # 2. Restore document context when reopening an existing chat session
+                                # Note: For NEW sessions, initial selection comes from user preferences in users table
+                                current_metadata["_prev_workspace_ids"] = curr_workspace_ids
+                                current_metadata["_prev_document_ids"] = curr_document_ids
 
-                                    logger.debug(f"Updated session metadata: {current_metadata}")
+                                # Update metadata in database
+                                conv_manager.update_session_metadata(UUID(session_id), current_metadata)
+                                db.commit()
 
-                            except Exception as e:
-                                logger.error(f"Error updating session metadata: {e}")
-                                db.rollback()
+                                if document_context_changed:
+                                    logger.info(f"[Document Context] Selection changed - saved to session: workspaces={len(curr_workspace_ids)}, docs={len(curr_document_ids)}")
+                                logger.debug(f"Updated session metadata: {current_metadata}")
+
+                        except Exception as e:
+                            logger.error(f"Error updating session metadata: {e}")
+                            db.rollback()
 
                         # Signal end of response (or error if streaming failed)
                         logger.info(f"[WebSocket] Preparing to send end message (streaming_error={streaming_error is not None})")

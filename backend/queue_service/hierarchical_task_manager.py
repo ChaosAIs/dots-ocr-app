@@ -510,23 +510,29 @@ class HierarchicalTaskQueueManager:
                     doc.indexing_details["graphrag_indexing"]["skip_reason"] = doc.skip_graphrag_reason
 
             # === OCR Stats (from pages) ===
+            # Note: SKIPPED pages count as "done" (e.g., markdown files that bypass OCR)
             ocr_stats = db.query(
                 func.count().label("total"),
                 func.count().filter(TaskQueuePage.ocr_status == TaskStatus.COMPLETED).label("completed"),
+                func.count().filter(TaskQueuePage.ocr_status == TaskStatus.SKIPPED).label("skipped"),
                 func.count().filter(TaskQueuePage.ocr_status == TaskStatus.PROCESSING).label("processing"),
                 func.count().filter(TaskQueuePage.ocr_status == TaskStatus.FAILED).label("failed"),
                 func.count().filter(TaskQueuePage.ocr_status == TaskStatus.PENDING).label("pending"),
             ).filter(TaskQueuePage.document_id == document_id).first()
 
             if ocr_stats and ocr_stats.total > 0:
+                # Calculate done pages (completed + skipped)
+                done_pages = ocr_stats.completed + ocr_stats.skipped
+
                 # Determine overall OCR status
                 if ocr_stats.processing > 0:
                     ocr_status = "processing"
-                elif ocr_stats.completed == ocr_stats.total:
-                    ocr_status = "completed"
+                elif done_pages == ocr_stats.total:
+                    # All pages are done (completed or skipped)
+                    ocr_status = "completed" if ocr_stats.skipped == 0 else "skipped"
                 elif ocr_stats.failed > 0 and ocr_stats.pending == 0 and ocr_stats.processing == 0:
                     ocr_status = "failed"
-                elif ocr_stats.completed > 0:
+                elif done_pages > 0:
                     ocr_status = "partial"
                 else:
                     ocr_status = "pending"
@@ -535,6 +541,7 @@ class HierarchicalTaskQueueManager:
                     "status": ocr_status,
                     "total_pages": ocr_stats.total,
                     "completed_pages": ocr_stats.completed,
+                    "skipped_pages": ocr_stats.skipped,
                     "failed_pages": ocr_stats.failed,
                     "pending_pages": ocr_stats.pending,
                     "processing_pages": ocr_stats.processing,
@@ -865,7 +872,8 @@ class HierarchicalTaskQueueManager:
         """
         Claim the next available Vector indexing chunk task.
 
-        Only picks up chunks where the parent page's OCR is completed.
+        Only picks up chunks where the parent page's OCR is completed or skipped.
+        OCR can be SKIPPED for markdown files that bypass the OCR process.
 
         Args:
             worker_id: Worker identifier
@@ -879,13 +887,14 @@ class HierarchicalTaskQueueManager:
             db = create_db_session()
 
         try:
-            # Find next Vector chunk task where OCR is completed
+            # Find next Vector chunk task where OCR is completed or skipped
+            # OCR can be COMPLETED (normal conversion) or SKIPPED (markdown files that bypass OCR)
             chunk = db.query(TaskQueueChunk).join(
                 TaskQueuePage, TaskQueueChunk.page_id == TaskQueuePage.id
             ).filter(
                 TaskQueueChunk.vector_status.in_([TaskStatus.PENDING, TaskStatus.FAILED]),
                 TaskQueueChunk.vector_retry_count < TaskQueueChunk.max_retries,
-                TaskQueuePage.ocr_status == TaskStatus.COMPLETED  # Dependency check
+                TaskQueuePage.ocr_status.in_(DONE_STATUSES)  # COMPLETED or SKIPPED
             ).order_by(
                 TaskQueueChunk.vector_status.desc(),  # Failed first
                 TaskQueueChunk.vector_retry_count.asc(),
