@@ -51,6 +51,83 @@ export const WorkspaceBrowser = forwardRef(({
     setLocalSelectedDocIds(selectedDocumentIds || []);
   }, [selectedDocumentIds]);
 
+  // Validate and clean up stale document IDs when workspace documents are loaded
+  // This ensures selectedDocumentIds only contains documents from selected workspaces
+  useEffect(() => {
+    const validateDocumentSelection = async () => {
+      if (localSelectedIds.length === 0) {
+        // No workspaces selected - clear document selection if any
+        if (localSelectedDocIds.length > 0) {
+          console.log("[WorkspaceBrowser] No workspaces selected, clearing stale document IDs");
+          setLocalSelectedDocIds([]);
+          onDocumentSelectionChange?.([]);
+          savePreferences([], []);
+        }
+        return;
+      }
+
+      // Collect all valid document IDs from selected workspaces
+      const validDocIds = new Set();
+      let needsLoad = false;
+
+      for (const wsId of localSelectedIds) {
+        const docs = workspaceDocuments[wsId];
+        if (docs) {
+          docs.forEach(doc => validDocIds.add(doc.id));
+        } else {
+          // Documents not loaded yet for this workspace - need to load them
+          needsLoad = true;
+        }
+      }
+
+      // If we have all workspace documents loaded, validate the selection
+      if (!needsLoad && localSelectedDocIds.length > 0) {
+        const staleIds = localSelectedDocIds.filter(id => !validDocIds.has(id));
+        if (staleIds.length > 0) {
+          console.log(`[WorkspaceBrowser] Removing ${staleIds.length} stale document IDs not in selected workspaces:`, staleIds);
+          const cleanedDocIds = localSelectedDocIds.filter(id => validDocIds.has(id));
+          setLocalSelectedDocIds(cleanedDocIds);
+          onDocumentSelectionChange?.(cleanedDocIds);
+          savePreferences(localSelectedIds, cleanedDocIds);
+        }
+      }
+    };
+
+    validateDocumentSelection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [localSelectedIds, workspaceDocuments]); // Re-run when workspaces or their documents change (callbacks are stable)
+
+  // Load documents for selected workspaces on initial mount (for validation)
+  useEffect(() => {
+    const loadSelectedWorkspaceDocs = async () => {
+      if (localSelectedIds.length === 0) return;
+
+      // Load documents for any selected workspace that doesn't have docs loaded yet
+      for (const wsId of localSelectedIds) {
+        if (!workspaceDocuments[wsId] && !loadingDocuments[wsId]) {
+          setLoadingDocuments(prev => ({ ...prev, [wsId]: true }));
+          try {
+            const result = await workspaceService.getWorkspace(wsId, 50, 0);
+            setWorkspaceDocuments(prev => ({
+              ...prev,
+              [wsId]: result.documents || []
+            }));
+          } catch (error) {
+            console.error(`[WorkspaceBrowser] Failed to load documents for workspace ${wsId}:`, error);
+            setWorkspaceDocuments(prev => ({
+              ...prev,
+              [wsId]: []
+            }));
+          } finally {
+            setLoadingDocuments(prev => ({ ...prev, [wsId]: false }));
+          }
+        }
+      }
+    };
+
+    loadSelectedWorkspaceDocs();
+  }, [localSelectedIds]); // Only trigger when selected workspace IDs change
+
   // Subscribe to workspace deletion events to clean up selections
   useEffect(() => {
     const unsubscribe = subscribe(WorkspaceEvents.WORKSPACE_DELETED, (deletedWorkspace) => {

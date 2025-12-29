@@ -335,66 +335,76 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         if user_id:
                             try:
                                 user_doc_repo = UserDocumentRepository(db)
-                                accessible_doc_ids = user_doc_repo.get_user_accessible_document_ids(
-                                    user_id=UUID(user_id),
-                                    permission='read'
-                                )
+
+                                # OPTIMIZATION: When specific document_ids are provided by frontend,
+                                # only validate those IDs instead of fetching ALL accessible documents.
+                                # This is much more efficient when user has selected specific documents.
+                                if document_ids and len(document_ids) > 0:
+                                    logger.info(f"[Access Control] Validating {len(document_ids)} selected document(s) for user access")
+                                    try:
+                                        # Convert document_ids to UUID list
+                                        selected_doc_ids = [UUID(doc_id) for doc_id in document_ids]
+                                        # Only query for the specific documents user selected
+                                        accessible_doc_ids = user_doc_repo.filter_accessible_document_ids(
+                                            user_id=UUID(user_id),
+                                            document_ids=selected_doc_ids,
+                                            permission='read'
+                                        )
+                                        # Check for stale/inaccessible document IDs
+                                        selected_set = set(selected_doc_ids)
+                                        stale_ids = selected_set - accessible_doc_ids
+                                        if stale_ids:
+                                            logger.warning(f"[Access Control] {len(stale_ids)} selected documents are not accessible: {[str(sid) for sid in list(stale_ids)[:3]]}...")
+                                        logger.info(f"[Access Control] User has access to {len(accessible_doc_ids)} of {len(document_ids)} selected documents")
+                                    except Exception as doc_error:
+                                        logger.warning(f"[Access Control] Failed to validate selected documents: {doc_error}")
+                                        # Fall back to full access check if validation fails
+                                        accessible_doc_ids = user_doc_repo.get_user_accessible_document_ids(
+                                            user_id=UUID(user_id),
+                                            permission='read'
+                                        )
+                                        if document_ids:
+                                            selected_doc_ids = set(UUID(doc_id) for doc_id in document_ids)
+                                            accessible_doc_ids = accessible_doc_ids.intersection(selected_doc_ids)
+                                # When workspace_ids are provided (but no document_ids), get workspace docs directly
+                                elif workspace_ids and len(workspace_ids) > 0:
+                                    logger.info(f"[Access Control] Filtering by {len(workspace_ids)} workspace(s): {workspace_ids[:3]}...")
+                                    try:
+                                        doc_repo = DocumentRepository(db)
+                                        workspace_doc_ids = doc_repo.get_document_ids_by_workspaces(
+                                            [UUID(ws_id) for ws_id in workspace_ids]
+                                        )
+                                        if workspace_doc_ids:
+                                            # Validate that user has access to these workspace documents
+                                            accessible_doc_ids = user_doc_repo.filter_accessible_document_ids(
+                                                user_id=UUID(user_id),
+                                                document_ids=list(workspace_doc_ids),
+                                                permission='read'
+                                            )
+                                            logger.info(f"[Access Control] User has access to {len(accessible_doc_ids)} of {len(workspace_doc_ids)} workspace documents")
+                                        else:
+                                            logger.info(f"[Access Control] Selected workspaces have no documents")
+                                            accessible_doc_ids = set()
+                                    except Exception as ws_error:
+                                        logger.warning(f"[Access Control] Failed to filter by workspaces: {ws_error}")
+                                        # Fall back to getting all accessible documents
+                                        accessible_doc_ids = user_doc_repo.get_user_accessible_document_ids(
+                                            user_id=UUID(user_id),
+                                            permission='read'
+                                        )
+                                else:
+                                    # No specific filter - get all accessible documents (original behavior)
+                                    logger.info(f"[Access Control] No filter applied - fetching all accessible documents")
+                                    accessible_doc_ids = user_doc_repo.get_user_accessible_document_ids(
+                                        user_id=UUID(user_id),
+                                        permission='read'
+                                    )
+                                    logger.info(f"[Access Control] User has access to {len(accessible_doc_ids) if accessible_doc_ids else 0} documents")
+
                                 # IMPORTANT: If the set is empty, it means user has NO access to any documents
                                 # This should block all document searches
-                                if accessible_doc_ids is not None:
-                                    if len(accessible_doc_ids) == 0:
-                                        logger.warning(f"[Access Control] User {user_id} has NO document access permissions - chat will return no documents")
-                                    else:
-                                        logger.info(f"[Access Control] User {user_id} has access to {len(accessible_doc_ids)} documents: {list(accessible_doc_ids)[:5]}...")
-
-                                        # Apply document filter if document_ids are provided (takes precedence over workspace filter)
-                                        if document_ids and len(document_ids) > 0:
-                                            logger.info(f"[Document Filter] Filtering by {len(document_ids)} document(s)")
-                                            try:
-                                                # Convert document_ids to UUID set
-                                                selected_doc_ids = set(UUID(doc_id) for doc_id in document_ids)
-                                                # Check for stale/invalid document IDs that frontend might have cached
-                                                stale_ids = selected_doc_ids - accessible_doc_ids
-                                                if stale_ids:
-                                                    logger.warning(f"[Document Filter] Frontend sent {len(stale_ids)} stale/inaccessible document IDs: {[str(sid) for sid in stale_ids]}")
-                                                    logger.warning(f"[Document Filter] These documents may have been deleted and re-uploaded. Frontend should refresh document list.")
-                                                # Intersect with accessible documents
-                                                original_count = len(accessible_doc_ids)
-                                                accessible_doc_ids = accessible_doc_ids.intersection(selected_doc_ids)
-                                                logger.info(f"[Document Filter] Filtered from {original_count} to {len(accessible_doc_ids)} documents")
-                                            except Exception as doc_error:
-                                                logger.warning(f"[Document Filter] Failed to filter by documents: {doc_error}")
-                                                # Fall back to workspace filter if document filter fails
-                                                if workspace_ids and len(workspace_ids) > 0:
-                                                    try:
-                                                        doc_repo = DocumentRepository(db)
-                                                        workspace_doc_ids = doc_repo.get_document_ids_by_workspaces(
-                                                            [UUID(ws_id) for ws_id in workspace_ids]
-                                                        )
-                                                        original_count = len(accessible_doc_ids)
-                                                        accessible_doc_ids = accessible_doc_ids.intersection(workspace_doc_ids)
-                                                        logger.info(f"[Workspace Filter] Fallback - filtered from {original_count} to {len(accessible_doc_ids)} documents")
-                                                    except Exception as ws_error:
-                                                        logger.warning(f"[Workspace Filter] Fallback also failed: {ws_error}")
-                                        # Apply workspace filter if workspace_ids are provided but no document_ids
-                                        elif workspace_ids and len(workspace_ids) > 0:
-                                            logger.info(f"[Workspace Filter] Filtering by {len(workspace_ids)} workspace(s): {workspace_ids}")
-                                            try:
-                                                doc_repo = DocumentRepository(db)
-                                                workspace_doc_ids = doc_repo.get_document_ids_by_workspaces(
-                                                    [UUID(ws_id) for ws_id in workspace_ids]
-                                                )
-                                                # Intersect with accessible documents
-                                                original_count = len(accessible_doc_ids)
-                                                accessible_doc_ids = accessible_doc_ids.intersection(workspace_doc_ids)
-                                                logger.info(f"[Workspace Filter] Filtered from {original_count} to {len(accessible_doc_ids)} documents (workspace has {len(workspace_doc_ids)} docs)")
-                                            except Exception as ws_error:
-                                                logger.warning(f"[Workspace Filter] Failed to filter by workspaces: {ws_error}")
-                                                # Continue with all accessible documents if workspace filter fails
-                                        else:
-                                            logger.info(f"[Workspace Filter] No workspace/document filter applied - searching all accessible documents")
-                                else:
-                                    logger.warning(f"[Access Control] get_user_accessible_document_ids returned None for user {user_id}")
+                                if accessible_doc_ids is not None and len(accessible_doc_ids) == 0:
+                                    logger.warning(f"[Access Control] User {user_id} has NO accessible documents with current filter - chat will return no documents")
                             except Exception as e:
                                 import traceback
                                 logger.warning(f"[Access Control] Failed to get accessible documents for user {user_id}: {e}")

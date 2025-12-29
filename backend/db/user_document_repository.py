@@ -245,6 +245,53 @@ class UserDocumentRepository:
         result = query.all()
         return {row[0] for row in result}
 
+    def filter_accessible_document_ids(
+        self,
+        user_id: UUID,
+        document_ids: List[UUID],
+        permission: Optional[str] = None
+    ) -> Set[UUID]:
+        """
+        Filter a list of document IDs to only those the user can access.
+
+        This is more efficient than get_user_accessible_document_ids when
+        the caller already knows which specific documents they want to check,
+        as it only queries the database for the specified documents rather
+        than fetching all accessible documents.
+
+        Args:
+            user_id: User ID
+            document_ids: List of document IDs to check access for
+            permission: Optional specific permission to check (e.g., 'read', 'update')
+
+        Returns:
+            Set of document IDs from the input list that the user can access
+        """
+        if not document_ids:
+            return set()
+
+        query = self.db.query(UserDocument.document_id).filter(
+            UserDocument.user_id == user_id,
+            UserDocument.document_id.in_(document_ids),
+            or_(
+                UserDocument.expires_at.is_(None),
+                UserDocument.expires_at > datetime.utcnow()
+            )
+        )
+
+        if permission:
+            # Filter by specific permission using PostgreSQL's ANY operator
+            query = query.filter(
+                or_(
+                    UserDocument.is_owner == True,
+                    literal(permission).op('=')(func.any(UserDocument.permissions)),
+                    literal('full').op('=')(func.any(UserDocument.permissions))
+                )
+            )
+
+        result = query.all()
+        return {row[0] for row in result}
+
     def check_permission(
         self,
         user_id: UUID,
