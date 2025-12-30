@@ -499,10 +499,16 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                             # Stream the report directly from LLM
                                             await progress_callback("Writing your report...")
                                             logger.info(f"[Intent Routing] Streaming report directly from LLM...")
+                                            # Extract additional context for large result handling
+                                            summary = analytics_result.get('summary', {})
+                                            schema_type = summary.get('schema_type', 'unknown')
+                                            sql_explanation = summary.get('explanation', '')
                                             async for chunk in stream_generator.stream_summary_report(
                                                 enhanced_message,
                                                 analytics_result.get('data', []),
-                                                field_mappings or {}
+                                                field_mappings or {},
+                                                schema_type=schema_type,
+                                                sql_explanation=sql_explanation
                                             ):
                                                 if chunk:
                                                     chunk_count += 1

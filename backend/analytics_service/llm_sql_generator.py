@@ -48,6 +48,316 @@ class SQLGenerationResult:
     error: Optional[str] = None
 
 
+@dataclass
+class ContentSizeEvaluation:
+    """Result of content size evaluation for LLM token limit checking."""
+    exceeds_limit: bool
+    row_count: int
+    column_count: int
+    estimated_tokens: int
+    markdown_table: str
+    column_headers: List[str]
+
+
+class ContentSizeEvaluator:
+    """
+    Evaluates SQL query result size to determine if it exceeds LLM token limits.
+
+    When results are too large for LLM processing, the system will:
+    1. Generate a summary header via LLM (using metadata + samples)
+    2. Stream the raw markdown table directly (without LLM processing)
+    """
+
+    # Configuration constants
+    LLM_MAX_SAFE_TOKENS = 80000      # Safe threshold (leaves headroom for prompt)
+    CHARS_PER_TOKEN = 4              # Approximate conversion ratio
+    PROMPT_OVERHEAD_TOKENS = 3000    # Reserved for prompt/instructions
+    SAMPLE_ROWS_FOR_LLM = 10         # Sample rows for LLM context
+    TOP_VALUES_COUNT = 5             # Top N for category columns
+
+    # Column type detection patterns
+    CURRENCY_PATTERNS = ['amount', 'total', 'sales', 'price', 'cost', 'revenue', 'sum', 'value']
+    DATE_PATTERNS = ['date', 'time', 'created', 'updated', 'timestamp']
+    COUNT_PATTERNS = ['count', 'quantity', 'qty', 'num', 'number']
+
+    def __init__(self, max_safe_tokens: int = None):
+        """
+        Initialize the evaluator.
+
+        Args:
+            max_safe_tokens: Override default token limit
+        """
+        self.max_safe_tokens = max_safe_tokens or self.LLM_MAX_SAFE_TOKENS
+
+    def evaluate(self, query_results: List[Dict[str, Any]]) -> ContentSizeEvaluation:
+        """
+        Evaluate if query results exceed LLM token limits.
+
+        Args:
+            query_results: List of result dictionaries from SQL query
+
+        Returns:
+            ContentSizeEvaluation with size metrics and pre-built markdown table
+        """
+        if not query_results:
+            return ContentSizeEvaluation(
+                exceeds_limit=False,
+                row_count=0,
+                column_count=0,
+                estimated_tokens=0,
+                markdown_table="No data available.",
+                column_headers=[]
+            )
+
+        # Get column headers from first row
+        columns = list(query_results[0].keys())
+
+        # Build the full markdown table
+        markdown_table = self._build_markdown_table(query_results, columns)
+
+        # Estimate token count
+        total_chars = len(markdown_table)
+        estimated_tokens = (total_chars // self.CHARS_PER_TOKEN) + self.PROMPT_OVERHEAD_TOKENS
+
+        # Check if exceeds limit
+        exceeds_limit = estimated_tokens > self.max_safe_tokens
+
+        if exceeds_limit:
+            logger.info(
+                f"[ContentSizeEvaluator] Result set exceeds LLM limit: "
+                f"{len(query_results)} rows, ~{estimated_tokens:,} tokens "
+                f"(limit: {self.max_safe_tokens:,})"
+            )
+
+        return ContentSizeEvaluation(
+            exceeds_limit=exceeds_limit,
+            row_count=len(query_results),
+            column_count=len(columns),
+            estimated_tokens=estimated_tokens,
+            markdown_table=markdown_table,
+            column_headers=columns
+        )
+
+    def _build_markdown_table(
+        self,
+        query_results: List[Dict[str, Any]],
+        columns: List[str]
+    ) -> str:
+        """
+        Build a markdown table from query results with proper formatting.
+
+        Args:
+            query_results: List of result dictionaries
+            columns: Column names (headers)
+
+        Returns:
+            Formatted markdown table string
+        """
+        if not query_results or not columns:
+            return "No data available."
+
+        lines = []
+
+        # Header row - use exact column names from SQL result
+        header = "| " + " | ".join(columns) + " |"
+        lines.append(header)
+
+        # Separator row
+        separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+        lines.append(separator)
+
+        # Data rows with proper formatting
+        for row in query_results:
+            values = []
+            for col in columns:
+                val = row.get(col, "")
+                formatted_val = self._format_cell_value(val, col)
+                values.append(formatted_val)
+            lines.append("| " + " | ".join(values) + " |")
+
+        return "\n".join(lines)
+
+    def _format_cell_value(self, value: Any, column_name: str) -> str:
+        """
+        Format a cell value based on its type and column name.
+
+        Args:
+            value: The cell value
+            column_name: Column name for type inference
+
+        Returns:
+            Formatted string value
+        """
+        if value is None:
+            return "-"
+
+        col_lower = column_name.lower()
+
+        # Format numeric values
+        if isinstance(value, (int, float)):
+            # Currency columns
+            if any(pattern in col_lower for pattern in self.CURRENCY_PATTERNS):
+                return f"${value:,.2f}"
+            # Count/quantity columns - show as integer
+            elif any(pattern in col_lower for pattern in self.COUNT_PATTERNS):
+                return f"{int(value):,}" if value == int(value) else f"{value:,.2f}"
+            # Other numeric
+            else:
+                if value == int(value):
+                    return str(int(value))
+                return f"{value:,.2f}"
+
+        # String values
+        str_val = str(value)
+        # Escape pipe characters in markdown tables
+        str_val = str_val.replace("|", "\\|")
+        return str_val
+
+    def get_sample_rows(
+        self,
+        query_results: List[Dict[str, Any]],
+        max_rows: int = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get a sample of rows for LLM context.
+
+        Args:
+            query_results: Full query results
+            max_rows: Maximum rows to return
+
+        Returns:
+            Sample subset of results
+        """
+        max_rows = max_rows or self.SAMPLE_ROWS_FOR_LLM
+        return query_results[:max_rows]
+
+    def calculate_column_statistics(
+        self,
+        query_results: List[Dict[str, Any]],
+        columns: List[str]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Calculate statistics for each column in the result set.
+
+        For numeric columns: sum, avg, min, max, count
+        For string columns: distinct count, top values
+
+        Args:
+            query_results: Full query results
+            columns: Column names
+
+        Returns:
+            Dict mapping column name to statistics
+        """
+        stats = {}
+
+        for col in columns:
+            col_stats = {"column_name": col}
+            values = [row.get(col) for row in query_results if row.get(col) is not None]
+
+            if not values:
+                stats[col] = {"column_name": col, "type": "empty", "non_null_count": 0}
+                continue
+
+            # Check if numeric
+            numeric_values = []
+            for v in values:
+                if isinstance(v, (int, float)):
+                    numeric_values.append(float(v))
+                elif isinstance(v, str):
+                    try:
+                        # Try to parse as number (handle currency, commas)
+                        cleaned = re.sub(r'[,$€£¥]', '', v.strip())
+                        numeric_values.append(float(cleaned))
+                    except (ValueError, AttributeError):
+                        pass
+
+            col_lower = col.lower()
+            is_currency = any(pattern in col_lower for pattern in self.CURRENCY_PATTERNS)
+
+            if len(numeric_values) == len(values):
+                # All values are numeric
+                col_stats["type"] = "numeric"
+                col_stats["is_currency"] = is_currency
+                col_stats["count"] = len(numeric_values)
+                col_stats["sum"] = round(sum(numeric_values), 2)
+                col_stats["avg"] = round(sum(numeric_values) / len(numeric_values), 2)
+                col_stats["min"] = round(min(numeric_values), 2)
+                col_stats["max"] = round(max(numeric_values), 2)
+            else:
+                # Treat as categorical/string
+                col_stats["type"] = "categorical"
+                col_stats["count"] = len(values)
+
+                # Count distinct values
+                unique_values = set(str(v) for v in values)
+                col_stats["distinct_count"] = len(unique_values)
+
+                # Get top N most frequent values
+                value_counts = {}
+                for v in values:
+                    str_v = str(v)
+                    value_counts[str_v] = value_counts.get(str_v, 0) + 1
+
+                sorted_counts = sorted(value_counts.items(), key=lambda x: x[1], reverse=True)
+                col_stats["top_values"] = [
+                    {"value": v, "count": c}
+                    for v, c in sorted_counts[:self.TOP_VALUES_COUNT]
+                ]
+
+            stats[col] = col_stats
+
+        return stats
+
+    def format_statistics_for_llm(
+        self,
+        stats: Dict[str, Dict[str, Any]]
+    ) -> str:
+        """
+        Format column statistics into a readable string for LLM prompt.
+
+        Args:
+            stats: Statistics dictionary from calculate_column_statistics
+
+        Returns:
+            Formatted string for LLM prompt
+        """
+        lines = []
+
+        for col_name, col_stats in stats.items():
+            col_type = col_stats.get("type", "unknown")
+
+            if col_type == "numeric":
+                is_currency = col_stats.get("is_currency", False)
+                if is_currency:
+                    lines.append(f"**{col_name}** (Currency):")
+                    lines.append(f"  - Total: ${col_stats['sum']:,.2f}")
+                    lines.append(f"  - Average: ${col_stats['avg']:,.2f}")
+                    lines.append(f"  - Min: ${col_stats['min']:,.2f}")
+                    lines.append(f"  - Max: ${col_stats['max']:,.2f}")
+                else:
+                    lines.append(f"**{col_name}** (Numeric):")
+                    lines.append(f"  - Total: {col_stats['sum']:,.2f}")
+                    lines.append(f"  - Average: {col_stats['avg']:,.2f}")
+                    lines.append(f"  - Min: {col_stats['min']:,.2f}")
+                    lines.append(f"  - Max: {col_stats['max']:,.2f}")
+
+            elif col_type == "categorical":
+                lines.append(f"**{col_name}** (Text/Category):")
+                lines.append(f"  - Unique Values: {col_stats['distinct_count']}")
+                top_vals = col_stats.get("top_values", [])
+                if top_vals:
+                    top_str = ", ".join([f"{v['value']} ({v['count']})" for v in top_vals[:3]])
+                    lines.append(f"  - Top Values: {top_str}")
+
+            elif col_type == "empty":
+                lines.append(f"**{col_name}**: No data")
+
+            lines.append("")  # Empty line between columns
+
+        return "\n".join(lines)
+
+
 class LLMSQLGenerator:
     """
     Generates SQL queries using LLM based on user query and data schema.
@@ -165,6 +475,46 @@ If the user query asks for minimum/maximum values, identify:
 }}
 
 Respond with JSON only:"""
+
+    # Prompt for generating summary header when result set is too large for full LLM processing
+    LARGE_RESULT_SUMMARY_PROMPT = """Generate a summary header for a large query result set.
+
+The full data table will be shown separately after this summary. Your job is to provide
+a concise overview that helps the user understand the data.
+
+## User's Question:
+"{user_query}"
+
+## Dataset Overview:
+- Total Records: {row_count:,}
+- Columns: {column_names}
+
+## Aggregated Statistics:
+{statistics}
+
+## Data Source:
+- Document Type: {schema_type}
+- Query Explanation: {sql_explanation}
+
+## Sample Data (first {sample_count} rows):
+{sample_markdown}
+
+## Instructions:
+Write a BRIEF summary header (under 300 words) that:
+1. Provides a clear, descriptive title for this result
+2. States the total record count
+3. Highlights key statistics from the aggregated data above
+4. Notes any patterns visible in the sample rows
+5. Tells the user that the complete data table follows below
+
+CRITICAL RULES:
+- Do NOT list individual records - the full table will be shown after this summary
+- Do NOT try to reproduce the data table
+- Focus on providing context and key insights
+- Format currency values with $ and proper formatting (e.g., $1,234.56)
+- Keep the summary concise and scannable
+
+Write the summary header in markdown format:"""
 
     # Round 1: Query Analysis - Understand user intent and grouping requirements
     QUERY_ANALYSIS_PROMPT = """Analyze the following user query to understand their data analysis requirements.
@@ -2355,18 +2705,23 @@ FROM expanded_items
         self,
         user_query: str,
         query_results: List[Dict[str, Any]],
-        field_mappings: Dict[str, Dict[str, Any]]
+        field_mappings: Dict[str, Dict[str, Any]],
+        schema_type: str = "unknown",
+        sql_explanation: str = ""
     ) -> Dict[str, Any]:
         """
         Generate summary report using LLM with a simple, natural approach.
 
-        Converts SQL results to markdown table format for better LLM comprehension,
-        then lets LLM generate a natural language summary.
+        Enhanced with content size evaluation:
+        - For small result sets: LLM processes full data
+        - For large result sets: LLM generates summary header only, then raw markdown table is appended
 
         Args:
             user_query: Original user query
             query_results: Results from SQL execution
             field_mappings: Field schema information
+            schema_type: Type of document schema (for context)
+            sql_explanation: Explanation of the generated SQL query
 
         Returns:
             Formatted report with summary text
@@ -2381,11 +2736,17 @@ FROM expanded_items
             }
 
         try:
-            # Calculate basic stats from results
-            sample = query_results[0]
-            columns = list(sample.keys())
+            # Step 1: Evaluate content size to determine processing strategy
+            evaluator = ContentSizeEvaluator()
+            evaluation = evaluator.evaluate(query_results)
 
-            # Find amount column for grand total
+            logger.info(
+                f"[LLM Summary] Content size evaluation: {evaluation.row_count} rows, "
+                f"~{evaluation.estimated_tokens:,} tokens, exceeds_limit={evaluation.exceeds_limit}"
+            )
+
+            # Calculate grand total for metadata
+            columns = evaluation.column_headers
             amount_col = None
             for col in columns:
                 col_lower = col.lower()
@@ -2397,25 +2758,160 @@ FROM expanded_items
             if amount_col:
                 grand_total = sum(float(r.get(amount_col, 0) or 0) for r in query_results)
 
-            # Convert query results to markdown table format
-            results_markdown = self._convert_results_to_markdown(query_results, columns)
-
-            # Detect if user wants detailed listing vs summary
-            detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
-                               'each', 'breakdown', 'itemized', 'every', 'specific']
-            query_lower = user_query.lower()
-            wants_details = any(keyword in query_lower for keyword in detail_keywords)
-
-            # Determine instruction based on user intent
-            if wants_details:
-                detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
-                report_type = "detailed"
+            # Step 2: Choose processing strategy based on size
+            if evaluation.exceeds_limit:
+                # LARGE RESULT SET: Generate summary header + raw markdown table
+                formatted_report = self._generate_large_result_report(
+                    user_query=user_query,
+                    query_results=query_results,
+                    evaluation=evaluation,
+                    evaluator=evaluator,
+                    schema_type=schema_type,
+                    sql_explanation=sql_explanation
+                )
             else:
-                detail_instruction = "4. Be concise but complete - summarize the data appropriately"
-                report_type = "summary"
+                # SMALL RESULT SET: LLM processes full data
+                formatted_report = self._generate_small_result_report(
+                    user_query=user_query,
+                    query_results=query_results,
+                    evaluation=evaluation
+                )
 
-            # Simple prompt with markdown-formatted data
-            prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
+            return {
+                "report_title": "Query Results Summary",
+                "hierarchical_data": [],
+                "grand_total": round(grand_total, 2),
+                "total_records": len(query_results),
+                "formatted_report": formatted_report
+            }
+
+        except Exception as e:
+            logger.error(f"[LLM Summary] LLM summary generation failed: {e}")
+            return self._generate_summary_heuristic(query_results, field_mappings, user_query)
+
+    def _generate_large_result_report(
+        self,
+        user_query: str,
+        query_results: List[Dict[str, Any]],
+        evaluation: ContentSizeEvaluation,
+        evaluator: ContentSizeEvaluator,
+        schema_type: str,
+        sql_explanation: str
+    ) -> str:
+        """
+        Generate report for large result sets that exceed LLM token limits.
+
+        Strategy:
+        1. Generate summary header via LLM (using metadata + samples only)
+        2. Append the raw markdown table directly (no LLM processing)
+
+        Args:
+            user_query: Original user query
+            query_results: Full query results
+            evaluation: Content size evaluation result
+            evaluator: ContentSizeEvaluator instance
+            schema_type: Document schema type
+            sql_explanation: SQL query explanation
+
+        Returns:
+            Complete formatted report string
+        """
+        logger.info(
+            f"[LLM Summary] Using large result strategy for {evaluation.row_count} rows "
+            f"(~{evaluation.estimated_tokens:,} tokens)"
+        )
+
+        report_parts = []
+
+        # Step 1: Calculate statistics for LLM context
+        stats = evaluator.calculate_column_statistics(query_results, evaluation.column_headers)
+        stats_formatted = evaluator.format_statistics_for_llm(stats)
+
+        # Step 2: Get sample rows for LLM context
+        sample_rows = evaluator.get_sample_rows(query_results)
+        sample_markdown = evaluator._build_markdown_table(sample_rows, evaluation.column_headers)
+
+        # Step 3: Build prompt for summary header only
+        prompt = self.LARGE_RESULT_SUMMARY_PROMPT.format(
+            user_query=user_query,
+            row_count=evaluation.row_count,
+            column_names=", ".join(evaluation.column_headers),
+            statistics=stats_formatted,
+            schema_type=schema_type or "unknown",
+            sql_explanation=sql_explanation or "Query executed successfully",
+            sample_count=len(sample_rows),
+            sample_markdown=sample_markdown
+        )
+
+        # Step 4: Generate summary header via LLM
+        try:
+            summary_header = self.llm_client.generate(prompt)
+            # Clean up the response
+            summary_header = summary_header.strip()
+            if summary_header.startswith('```'):
+                lines = summary_header.split('\n')
+                summary_header = '\n'.join(
+                    line for line in lines
+                    if not line.startswith('```')
+                )
+            report_parts.append(summary_header)
+        except Exception as e:
+            logger.error(f"[LLM Summary] Failed to generate summary header: {e}")
+            # Fallback: Generate a simple header
+            report_parts.append(f"## Query Results\n\n")
+            report_parts.append(f"Found **{evaluation.row_count:,}** records matching your query.\n")
+
+        # Step 5: Add separator between summary and data table
+        report_parts.append("\n\n---\n\n")
+        report_parts.append("## Complete Data Results\n\n")
+
+        # Step 6: Append the raw markdown table directly (pre-built during evaluation)
+        report_parts.append(evaluation.markdown_table)
+
+        # Step 7: Add footer with row count
+        report_parts.append(f"\n\n*Showing all {evaluation.row_count:,} records*\n")
+
+        return "".join(report_parts)
+
+    def _generate_small_result_report(
+        self,
+        user_query: str,
+        query_results: List[Dict[str, Any]],
+        evaluation: ContentSizeEvaluation
+    ) -> str:
+        """
+        Generate report for small result sets using full LLM processing.
+
+        This is the original behavior - LLM processes the entire result set
+        and generates a formatted report.
+
+        Args:
+            user_query: Original user query
+            query_results: Query results
+            evaluation: Content size evaluation (contains pre-built markdown table)
+
+        Returns:
+            Formatted report string
+        """
+        # Detect if user wants detailed listing vs summary
+        detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
+                           'each', 'breakdown', 'itemized', 'every', 'specific']
+        query_lower = user_query.lower()
+        wants_details = any(keyword in query_lower for keyword in detail_keywords)
+
+        # Determine instruction based on user intent
+        if wants_details:
+            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
+            report_type = "detailed"
+        else:
+            detail_instruction = "4. Be concise but complete - summarize the data appropriately"
+            report_type = "summary"
+
+        # Use the pre-built markdown table from evaluation
+        results_markdown = evaluation.markdown_table
+
+        # Simple prompt with markdown-formatted data
+        prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
 "{user_query}"
@@ -2475,39 +2971,35 @@ IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the pri
 
 Write the {report_type} report in markdown format:"""
 
-            response = self.llm_client.generate(prompt)
+        response = self.llm_client.generate(prompt)
 
-            # Clean up the response - remove any code block markers
-            formatted_report = response.strip()
-            if formatted_report.startswith('```'):
-                lines = formatted_report.split('\n')
-                formatted_report = '\n'.join(
-                    line for line in lines
-                    if not line.startswith('```')
-                )
+        # Clean up the response - remove any code block markers
+        formatted_report = response.strip()
+        if formatted_report.startswith('```'):
+            lines = formatted_report.split('\n')
+            formatted_report = '\n'.join(
+                line for line in lines
+                if not line.startswith('```')
+            )
 
-            logger.info(f"[LLM Summary] Generated natural language summary ({len(formatted_report)} chars)")
+        logger.info(f"[LLM Summary] Generated natural language summary ({len(formatted_report)} chars)")
 
-            return {
-                "report_title": "Query Results Summary",
-                "hierarchical_data": [],  # Not needed for natural language response
-                "grand_total": round(grand_total, 2),
-                "total_records": len(query_results),
-                "formatted_report": formatted_report
-            }
-
-        except Exception as e:
-            logger.error(f"[LLM Summary] LLM summary generation failed: {e}")
-            return self._generate_summary_heuristic(query_results, field_mappings, user_query)
+        return formatted_report
 
     async def stream_summary_report(
         self,
         user_query: str,
         query_results: List[Dict[str, Any]],
-        field_mappings: Dict[str, Dict[str, Any]]
+        field_mappings: Dict[str, Dict[str, Any]],
+        schema_type: str = "unknown",
+        sql_explanation: str = ""
     ):
         """
         Stream the summary report generation for real-time display.
+
+        Enhanced with content size evaluation:
+        - For small result sets: LLM processes full data (current behavior)
+        - For large result sets: LLM generates summary header only, then raw markdown table is streamed
 
         Yields chunks of the report as they are generated by the LLM.
 
@@ -2515,6 +3007,8 @@ Write the {report_type} report in markdown format:"""
             user_query: Original user query
             query_results: Results from SQL execution
             field_mappings: Field schema information
+            schema_type: Type of document schema (for context)
+            sql_explanation: Explanation of the generated SQL query
 
         Yields:
             Chunks of the formatted report text
@@ -2532,29 +3026,186 @@ Write the {report_type} report in markdown format:"""
             return
 
         try:
-            # Calculate basic stats from results
-            sample = query_results[0]
-            columns = list(sample.keys())
+            # Step 1: Evaluate content size to determine processing strategy
+            evaluator = ContentSizeEvaluator()
+            evaluation = evaluator.evaluate(query_results)
 
-            # Convert query results to markdown table format
-            results_markdown = self._convert_results_to_markdown(query_results, columns)
+            logger.info(
+                f"[LLM Summary] Content size evaluation: {evaluation.row_count} rows, "
+                f"~{evaluation.estimated_tokens:,} tokens, exceeds_limit={evaluation.exceeds_limit}"
+            )
 
-            # Detect if user wants detailed listing vs summary
-            detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
-                               'each', 'breakdown', 'itemized', 'every', 'specific']
-            query_lower = user_query.lower()
-            wants_details = any(keyword in query_lower for keyword in detail_keywords)
-
-            # Determine instruction based on user intent
-            if wants_details:
-                detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
-                report_type = "detailed"
+            # Step 2: Choose processing strategy based on size
+            if evaluation.exceeds_limit:
+                # LARGE RESULT SET: Stream summary header + raw markdown table
+                async for chunk in self._stream_large_result_response(
+                    user_query=user_query,
+                    query_results=query_results,
+                    evaluation=evaluation,
+                    evaluator=evaluator,
+                    field_mappings=field_mappings,
+                    schema_type=schema_type,
+                    sql_explanation=sql_explanation
+                ):
+                    yield chunk
             else:
-                detail_instruction = "4. Be concise but complete - summarize the data appropriately"
-                report_type = "summary"
+                # SMALL RESULT SET: Use current LLM-based formatting
+                async for chunk in self._stream_small_result_response(
+                    user_query=user_query,
+                    query_results=query_results,
+                    evaluation=evaluation
+                ):
+                    yield chunk
 
-            # Simple prompt with markdown-formatted data
-            prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
+            logger.info(f"[LLM Summary] Streamed summary report completed")
+
+        except Exception as e:
+            logger.error(f"[LLM Summary] Streaming summary generation failed: {e}")
+            # Fallback to non-streaming
+            result = self._generate_summary_heuristic(query_results, field_mappings, user_query)
+            formatted_report = result.get('formatted_report', '')
+            if formatted_report:
+                yield formatted_report
+
+    async def _stream_large_result_response(
+        self,
+        user_query: str,
+        query_results: List[Dict[str, Any]],
+        evaluation: ContentSizeEvaluation,
+        evaluator: ContentSizeEvaluator,
+        field_mappings: Dict[str, Dict[str, Any]],
+        schema_type: str,
+        sql_explanation: str
+    ):
+        """
+        Stream response for large result sets that exceed LLM token limits.
+
+        Strategy:
+        1. Generate summary header via LLM (using metadata + samples only)
+        2. Stream the raw markdown table directly (no LLM processing)
+
+        Args:
+            user_query: Original user query
+            query_results: Full query results
+            evaluation: Content size evaluation result
+            evaluator: ContentSizeEvaluator instance
+            field_mappings: Field schema information
+            schema_type: Document schema type
+            sql_explanation: SQL query explanation
+
+        Yields:
+            Chunks of the formatted report
+        """
+        logger.info(
+            f"[LLM Summary] Using large result strategy for {evaluation.row_count} rows "
+            f"(~{evaluation.estimated_tokens:,} tokens)"
+        )
+
+        # Step 1: Calculate statistics for LLM context
+        stats = evaluator.calculate_column_statistics(query_results, evaluation.column_headers)
+        stats_formatted = evaluator.format_statistics_for_llm(stats)
+
+        # Step 2: Get sample rows for LLM context
+        sample_rows = evaluator.get_sample_rows(query_results)
+        sample_markdown = evaluator._build_markdown_table(sample_rows, evaluation.column_headers)
+
+        # Step 3: Build prompt for summary header only
+        prompt = self.LARGE_RESULT_SUMMARY_PROMPT.format(
+            user_query=user_query,
+            row_count=evaluation.row_count,
+            column_names=", ".join(evaluation.column_headers),
+            statistics=stats_formatted,
+            schema_type=schema_type or "unknown",
+            sql_explanation=sql_explanation or "Query executed successfully",
+            sample_count=len(sample_rows),
+            sample_markdown=sample_markdown
+        )
+
+        # Step 4: Stream the LLM-generated summary header
+        try:
+            async for chunk in self.llm_client.astream(prompt):
+                if chunk:
+                    yield chunk
+        except Exception as e:
+            logger.error(f"[LLM Summary] Failed to generate summary header: {e}")
+            # Fallback: Generate a simple header
+            yield f"## Query Results\n\n"
+            yield f"Found **{evaluation.row_count:,}** records matching your query.\n\n"
+
+        # Step 5: Add separator between summary and data table
+        yield "\n\n---\n\n"
+        yield "## Complete Data Results\n\n"
+
+        # Step 6: Stream the raw markdown table directly (no LLM processing)
+        # Stream in chunks to avoid memory issues with very large tables
+        chunk_size = 100  # rows per chunk
+        total_rows = len(query_results)
+
+        for i in range(0, total_rows, chunk_size):
+            chunk_end = min(i + chunk_size, total_rows)
+            chunk_rows = query_results[i:chunk_end]
+
+            if i == 0:
+                # First chunk: include header
+                chunk_markdown = evaluator._build_markdown_table(chunk_rows, evaluation.column_headers)
+            else:
+                # Subsequent chunks: data rows only (no header)
+                lines = []
+                for row in chunk_rows:
+                    values = []
+                    for col in evaluation.column_headers:
+                        val = row.get(col, "")
+                        formatted_val = evaluator._format_cell_value(val, col)
+                        values.append(formatted_val)
+                    lines.append("| " + " | ".join(values) + " |")
+                chunk_markdown = "\n".join(lines)
+
+            yield chunk_markdown
+            if chunk_end < total_rows:
+                yield "\n"  # Add newline between chunks
+
+        # Step 7: Add footer with row count
+        yield f"\n\n*Showing all {evaluation.row_count:,} records*\n"
+
+    async def _stream_small_result_response(
+        self,
+        user_query: str,
+        query_results: List[Dict[str, Any]],
+        evaluation: ContentSizeEvaluation
+    ):
+        """
+        Stream response for small result sets using full LLM processing.
+
+        This is the original behavior - LLM processes the entire result set
+        and generates a formatted report.
+
+        Args:
+            user_query: Original user query
+            query_results: Query results
+            evaluation: Content size evaluation (contains pre-built markdown table)
+
+        Yields:
+            Chunks of the LLM-generated report
+        """
+        # Detect if user wants detailed listing vs summary
+        detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
+                           'each', 'breakdown', 'itemized', 'every', 'specific']
+        query_lower = user_query.lower()
+        wants_details = any(keyword in query_lower for keyword in detail_keywords)
+
+        # Determine instruction based on user intent
+        if wants_details:
+            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
+            report_type = "detailed"
+        else:
+            detail_instruction = "4. Be concise but complete - summarize the data appropriately"
+            report_type = "summary"
+
+        # Use the pre-built markdown table from evaluation
+        results_markdown = evaluation.markdown_table
+
+        # Simple prompt with markdown-formatted data
+        prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
 "{user_query}"
@@ -2614,23 +3265,10 @@ IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the pri
 
 Write the {report_type} report in markdown format:"""
 
-            # Stream the response
-            in_code_block = False
-            async for chunk in self.llm_client.astream(prompt):
-                # Clean up code block markers as we stream
-                if chunk:
-                    # Simple streaming - let frontend handle any cleanup
-                    yield chunk
-
-            logger.info(f"[LLM Summary] Streamed summary report completed")
-
-        except Exception as e:
-            logger.error(f"[LLM Summary] Streaming summary generation failed: {e}")
-            # Fallback to non-streaming
-            result = self._generate_summary_heuristic(query_results, field_mappings, user_query)
-            formatted_report = result.get('formatted_report', '')
-            if formatted_report:
-                yield formatted_report
+        # Stream the response
+        async for chunk in self.llm_client.astream(prompt):
+            if chunk:
+                yield chunk
 
     def _convert_results_to_markdown(
         self,
