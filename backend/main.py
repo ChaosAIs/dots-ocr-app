@@ -400,6 +400,14 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(document_status_manager.start_broadcast_worker())
     logger.info("WebSocket broadcast workers started")
 
+    # Initialize extraction service broadcast callback
+    try:
+        from extraction_service.task_queue_integration import set_broadcast_callback
+        set_broadcast_callback(document_status_manager.broadcast_from_thread)
+        logger.info("Extraction service broadcast callback configured")
+    except ImportError:
+        logger.debug("Extraction service not available, skipping broadcast callback setup")
+
     if GRAPH_RAG_INDEX_ENABLED or GRAPH_RAG_QUERY_ENABLED:
         try:
             from rag_service.storage import Neo4jStorage
@@ -1259,6 +1267,135 @@ async def list_markdown_files(filename: str):
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing markdown files: {str(e)}")
+
+
+# ============================================================================
+# Document ID-based endpoints (new design using UUID as primary key)
+# ============================================================================
+
+@app.get("/documents/{document_id}/markdown-files")
+async def list_markdown_files_by_id(document_id: str):
+    """List all markdown files associated with a document by its ID."""
+    try:
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
+
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        with get_db_session() as db:
+            markdown_files = document_service.list_markdown_files_by_id(doc_uuid, db)
+
+        if not markdown_files:
+            raise HTTPException(status_code=404, detail=f"No markdown files found for document: {document_id}")
+
+        return JSONResponse(content={
+            "status": "success",
+            "document_id": document_id,
+            "markdown_files": markdown_files,
+            "total": len(markdown_files),
+        })
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing markdown files: {str(e)}")
+
+
+@app.get("/documents/{document_id}/markdown")
+async def get_markdown_content_by_id(document_id: str, page_no: int = None):
+    """Get the markdown content of a document by its ID."""
+    try:
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
+
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        with get_db_session() as db:
+            content = document_service.get_markdown_content_by_id(doc_uuid, db, page_no)
+
+        return JSONResponse(content={
+            "status": "success",
+            "document_id": document_id,
+            "page_no": page_no,
+            "content": content,
+        })
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading markdown file: {str(e)}")
+
+
+@app.put("/documents/{document_id}/markdown")
+async def update_markdown_content_by_id(document_id: str, request: Request, page_no: int = None):
+    """Update the markdown content of a document by its ID."""
+    try:
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
+
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        body = await request.json()
+        content = body.get("content", "")
+
+        if not content:
+            raise HTTPException(status_code=400, detail="No content provided")
+
+        with get_db_session() as db:
+            document_service.update_markdown_content_by_id(doc_uuid, db, content, page_no)
+
+        return JSONResponse(content={
+            "status": "success",
+            "document_id": document_id,
+            "page_no": page_no,
+            "message": "Markdown content updated successfully",
+        })
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error updating markdown file: {str(e)}")
+
+
+@app.get("/documents/{document_id}/images/{page_no}")
+async def get_document_image_by_id(document_id: str, page_no: int = None):
+    """Get the image for a document page by document ID."""
+    try:
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
+
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        with get_db_session() as db:
+            image_path = document_service.get_image_path_by_id(doc_uuid, db, page_no)
+
+        if not image_path or not os.path.exists(image_path):
+            raise HTTPException(status_code=404, detail=f"Image not found for document: {document_id}")
+
+        return FileResponse(image_path)
+
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving image: {str(e)}")
+
+
+@app.get("/documents/{document_id}/images")
+async def get_document_image_default_by_id(document_id: str):
+    """Get the default image for a document by document ID (for single-page documents)."""
+    return await get_document_image_by_id(document_id, None)
 
 
 @app.delete("/documents/{document_id}")

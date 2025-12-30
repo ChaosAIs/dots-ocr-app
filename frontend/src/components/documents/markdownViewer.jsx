@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { Dialog } from "primereact/dialog";
 import { Button } from "primereact/button";
 import { ProgressSpinner } from "primereact/progressspinner";
-import { InputText } from "primereact/inputtext";
 import { TabView, TabPanel } from "primereact/tabview";
 import { InputTextarea } from "primereact/inputtextarea";
 import { useTranslation } from "react-i18next";
@@ -30,7 +29,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const [saving, setSaving] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [activeTabIndex, setActiveTabIndex] = useState(0);
-  const [searchTerm, setSearchTerm] = useState("");
   const [lightboxOpen, setLightboxOpen] = useState(false);
   const [lightboxIndex, setLightboxIndex] = useState(0);
   const [images, setImages] = useState([]);
@@ -101,18 +99,18 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const loadMarkdownContent = async () => {
     try {
       setLoading(true);
-      // Remove only the last file extension (e.g., "file.v6.0.pdf" -> "file.v6.0")
-      const filename = document.filename.substring(0, document.filename.lastIndexOf('.'));
+      // Use document ID for API calls (new design)
+      const documentId = document.id || document.document_id;
 
-      const filesResponse = await documentService.getMarkdownFiles(filename);
+      const filesResponse = await documentService.getMarkdownFilesByDocumentId(documentId);
       if (filesResponse.status === "success") {
         let combinedContent = "";
         const imageUrls = [];
 
         for (const file of filesResponse.markdown_files) {
           try {
-            const contentResponse = await documentService.getMarkdownContent(
-              filename,
+            const contentResponse = await documentService.getMarkdownContentByDocumentId(
+              documentId,
               file.page_no
             );
             if (contentResponse.status === "success") {
@@ -130,8 +128,8 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
                 combinedContent += `\n\n---\n\n*${pageLabel}*`;
               }
 
-              // Get the image URL for this page
-              const imageUrl = documentService.getImageUrl(filename, file.page_no);
+              // Get the image URL for this page using document ID
+              const imageUrl = documentService.getImageUrlByDocumentId(documentId, file.page_no);
               imageUrls.push({
                 pageNo: file.page_no,
                 imageUrl: imageUrl
@@ -166,11 +164,11 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const handleSaveMarkdown = async () => {
     try {
       setSaving(true);
-      // Remove only the last file extension (e.g., "file.v6.0.pdf" -> "file.v6.0")
-      const filename = document.filename.substring(0, document.filename.lastIndexOf('.'));
+      // Use document ID for API calls (new design)
+      const documentId = document.id || document.document_id;
 
       // For multi-page documents, we need to save each page separately
-      const filesResponse = await documentService.getMarkdownFiles(filename);
+      const filesResponse = await documentService.getMarkdownFilesByDocumentId(documentId);
       if (filesResponse.status === "success" && filesResponse.markdown_files.length > 1) {
         // Split the edited content by the pattern we use when combining pages
         // The pattern is: \n\n---\n\n[content]\n\n---\n\n*Page X*\n\n---\n\n[content]\n\n---\n\n*Page Y*
@@ -205,11 +203,11 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
           const file = filesResponse.markdown_files[i];
           const pageContent = pageContents[i];
           console.log(`Saving page ${file.page_no}, content length: ${pageContent.length}`);
-          await documentService.saveMarkdownContent(filename, pageContent, file.page_no);
+          await documentService.saveMarkdownContentByDocumentId(documentId, pageContent, file.page_no);
         }
       } else {
         // Single page document
-        await documentService.saveMarkdownContent(filename, editedContent);
+        await documentService.saveMarkdownContentByDocumentId(documentId, editedContent);
       }
 
       setContent(editedContent);
@@ -460,15 +458,15 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
   const headerTemplate = (
     <div className="markdown-viewer-header">
       <span>{document?.filename}</span>
-      <div className="header-actions">
-        <Button
-          icon="pi pi-download"
-          className="p-button-rounded p-button-text"
-          onClick={handleDownload}
-          tooltip={t("MarkdownViewer.DownloadMarkdown")}
-          tooltipPosition="left"
-        />
-      </div>
+      <Button
+        icon="pi pi-download"
+        rounded
+        text
+        severity="secondary"
+        onClick={handleDownload}
+        tooltip={t("MarkdownViewer.DownloadMarkdown")}
+        tooltipOptions={{ position: "bottom" }}
+      />
     </div>
   );
 
@@ -551,21 +549,6 @@ const MarkdownViewer = ({ document, visible, onHide }) => {
               <TabView activeIndex={activeTabIndex} onTabChange={(e) => setActiveTabIndex(e.index)}>
                 {/* Preview Tab */}
                 <TabPanel header={t("MarkdownViewer.PreviewTab")} leftIcon="pi pi-eye">
-                  <div className="search-bar">
-                    <InputText
-                      placeholder={t("MarkdownViewer.SearchPlaceholder")}
-                      value={searchTerm}
-                      onChange={(e) => setSearchTerm(e.target.value)}
-                      className="search-input"
-                    />
-                    {searchTerm && (
-                      <Button
-                        icon="pi pi-times"
-                        className="p-button-rounded p-button-text p-button-sm"
-                        onClick={() => setSearchTerm("")}
-                      />
-                    )}
-                  </div>
                   <div className="markdown-body" ref={contentRef}>
                     <ReactMarkdown
                       components={markdownComponents}

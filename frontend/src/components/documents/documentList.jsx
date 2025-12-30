@@ -308,10 +308,11 @@ export const DocumentList = forwardRef((props, ref) => {
               loadDocumentsRef.current();
             }
 
-            // If indexing/conversion completed, remove from subscriptions
-            if (data.event_type === "indexing_completed" || data.event_type === "ocr_completed") {
+            // If indexing/conversion/extraction completed, remove from subscriptions
+            if (data.event_type === "indexing_completed" || data.event_type === "ocr_completed" ||
+                data.event_type === "extraction_completed" || data.event_type === "extraction_failed") {
               subscribedDocIdsRef.current.delete(data.document_id);
-              console.log(`📭 Removed ${data.document_id} from subscriptions (completed)`);
+              console.log(`📭 Removed ${data.document_id} from subscriptions (${data.event_type})`);
             }
           }
         } catch (error) {

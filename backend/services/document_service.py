@@ -213,7 +213,7 @@ class DocumentService:
             doc = repo.get_by_filename(filename)
             if not doc:
                 # Try common extensions including .md for markdown files saved from chat
-                for ext in ['.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                for ext in ['.csv', '.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
                     doc = repo.get_by_filename(filename + ext)
                     if doc:
                         break
@@ -310,7 +310,7 @@ class DocumentService:
             doc = repo.get_by_filename(filename)
             if not doc:
                 # Try common extensions including .md for markdown files saved from chat
-                for ext in ['.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
+                for ext in ['.csv', '.md', '.pdf', '.docx', '.xlsx', '.png', '.jpg', '.jpeg']:
                     doc = repo.get_by_filename(filename + ext)
                     if doc:
                         break
@@ -356,6 +356,222 @@ class DocumentService:
         markdown_files.extend(page_files)
 
         return markdown_files
+
+    def get_document_output_dir(self, document_id: UUID, db: Session) -> Tuple[Optional[str], Optional[Document]]:
+        """
+        Get the output directory for a document by its ID.
+
+        Args:
+            document_id: The UUID of the document
+            db: Database session
+
+        Returns:
+            Tuple of (output_dir path, document object) or (None, None) if not found
+        """
+        repo = DocumentRepository(db)
+        doc = repo.get_by_id(document_id)
+
+        if not doc:
+            return None, None
+
+        # Get output directory from document record
+        if doc.output_path:
+            output_dir = self.resolve_output_path(doc.output_path)
+        elif doc.file_path:
+            file_name_without_ext = os.path.splitext(doc.filename)[0]
+            rel_dir = os.path.dirname(doc.file_path)
+            output_dir = os.path.join(self.output_dir, rel_dir, file_name_without_ext) if rel_dir else os.path.join(self.output_dir, file_name_without_ext)
+        else:
+            file_name_without_ext = os.path.splitext(doc.filename)[0]
+            output_dir = os.path.join(self.output_dir, file_name_without_ext)
+
+        return output_dir, doc
+
+    def list_markdown_files_by_id(
+        self,
+        document_id: UUID,
+        db: Session
+    ) -> List[dict]:
+        """
+        List all markdown files associated with a document by its ID.
+
+        Args:
+            document_id: The UUID of the document
+            db: Database session
+
+        Returns:
+            List of markdown file info dicts
+        """
+        output_dir, doc = self.get_document_output_dir(document_id, db)
+
+        if not doc:
+            raise FileNotFoundError(f"Document not found: {document_id}")
+
+        if not output_dir or not os.path.exists(output_dir):
+            raise FileNotFoundError(f"No output directory for document: {document_id}")
+
+        file_name_without_ext = os.path.splitext(doc.filename)[0]
+        markdown_files = []
+
+        # Check for single markdown file
+        single_md_path = os.path.join(output_dir, f"{file_name_without_ext}_nohf.md")
+        if os.path.exists(single_md_path):
+            markdown_files.append({
+                "filename": f"{file_name_without_ext}_nohf.md",
+                "path": single_md_path,
+                "page_no": None,
+                "is_multipage": False,
+            })
+
+        # Check for multi-page markdown files
+        page_files = []
+        for file in os.listdir(output_dir):
+            if file.endswith("_nohf.md") and "_page_" in file:
+                page_no = int(file.split("_page_")[1].split("_")[0])
+                page_files.append({
+                    "filename": file,
+                    "path": os.path.join(output_dir, file),
+                    "page_no": page_no,
+                    "is_multipage": True,
+                })
+
+        # Sort by page number
+        page_files.sort(key=lambda x: x["page_no"])
+        markdown_files.extend(page_files)
+
+        return markdown_files
+
+    def get_markdown_content_by_id(
+        self,
+        document_id: UUID,
+        db: Session,
+        page_no: Optional[int] = None
+    ) -> str:
+        """
+        Get markdown content for a document by its ID.
+
+        Args:
+            document_id: The UUID of the document
+            db: Database session
+            page_no: Optional page number for multi-page documents
+
+        Returns:
+            Markdown content as string
+        """
+        output_dir, doc = self.get_document_output_dir(document_id, db)
+
+        if not doc:
+            raise FileNotFoundError(f"Document not found: {document_id}")
+
+        if not output_dir or not os.path.exists(output_dir):
+            raise FileNotFoundError(f"No output directory for document: {document_id}")
+
+        file_name_without_ext = os.path.splitext(doc.filename)[0]
+
+        # Determine which markdown file to read
+        if page_no is not None:
+            markdown_path = os.path.join(output_dir, f"{file_name_without_ext}_page_{page_no}_nohf.md")
+        else:
+            markdown_path = os.path.join(output_dir, f"{file_name_without_ext}_nohf.md")
+
+        if not os.path.exists(markdown_path):
+            raise FileNotFoundError(f"Markdown file not found for document: {document_id}")
+
+        with open(markdown_path, "r", encoding="utf-8") as f:
+            return f.read()
+
+    def update_markdown_content_by_id(
+        self,
+        document_id: UUID,
+        db: Session,
+        content: str,
+        page_no: Optional[int] = None
+    ) -> bool:
+        """
+        Update markdown content for a document by its ID.
+
+        Args:
+            document_id: The UUID of the document
+            db: Database session
+            content: New markdown content
+            page_no: Optional page number for multi-page documents
+
+        Returns:
+            True if successful
+        """
+        output_dir, doc = self.get_document_output_dir(document_id, db)
+
+        if not doc:
+            raise FileNotFoundError(f"Document not found: {document_id}")
+
+        if not output_dir or not os.path.exists(output_dir):
+            raise FileNotFoundError(f"No output directory for document: {document_id}")
+
+        file_name_without_ext = os.path.splitext(doc.filename)[0]
+
+        # Determine which markdown file to write
+        if page_no is not None:
+            markdown_path = os.path.join(output_dir, f"{file_name_without_ext}_page_{page_no}_nohf.md")
+        else:
+            markdown_path = os.path.join(output_dir, f"{file_name_without_ext}_nohf.md")
+
+        if not os.path.exists(markdown_path):
+            raise FileNotFoundError(f"Markdown file not found for document: {document_id}")
+
+        with open(markdown_path, "w", encoding="utf-8") as f:
+            f.write(content)
+
+        return True
+
+    def get_image_path_by_id(
+        self,
+        document_id: UUID,
+        db: Session,
+        page_no: Optional[int] = None
+    ) -> Optional[str]:
+        """
+        Get image path for a document by its ID.
+
+        Args:
+            document_id: The UUID of the document
+            db: Database session
+            page_no: Optional page number for multi-page documents
+
+        Returns:
+            Path to the image file or None if not found
+        """
+        output_dir, doc = self.get_document_output_dir(document_id, db)
+
+        if not doc:
+            return None
+
+        if not output_dir or not os.path.exists(output_dir):
+            return None
+
+        file_name_without_ext = os.path.splitext(doc.filename)[0]
+
+        # Check for page-specific image first
+        if page_no is not None:
+            for ext in ['.png', '.jpg', '.jpeg']:
+                image_path = os.path.join(output_dir, f"{file_name_without_ext}_page_{page_no}{ext}")
+                if os.path.exists(image_path):
+                    return image_path
+
+        # Check for single image
+        for ext in ['.png', '.jpg', '.jpeg']:
+            image_path = os.path.join(output_dir, f"{file_name_without_ext}{ext}")
+            if os.path.exists(image_path):
+                return image_path
+
+        # Check original file path for images
+        if doc.file_path:
+            original_path = self.resolve_file_path(doc.file_path)
+            if os.path.exists(original_path):
+                file_ext = os.path.splitext(original_path)[1].lower()
+                if file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp']:
+                    return original_path
+
+        return None
 
     def resize_image_if_needed(self, file_path: str, max_pixels: int = None) -> dict:
         """

@@ -8,6 +8,7 @@ Extraction is triggered after GraphRAG indexing completes for a document.
 import os
 import logging
 import threading
+from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
@@ -19,6 +20,38 @@ from db.models import Document
 from queue_service.models import TaskQueueChunk, TaskStatus
 
 logger = logging.getLogger(__name__)
+
+# Module-level broadcast callback, set during initialization
+_broadcast_callback = None
+
+
+def set_broadcast_callback(callback):
+    """
+    Set the broadcast callback for websocket status updates.
+
+    This should be called during application startup with the
+    document_status_manager.broadcast_from_thread method.
+
+    Args:
+        callback: Function that takes a dict and broadcasts it via websocket
+    """
+    global _broadcast_callback
+    _broadcast_callback = callback
+    logger.info("[Extraction] Broadcast callback configured")
+
+
+def _broadcast_status(message: dict):
+    """Broadcast a status message via websocket if callback is configured."""
+    if _broadcast_callback:
+        try:
+            _broadcast_callback(message)
+            return True
+        except Exception as e:
+            logger.warning(f"[Extraction] Broadcast failed: {e}")
+            return False
+    else:
+        logger.debug("[Extraction] No broadcast callback configured, skipping websocket notification")
+        return False
 
 
 def check_and_trigger_data_extraction(
@@ -137,14 +170,43 @@ def run_document_extraction(document_id: UUID) -> bool:
         llm_client = get_extraction_llm_client()
         service = ExtractionService(db, llm_client=llm_client)
 
+        # Get document info for broadcast
+        doc = db.query(Document).filter(Document.id == document_id).first()
+        filename = doc.filename if doc else str(document_id)
+
         # Run extraction
         result = service.extract_document(document_id)
 
         if result:
             logger.info(f"[Extraction] ✅ Completed for document {document_id}")
+
+            # Broadcast extraction completion via websocket
+            if _broadcast_status({
+                "event_type": "extraction_completed",
+                "document_id": str(document_id),
+                "filename": filename,
+                "status": "completed",
+                "extraction_status": "completed",
+                "message": "Data extraction completed successfully",
+                "timestamp": datetime.now().isoformat()
+            }):
+                logger.info(f"[Extraction] 📤 Broadcast extraction_completed for {filename}")
+
             return True
         else:
             logger.warning(f"[Extraction] ⚠️ No result for document {document_id}")
+
+            # Broadcast extraction skipped/no result via websocket
+            _broadcast_status({
+                "event_type": "extraction_completed",
+                "document_id": str(document_id),
+                "filename": filename,
+                "status": "no_result",
+                "extraction_status": "completed",
+                "message": "Data extraction completed with no result",
+                "timestamp": datetime.now().isoformat()
+            })
+
             return False
 
     except Exception as e:
@@ -153,10 +215,25 @@ def run_document_extraction(document_id: UUID) -> bool:
         # Update status to failed
         try:
             doc = db.query(Document).filter(Document.id == document_id).first()
+            filename = doc.filename if doc else str(document_id)
             if doc:
                 doc.extraction_status = "failed"
                 doc.extraction_error = str(e)
                 db.commit()
+
+            # Broadcast extraction failure via websocket
+            if _broadcast_status({
+                "event_type": "extraction_failed",
+                "document_id": str(document_id),
+                "filename": filename,
+                "status": "failed",
+                "extraction_status": "failed",
+                "error": str(e),
+                "message": f"Data extraction failed: {str(e)}",
+                "timestamp": datetime.now().isoformat()
+            }):
+                logger.info(f"[Extraction] 📤 Broadcast extraction_failed for {filename}")
+
         except Exception as db_error:
             logger.warning(f"[Extraction] Could not update failed status: {db_error}")
 

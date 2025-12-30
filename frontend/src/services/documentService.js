@@ -405,6 +405,81 @@ class DocumentService {
     return url;
   }
 
+  // ============================================================================
+  // Document ID-based methods (new design using UUID as primary key)
+  // ============================================================================
+
+  /**
+   * Get list of markdown files for a document by its ID
+   * @param {string} documentId - The document UUID
+   * @returns {Promise} - List of markdown files
+   */
+  async getMarkdownFilesByDocumentId(documentId) {
+    try {
+      const response = await http.get(
+        `${this.apiDomain}/documents/${documentId}/markdown-files`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching markdown files:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get markdown content of a document by its ID
+   * @param {string} documentId - The document UUID
+   * @param {number} pageNo - Optional page number for multi-page documents
+   * @returns {Promise} - Markdown content
+   */
+  async getMarkdownContentByDocumentId(documentId, pageNo = null) {
+    try {
+      let url = `${this.apiDomain}/documents/${documentId}/markdown`;
+      if (pageNo !== null) {
+        url += `?page_no=${pageNo}`;
+      }
+      const response = await http.get(url);
+      return response.data;
+    } catch (error) {
+      console.error("Error fetching markdown content:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Update markdown content of a document by its ID
+   * @param {string} documentId - The document UUID
+   * @param {string} content - The new markdown content
+   * @param {number} pageNo - Optional page number for multi-page documents
+   * @returns {Promise} - Update response
+   */
+  async saveMarkdownContentByDocumentId(documentId, content, pageNo = null) {
+    try {
+      let url = `${this.apiDomain}/documents/${documentId}/markdown`;
+      if (pageNo !== null) {
+        url += `?page_no=${pageNo}`;
+      }
+      const response = await http.put(url, { content });
+      return response.data;
+    } catch (error) {
+      console.error("Error saving markdown content:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get the URL for the image of a document by its ID
+   * @param {string} documentId - The document UUID
+   * @param {number} pageNo - Optional page number for multi-page documents
+   * @returns {string} - Image URL
+   */
+  getImageUrlByDocumentId(documentId, pageNo = null) {
+    if (pageNo !== null) {
+      return `${this.apiDomain}/documents/${documentId}/images/${pageNo}`;
+    }
+    return `${this.apiDomain}/documents/${documentId}/images`;
+  }
+
   /**
    * Format file size for display
    * @param {number} bytes - File size in bytes
