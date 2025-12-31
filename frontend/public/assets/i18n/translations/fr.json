@@ -128,7 +128,11 @@
     "MoveSuccess": "Document déplacé avec succès",
     "MoveFailed": "Échec du déplacement du document",
     "Moving": "Déplacement...",
-    "Cancel": "Annuler"
+    "Cancel": "Annuler",
+    "RecoverIndexing": "Réessayer l'indexation échouée",
+    "RecoverSuccess": "{{count}} tâches échouées récupérées avec succès",
+    "RecoverFailed": "Échec de la récupération des tâches d'indexation",
+    "NoFailedTasks": "Aucune tâche échouée à récupérer"
   },
   "MarkdownViewer": {
     "DownloadMarkdown": "Télécharger le Markdown",

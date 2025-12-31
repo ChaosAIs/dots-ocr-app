@@ -8,6 +8,12 @@ V2.0 Enhancement: Tabular Skip Analysis
 - After classification, if strategy is "table_preserving", analyze whether to skip row-level chunking
 - For pure tabular documents (high table ratio, tabular document types), generate 1-3 summary chunks
 - Hybrid documents (research papers with tables) continue with full chunking
+
+V3.0 Enhancement: LLM-Driven Structure Analysis
+- Replace pattern-based domain classification with LLM structure analysis
+- Single LLM call per uploaded file to select optimal chunking strategy
+- Predefined strategy library with 8 strategies
+- Support for multi-page OCR (page-based sampling) and single-file conversion (char-based sampling)
 """
 
 import logging
@@ -28,6 +34,22 @@ from .chunking_strategies import (
     SemanticHeaderStrategy,
 )
 from .domain_patterns import DocumentDomain, get_domain_for_document_type
+
+# V3.0: LLM-driven chunking imports
+from .structure_analyzer import (
+    StructureAnalyzer,
+    StrategyConfig,
+    DEFAULT_STRATEGY,
+    analyze_document_structure,
+    analyze_content_structure,
+)
+from .strategy_executor import (
+    StrategyExecutor,
+    Chunk,
+    execute_strategy,
+    STRATEGIES,
+)
+from .content_sampler import ContentSampler, sample_content
 
 # Import date normalization utilities
 try:
@@ -68,6 +90,11 @@ TABULAR_SKIP_THRESHOLD = float(os.environ.get("TABULAR_SKIP_THRESHOLD", "0.6"))
 
 # Enable/disable tabular skip feature
 TABULAR_SKIP_ENABLED = os.environ.get("TABULAR_SKIP_ENABLED", "true").lower() == "true"
+
+# V3.0: Enable/disable LLM-driven structure analysis
+# When enabled, uses LLM to analyze document structure and select chunking strategy
+# When disabled, uses the existing pattern-based domain classification
+LLM_DRIVEN_CHUNKING_ENABLED = os.environ.get("LLM_DRIVEN_CHUNKING_ENABLED", "false").lower() == "true"
 
 
 @dataclass
@@ -113,21 +140,49 @@ class AdaptiveChunker:
         fallback_strategy: str = "semantic_header",
         default_chunk_size: int = 512,
         default_overlap: int = 51,
+        use_llm_driven_chunking: Optional[bool] = None,
+        llm_client=None,
     ):
         """
         Initialize the adaptive chunker.
 
         Args:
-            use_llm_classification: Whether to use LLM for document classification
+            use_llm_classification: Whether to use LLM for document classification (V2.0)
             fallback_strategy: Strategy to use if classification fails
             default_chunk_size: Default chunk size if not determined by profile
             default_overlap: Default overlap if not determined by profile
+            use_llm_driven_chunking: Whether to use LLM-driven structure analysis (V3.0)
+                                    If None, uses LLM_DRIVEN_CHUNKING_ENABLED env var
+            llm_client: Optional LLM client for structure analysis
         """
         self.use_llm_classification = use_llm_classification
         self.fallback_strategy = fallback_strategy
         self.default_chunk_size = default_chunk_size
         self.default_overlap = default_overlap
-        self.classifier = DocumentClassifier(use_llm=use_llm_classification)
+
+        # V3.0: LLM-driven chunking
+        if use_llm_driven_chunking is None:
+            self.use_llm_driven_chunking = LLM_DRIVEN_CHUNKING_ENABLED
+        else:
+            self.use_llm_driven_chunking = use_llm_driven_chunking
+
+        self.llm_client = llm_client
+
+        # Only instantiate components needed for the selected mode
+        if self.use_llm_driven_chunking:
+            # V3.0: LLM-driven chunking components
+            self.structure_analyzer = StructureAnalyzer(llm_client=llm_client)
+            self.strategy_executor = StrategyExecutor()
+            self.content_sampler = ContentSampler()
+            self.classifier = None  # Not used in V3.0
+            logger.info("[Chunker] Initialized with V3.0 LLM-driven chunking mode")
+        else:
+            # V2.0: Pattern-based classification
+            self.classifier = DocumentClassifier(use_llm=use_llm_classification)
+            self.structure_analyzer = None
+            self.strategy_executor = None
+            self.content_sampler = None
+            logger.info("[Chunker] Initialized with V2.0 pattern-based classification mode")
 
     def chunk_file(
         self,
@@ -219,6 +274,7 @@ class AdaptiveChunker:
         logger.info(f"[Chunker] Content Length: {len(content) if content else 0} chars")
         logger.info(f"[Chunker] Force Strategy: {force_strategy or 'None'}")
         logger.info(f"[Chunker] Skip Classification: {skip_classification}")
+        logger.info(f"[Chunker] LLM-Driven Chunking: {self.use_llm_driven_chunking}")
         logger.info("-" * 80)
 
         if not content or not content.strip():
@@ -231,6 +287,16 @@ class AdaptiveChunker:
                     document_domain="general",
                     recommended_strategy=self.fallback_strategy,
                 ),
+            )
+
+        # V3.0: Use LLM-driven chunking if enabled and not forcing a specific strategy
+        if self.use_llm_driven_chunking and not force_strategy:
+            logger.info("[Chunker] Using V3.0 LLM-driven structure analysis...")
+            return self._chunk_content_llm_driven(
+                content=content,
+                source_name=source_name,
+                file_path=file_path,
+                existing_metadata=existing_metadata,
             )
 
         # Pre-process content
@@ -538,6 +604,376 @@ class AdaptiveChunker:
             score += 0.2
 
         return min(1.0, score)
+
+    # ========================================================================
+    # V3.0: LLM-DRIVEN CHUNKING METHODS
+    # ========================================================================
+
+    def _chunk_content_llm_driven(
+        self,
+        content: str,
+        source_name: str,
+        file_path: str = "",
+        existing_metadata: Optional[Dict[str, Any]] = None,
+    ) -> AdaptiveChunkingResult:
+        """
+        Chunk content using LLM-driven structure analysis (V3.0).
+
+        This method replaces the pattern-based domain classification with
+        a single LLM call to analyze document structure and select the
+        optimal chunking strategy.
+
+        Args:
+            content: The text content to chunk
+            source_name: Name to use as source metadata
+            file_path: Optional file path for metadata
+            existing_metadata: Additional metadata to include in chunks
+
+        Returns:
+            AdaptiveChunkingResult with chunks and metadata
+        """
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] LLM-Driven Structure Analysis")
+        logger.info("-" * 80)
+
+        # Step 1: Pre-process content
+        logger.info("[Chunker V3.0] STEP 1: Pre-processing content...")
+        original_length = len(content)
+        content = self._preprocess_content(content)
+        logger.info(f"[Chunker V3.0] Pre-processing: {original_length} -> {len(content)} chars")
+
+        # Step 2: Analyze document structure with LLM
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 2: LLM Structure Analysis...")
+        try:
+            strategy_config = self.structure_analyzer.analyze_from_content(content)
+            logger.info(f"[Chunker V3.0] LLM selected strategy: {strategy_config.selected_strategy}")
+            logger.info(f"[Chunker V3.0]   - Chunk size: {strategy_config.chunk_size}")
+            logger.info(f"[Chunker V3.0]   - Overlap: {strategy_config.overlap_percent}%")
+            logger.info(f"[Chunker V3.0]   - Preserve: {strategy_config.preserve_elements}")
+            logger.info(f"[Chunker V3.0]   - Reasoning: {strategy_config.reasoning}")
+        except Exception as e:
+            logger.error(f"[Chunker V3.0] LLM analysis failed: {e}")
+            logger.info("[Chunker V3.0] Using default fallback strategy...")
+            strategy_config = DEFAULT_STRATEGY
+
+        # Step 3: Apply date normalization if available
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 3: Date normalization...")
+        if DATE_NORMALIZER_AVAILABLE:
+            normalized_dates = find_and_normalize_dates(content)
+            if normalized_dates:
+                logger.info(f"[Chunker V3.0] Found {len(normalized_dates)} dates to normalize")
+                content = augment_text_with_dates(content, normalized_dates)
+            else:
+                logger.info("[Chunker V3.0] No dates found to normalize")
+        else:
+            logger.info("[Chunker V3.0] Date normalizer not available")
+
+        # Step 4: Execute chunking strategy
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 4: Executing chunking strategy...")
+        logger.info(f"[Chunker V3.0] Strategy: {strategy_config.selected_strategy}")
+
+        try:
+            raw_chunks = self.strategy_executor.execute(content, strategy_config)
+            logger.info(f"[Chunker V3.0] Created {len(raw_chunks)} raw chunks")
+        except Exception as e:
+            logger.error(f"[Chunker V3.0] Strategy execution failed: {e}")
+            # Fallback to paragraph-based chunking
+            logger.info("[Chunker V3.0] Falling back to paragraph_based strategy...")
+            fallback_config = StrategyConfig(
+                selected_strategy="paragraph_based",
+                chunk_size=self.default_chunk_size,
+                overlap_percent=10,
+                preserve_elements=["tables", "code_blocks", "lists"],
+                reasoning="Fallback due to execution error"
+            )
+            raw_chunks = self.strategy_executor.execute(content, fallback_config)
+
+        # Step 5: Convert raw chunks to Document objects
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 5: Converting to Document objects...")
+        documents = self._convert_chunks_to_documents(
+            raw_chunks=raw_chunks,
+            source_name=source_name,
+            file_path=file_path,
+            strategy_config=strategy_config,
+            existing_metadata=existing_metadata,
+        )
+
+        # Step 6: Post-process chunks (add dates, importance scores)
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 6: Post-processing chunks...")
+        # Create a minimal profile for post-processing
+        profile = ChunkingProfile(
+            document_type="llm_analyzed",
+            document_domain="general",
+            recommended_strategy=strategy_config.selected_strategy,
+            recommended_chunk_size=strategy_config.chunk_size,
+            recommended_overlap_percent=strategy_config.overlap_percent,
+            confidence=0.9,
+            reasoning=strategy_config.reasoning,
+            total_chars=len(content),
+            total_tokens=len(content) // 4,
+        )
+        documents = self._postprocess_chunks(documents, profile, source_name)
+
+        # Build stats
+        stats = {
+            "total_chunks": len(documents),
+            "strategy_used": strategy_config.selected_strategy,
+            "document_type": "llm_analyzed",
+            "document_domain": "general",
+            "chunk_size_used": strategy_config.chunk_size,
+            "overlap_percent": strategy_config.overlap_percent,
+            "preserve_elements": strategy_config.preserve_elements,
+            "classification_method": "llm_structure_analysis",
+            "reasoning": strategy_config.reasoning,
+        }
+
+        # Log final summary
+        logger.info("=" * 80)
+        logger.info("[Chunker V3.0] ========== LLM-DRIVEN CHUNKING COMPLETE ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Chunker V3.0] FINAL SUMMARY:")
+        logger.info(f"[Chunker V3.0]   - Source: {source_name}")
+        logger.info(f"[Chunker V3.0]   - Strategy: {strategy_config.selected_strategy}")
+        logger.info(f"[Chunker V3.0]   - Total Chunks: {len(documents)}")
+        logger.info(f"[Chunker V3.0]   - Chunk Size: {strategy_config.chunk_size}")
+        logger.info(f"[Chunker V3.0]   - Overlap: {strategy_config.overlap_percent}%")
+        logger.info(f"[Chunker V3.0]   - Reasoning: {strategy_config.reasoning}")
+        logger.info("=" * 80)
+
+        return AdaptiveChunkingResult(
+            chunks=documents,
+            profile=profile,
+            stats=stats,
+        )
+
+    def _convert_chunks_to_documents(
+        self,
+        raw_chunks: List[Chunk],
+        source_name: str,
+        file_path: str,
+        strategy_config: StrategyConfig,
+        existing_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Document]:
+        """
+        Convert raw Chunk objects to LangChain Document objects.
+
+        Args:
+            raw_chunks: List of Chunk objects from strategy executor
+            source_name: Name for the source
+            file_path: Path to the source file
+            strategy_config: Strategy configuration used
+            existing_metadata: Additional metadata to include
+
+        Returns:
+            List of Document objects
+        """
+        documents = []
+        total_chunks = len(raw_chunks)
+
+        for chunk in raw_chunks:
+            metadata = {
+                # Source info
+                "source": source_name,
+                "file_path": file_path,
+                # Chunk positioning
+                "chunk_index": chunk.index,
+                "total_chunks": total_chunks,
+                "start_position": chunk.start_position,
+                "end_position": chunk.end_position,
+                "chunk_chars": len(chunk.content),
+                # Strategy info
+                "strategy_used": strategy_config.selected_strategy,
+                "chunk_size_setting": strategy_config.chunk_size,
+                "overlap_percent": strategy_config.overlap_percent,
+                # V3.0 marker
+                "chunking_version": "3.0",
+                "classification_method": "llm_structure_analysis",
+            }
+
+            # Merge with chunk's own metadata
+            if chunk.metadata:
+                metadata.update(chunk.metadata)
+
+            # Merge with existing metadata if provided
+            if existing_metadata:
+                metadata.update(existing_metadata)
+
+            documents.append(Document(
+                page_content=chunk.content,
+                metadata=metadata,
+            ))
+
+        return documents
+
+    def chunk_folder(
+        self,
+        output_folder: str,
+        source_name: Optional[str] = None,
+        existing_metadata: Optional[Dict[str, Any]] = None,
+    ) -> AdaptiveChunkingResult:
+        """
+        Chunk documents from an output folder using LLM-driven analysis.
+
+        This method is designed for multi-page documents processed by OCR,
+        where each page is a separate *_nohf.md file in the folder.
+
+        Uses page-based sampling (first 3 + middle 2 + last 2 pages) for
+        LLM structure analysis, then applies the selected strategy to
+        all pages.
+
+        NOTE: This is a V3.0-only method. If V3.0 components are not initialized,
+        they will be lazily created.
+
+        Args:
+            output_folder: Path to folder containing *_nohf.md files
+            source_name: Optional name for the source (defaults to folder name)
+            existing_metadata: Additional metadata to include in chunks
+
+        Returns:
+            AdaptiveChunkingResult with chunks from all pages
+        """
+        # Ensure V3.0 components are available (lazy initialization)
+        if self.content_sampler is None:
+            self.content_sampler = ContentSampler()
+        if self.structure_analyzer is None:
+            self.structure_analyzer = StructureAnalyzer(llm_client=self.llm_client)
+        if self.strategy_executor is None:
+            self.strategy_executor = StrategyExecutor()
+
+        logger.info("=" * 80)
+        logger.info("[Chunker V3.0] ========== FOLDER CHUNKING START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Chunker V3.0] Folder: {output_folder}")
+
+        # Determine source name
+        if source_name is None:
+            source_name = Path(output_folder).name
+
+        # Detect scenario (multi-page or single-file)
+        scenario, nohf_files = self.content_sampler.detect_scenario(output_folder)
+        logger.info(f"[Chunker V3.0] Scenario: {scenario}")
+        logger.info(f"[Chunker V3.0] Found {len(nohf_files)} *_nohf.md files")
+
+        if not nohf_files:
+            logger.warning(f"[Chunker V3.0] No files found in {output_folder}")
+            return AdaptiveChunkingResult(
+                chunks=[],
+                profile=ChunkingProfile(
+                    document_type="unknown",
+                    document_domain="general",
+                    recommended_strategy="paragraph_based",
+                ),
+            )
+
+        # Step 1: Sample content for LLM analysis
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 1: Sampling content for analysis...")
+        sampled = self.content_sampler.sample_from_folder(output_folder)
+        logger.info(f"[Chunker V3.0] Sampled {sampled.total_chars} chars from {sampled.total_pages} pages")
+
+        # Step 2: Analyze structure with LLM
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 2: LLM Structure Analysis...")
+        try:
+            strategy_config = self.structure_analyzer._analyze_with_llm(sampled)
+            logger.info(f"[Chunker V3.0] LLM selected strategy: {strategy_config.selected_strategy}")
+        except Exception as e:
+            logger.error(f"[Chunker V3.0] LLM analysis failed: {e}")
+            strategy_config = DEFAULT_STRATEGY
+
+        # Step 3: Process each file with the selected strategy
+        logger.info("-" * 80)
+        logger.info("[Chunker V3.0] STEP 3: Processing files with selected strategy...")
+        all_chunks = []
+
+        for i, file_path in enumerate(nohf_files):
+            logger.info(f"[Chunker V3.0] Processing file {i+1}/{len(nohf_files)}: {Path(file_path).name}")
+
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    file_content = f.read()
+
+                # Pre-process content
+                file_content = self._preprocess_content(file_content)
+
+                # Apply date normalization
+                if DATE_NORMALIZER_AVAILABLE:
+                    normalized_dates = find_and_normalize_dates(file_content)
+                    if normalized_dates:
+                        file_content = augment_text_with_dates(file_content, normalized_dates)
+
+                # Execute strategy
+                raw_chunks = self.strategy_executor.execute(file_content, strategy_config)
+
+                # Convert to documents
+                page_num = i + 1
+                file_metadata = {
+                    "page_number": page_num,
+                    "file_name": Path(file_path).name,
+                }
+                if existing_metadata:
+                    file_metadata.update(existing_metadata)
+
+                documents = self._convert_chunks_to_documents(
+                    raw_chunks=raw_chunks,
+                    source_name=source_name,
+                    file_path=file_path,
+                    strategy_config=strategy_config,
+                    existing_metadata=file_metadata,
+                )
+
+                # Update chunk indices to be global
+                for doc in documents:
+                    doc.metadata["page_chunk_index"] = doc.metadata["chunk_index"]
+                    doc.metadata["chunk_index"] = len(all_chunks) + documents.index(doc)
+
+                all_chunks.extend(documents)
+                logger.info(f"[Chunker V3.0]   Created {len(documents)} chunks from page {page_num}")
+
+            except Exception as e:
+                logger.error(f"[Chunker V3.0] Error processing {file_path}: {e}")
+
+        # Create profile
+        profile = ChunkingProfile(
+            document_type="llm_analyzed",
+            document_domain="general",
+            recommended_strategy=strategy_config.selected_strategy,
+            recommended_chunk_size=strategy_config.chunk_size,
+            recommended_overlap_percent=strategy_config.overlap_percent,
+            confidence=0.9,
+            reasoning=strategy_config.reasoning,
+        )
+
+        # Build stats
+        stats = {
+            "total_chunks": len(all_chunks),
+            "total_pages": len(nohf_files),
+            "scenario": scenario,
+            "strategy_used": strategy_config.selected_strategy,
+            "chunk_size_used": strategy_config.chunk_size,
+            "classification_method": "llm_structure_analysis",
+        }
+
+        logger.info("=" * 80)
+        logger.info("[Chunker V3.0] ========== FOLDER CHUNKING COMPLETE ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Chunker V3.0] FINAL SUMMARY:")
+        logger.info(f"[Chunker V3.0]   - Source: {source_name}")
+        logger.info(f"[Chunker V3.0]   - Total Pages: {len(nohf_files)}")
+        logger.info(f"[Chunker V3.0]   - Total Chunks: {len(all_chunks)}")
+        logger.info(f"[Chunker V3.0]   - Strategy: {strategy_config.selected_strategy}")
+        logger.info("=" * 80)
+
+        return AdaptiveChunkingResult(
+            chunks=all_chunks,
+            profile=profile,
+            stats=stats,
+        )
 
     # ========================================================================
     # V2.0: TABULAR SKIP ANALYSIS METHODS

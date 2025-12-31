@@ -22,7 +22,7 @@ import socket
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Optional, List, NamedTuple, Literal, Tuple
+from typing import Optional, List, NamedTuple, Literal, Tuple, Dict, Any, Union
 from uuid import UUID
 from sqlalchemy import and_, or_, func
 from sqlalchemy.orm import Session
@@ -810,18 +810,21 @@ class HierarchicalTaskQueueManager:
         self,
         page_id: UUID,
         document_id: UUID,
-        chunks: List[Tuple[str, int]],  # List of (chunk_id, chunk_index)
+        chunks: List[Tuple[str, int, Optional[str], Optional[Dict[str, Any]]]],  # List of (chunk_id, chunk_index, content, metadata)
         db: Optional[Session] = None
     ) -> bool:
         """
         Create chunk tasks for a page.
 
         Called after OCR is complete and content is chunked.
+        V3.0: Now stores chunk content and metadata to avoid redundant LLM calls.
 
         Args:
             page_id: Page task UUID
             document_id: Document UUID
-            chunks: List of (chunk_id, chunk_index) tuples
+            chunks: List of (chunk_id, chunk_index, content, metadata) tuples
+                   - content: The actual chunk text (stored for Stages 2 & 3)
+                   - metadata: Chunk metadata as dict (strategy, positions, etc.)
             db: Database session
 
         Returns:
@@ -832,12 +835,21 @@ class HierarchicalTaskQueueManager:
             db = create_db_session()
 
         try:
-            for chunk_id, chunk_index in chunks:
+            for chunk_data in chunks:
+                # Handle both old format (id, index) and new format (id, index, content, metadata)
+                if len(chunk_data) == 2:
+                    chunk_id, chunk_index = chunk_data
+                    chunk_content, chunk_metadata = None, None
+                else:
+                    chunk_id, chunk_index, chunk_content, chunk_metadata = chunk_data
+
                 chunk = TaskQueueChunk(
                     page_id=page_id,
                     document_id=document_id,
                     chunk_id=chunk_id,
                     chunk_index=chunk_index,
+                    chunk_content=chunk_content,
+                    chunk_metadata=chunk_metadata,
                     vector_status=TaskStatus.PENDING,
                     graphrag_status=TaskStatus.PENDING,
                     max_retries=self.max_retries
@@ -1098,14 +1110,21 @@ class HierarchicalTaskQueueManager:
                     chunk.graphrag_status = TaskStatus.SKIPPED
                     chunk.graphrag_skip_reason = skip_reason
                     chunk.graphrag_completed_at = datetime.now(timezone.utc)
+
+                    # Store document_id before commit
+                    document_id = chunk.document_id
+
                     db.commit()
 
                     logger.info(f"⏭️ Skipped GraphRAG for chunk {chunk.chunk_id}: {skip_reason}")
 
                     # Update parent statuses (skipped counts as done)
                     self.update_page_status(chunk.page_id, "graphrag", db)
-                    self.update_document_status(chunk.document_id, "graphrag", db)
-                    self.sync_document_indexing_details(chunk.document_id, db)
+                    self.update_document_status(document_id, "graphrag", db)
+                    self.sync_document_indexing_details(document_id, db)
+
+                    # V3.0: Check if document is fully indexed and cleanup queue records
+                    self._check_and_cleanup_completed_document(document_id, db)
 
                     # Continue to find next non-skipped chunk
                     continue
@@ -1200,18 +1219,22 @@ class HierarchicalTaskQueueManager:
             chunk.entities_extracted = entities_extracted
             chunk.relationships_extracted = relationships_extracted
 
-            # Store page_id before commit
+            # Store page_id and document_id before commit
             page_id = chunk.page_id
+            document_id = chunk.document_id
 
             db.commit()
 
             # Update parent page and document status, sync to indexing_details
             self.update_page_status(page_id, "graphrag", db)
-            self.update_document_status(chunk.document_id, "graphrag", db)
-            self.sync_document_indexing_details(chunk.document_id, db)
+            self.update_document_status(document_id, "graphrag", db)
+            self.sync_document_indexing_details(document_id, db)
 
             # Note: Data extraction is now triggered after Vector indexing completes
             # (before GraphRAG), see complete_vector_chunk_task
+
+            # V3.0: Check if document is fully indexed and cleanup queue records
+            self._check_and_cleanup_completed_document(document_id, db)
 
             logger.debug(f"Completed GraphRAG chunk task: chunk={chunk_task_id}, entities={entities_extracted}")
             return True
@@ -1643,3 +1666,123 @@ class HierarchicalTaskQueueManager:
             logger.debug(f"[Extraction] Extraction service not available: {e}")
         except Exception as e:
             logger.error(f"[Extraction] Error triggering extraction for {document_id}: {e}")
+
+    # =========================================================================
+    # V3.0: Queue Cleanup (Hard Delete after completion)
+    # =========================================================================
+
+    def cleanup_completed_document_queue(
+        self,
+        document_id: UUID,
+        db: Optional[Session] = None
+    ) -> Dict[str, int]:
+        """
+        Hard delete queue records (pages and chunks) for a fully indexed document.
+
+        V3.0: Called when all processing stages are complete for a document.
+        The document table retains status info, so queue records are no longer needed.
+
+        This cleanup:
+        - Frees up database storage (especially chunk_content TEXT columns)
+        - Keeps queue tables lean for better query performance
+        - Relies on CASCADE delete from task_queue_page to task_queue_chunk
+
+        Args:
+            document_id: Document UUID
+            db: Database session
+
+        Returns:
+            Dict with counts of deleted records
+        """
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        deleted = {"pages": 0, "chunks": 0}
+
+        try:
+            # Count records before deletion for logging
+            chunk_count = db.query(TaskQueueChunk).filter(
+                TaskQueueChunk.document_id == document_id
+            ).count()
+
+            page_count = db.query(TaskQueuePage).filter(
+                TaskQueuePage.document_id == document_id
+            ).count()
+
+            if page_count == 0 and chunk_count == 0:
+                return deleted
+
+            # Delete pages (CASCADE will delete chunks automatically)
+            db.query(TaskQueuePage).filter(
+                TaskQueuePage.document_id == document_id
+            ).delete(synchronize_session=False)
+
+            db.commit()
+
+            deleted["pages"] = page_count
+            deleted["chunks"] = chunk_count
+
+            logger.info(f"🧹 Cleaned up queue records for document {document_id}: "
+                       f"{page_count} pages, {chunk_count} chunks deleted")
+
+            return deleted
+
+        except Exception as e:
+            logger.error(f"Error cleaning up queue for document {document_id}: {e}")
+            db.rollback()
+            return deleted
+        finally:
+            if should_close_db:
+                db.close()
+
+    def _check_and_cleanup_completed_document(
+        self,
+        document_id: UUID,
+        db: Optional[Session] = None
+    ) -> None:
+        """
+        Check if a document is fully indexed and trigger cleanup if so.
+
+        V3.0: A document is considered fully indexed when:
+        - All chunks have vector_status in DONE_STATUSES (completed/skipped)
+        - All chunks have graphrag_status in DONE_STATUSES (completed/skipped)
+
+        Args:
+            document_id: Document UUID
+            db: Database session
+        """
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        try:
+            # Check if all chunks are done (both vector and graphrag)
+            chunk_stats = db.query(
+                func.count().label("total"),
+                func.count().filter(
+                    TaskQueueChunk.vector_status.in_(DONE_STATUSES)
+                ).label("vector_done"),
+                func.count().filter(
+                    TaskQueueChunk.graphrag_status.in_(DONE_STATUSES)
+                ).label("graphrag_done"),
+            ).filter(TaskQueueChunk.document_id == document_id).first()
+
+            if not chunk_stats or chunk_stats.total == 0:
+                return
+
+            # Not fully done yet
+            if chunk_stats.vector_done < chunk_stats.total:
+                return
+            if chunk_stats.graphrag_done < chunk_stats.total:
+                return
+
+            # All stages complete - cleanup queue records
+            logger.info(f"🎉 Document {document_id} fully indexed, cleaning up queue records")
+            self.cleanup_completed_document_queue(document_id, db)
+
+        except Exception as e:
+            logger.error(f"Error checking cleanup status for document {document_id}: {e}")
+        finally:
+            if should_close_db:
+                db.close()

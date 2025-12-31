@@ -287,18 +287,41 @@ class TaskQueueService:
                             logger.info(f"✅ OCR completed for page {page_task.page_number} of {filename} (skipped chunking)")
                             return page_output_path
 
+                    # ================================================================
+                    # V3.0: CHUNKING START - Page {page_task.page_number}
+                    # ================================================================
+                    logger.info("=" * 80)
+                    logger.info(f"[Chunking] ========== START CHUNKING PAGE {page_task.page_number} ==========")
+                    logger.info("=" * 80)
+                    logger.info(f"[Chunking] Document: {filename}")
+                    logger.info(f"[Chunking] Page: {page_task.page_number}")
+                    logger.info(f"[Chunking] Input file: {page_output_path}")
+
                     result = chunk_markdown_with_summaries(
                         page_output_path,
                         source_name=f"{filename}_page_{page_task.page_number}"
                     )
                     chunks = result.chunks
 
+                    logger.info("-" * 80)
+                    logger.info(f"[Chunking] Chunking complete: {len(chunks) if chunks else 0} chunks created")
+
                     if chunks:
                         chunk_data = []
+                        total_content_size = 0
                         for idx, chunk in enumerate(chunks):
                             content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
                             chunk_id = f"{page_task.document_id}_{page_task.page_number}_{idx}_{content_hash}"
-                            chunk_data.append((chunk_id, idx))
+                            # V3.0: Store chunk content and metadata to avoid redundant LLM calls
+                            chunk_content = chunk.page_content
+                            chunk_metadata = chunk.metadata.copy() if chunk.metadata else {}
+                            chunk_metadata["source_page"] = page_task.page_number
+                            chunk_metadata["chunk_index"] = idx
+                            chunk_metadata["total_chunks"] = len(chunks)
+                            chunk_data.append((chunk_id, idx, chunk_content, chunk_metadata))
+                            total_content_size += len(chunk_content)
+
+                        logger.info(f"[Chunking] Total content stored: {total_content_size} chars across {len(chunk_data)} chunks")
 
                         if chunk_data and self.task_queue_manager:
                             self.task_queue_manager.create_chunk_tasks(
@@ -307,10 +330,17 @@ class TaskQueueService:
                                 chunks=chunk_data,
                                 db=db
                             )
-                            logger.info(f"📦 Created {len(chunk_data)} chunk tasks for page {page_task.page_number}")
+                            logger.info(f"[Chunking] 📦 Created {len(chunk_data)} chunk tasks with stored content")
 
                         page_record.chunk_count = len(chunks)
                         db.commit()
+
+                    # ================================================================
+                    # V3.0: CHUNKING END - Page {page_task.page_number}
+                    # ================================================================
+                    logger.info("=" * 80)
+                    logger.info(f"[Chunking] ========== END CHUNKING PAGE {page_task.page_number} ==========")
+                    logger.info("=" * 80)
 
                 logger.info(f"✅ OCR completed for page {page_task.page_number} of {filename}")
                 return page_output_path
@@ -369,6 +399,8 @@ class TaskQueueService:
         """
         Process Vector indexing task for a single chunk.
 
+        V3.0: Now uses stored chunk content from database instead of re-chunking.
+
         Args:
             chunk_task: ChunkTaskData with chunk_id, document_id, page_id, chunk_index, etc.
 
@@ -377,12 +409,25 @@ class TaskQueueService:
         """
         from rag_service.markdown_chunker import chunk_markdown_with_summaries
         from rag_service.vectorstore import get_vectorstore
-        from queue_service import TaskQueuePage
+        from queue_service import TaskQueuePage, TaskQueueChunk
+        from langchain_core.documents import Document as LangchainDocument
 
         try:
-            logger.info(f"🔄 Processing Vector index for chunk: {chunk_task.chunk_id}")
+            # ================================================================
+            # V3.0: VECTOR INDEXING START
+            # ================================================================
+            logger.info("=" * 80)
+            logger.info(f"[Vector] ========== START VECTOR INDEXING ==========")
+            logger.info("=" * 80)
+            logger.info(f"[Vector] Chunk ID: {chunk_task.chunk_id}")
+            logger.info(f"[Vector] Chunk Index: {chunk_task.chunk_index}")
 
             with get_db_session() as db:
+                # V3.0: First try to get stored chunk content from database
+                chunk_record = db.query(TaskQueueChunk).filter(
+                    TaskQueueChunk.id == chunk_task.id
+                ).first()
+
                 page_record = db.query(TaskQueuePage).filter(
                     TaskQueuePage.id == chunk_task.page_id
                 ).first()
@@ -400,50 +445,58 @@ class TaskQueueService:
                 source_name = os.path.splitext(doc.filename)[0]
 
                 # Check if this is a single-file document type
-                # For these, we use chunk_index 0 as the canonical page number to avoid duplicates
                 file_ext = Path(doc.filename).suffix.lower() if doc.filename else ''
                 is_single_file_doc = file_ext in self.DOC_SERVICE_EXTENSIONS
+                canonical_page_number = 0 if is_single_file_doc else page_number
 
-            result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
-            chunks = result.chunks
+                # V3.0: Use stored content if available, otherwise fall back to re-chunking
+                if chunk_record and chunk_record.chunk_content:
+                    logger.info(f"[Vector] 📦 V3.0 OPTIMIZATION: Using stored chunk content ({len(chunk_record.chunk_content)} chars)")
+                    chunk_content = chunk_record.chunk_content
+                    chunk_metadata = chunk_record.chunk_metadata or {}
+                    chunk_metadata["chunk_id"] = chunk_task.chunk_id
+                    chunk_metadata["document_id"] = str(chunk_task.document_id)
+                    chunk = LangchainDocument(page_content=chunk_content, metadata=chunk_metadata)
+                else:
+                    # Fallback: Re-chunk if stored content not available
+                    logger.warning(f"[Vector] ⚠️ V3.0 FALLBACK: Stored content not found, re-chunking...")
+                    result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
+                    chunks = result.chunks
 
-            if not chunks or chunk_task.chunk_index >= len(chunks):
-                raise ValueError(
-                    f"Chunk index {chunk_task.chunk_index} out of range. "
-                    f"Page has {len(chunks) if chunks else 0} chunks."
-                )
+                    if not chunks or chunk_task.chunk_index >= len(chunks):
+                        raise ValueError(
+                            f"Chunk index {chunk_task.chunk_index} out of range. "
+                            f"Page has {len(chunks) if chunks else 0} chunks."
+                        )
 
-            chunk = chunks[chunk_task.chunk_index]
+                    chunk = chunks[chunk_task.chunk_index]
 
-            # Build ID mapping for parent/child relationships
-            # For single-file documents, always use page 0 to ensure consistent IDs
-            canonical_page_number = 0 if is_single_file_doc else page_number
+                    # Build ID mapping for parent/child relationships
+                    old_to_new_id_map = {}
+                    for idx, c in enumerate(chunks):
+                        old_id = c.metadata.get("chunk_id", "")
+                        content_hash = hashlib.md5(c.page_content.encode()).hexdigest()[:16]
+                        new_id = f"{chunk_task.document_id}_{canonical_page_number}_{idx}_{content_hash}"
+                        old_to_new_id_map[old_id] = new_id
 
-            old_to_new_id_map = {}
-            for idx, c in enumerate(chunks):
-                old_id = c.metadata.get("chunk_id", "")
-                content_hash = hashlib.md5(c.page_content.encode()).hexdigest()[:16]
-                new_id = f"{chunk_task.document_id}_{canonical_page_number}_{idx}_{content_hash}"
-                old_to_new_id_map[old_id] = new_id
+                    # Use canonical chunk_id for single-file documents to prevent duplicates
+                    if is_single_file_doc:
+                        content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
+                        canonical_chunk_id = f"{chunk_task.document_id}_{canonical_page_number}_{chunk_task.chunk_index}_{content_hash}"
+                        chunk.metadata["chunk_id"] = canonical_chunk_id
+                    else:
+                        chunk.metadata["chunk_id"] = chunk_task.chunk_id
 
-            # Use canonical chunk_id for single-file documents to prevent duplicates
-            if is_single_file_doc:
-                content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
-                canonical_chunk_id = f"{chunk_task.document_id}_{canonical_page_number}_{chunk_task.chunk_index}_{content_hash}"
-                chunk.metadata["chunk_id"] = canonical_chunk_id
-            else:
-                chunk.metadata["chunk_id"] = chunk_task.chunk_id
+                    # Update parent/child references
+                    old_parent_id = chunk.metadata.get("parent_chunk_id")
+                    if old_parent_id and old_parent_id in old_to_new_id_map:
+                        chunk.metadata["parent_chunk_id"] = old_to_new_id_map[old_parent_id]
 
-            # Update parent/child references
-            old_parent_id = chunk.metadata.get("parent_chunk_id")
-            if old_parent_id and old_parent_id in old_to_new_id_map:
-                chunk.metadata["parent_chunk_id"] = old_to_new_id_map[old_parent_id]
+                    old_child_ids = chunk.metadata.get("child_chunk_ids", [])
+                    if old_child_ids:
+                        chunk.metadata["child_chunk_ids"] = [old_to_new_id_map.get(cid, cid) for cid in old_child_ids]
 
-            old_child_ids = chunk.metadata.get("child_chunk_ids", [])
-            if old_child_ids:
-                chunk.metadata["child_chunk_ids"] = [old_to_new_id_map.get(cid, cid) for cid in old_child_ids]
-
-            chunk.metadata["document_id"] = str(chunk_task.document_id)
+                    chunk.metadata["document_id"] = str(chunk_task.document_id)
 
             vectorstore = get_vectorstore()
 
@@ -474,16 +527,27 @@ class TaskQueueService:
 
             vectorstore.add_documents([chunk])
 
-            logger.info(f"✅ Vector index completed for chunk: {chunk_task.chunk_id}")
+            # ================================================================
+            # V3.0: VECTOR INDEXING END
+            # ================================================================
+            logger.info("=" * 80)
+            logger.info(f"[Vector] ========== END VECTOR INDEXING ==========")
+            logger.info("=" * 80)
+            logger.info(f"[Vector] ✅ Successfully indexed chunk: {chunk_task.chunk_id}")
             return True
 
         except Exception as e:
+            logger.error("=" * 80)
+            logger.error(f"[Vector] ========== VECTOR INDEXING FAILED ==========")
+            logger.error("=" * 80)
             logger.error(f"❌ Vector chunk task failed for chunk {chunk_task.chunk_id}: {e}", exc_info=True)
             raise
 
     def process_graphrag_chunk_task(self, chunk_task) -> tuple:
         """
         Process GraphRAG indexing task for a single chunk.
+
+        V3.0: Now uses stored chunk content from database instead of re-chunking.
 
         Args:
             chunk_task: ChunkTaskData with chunk_id, document_id, page_id, chunk_index, etc.
@@ -492,16 +556,29 @@ class TaskQueueService:
             tuple: (entities_count, relationships_count)
         """
         from rag_service.markdown_chunker import chunk_markdown_with_summaries
-        from queue_service import TaskQueuePage
+        from queue_service import TaskQueuePage, TaskQueueChunk
 
         try:
-            logger.info(f"🔄 Processing GraphRAG index for chunk: {chunk_task.chunk_id}")
+            # ================================================================
+            # V3.0: GRAPHRAG INDEXING START
+            # ================================================================
+            logger.info("=" * 80)
+            logger.info(f"[GraphRAG] ========== START GRAPHRAG INDEXING ==========")
+            logger.info("=" * 80)
+            logger.info(f"[GraphRAG] Chunk ID: {chunk_task.chunk_id}")
+            logger.info(f"[GraphRAG] Chunk Index: {chunk_task.chunk_index}")
 
             if not self.graph_rag_index_enabled:
-                logger.debug(f"GraphRAG indexing disabled, skipping chunk: {chunk_task.chunk_id}")
+                logger.info(f"[GraphRAG] GraphRAG indexing disabled, skipping chunk: {chunk_task.chunk_id}")
+                logger.info("=" * 80)
                 return (0, 0)
 
             with get_db_session() as db:
+                # V3.0: First try to get stored chunk content from database
+                chunk_record = db.query(TaskQueueChunk).filter(
+                    TaskQueueChunk.id == chunk_task.id
+                ).first()
+
                 page_record = db.query(TaskQueuePage).filter(
                     TaskQueuePage.id == chunk_task.page_id
                 ).first()
@@ -517,21 +594,33 @@ class TaskQueueService:
 
                 source_name = os.path.splitext(doc.filename)[0]
 
-            result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
-            chunks = result.chunks
+                # V3.0: Use stored content if available, otherwise fall back to re-chunking
+                if chunk_record and chunk_record.chunk_content:
+                    logger.info(f"[GraphRAG] 📦 V3.0 OPTIMIZATION: Using stored chunk content ({len(chunk_record.chunk_content)} chars)")
+                    chunk_content = chunk_record.chunk_content
+                    chunk_metadata = chunk_record.chunk_metadata or {}
+                    chunk_metadata["chunk_id"] = chunk_task.chunk_id
+                    chunk_metadata["document_id"] = str(chunk_task.document_id)
+                else:
+                    # Fallback: Re-chunk if stored content not available
+                    logger.warning(f"[GraphRAG] ⚠️ V3.0 FALLBACK: Stored content not found, re-chunking...")
+                    result = chunk_markdown_with_summaries(page_file_path, source_name=source_name)
+                    chunks = result.chunks
 
-            if not chunks or chunk_task.chunk_index >= len(chunks):
-                raise ValueError(
-                    f"Chunk index {chunk_task.chunk_index} out of range. "
-                    f"Page has {len(chunks) if chunks else 0} chunks."
-                )
+                    if not chunks or chunk_task.chunk_index >= len(chunks):
+                        raise ValueError(
+                            f"Chunk index {chunk_task.chunk_index} out of range. "
+                            f"Page has {len(chunks) if chunks else 0} chunks."
+                        )
 
-            chunk = chunks[chunk_task.chunk_index]
+                    chunk = chunks[chunk_task.chunk_index]
+                    chunk_content = chunk.page_content
+                    chunk_metadata = chunk.metadata
 
             chunk_data = {
                 "id": chunk_task.chunk_id,
-                "page_content": chunk.page_content,
-                "metadata": chunk.metadata,
+                "page_content": chunk_content,
+                "metadata": chunk_metadata,
             }
 
             entities_count = 0
@@ -546,14 +635,25 @@ class TaskQueueService:
                 )
 
             except ImportError:
-                logger.warning("GraphRAG indexer not available")
+                logger.warning("[GraphRAG] GraphRAG indexer not available")
             except Exception as e:
-                logger.error(f"GraphRAG indexing failed for chunk {chunk_task.chunk_id}: {e}")
+                logger.error(f"[GraphRAG] GraphRAG indexing failed for chunk {chunk_task.chunk_id}: {e}")
 
-            logger.info(f"✅ GraphRAG index completed for chunk: {chunk_task.chunk_id} (entities={entities_count}, relationships={relationships_count})")
+            # ================================================================
+            # V3.0: GRAPHRAG INDEXING END
+            # ================================================================
+            logger.info("=" * 80)
+            logger.info(f"[GraphRAG] ========== END GRAPHRAG INDEXING ==========")
+            logger.info("=" * 80)
+            logger.info(f"[GraphRAG] ✅ Chunk: {chunk_task.chunk_id}")
+            logger.info(f"[GraphRAG] Entities extracted: {entities_count}")
+            logger.info(f"[GraphRAG] Relationships extracted: {relationships_count}")
             return (entities_count, relationships_count)
 
         except Exception as e:
+            logger.error("=" * 80)
+            logger.error(f"[GraphRAG] ========== GRAPHRAG INDEXING FAILED ==========")
+            logger.error("=" * 80)
             logger.error(f"❌ GraphRAG chunk task failed for chunk {chunk_task.chunk_id}: {e}", exc_info=True)
             raise
 

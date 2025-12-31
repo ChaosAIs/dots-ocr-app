@@ -102,6 +102,7 @@ from queue_service import (
     HierarchicalWorkerPool,
     TaskStatus,
     TaskQueuePage,
+    TaskQueueChunk,
 )
 
 # Import services
@@ -1639,6 +1640,146 @@ async def get_document_status_logs(
     except Exception as e:
         logger.error(f"Error getting status logs: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error getting status logs: {str(e)}")
+
+
+@app.post("/documents/{document_id}/recover-failed")
+async def recover_failed_document(
+    document_id: str,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Recover failed indexing tasks for a document.
+
+    This endpoint resets failed vector/graphrag tasks to pending status,
+    allowing the worker pool to retry them. It preserves completed work
+    and uses stored chunk content (V3.0 optimization) to avoid re-OCR.
+
+    Only resets tasks that have status='failed'. Does not affect
+    completed or in-progress tasks.
+    """
+    try:
+        if not document_id:
+            raise HTTPException(status_code=400, detail="No document ID provided")
+
+        # Parse and validate document ID
+        try:
+            doc_uuid = UUID(document_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid document ID format")
+
+        # Get document from database
+        repo = DocumentRepository(db)
+        doc = repo.get_by_id(doc_uuid)
+
+        if not doc:
+            raise HTTPException(status_code=404, detail=f"Document not found: {document_id}")
+
+        # Check permission - user must own the document or have write permission
+        if doc.owner_id and doc.owner_id != current_user.id:
+            perm_service = PermissionService(db)
+            if not perm_service.has_permission(current_user.id, doc.id, 'write'):
+                raise HTTPException(status_code=403, detail="You don't have permission to modify this document")
+
+        # Count failed tasks before recovery
+        failed_chunks_vector = db.query(TaskQueueChunk).filter(
+            TaskQueueChunk.document_id == doc_uuid,
+            TaskQueueChunk.vector_status == TaskStatus.FAILED
+        ).count()
+
+        failed_chunks_graphrag = db.query(TaskQueueChunk).filter(
+            TaskQueueChunk.document_id == doc_uuid,
+            TaskQueueChunk.graphrag_status == TaskStatus.FAILED
+        ).count()
+
+        failed_pages_vector = db.query(TaskQueuePage).filter(
+            TaskQueuePage.document_id == doc_uuid,
+            TaskQueuePage.vector_status == TaskStatus.FAILED
+        ).count()
+
+        if failed_chunks_vector == 0 and failed_chunks_graphrag == 0 and failed_pages_vector == 0:
+            return JSONResponse(content={
+                "status": "success",
+                "message": "No failed tasks to recover",
+                "document_id": document_id,
+                "recovered": {
+                    "chunks_vector": 0,
+                    "chunks_graphrag": 0,
+                    "pages_vector": 0
+                }
+            })
+
+        # Reset failed vector chunks to pending
+        db.query(TaskQueueChunk).filter(
+            TaskQueueChunk.document_id == doc_uuid,
+            TaskQueueChunk.vector_status == TaskStatus.FAILED
+        ).update({
+            "vector_status": TaskStatus.PENDING,
+            "vector_error": None,
+            "vector_retry_count": 0,
+            "vector_worker_id": None,
+            "vector_started_at": None,
+            "vector_completed_at": None,
+            "vector_last_heartbeat": None
+        }, synchronize_session=False)
+
+        # Reset failed graphrag chunks to pending
+        db.query(TaskQueueChunk).filter(
+            TaskQueueChunk.document_id == doc_uuid,
+            TaskQueueChunk.graphrag_status == TaskStatus.FAILED
+        ).update({
+            "graphrag_status": TaskStatus.PENDING,
+            "graphrag_error": None,
+            "graphrag_retry_count": 0,
+            "graphrag_worker_id": None,
+            "graphrag_started_at": None,
+            "graphrag_completed_at": None,
+            "graphrag_last_heartbeat": None
+        }, synchronize_session=False)
+
+        # Reset failed vector pages to pending
+        db.query(TaskQueuePage).filter(
+            TaskQueuePage.document_id == doc_uuid,
+            TaskQueuePage.vector_status == TaskStatus.FAILED
+        ).update({
+            "vector_status": TaskStatus.PENDING,
+            "vector_error": None,
+            "vector_worker_id": None,
+            "vector_started_at": None,
+            "vector_completed_at": None,
+            "vector_last_heartbeat": None
+        }, synchronize_session=False)
+
+        # Update document status to processing if it was failed
+        if doc.vector_status == TaskStatus.FAILED:
+            doc.vector_status = TaskStatus.PROCESSING
+        if doc.graphrag_status == TaskStatus.FAILED:
+            doc.graphrag_status = TaskStatus.PROCESSING
+
+        db.commit()
+
+        logger.info(f"Recovered failed tasks for document {document_id}: "
+                   f"chunks_vector={failed_chunks_vector}, chunks_graphrag={failed_chunks_graphrag}, "
+                   f"pages_vector={failed_pages_vector}")
+
+        return JSONResponse(content={
+            "status": "success",
+            "message": f"Recovered {failed_chunks_vector + failed_chunks_graphrag + failed_pages_vector} failed tasks",
+            "document_id": document_id,
+            "filename": doc.filename,
+            "recovered": {
+                "chunks_vector": failed_chunks_vector,
+                "chunks_graphrag": failed_chunks_graphrag,
+                "pages_vector": failed_pages_vector
+            }
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error recovering failed tasks: {str(e)}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error recovering failed tasks: {str(e)}")
 
 
 @app.post("/documents/{filename}/index")

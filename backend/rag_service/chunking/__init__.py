@@ -4,6 +4,12 @@ Chunking module for domain-aware document processing.
 This module provides intelligent chunking strategies that adapt to different
 document types and domains including legal, academic, medical, engineering,
 education, financial, and government documents.
+
+V3.0: LLM-Driven Structure Analysis
+- Replaces pattern-based domain classification with LLM structure analysis
+- Single LLM call per uploaded file to select optimal chunking strategy
+- Predefined strategy library with 8 strategies
+- Support for multi-page OCR (page-based sampling) and single-file conversion
 """
 
 from .domain_patterns import (
@@ -63,6 +69,29 @@ from .parent_chunk_summarizer import (
     estimate_tokens,
 )
 
+# V3.0: LLM-driven chunking modules
+from .content_sampler import (
+    ContentSampler,
+    SampledContent,
+    sample_content,
+)
+
+from .structure_analyzer import (
+    StructureAnalyzer,
+    StrategyConfig,
+    DEFAULT_STRATEGY,
+    analyze_document_structure,
+    analyze_content_structure,
+)
+
+from .strategy_executor import (
+    StrategyExecutor,
+    StrategyDefinition,
+    Chunk,
+    STRATEGIES,
+    execute_strategy,
+)
+
 __all__ = [
     # Domain patterns
     "DocumentDomain",
@@ -109,4 +138,18 @@ __all__ = [
     "summarize_parent_chunk",
     "needs_parent_chunk_summary",
     "estimate_tokens",
+    # V3.0: LLM-driven chunking
+    "ContentSampler",
+    "SampledContent",
+    "sample_content",
+    "StructureAnalyzer",
+    "StrategyConfig",
+    "DEFAULT_STRATEGY",
+    "analyze_document_structure",
+    "analyze_content_structure",
+    "StrategyExecutor",
+    "StrategyDefinition",
+    "Chunk",
+    "STRATEGIES",
+    "execute_strategy",
 ]

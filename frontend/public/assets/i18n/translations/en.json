@@ -166,7 +166,11 @@
         "MoveSuccess": "Document moved successfully",
         "MoveFailed": "Failed to move document",
         "Moving": "Moving...",
-        "Cancel": "Cancel"
+        "Cancel": "Cancel",
+        "RecoverIndexing": "Retry failed indexing",
+        "RecoverSuccess": "Successfully recovered {{count}} failed tasks",
+        "RecoverFailed": "Failed to recover indexing tasks",
+        "NoFailedTasks": "No failed tasks to recover"
     },
     "MarkdownViewer": {
         "DownloadMarkdown": "Download Markdown",

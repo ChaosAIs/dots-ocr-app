@@ -11,7 +11,7 @@ Each level has 3 processing phases: OCR → Vector Index → GraphRAG Index
 
 from typing import Dict, Any
 from sqlalchemy import Column, String, Integer, Text, ForeignKey, Enum as SQLEnum, func
-from sqlalchemy.dialects.postgresql import UUID as PGUUID, TIMESTAMP
+from sqlalchemy.dialects.postgresql import UUID as PGUUID, TIMESTAMP, JSONB
 from sqlalchemy.orm import relationship
 from db.models import Base, TaskStatus
 
@@ -137,6 +137,11 @@ class TaskQueueChunk(Base):
     chunk_index = Column(Integer, nullable=False)   # Position within page (0-indexed)
     chunk_content_hash = Column(String(64), nullable=True)  # For deduplication
 
+    # V3.0: Chunk content storage for optimization
+    # Stores chunk content after Stage 1 (OCR) to avoid redundant LLM calls in Stages 2 & 3
+    chunk_content = Column(Text, nullable=True)  # Actual chunk text content
+    chunk_metadata = Column(JSONB, nullable=True)  # Chunk metadata as JSON
+
     # === Phase 2: Vector Index (Chunk → Qdrant embedding) ===
     vector_status = Column(
         SQLEnum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
@@ -185,6 +190,9 @@ class TaskQueueChunk(Base):
             "chunk_id": self.chunk_id,
             "chunk_index": self.chunk_index,
             "chunk_content_hash": self.chunk_content_hash,
+            # V3.0: Chunk content (not included by default to avoid large payloads)
+            "has_chunk_content": self.chunk_content is not None,
+            "chunk_metadata": self.chunk_metadata,
             # Vector phase
             "vector_status": self.vector_status.value if self.vector_status else None,
             "vector_worker_id": self.vector_worker_id,

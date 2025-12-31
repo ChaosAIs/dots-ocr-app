@@ -3,6 +3,26 @@ Domain-specific structure patterns for intelligent document chunking.
 
 This module defines structural patterns and rules for different document domains
 including legal, academic, medical, engineering, education, financial, and government.
+
+DEPRECATION NOTICE (V3.0):
+--------------------------
+This module contains fragile regex patterns that can cause misclassifications.
+For example, "rx" in "arXiv" matches prescription patterns, causing academic papers
+to be classified as medical prescriptions.
+
+The new LLM-driven chunking system (V3.0) replaces pattern-based classification
+with a single LLM call per uploaded file for structure analysis.
+
+To enable the new approach:
+    export LLM_DRIVEN_CHUNKING_ENABLED=true
+
+Or programmatically:
+    chunker = AdaptiveChunker(use_llm_driven_chunking=True)
+
+When V3.0 is enabled, this module's pattern-matching functions are bypassed.
+The DocumentDomain and DocumentType enums are still used for compatibility.
+
+This module will be removed in a future version once V3.0 is fully adopted.
 """
 
 import re
@@ -853,7 +873,23 @@ def detect_domain_from_content(content: str) -> Dict[DocumentDomain, float]:
     """
     Detect likely domains based on pattern matching in content.
     Returns a dictionary of domain -> confidence score.
+
+    DEPRECATED (V3.0): This function uses fragile regex patterns that can cause
+    misclassifications (e.g., "arXiv" matching prescription patterns).
+    Use LLM-driven chunking instead:
+        export LLM_DRIVEN_CHUNKING_ENABLED=true
+
+    Or programmatically:
+        from rag_service.chunking import analyze_content_structure
+        config = analyze_content_structure(content)
     """
+    import warnings
+    warnings.warn(
+        "detect_domain_from_content is deprecated. "
+        "Use LLM-driven chunking (LLM_DRIVEN_CHUNKING_ENABLED=true) instead.",
+        DeprecationWarning,
+        stacklevel=2
+    )
     scores: Dict[DocumentDomain, float] = {domain: 0.0 for domain in DocumentDomain}
 
     for domain, config in DOMAIN_CONFIGS.items():

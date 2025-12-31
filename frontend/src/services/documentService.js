@@ -577,6 +577,25 @@ class DocumentService {
   }
 
   /**
+   * Recover failed indexing tasks for a document
+   * Resets failed vector/graphrag tasks to pending status for retry.
+   * Preserves completed work and uses stored chunk content (V3.0).
+   * @param {string} documentId - The document ID (UUID) to recover
+   * @returns {Promise} - Recovery result with counts of recovered tasks
+   */
+  async recoverFailedDocument(documentId) {
+    try {
+      const response = await http.post(
+        `${this.apiDomain}/documents/${encodeURIComponent(documentId)}/recover-failed`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error recovering failed document:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Format date for display
    * @param {string} isoString - ISO date string
    * @returns {string} - Formatted date

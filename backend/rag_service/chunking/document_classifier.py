@@ -6,6 +6,21 @@ to determine the optimal chunking strategy before processing.
 
 Uses the centralized DocumentTypeClassifier for consistent document
 type classification across extraction and chunking services.
+
+NOTE (V3.0): This module is part of the V2.0 pattern-based classification system.
+When LLM_DRIVEN_CHUNKING_ENABLED=true, the AdaptiveChunker bypasses this module
+and uses the new structure_analyzer.py for LLM-driven strategy selection.
+
+The V3.0 approach:
+- Uses a single LLM call per file to analyze document structure
+- Selects from 8 predefined chunking strategies
+- Avoids the fragile regex patterns that cause misclassifications
+
+To enable V3.0:
+    export LLM_DRIVEN_CHUNKING_ENABLED=true
+
+Or programmatically:
+    chunker = AdaptiveChunker(use_llm_driven_chunking=True)
 """
 
 import logging

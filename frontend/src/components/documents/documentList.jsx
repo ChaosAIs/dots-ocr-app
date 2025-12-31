@@ -467,6 +467,30 @@ export const DocumentList = forwardRef((props, ref) => {
     setDocumentToMove(null);
   }, [loadDocuments]);
 
+  // Handle recover failed indexing - reset failed tasks and retry
+  const handleRecoverFailed = async (document) => {
+    try {
+      const response = await documentService.recoverFailedDocument(document.id);
+      if (response.status === "success") {
+        const totalRecovered = (response.recovered?.chunks_vector || 0) +
+                               (response.recovered?.chunks_graphrag || 0) +
+                               (response.recovered?.pages_vector || 0);
+        if (totalRecovered > 0) {
+          messageService.successToast(t("DocumentList.RecoverSuccess", { count: totalRecovered }));
+        } else {
+          messageService.infoToast(t("DocumentList.NoFailedTasks"));
+        }
+        // Reload documents list to show updated status
+        loadDocuments();
+      } else {
+        messageService.errorToast(t("DocumentList.RecoverFailed"));
+      }
+    } catch (error) {
+      messageService.errorToast(t("DocumentList.RecoverFailed"));
+      console.error("Error recovering failed document:", error);
+    }
+  };
+
   // Handle upload success - subscribe to new documents and refresh list
   const handleUploadSuccess = useCallback((uploadedDocIds) => {
     console.log(`📋 DocumentList: Upload success with ${uploadedDocIds?.length || 0} document IDs:`, uploadedDocIds);
@@ -532,6 +556,12 @@ export const DocumentList = forwardRef((props, ref) => {
     // Can move only if fully indexed and not currently processing
     const canMove = isFullyIndexed && !isConverting && !isIndexing;
 
+    // Check if any indexing phase has failed (show recover button)
+    const hasFailedIndexing = vectorStatus === "failed" ||
+                              metadataStatus === "failed" ||
+                              graphragStatus === "failed" ||
+                              index_status === "failed";
+
     return (
       <div className="flex gap-2 justify-content-center align-items-center">
         {/* Show view button only if conversion is fully completed with no errors */}
@@ -575,6 +605,18 @@ export const DocumentList = forwardRef((props, ref) => {
             severity="secondary"
             onClick={() => handleViewStatusLogs(rowData)}
             tooltip={t("DocumentList.ViewStatusLogs")}
+            tooltipOptions={{ position: "top" }}
+          />
+        )}
+
+        {/* Show recover/reindex button if indexing has failed */}
+        {hasFailedIndexing && rowData.document_id && (
+          <Button
+            icon="pi pi-refresh"
+            rounded
+            severity="warning"
+            onClick={() => handleRecoverFailed(rowData)}
+            tooltip={t("DocumentList.RecoverIndexing")}
             tooltipOptions={{ position: "top" }}
           />
         )}
