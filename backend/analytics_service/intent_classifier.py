@@ -209,15 +209,21 @@ ROUTING OPTIONS:
    - Reading or summarizing document text
    - Searching for mentions of specific terms or topics
    - Understanding what documents say or contain
+   - Questions about policies, procedures, terms, conditions, or guidelines
+   - Questions that could be answered by reading document content
+   - "How to" questions about processes described in documents
    - Questions like "find documents about", "what does X say", "show me documents mentioning"
+   - Questions about returning items, refund policies, contact information, instructions, etc.
 
 3. HYBRID - Use when the query requires BOTH:
    - Finding documents AND performing calculations on them
    - Example: "Find all invoices over $1000 and calculate the total"
 
-4. GENERAL - Use when:
-   - The query is a greeting, help request, or general question
-   - Not related to documents or data analysis
+4. GENERAL - Use ONLY when:
+   - The query is a simple greeting (hello, hi, thanks)
+   - The query is asking for help with the system itself (how do I use this app)
+   - The query is completely unrelated to any documents or business data
+   - IMPORTANT: If the user's question could possibly be answered by document content, use DOCUMENT_SEARCH instead!
 
 IMPORTANT CONSIDERATIONS:
 - Abbreviations like "max", "min", "avg" mean maximum, minimum, average
@@ -225,6 +231,8 @@ IMPORTANT CONSIDERATIONS:
 - "List the X" with filtering/aggregation criteria = DATA_ANALYTICS
 - "List documents about X" or "show me documents" = DOCUMENT_SEARCH
 - When in doubt between DOCUMENT_SEARCH and DATA_ANALYTICS, prefer DATA_ANALYTICS if the query mentions any numerical fields or aggregation concepts
+- Questions about policies, procedures, returns, refunds, contact info, or "how to" should ALWAYS be DOCUMENT_SEARCH (not GENERAL)
+- GENERAL should be very rare - only use it for greetings or questions completely unrelated to documents
 
 Respond with ONLY valid JSON (no markdown, no code blocks, no explanation):
 {{

@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 from typing import List, Dict, Optional
 from uuid import UUID
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
@@ -27,6 +28,12 @@ from chat_service.conversation_manager import ConversationManager
 from chat_service.context_analyzer import ContextAnalyzer
 from chat_service.chat_orchestrator import ChatOrchestrator, OrchestratorResult
 from analytics_service.intent_classifier import QueryIntent
+from analytics_service.query_cache_service import (
+    get_query_cache_service,
+    QueryCacheService,
+    UnifiedCacheAnalysis,
+    CacheSearchResult
+)
 from db.user_document_repository import UserDocumentRepository
 from db.document_repository import DocumentRepository
 
@@ -42,8 +49,12 @@ CHAT_MAX_TOPICS = int(os.getenv("CHAT_MAX_TOPICS", "5"))
 CHAT_ENABLE_INTENT_ROUTING = os.getenv("CHAT_ENABLE_INTENT_ROUTING", "true").lower() == "true"
 ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
 
+# Query Cache configuration
+QUERY_CACHE_ENABLED = os.getenv("QUERY_CACHE_ENABLED", "true").lower() == "true"
+
 logger.info(f"Chat Context Configuration: ENABLE_CONTEXT_ANALYSIS={CHAT_ENABLE_CONTEXT_ANALYSIS}, ENABLE_METADATA_TRACKING={CHAT_ENABLE_METADATA_TRACKING}")
 logger.info(f"Chat Intent Routing: ENABLE_INTENT_ROUTING={CHAT_ENABLE_INTENT_ROUTING}, ANALYTICS_ENABLED={ANALYTICS_ENABLED}")
+logger.info(f"Query Cache: QUERY_CACHE_ENABLED={QUERY_CACHE_ENABLED}")
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -421,6 +432,179 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # Convert accessible_doc_ids set to list for orchestrator
                         accessible_doc_ids_list = list(accessible_doc_ids) if accessible_doc_ids else []
 
+                        # ====== QUERY CACHE INTEGRATION ======
+                        cache_hit = False
+                        cache_analysis = None
+                        cache_result = None
+                        cache_key_question = None
+                        source_document_ids_for_cache = []
+
+                        if QUERY_CACHE_ENABLED and accessible_doc_ids_list:
+                            try:
+                                logger.info("=" * 80)
+                                logger.info("[QueryCache] ========== QUERY CACHE PROCESS START ==========")
+                                logger.info("=" * 80)
+                                logger.info(f"[QueryCache] Query: {enhanced_message[:100]}...")
+                                logger.info(f"[QueryCache] Workspace IDs: {curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}")
+                                logger.info(f"[QueryCache] Accessible documents: {len(accessible_doc_ids_list)}")
+                                logger.info("-" * 80)
+
+                                cache_service = get_query_cache_service()
+
+                                # Step 1: Unified pre-cache analysis (single LLM call)
+                                # This determines: dissatisfaction, question enhancement, cache worthiness
+                                logger.info("[QueryCache] STEP 1: Running unified pre-cache analysis (single LLM call)...")
+                                await progress_callback("Analyzing your question...")
+                                cache_analysis = cache_service.analyze_for_cache(
+                                    question=enhanced_message,
+                                    chat_history=history[-10:] if history else None,  # Last 10 messages
+                                    previous_response=history[-1].get("content") if history and history[-1].get("role") == "assistant" else None
+                                )
+
+                                logger.info("-" * 80)
+                                logger.info("[QueryCache] PRE-CACHE ANALYSIS RESULT:")
+                                logger.info(f"[QueryCache]   • Method: {cache_analysis.analysis_method}")
+                                logger.info(f"[QueryCache]   • Dissatisfied: {cache_analysis.dissatisfaction.is_dissatisfied} ({cache_analysis.dissatisfaction.type.value})")
+                                logger.info(f"[QueryCache]   • Bypass cache: {cache_analysis.dissatisfaction.should_bypass_cache}")
+                                logger.info(f"[QueryCache]   • Self-contained: {cache_analysis.question_analysis.is_self_contained}")
+                                logger.info(f"[QueryCache]   • Can enhance: {cache_analysis.question_analysis.can_be_enhanced}")
+                                logger.info(f"[QueryCache]   • Is cacheable: {cache_analysis.cache_decision.is_cacheable}")
+                                logger.info(f"[QueryCache]   • Cache key: {(cache_analysis.cache_decision.cache_key_question or 'None')[:80]}...")
+                                logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
+                                logger.info("-" * 80)
+
+                                # Determine cache workspace ID from current workspace selection
+                                # Use first workspace ID or "default" if none selected
+                                cache_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+                                logger.info(f"[QueryCache] Using workspace ID for cache: {cache_workspace_id}")
+
+                                # Step 2: Check for dissatisfaction (bypass cache if user is unhappy)
+                                if cache_analysis.dissatisfaction.should_bypass_cache:
+                                    logger.info("[QueryCache] STEP 2: BYPASS CACHE (user dissatisfaction detected)")
+                                    logger.info(f"[QueryCache]   • Dissatisfaction type: {cache_analysis.dissatisfaction.type.value}")
+                                    logger.info(f"[QueryCache]   • Should invalidate previous: {cache_analysis.dissatisfaction.should_invalidate_previous_cache}")
+                                    # Optionally invalidate previous cache entry
+                                    if cache_analysis.dissatisfaction.should_invalidate_previous_cache and history:
+                                        # Find the previous question to invalidate
+                                        for msg in reversed(history):
+                                            if msg.get("role") == "user":
+                                                prev_question = msg.get("content", "")
+                                                if prev_question:
+                                                    cache_service.invalidate_question(prev_question, cache_workspace_id)
+                                                    logger.info(f"[QueryCache]   • Invalidated previous cache entry: {prev_question[:50]}...")
+                                                break
+                                    logger.info("[QueryCache] → Proceeding to fresh query (cache bypassed)")
+                                elif cache_analysis.cache_decision.is_cacheable:
+                                    # Step 3: Try cache lookup
+                                    logger.info("[QueryCache] STEP 2: CACHE LOOKUP (question is cacheable)")
+                                    cache_key_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                    accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
+
+                                    logger.info(f"[QueryCache]   • Cache key question: {cache_key_question[:80]}...")
+                                    logger.info(f"[QueryCache]   • User accessible docs: {len(accessible_doc_ids_str)}")
+
+                                    cache_result = cache_service.lookup(
+                                        question=cache_key_question,
+                                        workspace_id=cache_workspace_id,
+                                        user_accessible_doc_ids=accessible_doc_ids_str
+                                    )
+
+                                    logger.info("-" * 80)
+                                    logger.info("[QueryCache] CACHE LOOKUP RESULT:")
+                                    logger.info(f"[QueryCache]   • Cache hit: {cache_result.cache_hit}")
+                                    logger.info(f"[QueryCache]   • Similarity score: {cache_result.similarity_score:.3f}")
+                                    logger.info(f"[QueryCache]   • Candidates checked: {cache_result.candidates_checked}")
+                                    logger.info(f"[QueryCache]   • Search time: {cache_result.search_time_ms:.2f}ms")
+                                    logger.info(f"[QueryCache]   • Permission granted: {cache_result.permission_granted}")
+
+                                    if cache_result.cache_hit:
+                                        # CACHE HIT! Stream the cached answer
+                                        cache_hit = True
+                                        logger.info("-" * 80)
+                                        logger.info("[QueryCache] ★★★ CACHE HIT! ★★★")
+                                        logger.info(f"[QueryCache]   • Entry ID: {cache_result.entry.id}")
+                                        logger.info(f"[QueryCache]   • Cached question: {cache_result.entry.question[:80]}...")
+                                        logger.info(f"[QueryCache]   • Answer length: {len(cache_result.entry.answer)} chars")
+                                        logger.info(f"[QueryCache]   • Source docs: {cache_result.entry.source_document_ids[:3]}...")
+                                        logger.info(f"[QueryCache]   • Confidence: {cache_result.entry.confidence_score:.2f}")
+                                        logger.info(f"[QueryCache]   • Hit count: {cache_result.entry.hit_count}")
+                                        logger.info("[QueryCache] → Streaming cached response to user...")
+
+                                        # Stream the cached response with realistic LLM-like typing effect
+                                        await progress_callback("Found a matching answer...")
+                                        cached_answer = cache_result.entry.answer
+
+                                        # Stream cached response in small chunks to simulate LLM streaming
+                                        # Use variable chunk sizes (2-8 chars) for more natural effect
+                                        pos = 0
+                                        answer_len = len(cached_answer)
+
+                                        while pos < answer_len:
+                                            # Variable chunk size: 2-8 characters, but respect word boundaries when possible
+                                            base_chunk_size = random.randint(2, 8)
+                                            end_pos = min(pos + base_chunk_size, answer_len)
+
+                                            # Try to extend to word boundary if close
+                                            if end_pos < answer_len and cached_answer[end_pos] != ' ':
+                                                # Look for next space within 5 chars
+                                                for lookahead in range(1, 6):
+                                                    if end_pos + lookahead < answer_len and cached_answer[end_pos + lookahead] == ' ':
+                                                        end_pos = end_pos + lookahead + 1
+                                                        break
+
+                                            chunk = cached_answer[pos:end_pos]
+                                            if chunk:
+                                                chunk_count += 1
+                                                full_response += chunk
+                                                await websocket.send_json({
+                                                    "type": "token",
+                                                    "content": chunk,
+                                                })
+                                                # Variable delay: 5-20ms for natural typing feel
+                                                await asyncio.sleep(random.uniform(0.005, 0.020))
+
+                                            pos = end_pos
+
+                                        # Add subtle cache indicator at the end
+                                        cache_indicator = "\n\n---\n_⚡ Retrieved from cache_"
+                                        full_response += cache_indicator
+                                        await websocket.send_json({
+                                            "type": "token",
+                                            "content": cache_indicator,
+                                        })
+
+                                        logger.info(f"[QueryCache] Streamed cached response: {len(full_response)} chars, {chunk_count} chunks")
+                                    else:
+                                        logger.info("[QueryCache] CACHE MISS - no matching entry found")
+                                        logger.info("[QueryCache] → Proceeding to fresh query...")
+                                else:
+                                    logger.info("[QueryCache] STEP 2: SKIP CACHE (question not cacheable)")
+                                    logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
+                                    logger.info("[QueryCache] → Proceeding to fresh query (no caching)...")
+
+                                logger.info("=" * 80)
+                                logger.info(f"[QueryCache] ========== QUERY CACHE PROCESS END (hit={cache_hit}) ==========")
+                                logger.info("=" * 80)
+
+                            except Exception as cache_error:
+                                logger.error(f"[QueryCache] ========== CACHE ERROR ==========")
+                                logger.error(f"[QueryCache] Error during cache operations: {cache_error}", exc_info=True)
+                                logger.error(f"[QueryCache] → Continuing without cache...")
+                                # Continue without cache on error
+
+                        # Skip full pipeline if cache hit
+                        if cache_hit:
+                            # Save cached response to conversation
+                            conv_manager.add_message(
+                                session_id=session_id,
+                                role="assistant",
+                                content=full_response,
+                                metadata={"source": "cache", "cache_entry_id": cache_result.entry.id if cache_result else None}
+                            )
+                            # Send end message and continue to next message
+                            await websocket.send_json({"type": "end"})
+                            continue
+
                         # ====== INTENT-BASED ROUTING ======
                         use_analytics_path = False
                         use_rag_path = True  # Default to RAG
@@ -636,6 +820,46 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             except Exception as e:
                                 logger.error(f"Error saving assistant message: {e}")
                                 db.rollback()
+
+                            # ====== BACKGROUND CACHE STORAGE ======
+                            # Store the response in cache for future similar questions
+                            # This is non-blocking (fire-and-forget)
+                            if (QUERY_CACHE_ENABLED and
+                                cache_analysis and
+                                cache_analysis.cache_decision.is_cacheable and
+                                not cache_hit and  # Don't re-cache cached responses
+                                accessible_doc_ids_list):
+                                try:
+                                    cache_service = get_query_cache_service()
+                                    cache_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                    source_doc_ids = [str(doc_id) for doc_id in accessible_doc_ids_list]
+
+                                    # Determine intent for TTL
+                                    cache_intent = "general"
+                                    if classification:
+                                        cache_intent = classification.intent.value
+
+                                    # Determine cache workspace ID
+                                    store_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+
+                                    # Store in background (non-blocking)
+                                    cache_service.store_async(
+                                        question=cache_question,
+                                        answer=full_response,
+                                        workspace_id=store_workspace_id,
+                                        source_document_ids=source_doc_ids,
+                                        intent=cache_intent,
+                                        metadata={
+                                            "original_question": enhanced_message,
+                                            "session_id": session_id,
+                                            "analysis_method": cache_analysis.analysis_method
+                                        }
+                                    )
+                                    logger.info(f"[QueryCache] Background cache storage initiated for: {cache_question[:50]}...")
+                                except Exception as cache_store_error:
+                                    logger.warning(f"[QueryCache] Failed to store response in cache: {cache_store_error}")
+                                    # Non-critical, continue without caching
+
                         elif streaming_error:
                             logger.info(f"[WebSocket] Not saving assistant message due to streaming error - user can retry")
 

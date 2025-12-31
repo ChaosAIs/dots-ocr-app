@@ -137,23 +137,27 @@ class DocumentRouter:
         try:
             # Strategy 1: Try vector-based routing first (fastest)
             if self.use_vector_routing:
-                vector_results = self._route_with_vector_search(
+                vector_results, doc_id_to_name = self._route_with_vector_search(
                     query_metadata, original_query,
                     accessible_document_ids=accessible_document_ids
                 )
 
                 if len(vector_results) >= self.vector_min_results:
+                    doc_names = [doc_id_to_name.get(doc_id, "unknown") for doc_id in vector_results]
                     logger.info(
                         f"[Router] 🎯 Vector routing returned {len(vector_results)} document(s): "
                         f"{vector_results}"
                     )
+                    logger.info(f"[Router] 🎯 Document names: {doc_names}")
                     return vector_results
                 elif vector_results:
                     # Got some results but below threshold - still use them but log
+                    doc_names = [doc_id_to_name.get(doc_id, "unknown") for doc_id in vector_results]
                     logger.info(
                         f"[Router] Vector routing returned {len(vector_results)} document(s) "
                         f"(below threshold {self.vector_min_results}, using anyway): {vector_results}"
                     )
+                    logger.info(f"[Router] Document names: {doc_names}")
                     return vector_results
                 else:
                     logger.info("[Router] Vector routing returned no results, falling back to LLM/rule-based")
@@ -213,7 +217,7 @@ class DocumentRouter:
         original_query: str,
         accessible_source_names: Optional[set] = None,  # DEPRECATED
         accessible_document_ids: Optional[List[str]] = None
-    ) -> List[str]:
+    ) -> Tuple[List[str], Dict[str, str]]:
         """
         Route query using vector search on metadata embeddings.
 
@@ -231,7 +235,9 @@ class DocumentRouter:
                                      If provided, only documents with these IDs will be returned.
 
         Returns:
-            List of document IDs (UUIDs as strings) from vector search results
+            Tuple of:
+            - List of document IDs (UUIDs as strings) from vector search results
+            - Dict mapping document_id -> source_name for logging
         """
         try:
             from .vectorstore import (
@@ -266,7 +272,7 @@ class DocumentRouter:
 
             if not results:
                 logger.debug("[Router Vector] No results from metadata vector search")
-                return []
+                return [], {}
 
             # ========== ENTITY MATCHING BOOST ==========
             # Apply score boost when query entities match document entities/source names
@@ -458,6 +464,7 @@ class DocumentRouter:
             # Extract and deduplicate document IDs with adaptive filtering
             seen_doc_ids = set()
             document_ids = []
+            doc_id_to_name = {}  # Track document_id -> source_name mapping for logging
             filtered_count = 0
             duplicate_count = 0
 
@@ -501,6 +508,7 @@ class DocumentRouter:
 
                 seen_doc_ids.add(doc_id)
                 document_ids.append(doc_id)
+                doc_id_to_name[doc_id] = source_name  # Store mapping for final log
                 logger.info(
                     f"[Router Vector]   ✓ ACCEPTED: {source_name:40s} ({doc_id[:8]}...) "
                     f"score={score:.4f} >= threshold={relative_threshold:.4f}"
@@ -515,17 +523,20 @@ class DocumentRouter:
             logger.info(f"[Router Vector]   • Skipped (duplicates): {duplicate_count}")
             if accessible_ids_set:
                 logger.info(f"[Router Vector]   • Access control:       {len(accessible_ids_set)} accessible IDs")
+            # Format final document list with names for easy tracking
+            doc_names_list = [doc_id_to_name.get(doc_id, "unknown") for doc_id in document_ids]
             logger.info(f"[Router Vector]   • Final document_ids: {document_ids}")
+            logger.info(f"[Router Vector]   • Final document_names: {doc_names_list}")
             logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-            return document_ids
+            return document_ids, doc_id_to_name
 
         except ImportError as e:
             logger.warning(f"[Router Vector] Vector search not available: {e}")
-            return []
+            return [], {}
         except Exception as e:
             logger.error(f"[Router Vector] Error in vector search: {e}", exc_info=True)
-            return []
+            return [], {}
     
     def _apply_hybrid_filtering(
         self,
