@@ -142,11 +142,12 @@ class UnifiedQueryPreprocessor:
                 logger.warning("[UnifiedPreprocessor] LLM service not available")
                 return None
 
-            # Use a fast model for preprocessing
+            # Use a fast model for preprocessing with minimal token generation
+            # Simplified prompt expects ~100 tokens response max
             chat_model = llm_service.get_query_model(
                 temperature=0.1,
-                num_ctx=4096,
-                num_predict=1024
+                num_ctx=2048,  # Reduced context - prompt is now much smaller
+                num_predict=256  # Reduced from 1024 - simplified response needs ~100 tokens
             )
 
             class LLMClientWrapper:
@@ -259,97 +260,21 @@ class UnifiedQueryPreprocessor:
         previous_response_str: str,
         schemas_str: str
     ) -> str:
-        """Build the unified analysis prompt."""
-        return f"""You are a query pre-processor for a document management system. Perform ALL of the following analyses in a SINGLE response.
+        """Build the unified analysis prompt - optimized for speed with minimal output."""
+        return f"""Query preprocessor. Analyze and respond with JSON only.
 
-## INPUT
+Message: "{message}"
+History: {history_str}
+Previous response: "{previous_response_str}"
 
-Current User Message: "{message}"
+Tasks:
+1. PRONOUNS: If message has pronouns (it, they, this, that) referring to history, resolve them.
+2. DISSATISFIED: Is user unhappy with previous response? ("wrong", "check again", "refresh", "are you sure")
+3. CACHEABLE: Worth caching? No for greetings/meta questions. Yes for factual queries.
+4. INTENT: DOCUMENT_SEARCH (find/read docs, policies, how-to) | DATA_ANALYTICS (counts, totals, averages, comparisons) | HYBRID (both) | GENERAL (greetings only)
 
-Chat History (last 5 messages):
-{history_str}
-
-Previous System Response: "{previous_response_str}"
-
-Available Document Types: {schemas_str}
-
-## ANALYSIS TASKS
-
-### 1. CONTEXT ANALYSIS
-Extract from the conversation:
-- Topics: Main subjects being discussed (e.g., "tire return", "invoice", "expenses")
-- Entities: Named items mentioned (documents, people, products, dates)
-- Pronouns: Any pronouns in current message that refer to previous context
-- If pronouns exist, provide resolved_message with pronouns replaced by actual referents
-
-### 2. CACHE ANALYSIS
-Determine cache behavior:
-
-A) DISSATISFACTION CHECK
-- Is user expressing dissatisfaction with the previous response?
-- Signals: "that's wrong", "check again", "not what I asked", "are you sure?"
-
-B) SELF-CONTAINED CHECK
-- Is the question understandable WITHOUT chat history?
-- IMPORTANT: Possessive pronouns in general questions are SELF-CONTAINED:
-  * "How to return my tire?" = SELF-CONTAINED (policy question)
-  * "What is my order status?" = SELF-CONTAINED (general inquiry)
-- NOT self-contained: "what about it?", "the previous one", "and the other?"
-
-C) CACHE WORTHINESS
-- Worth caching: policy questions, how-to questions, specific queries
-- NOT worth caching: greetings, meta questions, highly temporal questions
-
-### 3. INTENT CLASSIFICATION
-Route the query:
-
-- DATA_ANALYTICS: Numerical aggregations, sums, counts, averages, comparisons
-  * "how many", "total", "average", "compare", "top N", "by month"
-
-- DOCUMENT_SEARCH: Finding/reading documents, policies, procedures, how-to
-  * "find documents", "what does X say", "how to", "return policy"
-  * Questions about policies, procedures, terms, instructions
-
-- HYBRID: Both search AND calculations needed
-  * "Find invoices over $1000 and calculate total"
-
-- GENERAL: ONLY for greetings or completely unrelated questions
-  * "hello", "thanks", "how do I use this app"
-  * If the question could be answered by documents, use DOCUMENT_SEARCH!
-
-Respond with ONLY valid JSON (no markdown, no code blocks):
-{{
-  "context": {{
-    "topics": ["topic1", "topic2"],
-    "entities": {{
-      "documents": [],
-      "people": [],
-      "products": [],
-      "dates": []
-    }},
-    "detected_pronouns": [],
-    "resolved_message": "message with pronouns resolved or original"
-  }},
-  "cache": {{
-    "is_dissatisfied": false,
-    "dissatisfaction_type": "none|incorrect|unclear|refresh_request|verification",
-    "should_bypass_cache": false,
-    "should_invalidate_previous": false,
-    "is_self_contained": true,
-    "has_unresolved_references": false,
-    "is_cacheable": true,
-    "cache_reason": "brief reason"
-  }},
-  "intent": {{
-    "intent": "DOCUMENT_SEARCH|DATA_ANALYTICS|HYBRID|GENERAL",
-    "confidence": 0.0-1.0,
-    "reasoning": "brief explanation",
-    "requires_extracted_data": false,
-    "suggested_schemas": [],
-    "detected_entities": [],
-    "detected_metrics": []
-  }}
-}}"""
+JSON only, no markdown:
+{{"topics":["topic1"],"resolved_message":"original or resolved","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DOCUMENT_SEARCH"}}"""
 
     def _format_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> str:
         """Format chat history for the prompt."""
@@ -383,56 +308,104 @@ Respond with ONLY valid JSON (no markdown, no code blocks):
         original_message: str,
         available_schemas: Optional[List[str]]
     ) -> UnifiedPreprocessResult:
-        """Parse LLM result dict into UnifiedPreprocessResult."""
+        """Parse LLM result dict into UnifiedPreprocessResult.
 
-        # Parse context
-        context_data = result.get("context", {})
-        entities = context_data.get("entities", {})
-        context = ContextAnalysisResult(
-            topics=context_data.get("topics", [])[:5],
-            entities={
-                "documents": entities.get("documents", [])[:5],
-                "people": entities.get("people", [])[:5],
-                "topics": context_data.get("topics", [])[:5],
-                "objects": entities.get("products", [])[:5],
-                "dates": entities.get("dates", [])[:5]
-            },
-            detected_pronouns=context_data.get("detected_pronouns", []),
-            resolved_message=context_data.get("resolved_message", original_message),
-            has_pronouns=len(context_data.get("detected_pronouns", [])) > 0
-        )
+        Supports both simplified (flat) and legacy (nested) response formats.
+        Simplified format is preferred for faster LLM responses.
+        """
 
-        # Parse cache
-        cache_data = result.get("cache", {})
-        cache = CacheAnalysisResult(
-            is_dissatisfied=cache_data.get("is_dissatisfied", False),
-            dissatisfaction_type=DissatisfactionType(cache_data.get("dissatisfaction_type", "none").lower()),
-            should_bypass_cache=cache_data.get("should_bypass_cache", False),
-            should_invalidate_previous=cache_data.get("should_invalidate_previous", False),
-            is_self_contained=cache_data.get("is_self_contained", True),
-            has_unresolved_references=cache_data.get("has_unresolved_references", False),
-            is_cacheable=cache_data.get("is_cacheable", True),
-            cache_reason=cache_data.get("cache_reason", ""),
-            cache_key_question=context.resolved_message or original_message
-        )
+        # Check if this is simplified (flat) or legacy (nested) format
+        is_simplified = "topics" in result and "context" not in result
 
-        # Parse intent
-        intent_data = result.get("intent", {})
-        intent_str = intent_data.get("intent", "document_search").lower()
+        if is_simplified:
+            # Parse simplified flat format
+            topics = result.get("topics", [])[:5]
+            resolved_message = result.get("resolved_message", original_message)
 
-        # Extract time range from message
-        time_range = self._extract_time_range(original_message.lower())
+            # Detect if pronouns were resolved (message changed)
+            has_pronouns = resolved_message != original_message and resolved_message != ""
 
-        intent = IntentClassificationResult(
-            intent=QueryIntent(intent_str),
-            confidence=float(intent_data.get("confidence", 0.8)),
-            reasoning=intent_data.get("reasoning", ""),
-            requires_extracted_data=intent_data.get("requires_extracted_data", False),
-            suggested_schemas=intent_data.get("suggested_schemas", []),
-            detected_entities=intent_data.get("detected_entities", []),
-            detected_metrics=intent_data.get("detected_metrics", []),
-            detected_time_range=time_range
-        )
+            context = ContextAnalysisResult(
+                topics=topics,
+                entities={"documents": [], "people": [], "topics": topics, "objects": [], "dates": []},
+                detected_pronouns=[],  # Not needed downstream
+                resolved_message=resolved_message if resolved_message else original_message,
+                has_pronouns=has_pronouns
+            )
+
+            # Parse cache fields from flat structure
+            is_dissatisfied = result.get("is_dissatisfied", False)
+            cache = CacheAnalysisResult(
+                is_dissatisfied=is_dissatisfied,
+                dissatisfaction_type=DissatisfactionType.REFRESH_REQUEST if is_dissatisfied else DissatisfactionType.NONE,
+                should_bypass_cache=result.get("bypass_cache", is_dissatisfied),
+                should_invalidate_previous=result.get("invalidate_previous", is_dissatisfied),
+                is_self_contained=True,  # Default, not critical
+                has_unresolved_references=False,  # Not used downstream
+                is_cacheable=result.get("is_cacheable", True),
+                cache_reason="",  # Not used downstream
+                cache_key_question=context.resolved_message or original_message
+            )
+
+            # Parse intent from flat structure
+            intent_str = result.get("intent", "document_search").lower()
+            time_range = self._extract_time_range(original_message.lower())
+
+            intent = IntentClassificationResult(
+                intent=QueryIntent(intent_str),
+                confidence=0.85,  # Default confidence for simplified format
+                reasoning="",  # Not used downstream
+                requires_extracted_data=intent_str == "data_analytics",
+                suggested_schemas=[],  # Not used downstream
+                detected_entities=[],  # Not used downstream
+                detected_metrics=[],  # Not used downstream
+                detected_time_range=time_range
+            )
+        else:
+            # Parse legacy nested format for backward compatibility
+            context_data = result.get("context", {})
+            entities = context_data.get("entities", {})
+            context = ContextAnalysisResult(
+                topics=context_data.get("topics", [])[:5],
+                entities={
+                    "documents": entities.get("documents", [])[:5],
+                    "people": entities.get("people", [])[:5],
+                    "topics": context_data.get("topics", [])[:5],
+                    "objects": entities.get("products", [])[:5],
+                    "dates": entities.get("dates", [])[:5]
+                },
+                detected_pronouns=context_data.get("detected_pronouns", []),
+                resolved_message=context_data.get("resolved_message", original_message),
+                has_pronouns=len(context_data.get("detected_pronouns", [])) > 0
+            )
+
+            cache_data = result.get("cache", {})
+            cache = CacheAnalysisResult(
+                is_dissatisfied=cache_data.get("is_dissatisfied", False),
+                dissatisfaction_type=DissatisfactionType(cache_data.get("dissatisfaction_type", "none").lower()),
+                should_bypass_cache=cache_data.get("should_bypass_cache", False),
+                should_invalidate_previous=cache_data.get("should_invalidate_previous", False),
+                is_self_contained=cache_data.get("is_self_contained", True),
+                has_unresolved_references=cache_data.get("has_unresolved_references", False),
+                is_cacheable=cache_data.get("is_cacheable", True),
+                cache_reason=cache_data.get("cache_reason", ""),
+                cache_key_question=context.resolved_message or original_message
+            )
+
+            intent_data = result.get("intent", {})
+            intent_str = intent_data.get("intent", "document_search").lower()
+            time_range = self._extract_time_range(original_message.lower())
+
+            intent = IntentClassificationResult(
+                intent=QueryIntent(intent_str),
+                confidence=float(intent_data.get("confidence", 0.8)),
+                reasoning=intent_data.get("reasoning", ""),
+                requires_extracted_data=intent_data.get("requires_extracted_data", False),
+                suggested_schemas=intent_data.get("suggested_schemas", []),
+                detected_entities=intent_data.get("detected_entities", []),
+                detected_metrics=intent_data.get("detected_metrics", []),
+                detected_time_range=time_range
+            )
 
         return UnifiedPreprocessResult(
             context=context,

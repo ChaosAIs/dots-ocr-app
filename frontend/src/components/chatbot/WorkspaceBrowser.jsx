@@ -344,17 +344,21 @@ export const WorkspaceBrowser = forwardRef(({
 
   // Get workspace checkbox state (checked, unchecked, or indeterminate)
   const getWorkspaceCheckState = useCallback((workspaceId) => {
+    const isWorkspaceSelected = localSelectedIds.includes(workspaceId);
     const workspaceDocs = workspaceDocuments[workspaceId] || [];
+
     if (workspaceDocs.length === 0) {
       // No documents loaded yet - use workspace selection state
-      return { checked: localSelectedIds.includes(workspaceId), indeterminate: false };
+      return { checked: isWorkspaceSelected, indeterminate: false };
     }
 
     const workspaceDocIds = workspaceDocs.map(doc => doc.id);
     const selectedDocsInWorkspace = localSelectedDocIds.filter(id => workspaceDocIds.includes(id));
 
     if (selectedDocsInWorkspace.length === 0) {
-      return { checked: false, indeterminate: false };
+      // No documents selected - but workspace might still be selected (legacy state or just added)
+      // Use workspace selection state as the source of truth
+      return { checked: isWorkspaceSelected, indeterminate: false };
     } else if (selectedDocsInWorkspace.length === workspaceDocIds.length) {
       return { checked: true, indeterminate: false };
     } else {
@@ -475,10 +479,10 @@ export const WorkspaceBrowser = forwardRef(({
       <div className="action-buttons">
         <Button
           label="Select All"
-          icon="pi pi-check-square"
+          icon={selectedCount === regularWorkspaces.length && regularWorkspaces.length > 0 ? "pi pi-check-square" : "pi pi-stop"}
           className="p-button-text p-button-sm"
           onClick={handleSelectAll}
-          disabled={regularWorkspaces.length === 0}
+          disabled={regularWorkspaces.length === 0 || selectedCount === regularWorkspaces.length}
         />
         <Button
           label="Clear"

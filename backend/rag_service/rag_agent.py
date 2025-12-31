@@ -1236,7 +1236,8 @@ def _search_with_iterative_reasoning(
     # Define async reasoning function
     async def _run_reasoning():
         # Create async progress callback
-        async def progress_callback(message: str, percent: int):
+        # Note: percent is optional because iterative_reasoning.py only passes message
+        async def progress_callback(message: str, percent: int = None):
             _send_progress(message, percent)
 
         return await engine.reason(query, progress_callback=progress_callback)

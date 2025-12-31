@@ -550,12 +550,12 @@ export const AgenticChatBot = () => {
     }
 
     // Send to WebSocket (history is now managed by backend)
+    // Only send document_ids - backend filters by selected documents directly
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(
         JSON.stringify({
           message: userMessage.content,
           user_id: user?.id,
-          workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
         })
       );
@@ -569,7 +569,7 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
       connectWebSocket();
     }
-  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedWorkspaceIds, selectedDocumentIds]);
+  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds]);
 
   const handleRetry = useCallback(async (msg, msgIndex) => {
     if (isLoading || !sessionId) return;
@@ -646,17 +646,17 @@ export const AgenticChatBot = () => {
       }
 
       // Send to WebSocket with is_retry flag to force new document search
+      // Only send document_ids - backend filters by selected documents directly
       wsRef.current.send(
         JSON.stringify({
           message: messageContent,
           user_id: user?.id,
           is_retry: true,
-          workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}, document_ids=${selectedDocumentIds.length}: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -667,7 +667,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, selectedWorkspaceIds, selectedDocumentIds, connectWebSocket]);
+  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -1053,17 +1053,17 @@ export const AgenticChatBot = () => {
       }
 
       // Send to WebSocket with is_retry flag to force new document search
+      // Only send document_ids - backend filters by selected documents directly
       wsRef.current.send(
         JSON.stringify({
           message: newContent,
           user_id: user?.id,
           is_retry: true,
-          workspace_ids: selectedWorkspaceIds.length > 0 ? selectedWorkspaceIds : [],
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
         })
       );
 
-      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, workspace_ids=${selectedWorkspaceIds.length}, document_ids=${selectedDocumentIds.length}: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({
@@ -1074,7 +1074,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedWorkspaceIds, selectedDocumentIds, connectWebSocket]);
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedDocumentIds, connectWebSocket]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {

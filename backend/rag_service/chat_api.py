@@ -715,6 +715,12 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 use_analytics_path = orchestrator.should_use_analytics(classification)
                                 use_rag_path = orchestrator.should_use_rag(classification)
 
+                                # OVERRIDE: If user has explicitly selected specific documents, always use RAG
+                                # This ensures document search is performed when user wants to query their selected docs
+                                if document_ids and len(document_ids) > 0 and not use_rag_path:
+                                    logger.info(f"[Intent Routing] Override: User selected {len(document_ids)} specific document(s), forcing RAG path")
+                                    use_rag_path = True
+
                                 logger.info(f"[Intent Routing] Routing decision: analytics={use_analytics_path}, rag={use_rag_path}")
 
                                 # Execute analytics query if needed
