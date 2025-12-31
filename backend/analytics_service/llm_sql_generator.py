@@ -70,6 +70,7 @@ class ContentSizeEvaluator:
 
     # Configuration constants
     LLM_MAX_SAFE_TOKENS = 80000      # Safe threshold (leaves headroom for prompt)
+    LLM_MAX_SAFE_ROWS = 25           # Max rows for LLM formatting (output token limit)
     CHARS_PER_TOKEN = 4              # Approximate conversion ratio
     PROMPT_OVERHEAD_TOKENS = 3000    # Reserved for prompt/instructions
     SAMPLE_ROWS_FOR_LLM = 10         # Sample rows for LLM context
@@ -118,15 +119,22 @@ class ContentSizeEvaluator:
         # Estimate token count
         total_chars = len(markdown_table)
         estimated_tokens = (total_chars // self.CHARS_PER_TOKEN) + self.PROMPT_OVERHEAD_TOKENS
+        row_count = len(query_results)
 
-        # Check if exceeds limit
-        exceeds_limit = estimated_tokens > self.max_safe_tokens
+        # Check if exceeds limit (either token limit OR row count limit)
+        # Row count limit prevents LLM output token exhaustion when formatting many rows
+        exceeds_token_limit = estimated_tokens > self.max_safe_tokens
+        exceeds_row_limit = row_count > self.LLM_MAX_SAFE_ROWS
+        exceeds_limit = exceeds_token_limit or exceeds_row_limit
 
         if exceeds_limit:
+            reason = []
+            if exceeds_token_limit:
+                reason.append(f"tokens ({estimated_tokens:,} > {self.max_safe_tokens:,})")
+            if exceeds_row_limit:
+                reason.append(f"rows ({row_count} > {self.LLM_MAX_SAFE_ROWS})")
             logger.info(
-                f"[ContentSizeEvaluator] Result set exceeds LLM limit: "
-                f"{len(query_results)} rows, ~{estimated_tokens:,} tokens "
-                f"(limit: {self.max_safe_tokens:,})"
+                f"[ContentSizeEvaluator] Result set exceeds LLM limit: {' and '.join(reason)}"
             )
 
         return ContentSizeEvaluation(
@@ -447,6 +455,8 @@ CRITICAL: You MUST use ONLY the actual data from the Query Results below. Do NOT
 3. If the query asks for MIN/MAX, identify the rows with minimum and maximum values
 4. Do NOT invent categories like "Electronics" or "Furniture" unless they actually appear in the data
 5. Format currency values with $ and proper formatting
+6. NEVER add fields that don't exist in the Query Results - no "Description", "Tax", "Discount", "Supplier ID", etc.
+7. If a field is not in the query results, it does NOT exist - do not include it in your response
 
 ## For MIN/MAX Queries:
 If the user query asks for minimum/maximum values, identify:
@@ -513,6 +523,8 @@ CRITICAL RULES:
 - Focus on providing context and key insights
 - Format currency values with $ and proper formatting (e.g., $1,234.56)
 - Keep the summary concise and scannable
+- ONLY mention columns that appear in the "Columns" list above - NEVER assume or add fields that don't exist
+- If a field is not listed in Columns, it does NOT exist in this data
 
 Write the summary header in markdown format:"""
 
@@ -568,9 +580,14 @@ Analyze the query and identify:
    - If user asks for "average", "mean" -> aggregation_type = "avg"
    - If user asks for "count", "how many" -> aggregation_type = "count"
 7. CRITICAL - Report type detection:
-   - "detail": User wants to see INDIVIDUAL LINE ITEMS/RECORDS with their details. Keywords: "details", "included details", "include details", "with details", "list", "show all", "each", "every", "items", "individual", "breakdown", "itemized", "what items", "what did we buy", "line items"
+   - "detail": User wants to see INDIVIDUAL LINE ITEMS/RECORDS with their details. Keywords: "details", "included details", "include details", "with details", "list", "show all", "each", "every", "items", "individual", "breakdown", "itemized", "what items", "what did we buy", "line items", "products details", "product details"
    - "summary": User wants AGGREGATED totals only (no individual line items). Keywords: "total only", "sum only", "just the total", "aggregate only"
    - "comparison": User wants to compare different groups
+
+   **CRITICAL for "detail" report_type**:
+   - When report_type="detail", the SQL must include ALL columns from the Available Data Fields schema
+   - Do NOT selectively include only 2-3 columns - include EVERY field in the schema
+   - Example: If user asks "list products with details" and schema has 7 fields, SELECT must include all 7 fields
 
    IMPORTANT for MIN/MAX queries with details:
    - "max and min receipts with details" -> report_type="detail" (show the receipts AND their line items)
@@ -719,7 +736,13 @@ Check the 'source' and 'access_pattern' in the field schema!
 ## Common Error Fixes:
 1. "column X does not exist" in CTE: The 'item' column is only available AFTER jsonb_array_elements() runs. You CANNOT use item->>'...' in WHERE clause inside the CTE (WITH ... AS block). Move such filters to the outer SELECT.
 2. "column must appear in GROUP BY": Add the column to GROUP BY clause.
-3. "invalid input syntax for type numeric": Add NULLIF and type checking for numeric casts.
+3. **"invalid input syntax for type numeric"**:
+   - CRITICAL: Check the data_type in the schema! The field being cast might be a STRING, not a number.
+   - If error shows a value like "P000035", "SKU-001", etc., the field is a STRING - DO NOT cast to ::numeric
+   - For STRING fields: Use item->>'FieldName' without any cast
+   - For NUMERIC fields only: Use (item->>'FieldName')::numeric with NULLIF for safety
+   - Check the schema's data_type field: "string" = no cast, "number" = can cast to numeric
+   - Common STRING fields that should NOT be cast: ProductID, SKU, Code, ID, Number (identifiers)
 4. Date parsing errors: Use proper date format handling.
 5. Wrong field name: Check the schema for exact field names (e.g., 'Total Sales' not 'amount', 'Product' not 'description').
 
@@ -742,557 +765,76 @@ Check the 'source' and 'access_pattern' in the field schema!
 Respond with JSON only:"""
 
     # Round 3: SQL Generation with verified parameters
-    VERIFIED_SQL_PROMPT = """Generate a PostgreSQL query using the verified field mappings.
+    VERIFIED_SQL_PROMPT = """Generate a PostgreSQL query based on the schema and parameters provided.
 
 ## Original User Query:
 "{user_query}"
 
-## Verified Parameters:
-- Grouping Fields (in order): {grouping_fields}
+## Available Data Fields (use ONLY these fields):
+{field_schema}
+
+## Query Parameters:
+- Report Type: {report_type}
+- Aggregation Type: {aggregation_type}
+- Aggregation Field: {aggregation_field}
+- Entity Field: {entity_field}
+- Grouping Fields: {grouping_fields}
+- Filters: {filters}
+- Date Field: {date_field} (source: {date_field_source})
 - Time Grouping: {time_grouping}
 - Time Filter Only: {time_filter_only}
 - Time Filter Year: {time_filter_year}
 - Time Filter Period: {time_filter_period}
-- Aggregation Field: {aggregation_field}
-- Aggregation Type: {aggregation_type}
-- Entity Field: {entity_field}
-- Date Field: {date_field}
-- Date Field Source: {date_field_source}
-- Report Type: {report_type}
-- Filters: {filters}
 
-## CRITICAL - HOW TO USE FILTERS:
-If filters are provided (not empty {{}}), you MUST apply them in the query!
-- Apply filters in the OUTER SELECT WHERE clause (after the CTE), NOT inside the CTE
-- For line_item fields, use item->>'FieldName' with appropriate casting
+## CRITICAL RULES:
 
-**Filter SQL patterns by operator:**
+### 1. Schema Adherence:
+- Use ONLY fields listed in "Available Data Fields" above
+- For report_type="detail": Include ALL fields from the schema in SELECT
+- For min/max queries (finding record with min or max value): Include ALL fields from the schema in SELECT
+- Never invent or assume fields not in the schema
 
-1. **Comparison operators (<, >, =, <=, >=, !=):**
-   - {{"StockQuantity": {{"operator": "<", "value": 50}}}} -> WHERE (item->>'StockQuantity')::numeric < 50
-   - {{"Price": {{"operator": ">=", "value": 100}}}} -> WHERE (item->>'Price')::numeric >= 100
-   - {{"Status": {{"operator": "=", "value": "Active"}}}} -> WHERE item->>'Status' = 'Active'
+### 2. Data Type Handling (SIMPLE):
+- **SELECT columns**: Just use item->>'FieldName' AS alias - NO type casting needed
+- **ORDER BY numeric field**: Cast only in ORDER BY clause: ORDER BY (item->>'Field')::numeric
+- **WHERE comparisons**: Cast only when comparing numbers or dates
+- **Aggregations (SUM, AVG)**: Cast to numeric only for the aggregated field
+- **DO NOT cast in SELECT** - return values as-is from JSONB
 
-2. **BETWEEN operator:**
-   - {{"Price": {{"operator": "between", "value": [50, 100]}}}} -> WHERE (item->>'Price')::numeric BETWEEN 50 AND 100
-   - {{"StockQuantity": {{"operator": "between", "value": [10, 50]}}}} -> WHERE (item->>'StockQuantity')::numeric BETWEEN 10 AND 50
+### 3. Filter Application:
+- Apply filters in OUTER WHERE clause (after CTE), not inside CTE
+- Operators: <, >, =, <=, >=, !=, between, in, not_in, like
 
-3. **IN operator (for lists):**
-   - {{"Category": {{"operator": "in", "value": ["Electronics", "Books"]}}}} -> WHERE item->>'Category' IN ('Electronics', 'Books')
-   - {{"Brand": {{"operator": "in", "value": ["Nike", "Adidas"]}}}} -> WHERE item->>'Brand' IN ('Nike', 'Adidas')
-
-4. **NOT IN operator:**
-   - {{"Category": {{"operator": "not_in", "value": ["Electronics", "Books"]}}}} -> WHERE item->>'Category' NOT IN ('Electronics', 'Books')
-
-5. **LIKE operator (string matching):**
-   - {{"ProductName": {{"operator": "like", "value": "%Apple%"}}}} -> WHERE item->>'ProductName' ILIKE '%Apple%'
-   - {{"SKU": {{"operator": "like", "value": "BOO-%"}}}} -> WHERE item->>'SKU' LIKE 'BOO-%'
-
-**Multiple filters:** Combine with AND
-- filters = {{"Price": {{"operator": ">", "value": 100}}, "Category": {{"operator": "=", "value": "Electronics"}}}}
-- -> WHERE (item->>'Price')::numeric > 100 AND item->>'Category' = 'Electronics'
-
-## CRITICAL - USE EXACT FIELD NAMES:
-You MUST use the EXACT field names from the Verified Parameters above!
-- For Aggregation Field: Use exactly "{aggregation_field}" (e.g., item->>'Total Sales', NOT item->>'amount')
-- For Date Field: Use exactly "{date_field}" (e.g., item->>'Purchase Date', NOT item->>'date')
-- For Entity Field: Use exactly "{entity_field}" if specified
-- For Grouping Fields: Use the exact 'actual_field' values from the grouping_fields list
-
-DO NOT use generic field names like 'amount', 'description', 'date', 'quantity'.
-USE the actual field names: 'Total Sales', 'Product', 'Purchase Date', 'Customer Name', etc.
-
-## Data Structure:
-The documents_data table has TWO separate JSONB columns:
-- header_data (JSONB object): Document-level fields
-- line_items (JSONB array): Item-level fields (for spreadsheet data, ALL fields are here)
-
-## Field Access Rules based on Date Field Source = '{date_field_source}':
-- If Date Field Source = 'line_item': ALL fields are in line_items, use item->>'field_name'
-- If Date Field Source = 'header': Date is in header_data, other fields may be in line_items
-
-EXAMPLE for spreadsheet data (Date Field Source = 'line_item'):
-- Date access: item->>'{date_field}'
-- Amount access: item->>'{aggregation_field}'
-- Product access: item->>'Product'
-
-## CRITICAL - WHERE clause placement:
-The 'item' column is ONLY available AFTER jsonb_array_elements() runs.
-- Document ID filter: Goes in CTE WHERE clause (WHERE dd.document_id IN (...))
-- Year/date filter on item fields: Goes in OUTER SELECT WHERE clause (WHERE EXTRACT(YEAR FROM (item->>'date')::timestamp) = 2024)
-
-## CRITICAL - Time Filter vs Time Grouping:
-- If time_filter_only=true: Add a WHERE clause to filter by the time period, but do NOT group by time
-- If time_filter_only=false and time_grouping is set: Group results by the time period
-
-## SQL Templates by Report Type and Aggregation Type:
-
-### For report_type = "detail" (show individual items):
-When user wants to see INDIVIDUAL ITEMS with their details:
-IMPORTANT: Always include document identifiers like receipt_number, invoice_number, or document_number from header_data!
+### 4. SQL Structure:
 ```sql
 WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
+    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
 )
 SELECT
-    COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'document_number', 'N/A') as receipt_number,
-    TO_CHAR((header_data->>'transaction_date')::timestamp, 'YYYY-MM') as month,
-    (header_data->>'transaction_date')::date as date,
-    header_data->>'store_name' as store,
-    header_data->>'store_address' as address,
-    item->>'description' as item_description,
-    ROUND((item->>'amount')::numeric, 2) as amount
+    item->>'FieldName' AS FieldName,  -- NO casting in SELECT
+    item->>'AnotherField' AS AnotherField
 FROM expanded_items
-WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{YEAR}}
-ORDER BY (header_data->>'transaction_date')::timestamp, item->>'description'
-```
-NOTE: The receipt_number/invoice_number field is CRITICAL - it uniquely identifies each receipt/invoice document.
-
-### For report_type = "detail" with PRODUCT INVENTORY data (no header_data dates/receipts):
-When the schema has product fields like ProductID, ProductName, StockQuantity, Price, Category, Brand:
-```sql
-WITH items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-)
-SELECT
-    item->>'ProductID' as product_id,
-    item->>'ProductName' as product_name,
-    item->>'Category' as category,
-    item->>'Brand' as brand,
-    (item->>'Price')::numeric as price,
-    (item->>'StockQuantity')::numeric as stock_quantity,
-    item->>'SKU' as sku
-FROM items
-WHERE (item->>'StockQuantity')::numeric < {{FILTER_VALUE}}
-ORDER BY (item->>'StockQuantity')::numeric ASC
-```
-NOTE: Apply any numeric filters in the WHERE clause using item->>'FieldName'. Adapt field names to match the actual schema.
-
-## SQL Templates by Aggregation Type (for summary reports):
-
-### For aggregation_type = "sum" (default):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-)
-SELECT
-    {{SELECT_FIELDS}},
-    COUNT(*) as item_count,
-    ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-FROM expanded_items
-GROUP BY {{GROUP_BY_FIELDS}}
-ORDER BY {{ORDER_BY_FIELDS}}
-```
-**CRITICAL**: Check the Date Field Source parameter!
-- If Date Field Source = 'line_item': Use item->>'Date Field' for date extraction (e.g., TO_CHAR((item->>'Purchase Date')::timestamp, 'YYYY-MM'))
-- If Date Field Source = 'header': Use header_data->>'Date Field' for date extraction
-
-### For aggregation_type = "avg" when asking about "average per receipt/meal" (DOCUMENT-LEVEL average):
-**CRITICAL**: When user asks "average for each meal", "average per receipt", "average meal cost", they want the average TOTAL per receipt, NOT average per line item.
-This requires a TWO-STEP aggregation:
-1. First calculate the TOTAL for each receipt (sum line items within each receipt)
-2. Then calculate the AVERAGE of those receipt totals
-
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-receipt_totals AS (
-    SELECT
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
-        header_data->>'store_name' as store_name,
-        (header_data->>'transaction_date')::date as transaction_date,
-        ROUND(SUM((item->>'amount')::numeric), 2) as receipt_total
-    FROM expanded_items
-    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
-)
-SELECT
-    ROUND(AVG(receipt_total), 2) as average_per_receipt,
-    COUNT(*) as total_receipts,
-    ROUND(SUM(receipt_total), 2) as grand_total,
-    ROUND(MIN(receipt_total), 2) as min_receipt,
-    ROUND(MAX(receipt_total), 2) as max_receipt
-FROM receipt_totals
-```
-NOTE: This returns a SINGLE ROW with the average across all receipts. Include receipt count and grand total for context.
-
-### For aggregation_type = "avg" with LIST of each receipt (show individual receipts with totals, plus overall average):
-When user wants to see each receipt AND the average:
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-receipt_totals AS (
-    SELECT
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
-        header_data->>'store_name' as store_name,
-        (header_data->>'transaction_date')::date as transaction_date,
-        ROUND(SUM((item->>'amount')::numeric), 2) as receipt_total
-    FROM expanded_items
-    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
-)
-SELECT
-    receipt_number,
-    store_name,
-    transaction_date,
-    receipt_total,
-    ROUND(AVG(receipt_total) OVER (), 2) as overall_average
-FROM receipt_totals
-ORDER BY transaction_date, receipt_number
-```
-NOTE: This returns EACH receipt with its total, plus an overall_average column showing the average across all receipts.
-
-### For aggregation_type = "min_max" WITH time_filter_only=true AND report_type="summary" (OVERALL min AND max, no details):
-When user wants the SINGLE min and SINGLE max across all data without line item details (e.g., "min and max receipts in 2025"):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-receipt_totals AS (
-    SELECT
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
-        header_data->>'store_name' as store_name,
-        (header_data->>'transaction_date')::date as transaction_date,
-        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
-    FROM expanded_items
-    WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{FILTER_YEAR}}
-    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
-),
-min_max AS (
-    (SELECT receipt_number, store_name, transaction_date, total_amount, 'MIN' as record_type
-     FROM receipt_totals ORDER BY total_amount ASC LIMIT 1)
-    UNION ALL
-    (SELECT receipt_number, store_name, transaction_date, total_amount, 'MAX' as record_type
-     FROM receipt_totals ORDER BY total_amount DESC LIMIT 1)
-)
-SELECT * FROM min_max ORDER BY record_type
-```
-NOTE: This returns exactly 2 rows - the single MIN and single MAX across the entire filtered period.
-
-### For aggregation_type = "min_max" WITH time_filter_only=true AND report_type="detail" (OVERALL min AND max WITH line item details):
-**CRITICAL: USE THIS TEMPLATE when user asks for min/max receipts WITH details/items.**
-When user wants the SINGLE min and SINGLE max receipts WITH their individual line items (e.g., "min and max receipts with details in 2025", "include their details"):
-
-**IMPORTANT**: You MUST include ALL relevant header_data fields in the output (store_name, transaction_date, store_address, payment_method, etc.)
-- Do NOT skip header fields - include all available header information in the final SELECT
-- The receipt_totals CTE should extract ALL header fields that exist in the schema
-- Join back to get both header info AND line item details
-
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-receipt_totals AS (
-    SELECT
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
-        header_data->>'store_name' as store_name,
-        header_data->>'store_address' as store_address,
-        (header_data->>'transaction_date')::date as transaction_date,
-        header_data->>'payment_method' as payment_method,
-        header_data->>'currency' as currency,
-        -- Include ALL other header fields that exist in the schema
-        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
-    FROM expanded_items
-    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name',
-             header_data->>'store_address', header_data->>'transaction_date', header_data->>'payment_method',
-             header_data->>'currency'
-),
-min_max_receipts AS (
-    (SELECT receipt_number, 'MIN' as record_type FROM receipt_totals ORDER BY total_amount ASC LIMIT 1)
-    UNION ALL
-    (SELECT receipt_number, 'MAX' as record_type FROM receipt_totals ORDER BY total_amount DESC LIMIT 1)
-)
-SELECT
-    mm.record_type,
-    rt.receipt_number,
-    rt.store_name,
-    rt.store_address,
-    rt.transaction_date,
-    rt.payment_method,
-    rt.currency,
-    rt.total_amount as receipt_total,
-    -- Include ALL line item fields
-    ei.item->>'description' as item_description,
-    COALESCE(ei.item->>'quantity', '1') as quantity,
-    ROUND((ei.item->>'unit_price')::numeric, 2) as unit_price,
-    ROUND((ei.item->>'amount')::numeric, 2) as item_amount
-FROM min_max_receipts mm
-JOIN receipt_totals rt ON mm.receipt_number = rt.receipt_number
-JOIN expanded_items ei ON COALESCE(ei.header_data->>'receipt_number', ei.header_data->>'invoice_number', 'Unknown') = mm.receipt_number
-ORDER BY mm.record_type DESC, rt.receipt_number, ei.item->>'description'
-```
-**CRITICAL NOTES**:
-- This query uses THREE CTEs and requires THREE JOINs in the final SELECT
-- The receipt_totals CTE MUST extract header fields (store_name, transaction_date, etc.) - adapt based on available schema fields
-- The final SELECT MUST include header fields from rt (receipt_totals) AND line item fields from ei (expanded_items)
-- Returns the MIN and MAX receipts WITH all their line items (multiple rows per receipt)
-- Adapt the header fields based on the actual schema - include ALL available header fields, not just the ones shown
-
-### For aggregation_type = "min_max" WITH time_filter_only=false (min AND max PER time period):
-When user wants min/max FOR EACH time period (e.g., "min and max receipts by month in 2025"):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-aggregated AS (
-    SELECT
-        {{TIME_GROUP_FIELD}} as group_period,
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as entity_name,
-        header_data->>'store_name' as store_name,
-        ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-    FROM expanded_items
-    GROUP BY group_period, header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name'
-),
-ranked AS (
-    SELECT *,
-        ROW_NUMBER() OVER (PARTITION BY group_period ORDER BY total_amount ASC) as min_rank,
-        ROW_NUMBER() OVER (PARTITION BY group_period ORDER BY total_amount DESC) as max_rank
-    FROM aggregated
-)
-SELECT
-    group_period,
-    entity_name,
-    store_name,
-    total_amount,
-    CASE
-        WHEN min_rank = 1 THEN 'MIN'
-        WHEN max_rank = 1 THEN 'MAX'
-    END as record_type
-FROM ranked
-WHERE min_rank = 1 OR max_rank = 1
-ORDER BY group_period, record_type DESC
-```
-NOTE: For time grouping from header_data, use: header_data->>'transaction_date' (NOT item!)
-
-### For LINE-ITEM LEVEL min/max (e.g., "which product has lowest inventory", "find the item with highest price"):
-CRITICAL: Use this template when there is NO header-level grouping needed (like receipts/invoices).
-This is for flat line-item data like product catalogs, inventory lists, etc.
-
-For MINIMUM (single item with lowest value):
-```sql
-WITH items AS (
-    SELECT li.data as item
-    FROM documents_data dd
-    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-)
-SELECT
-    item->>'ProductID' as product_id,
-    item->>'ProductName' as product_name,
-    item->>'Category' as category,
-    item->>'Brand' as brand,
-    (item->>'StockQuantity')::numeric as stock_quantity,
-    (item->>'Price')::numeric as price
-FROM items
-ORDER BY (item->>'{{VALUE_FIELD}}')::numeric ASC
-LIMIT 1
+WHERE -- filters here (cast only for comparisons)
+ORDER BY (item->>'NumericField')::numeric DESC  -- cast only in ORDER BY if needed
 ```
 
-For MAXIMUM (single item with highest value):
-```sql
-WITH items AS (
-    SELECT li.data as item
-    FROM documents_data dd
-    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-)
-SELECT
-    item->>'ProductID' as product_id,
-    item->>'ProductName' as product_name,
-    item->>'Category' as category,
-    item->>'Brand' as brand,
-    (item->>'StockQuantity')::numeric as stock_quantity,
-    (item->>'Price')::numeric as price
-FROM items
-ORDER BY (item->>'{{VALUE_FIELD}}')::numeric DESC
-LIMIT 1
-```
-NOTE: Adapt field names based on the actual schema. The key is: NO GROUP BY, just ORDER BY the value field and LIMIT 1.
+### 5. Report Type Behavior:
+- **detail**: SELECT all schema fields, return individual rows
+- **summary**: GROUP BY and aggregate (SUM, COUNT, AVG, MIN, MAX)
+- **count**: Return COUNT with optional grouping
 
-### For aggregation_type = "min" WITH time_filter_only=true (SINGLE minimum overall):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-receipt_totals AS (
-    SELECT
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
-        header_data->>'store_name' as store_name,
-        (header_data->>'transaction_date')::date as transaction_date,
-        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
-    FROM expanded_items
-    WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{FILTER_YEAR}}
-    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
-)
-SELECT receipt_number, store_name, transaction_date, total_amount, 'MIN' as record_type
-FROM receipt_totals
-ORDER BY total_amount ASC
-LIMIT 1
-```
+### 6. Aggregation Patterns:
+- **sum**: GROUP BY grouping fields, SUM(aggregation_field)
+- **avg**: Use two-step aggregation for per-document averages
+- **count**: COUNT(*) with optional grouping
+- **min/max**: ORDER BY aggregation_field ASC/DESC LIMIT 1. **IMPORTANT: Include ALL schema fields in SELECT, not just the aggregation field. The user wants to see the complete record.**
 
-### For aggregation_type = "min" WITH time_filter_only=false (minimum per time period):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-aggregated AS (
-    SELECT
-        {{TIME_GROUP_FIELD}} as group_period,
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as entity_name,
-        ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-    FROM expanded_items
-    GROUP BY group_period, header_data->>'receipt_number', header_data->>'invoice_number'
-),
-ranked AS (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY group_period ORDER BY total_amount ASC) as rn
-    FROM aggregated
-)
-SELECT group_period, entity_name, total_amount
-FROM ranked
-WHERE rn = 1
-ORDER BY group_period
-```
-
-### For aggregation_type = "max" WITH time_filter_only=true (SINGLE maximum overall):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-receipt_totals AS (
-    SELECT
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as receipt_number,
-        header_data->>'store_name' as store_name,
-        (header_data->>'transaction_date')::date as transaction_date,
-        ROUND(SUM((item->>'amount')::numeric), 2) as total_amount
-    FROM expanded_items
-    WHERE EXTRACT(YEAR FROM (header_data->>'transaction_date')::timestamp) = {{FILTER_YEAR}}
-    GROUP BY header_data->>'receipt_number', header_data->>'invoice_number', header_data->>'store_name', header_data->>'transaction_date'
-)
-SELECT receipt_number, store_name, transaction_date, total_amount, 'MAX' as record_type
-FROM receipt_totals
-ORDER BY total_amount DESC
-LIMIT 1
-```
-
-### For aggregation_type = "max" WITH time_filter_only=false (maximum per time period):
-```sql
-WITH expanded_items AS (
-    SELECT
-        dd.header_data,
-        jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    JOIN documents d ON dd.document_id = d.id
-    {{WHERE_CLAUSE}}
-),
-aggregated AS (
-    SELECT
-        {{TIME_GROUP_FIELD}} as group_period,
-        COALESCE(header_data->>'receipt_number', header_data->>'invoice_number', 'Unknown') as entity_name,
-        ROUND(SUM((item->>'{{AMOUNT_FIELD}}')::numeric), 2) as total_amount
-    FROM expanded_items
-    GROUP BY group_period, header_data->>'receipt_number', header_data->>'invoice_number'
-),
-ranked AS (
-    SELECT *, ROW_NUMBER() OVER (PARTITION BY group_period ORDER BY total_amount DESC) as rn
-    FROM aggregated
-)
-SELECT group_period, entity_name, total_amount
-FROM ranked
-WHERE rn = 1
-ORDER BY group_period
-```
-
-## Requirements:
-1. CRITICAL - For MIN/MAX queries, check BOTH time_filter_only AND report_type:
-   - If aggregation_type is "min", "max", or "min_max":
-     a) Check time_filter_only first:
-        - time_filter_only=true: Find OVERALL min/max (not per time period)
-        - time_filter_only=false: Find min/max PER time period
-     b) Then check report_type:
-        - report_type="detail": Include LINE ITEM details (description, quantity, unit_price, item_amount) for each receipt
-        - report_type="summary": Just show receipt totals (no line items)
-
-   Template selection for min_max queries:
-   - time_filter_only=true + report_type="summary" -> Use "OVERALL min AND max, no details" template
-   - time_filter_only=true + report_type="detail" -> Use "OVERALL min AND max WITH line item details" template
-   - time_filter_only=false + report_type="summary" -> Use "min AND max PER time period" template
-   - time_filter_only=false + report_type="detail" -> Use "min AND max PER time period WITH details" template (similar pattern)
-
-2. For non-MIN/MAX queries, check report_type:
-   - If report_type = "detail": Use the DETAIL template to show INDIVIDUAL ITEMS with date, store, description, amount. NO GROUP BY.
-   - If report_type = "summary": Use the aggregation templates with GROUP BY.
-
-3. For time groupings, check the source of the date field:
-   - If date is in header_data (source='header'): Use header_data->>'date_field'
-   - If date is in line_items (source='line_item'): Use item->>'date_field'
-   - yearly: EXTRACT(YEAR FROM (header_data->>'date_field')::timestamp)::int
-   - monthly: TO_CHAR((header_data->>'date_field')::timestamp, 'YYYY-MM')
-   - quarterly: CONCAT(EXTRACT(YEAR FROM ...)::int, '-Q', EXTRACT(QUARTER FROM ...)::int)
-
-4. Non-time groupings: Check the source! Use header_data->>'field' or item->>'field' accordingly
-
-5. CRITICAL: Do NOT add any WHERE clause inside the base CTE (WITH ... AS block). Document filtering will be added automatically.
-
-6. ALWAYS include header_data in the CTE SELECT so you can access header fields in outer queries.
-
-7. When time_filter_only=true and time_filter_year is provided, add a WHERE clause to filter by that year in the aggregation CTE.
+### 7. Important Notes:
+- Do NOT add WHERE inside base CTE - document filtering is added automatically
+- Always include header_data in CTE SELECT for access in outer queries
+- For time groupings use: EXTRACT(YEAR/QUARTER FROM ...) or TO_CHAR(..., 'YYYY-MM')
 
 ## Response Format (JSON only):
 {{
@@ -1447,6 +989,8 @@ Respond with JSON only:"""
         """
         Infer field mappings from actual document data structure.
 
+        Supports both inline and external line item storage.
+
         Args:
             document_ids: Document IDs to analyze
             db: Database session
@@ -1459,7 +1003,7 @@ Respond with JSON only:"""
         try:
             doc_ids_str = ", ".join(f"'{doc_id}'" for doc_id in document_ids)
 
-            # Get sample data
+            # First try inline storage: Get sample data from line_items array
             result = db.execute(text(f"""
                 SELECT
                     header_data,
@@ -1467,15 +1011,40 @@ Respond with JSON only:"""
                 FROM documents_data
                 WHERE document_id IN ({doc_ids_str})
                 AND line_items IS NOT NULL
+                AND jsonb_array_length(line_items) > 0
                 LIMIT 1
             """))
 
             row = result.fetchone()
-            if not row:
-                return {}
 
-            header_data = row[0] or {}
-            sample_item = row[1] or {}
+            header_data = {}
+            sample_item = {}
+
+            if row:
+                header_data = row[0] or {}
+                sample_item = row[1] or {}
+
+            # If no inline line_items found, check external storage
+            if not sample_item:
+                logger.info("[SQL Generator] No inline line_items, checking external storage")
+                result = db.execute(text(f"""
+                    SELECT
+                        dd.header_data,
+                        li.data as sample_item
+                    FROM documents_data dd
+                    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+                    WHERE dd.document_id IN ({doc_ids_str})
+                    LIMIT 1
+                """))
+                row = result.fetchone()
+                if row:
+                    header_data = row[0] or {}
+                    sample_item = row[1] or {}
+                    logger.info(f"[SQL Generator] Found external line_items with fields: {list(sample_item.keys())}")
+
+            if not header_data and not sample_item:
+                logger.warning("[SQL Generator] No data found for field inference")
+                return {}
 
             field_mappings = {}
 
@@ -1489,6 +1058,7 @@ Respond with JSON only:"""
                 if field != 'row_number':
                     field_mappings[field] = self._classify_field_for_sql(field, 'line_item')
 
+            logger.info(f"[SQL Generator] Inferred {len(field_mappings)} field mappings: {list(field_mappings.keys())}")
             return field_mappings
 
         except Exception as e:
@@ -1667,9 +1237,9 @@ Respond with JSON only:"""
             # Handle "max xxx and min xxx" patterns - make more explicit
             modified = re.sub(r'\bmax(?:imum)?\s+(\w+)\s+(?:and|&)\s+min(?:imum)?\s+\1\b', r'the single lowest \1', modified, flags=re.IGNORECASE)
             modified = re.sub(r'\bmin(?:imum)?\s+(\w+)\s+(?:and|&)\s+max(?:imum)?\s+\1\b', r'the single lowest \1', modified, flags=re.IGNORECASE)
-            # Add clarification suffix
+            # Add clarification suffix with explicit instruction to include ALL fields
             if 'single' not in modified:
-                modified = modified + ' (return only the 1 item with the minimum value, ORDER BY ASC LIMIT 1)'
+                modified = modified + ' (return only the 1 item with the minimum value, ORDER BY ASC LIMIT 1. IMPORTANT: Include ALL schema fields in SELECT to show complete record details)'
             return modified
         else:  # max
             modified = query_lower
@@ -1681,9 +1251,9 @@ Respond with JSON only:"""
             # Handle "max xxx and min xxx" patterns - make more explicit
             modified = re.sub(r'\bmax(?:imum)?\s+(\w+)\s+(?:and|&)\s+min(?:imum)?\s+\1\b', r'the single highest \1', modified, flags=re.IGNORECASE)
             modified = re.sub(r'\bmin(?:imum)?\s+(\w+)\s+(?:and|&)\s+max(?:imum)?\s+\1\b', r'the single highest \1', modified, flags=re.IGNORECASE)
-            # Add clarification suffix
+            # Add clarification suffix with explicit instruction to include ALL fields
             if 'single' not in modified:
-                modified = modified + ' (return only the 1 item with the maximum value, ORDER BY DESC LIMIT 1)'
+                modified = modified + ' (return only the 1 item with the maximum value, ORDER BY DESC LIMIT 1. IMPORTANT: Include ALL schema fields in SELECT to show complete record details)'
             return modified
 
     def is_min_max_query(self, user_query: str) -> bool:
@@ -1857,6 +1427,7 @@ Respond with JSON only:"""
 
         sql_prompt = self.VERIFIED_SQL_PROMPT.format(
             user_query=user_query,
+            field_schema=field_schema_json,
             grouping_fields=json.dumps(grouping_fields_desc),
             time_grouping=time_grouping_info,
             time_filter_only=time_filter_only,
@@ -2901,7 +2472,7 @@ FROM expanded_items
 
         # Determine instruction based on user intent
         if wants_details:
-            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
+            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details. Do NOT just show a summary total."
             report_type = "detailed"
         else:
             detail_instruction = "4. Be concise but complete - summarize the data appropriately"
@@ -2910,15 +2481,30 @@ FROM expanded_items
         # Use the pre-built markdown table from evaluation
         results_markdown = evaluation.markdown_table
 
+        # Get actual column names from the results to enforce schema adherence
+        actual_columns = list(query_results[0].keys()) if query_results else []
+        columns_list = ", ".join(actual_columns)
+
         # Simple prompt with markdown-formatted data
         prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
 "{user_query}"
 
+## AVAILABLE COLUMNS IN THIS DATA (ONLY THESE EXIST):
+{columns_list}
+
 ## SQL Query Results ({len(query_results)} rows):
 
 {results_markdown}
+
+## CRITICAL - STRICT DATA ADHERENCE (MOST IMPORTANT RULE):
+**You MUST ONLY report on columns listed in "AVAILABLE COLUMNS" above!**
+- The AVAILABLE COLUMNS list shows ALL fields that exist - there are NO OTHER fields
+- Do NOT add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date", "Notes", "Last Purchase Date", "Last Sale Date"
+- If a field is not in AVAILABLE COLUMNS, it DOES NOT EXIST - NEVER mention it
+- Only use values you can actually see in the SQL Query Results table
+- For each product/item, ONLY show the columns that exist in the data
 
 ## Instructions:
 1. Directly answer the user's question based on the data above
@@ -2966,6 +2552,13 @@ IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the pri
 - NEVER invent receipt numbers, item numbers, or any identifiers that don't exist in the data
 - Each unique receipt_number should appear EXACTLY ONCE in your output
 - If the data is aggregate/summary, just present the numbers - don't create fake detail rows
+
+## CRITICAL - ONLY USE COLUMNS FROM THE QUERY RESULTS:
+- ONLY display fields/columns that actually exist in the SQL Query Results table above
+- NEVER assume or add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date" etc.
+- If a column is not in the query results, DO NOT include it in your response
+- Use "-" for NULL/empty values, but NEVER invent field names that don't exist in the data
+- Look at the actual column headers in the results table - those are the ONLY fields you can report on
 
 6. For detail reports, include subtotals for each group and a grand total at the end
 
@@ -3195,7 +2788,7 @@ Write the {report_type} report in markdown format:"""
 
         # Determine instruction based on user intent
         if wants_details:
-            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details (date, description, amount, etc.). Do NOT just show a summary total."
+            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details. Do NOT just show a summary total."
             report_type = "detailed"
         else:
             detail_instruction = "4. Be concise but complete - summarize the data appropriately"
@@ -3204,15 +2797,30 @@ Write the {report_type} report in markdown format:"""
         # Use the pre-built markdown table from evaluation
         results_markdown = evaluation.markdown_table
 
+        # Get actual column names from the results to enforce schema adherence
+        actual_columns = list(query_results[0].keys()) if query_results else []
+        columns_list = ", ".join(actual_columns)
+
         # Simple prompt with markdown-formatted data
         prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
 "{user_query}"
 
+## AVAILABLE COLUMNS IN THIS DATA (ONLY THESE EXIST):
+{columns_list}
+
 ## SQL Query Results ({len(query_results)} rows):
 
 {results_markdown}
+
+## CRITICAL - STRICT DATA ADHERENCE (MOST IMPORTANT RULE):
+**You MUST ONLY report on columns listed in "AVAILABLE COLUMNS" above!**
+- The AVAILABLE COLUMNS list shows ALL fields that exist - there are NO OTHER fields
+- Do NOT add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date", "Notes", "Last Purchase Date", "Last Sale Date"
+- If a field is not in AVAILABLE COLUMNS, it DOES NOT EXIST - NEVER mention it
+- Only use values you can actually see in the SQL Query Results table
+- For each product/item, ONLY show the columns that exist in the data
 
 ## Instructions:
 1. Directly answer the user's question based on the data above
@@ -3260,6 +2868,13 @@ IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the pri
 - NEVER invent receipt numbers, item numbers, or any identifiers that don't exist in the data
 - Each unique receipt_number should appear EXACTLY ONCE in your output
 - If the data is aggregate/summary, just present the numbers - don't create fake detail rows
+
+## CRITICAL - ONLY USE COLUMNS FROM THE QUERY RESULTS:
+- ONLY display fields/columns that actually exist in the SQL Query Results table above
+- NEVER assume or add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date" etc.
+- If a column is not in the query results, DO NOT include it in your response
+- Use "-" for NULL/empty values, but NEVER invent field names that don't exist in the data
+- Look at the actual column headers in the results table - those are the ONLY fields you can report on
 
 6. For detail reports, include subtotals for each group and a grand total at the end
 
