@@ -126,6 +126,29 @@ logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
 # Suppress noisy WebSocket connection logs
 logging.getLogger("uvicorn.protocols.websockets.websockets_impl").setLevel(logging.WARNING)
 
+
+# Custom filter to suppress noisy polling endpoint logs
+class EndpointFilter(logging.Filter):
+    """Filter out noisy polling endpoint logs."""
+
+    # Endpoints to suppress (polling/health check endpoints)
+    SUPPRESSED_ENDPOINTS = [
+        "/health",
+        "/documents/in-progress",
+    ]
+
+    def filter(self, record):
+        # Check if the log message contains any of the suppressed endpoints
+        message = record.getMessage()
+        for endpoint in self.SUPPRESSED_ENDPOINTS:
+            if endpoint in message and "200" in message:
+                return False  # Suppress this log
+        return True  # Allow this log
+
+
+# Create the filter instance
+_endpoint_filter = EndpointFilter()
+
 # Log deferred analytics import error if any
 if _analytics_import_error:
     logger.warning(f"Analytics service not available: {_analytics_import_error}")
@@ -381,6 +404,11 @@ async def lifespan(app: FastAPI):
     global task_queue_manager, task_scheduler, queue_worker_pool, task_queue_service
 
     # ===== STARTUP =====
+
+    # Apply endpoint filter to uvicorn access logger to suppress noisy polling endpoints
+    uvicorn_access_logger = logging.getLogger("uvicorn.access")
+    uvicorn_access_logger.addFilter(_endpoint_filter)
+
     try:
         init_db()
         logger.info("Database initialized successfully")
