@@ -223,10 +223,90 @@ def test_cache_service():
     return True
 
 
+def test_response_quality_evaluator():
+    """Test response quality evaluator."""
+    print("\n" + "=" * 60)
+    print("TEST 5: Response Quality Evaluator")
+    print("=" * 60)
+
+    from analytics_service.query_cache_service import ResponseQualityEvaluator
+    from analytics_service.query_cache_config import get_query_cache_config
+
+    evaluator = ResponseQualityEvaluator()
+    config = get_query_cache_config()
+
+    # Test cases: (question, answer, expected_cacheable, description)
+    test_cases = [
+        # Should NOT cache - "no information" responses
+        (
+            "What is Graph R1?",
+            "The provided context does not contain information about 'Graph R1' or its core design.",
+            False,
+            "No information found response"
+        ),
+        (
+            "What is the return policy?",
+            "I couldn't find any information about the return policy in the provided documents.",
+            False,
+            "Couldn't find information"
+        ),
+        (
+            "How do I reset my password?",
+            "There are no results found for password reset procedures.",
+            False,
+            "No results found"
+        ),
+        # Should cache - actual informative responses
+        (
+            "What is the return policy?",
+            "The return policy allows customers to return items within 30 days of purchase. Items must be in original condition with tags attached. Refunds are processed within 5-7 business days.",
+            True,
+            "Informative response with actual content"
+        ),
+        (
+            "How do I contact support?",
+            "You can contact support via email at support@example.com or call 1-800-123-4567. Support hours are Monday-Friday, 9am-5pm EST.",
+            True,
+            "Specific contact information"
+        ),
+        # Edge cases
+        (
+            "Hello",
+            "Hi",
+            False,
+            "Response too short"
+        ),
+    ]
+
+    print("\n--- Testing response quality evaluation (heuristic/pattern matching):")
+
+    for question, answer, expected_cacheable, description in test_cases:
+        # Temporarily disable LLM evaluation to test heuristics
+        original_setting = config.response_evaluation_enabled
+        config.response_evaluation_enabled = False
+
+        is_cacheable, reason = evaluator.evaluate(question, answer, config)
+
+        config.response_evaluation_enabled = original_setting
+
+        status = "✓" if is_cacheable == expected_cacheable else "✗"
+        print(f"\n  {status} {description}")
+        print(f"    Question: {question[:50]}...")
+        print(f"    Answer: {answer[:60]}...")
+        print(f"    Expected: {expected_cacheable}, Got: {is_cacheable}")
+        print(f"    Reason: {reason}")
+
+        if is_cacheable != expected_cacheable:
+            print(f"    ⚠ MISMATCH!")
+
+    print("\n✅ Response quality evaluator test completed!")
+    return True
+
+
 def test_convenience_functions():
     """Test convenience functions."""
     print("\n" + "=" * 60)
-    print("TEST 5: Convenience Functions")
+    print("TEST 6: Convenience Functions")
     print("=" * 60)
 
     from analytics_service.query_cache_service import (
@@ -272,6 +352,7 @@ def run_all_tests():
         ("Analyzer Heuristic", test_analyzer_heuristic),
         ("Cache Manager", test_cache_manager),
         ("Cache Service", test_cache_service),
+        ("Response Quality Evaluator", test_response_quality_evaluator),
         ("Convenience Functions", test_convenience_functions),
     ]
 

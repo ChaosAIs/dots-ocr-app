@@ -15,13 +15,17 @@ fastapi
 uvicorn
 python-multipart
 
-# RAG Chatbot dependencies
-langchain>=0.3.0
-langchain-openai
-langchain-qdrant
-langchain-ollama
-langchain-community
-langgraph
+# RAG Chatbot dependencies (LangChain 1.0+)
+# Upgraded from 0.3.x to 1.0+ for stability and new features
+langchain>=1.1.0
+langchain-core>=1.1.0
+langchain-openai>=1.1.0
+langchain-qdrant>=1.1.0
+langchain-ollama>=1.0.0
+langchain-text-splitters>=1.0.0
+langgraph>=1.0.0
+# Note: langchain-community is deprecated in 1.0, functionality moved to specific packages
+# Note: langchain-classic available for legacy chain compatibility if needed
 qdrant-client
 watchdog
 requests

@@ -75,6 +75,192 @@ logger = logging.getLogger(__name__)
 _executor: Optional[ThreadPoolExecutor] = None
 
 
+class ResponseQualityEvaluator:
+    """
+    Evaluates response quality to determine if it's worth caching.
+
+    Uses LLM to analyze whether a response actually answers the question
+    or is just a "I don't know" / "no information found" type response.
+    """
+
+    def __init__(self):
+        self._llm_client = None
+
+    def _get_llm_client(self):
+        """Lazily initialize LLM client."""
+        if self._llm_client:
+            return self._llm_client
+
+        try:
+            from rag_service.llm_service import get_llm_service
+            from langchain_core.messages import HumanMessage
+
+            llm_service = get_llm_service()
+            if not llm_service.is_available():
+                logger.warning("[ResponseEvaluator] LLM service not available")
+                return None
+
+            # Use a fast model for evaluation
+            chat_model = llm_service.get_query_model(
+                temperature=0.0,
+                num_ctx=4096,
+                num_predict=256
+            )
+
+            class LLMClientWrapper:
+                def __init__(self, model):
+                    self.model = model
+
+                def generate(self, prompt: str) -> str:
+                    response = self.model.invoke([HumanMessage(content=prompt)])
+                    return response.content
+
+            self._llm_client = LLMClientWrapper(chat_model)
+            logger.info("[ResponseEvaluator] LLM client initialized")
+            return self._llm_client
+
+        except Exception as e:
+            logger.warning(f"[ResponseEvaluator] Failed to create LLM client: {e}")
+            return None
+
+    def evaluate(self, question: str, answer: str, config: "QueryCacheConfig") -> tuple[bool, str]:
+        """
+        Evaluate if the response is worth caching.
+
+        Args:
+            question: The user's question
+            answer: The generated answer
+            config: Cache configuration
+
+        Returns:
+            Tuple of (is_worth_caching, reason)
+        """
+        # Quick checks first (no LLM needed)
+        if len(answer.strip()) < config.min_response_length:
+            return False, f"Response too short ({len(answer.strip())} chars < {config.min_response_length})"
+
+        # Check for common "no answer" patterns
+        no_answer_patterns = [
+            "does not contain",
+            "no information",
+            "cannot find",
+            "not found",
+            "unable to find",
+            "don't have",
+            "do not have",
+            "no relevant",
+            "no data",
+            "context does not",
+            "provided context does not",
+            "i couldn't find",
+            "i could not find",
+            "couldn't find any",
+            "could not find any",
+            "there is no information",
+            "there are no results",
+            "no results found",
+            "not available",
+            "not mentioned",
+            "does not mention",
+            "doesn't contain",
+            "doesn't include",
+            "does not include",
+            "no documents",
+            "no matching",
+        ]
+
+        answer_lower = answer.lower()
+        for pattern in no_answer_patterns:
+            if pattern in answer_lower:
+                # Quick rejection based on pattern, but let LLM confirm if enabled
+                if config.response_evaluation_enabled:
+                    llm_result = self._llm_evaluate(question, answer)
+                    if llm_result is not None:
+                        return llm_result
+                return False, f"Response indicates no information found (pattern: '{pattern}')"
+
+        # If LLM evaluation is enabled, do a more thorough check
+        if config.response_evaluation_enabled:
+            llm_result = self._llm_evaluate(question, answer)
+            if llm_result is not None:
+                return llm_result
+
+        # Default: assume response is worth caching
+        return True, "Response passed quality checks"
+
+    def _llm_evaluate(self, question: str, answer: str) -> Optional[tuple[bool, str]]:
+        """
+        Use LLM to evaluate response quality.
+
+        Returns:
+            Tuple of (is_worth_caching, reason) or None if LLM unavailable
+        """
+        llm_client = self._get_llm_client()
+        if not llm_client:
+            return None
+
+        try:
+            prompt = f"""You are evaluating whether an AI assistant's response should be cached for future similar questions.
+
+Question: "{question[:500]}"
+
+Response: "{answer[:1500]}"
+
+Evaluate if this response ACTUALLY ANSWERS the question with useful information.
+
+A response should NOT be cached if:
+1. It says information is not found/available/provided
+2. It only describes an error or technical issue
+3. It asks the user to provide more context/documents
+4. It's a generic "I don't know" type response
+5. It doesn't provide substantive information related to the question
+
+A response SHOULD be cached if:
+1. It provides specific, useful information answering the question
+2. It contains facts, procedures, or data relevant to the question
+3. Even if partial, it gives meaningful content
+
+Respond with ONLY a JSON object (no markdown, no explanation):
+{{"should_cache": true/false, "reason": "brief explanation"}}"""
+
+            response = llm_client.generate(prompt)
+
+            # Parse the response
+            import json
+            import re
+
+            # Extract JSON from response
+            response = response.strip()
+            if response.startswith("```"):
+                response = re.sub(r'^```(?:json)?\s*\n?', '', response)
+                response = re.sub(r'\n?```\s*$', '', response)
+
+            match = re.search(r'\{[\s\S]*\}', response)
+            if match:
+                result = json.loads(match.group(0))
+                should_cache = result.get("should_cache", True)
+                reason = result.get("reason", "LLM evaluation")
+                logger.info(f"[ResponseEvaluator] LLM evaluation: should_cache={should_cache}, reason={reason}")
+                return should_cache, reason
+
+        except Exception as e:
+            logger.warning(f"[ResponseEvaluator] LLM evaluation failed: {e}")
+
+        return None
+
+
+# Singleton for response evaluator
+_response_evaluator: Optional[ResponseQualityEvaluator] = None
+
+
+def _get_response_evaluator() -> ResponseQualityEvaluator:
+    """Get or create the response evaluator singleton."""
+    global _response_evaluator
+    if _response_evaluator is None:
+        _response_evaluator = ResponseQualityEvaluator()
+    return _response_evaluator
+
+
 def _get_executor() -> ThreadPoolExecutor:
     """Get or create the thread pool executor for background tasks."""
     global _executor
@@ -261,13 +447,18 @@ class QueryCacheService:
         workspace_id: str,
         source_document_ids: List[str],
         intent: str = "general",
-        metadata: Optional[Dict[str, Any]] = None
+        metadata: Optional[Dict[str, Any]] = None,
+        skip_quality_check: bool = False
     ) -> None:
         """
         Store a new cache entry in the background (non-blocking).
 
         This is the preferred method for cache storage as it doesn't
         block the user response.
+
+        Before storing, the response is evaluated to determine if it's worth caching.
+        Responses that don't actually answer the question (e.g., "information not found")
+        are not cached.
 
         Args:
             question: The question (should be enhanced/self-contained)
@@ -276,12 +467,26 @@ class QueryCacheService:
             source_document_ids: List of document IDs used to generate the answer
             intent: Query intent type
             metadata: Additional metadata to store
+            skip_quality_check: If True, skip response quality evaluation
         """
         if not self.config.cache_enabled:
             return
 
         def _store_background():
             try:
+                # Evaluate response quality before caching
+                if not skip_quality_check:
+                    evaluator = _get_response_evaluator()
+                    is_worth_caching, reason = evaluator.evaluate(question, answer, self.config)
+
+                    if not is_worth_caching:
+                        logger.info(f"[CacheService] Response NOT cached - {reason}")
+                        logger.info(f"[CacheService]   Question: {question[:80]}...")
+                        logger.info(f"[CacheService]   Answer preview: {answer[:100]}...")
+                        return
+
+                    logger.info(f"[CacheService] Response quality check passed: {reason}")
+
                 entry_id = self.cache_manager.store_cache_entry(
                     question=question,
                     answer=answer,
@@ -291,7 +496,7 @@ class QueryCacheService:
                     metadata=metadata
                 )
                 if entry_id:
-                    logger.debug(f"[CacheService] Background store completed: {entry_id[:8]}...")
+                    logger.info(f"[CacheService] Background store completed: {entry_id[:8]}...")
             except Exception as e:
                 logger.error(f"[CacheService] Background store failed: {e}")
 
@@ -463,10 +668,15 @@ def store_answer_in_cache(
     workspace_id: str,
     source_document_ids: List[str],
     intent: str = "general",
-    background: bool = True
+    background: bool = True,
+    skip_quality_check: bool = False
 ) -> Optional[str]:
     """
     Convenience function to store an answer in cache.
+
+    Before storing, the response is evaluated to determine if it's worth caching.
+    Responses that don't actually answer the question (e.g., "information not found")
+    are not cached unless skip_quality_check=True.
 
     Args:
         question: The question
@@ -475,13 +685,14 @@ def store_answer_in_cache(
         source_document_ids: List of document IDs used
         intent: Query intent type
         background: If True, store in background (non-blocking)
+        skip_quality_check: If True, skip response quality evaluation
 
     Returns:
         Cache entry ID if blocking, None if background
     """
     service = get_query_cache_service()
     if background:
-        service.store_async(question, answer, workspace_id, source_document_ids, intent)
+        service.store_async(question, answer, workspace_id, source_document_ids, intent, skip_quality_check=skip_quality_check)
         return None
     else:
         return service.store(question, answer, workspace_id, source_document_ids, intent)

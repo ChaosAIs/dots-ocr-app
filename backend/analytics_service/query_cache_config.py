@@ -75,6 +75,14 @@ class QueryCacheConfig:
         default_factory=lambda: int(os.getenv("QUERY_CACHE_MAX_NEGATIVE_FEEDBACK", "3"))
     )
 
+    # Response quality evaluation (before caching)
+    response_evaluation_enabled: bool = field(
+        default_factory=lambda: os.getenv("QUERY_CACHE_RESPONSE_EVALUATION_ENABLED", "true").lower() == "true"
+    )
+    min_response_length: int = field(
+        default_factory=lambda: int(os.getenv("QUERY_CACHE_MIN_RESPONSE_LENGTH", "50"))
+    )
+
     # Qdrant settings
     collection_prefix: str = field(
         default_factory=lambda: os.getenv("QUERY_CACHE_COLLECTION_PREFIX", "query_cache_")
