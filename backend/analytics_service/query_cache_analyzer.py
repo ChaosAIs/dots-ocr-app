@@ -86,16 +86,16 @@ class UnifiedCacheAnalysis:
 
 class QueryCacheAnalyzer:
     """
-    Unified pre-cache analyzer using a single LLM call.
+    Pre-cache analyzer for determining cache behavior.
 
-    Performs all analysis in one call:
+    Performs analysis for:
     1. Dissatisfaction detection
     2. Question self-containment check
     3. Question enhancement (if needed)
     4. Cache worthiness decision
 
-    This consolidation reduces latency by 400-800ms compared to
-    making 3 separate LLM calls.
+    Can accept pre-computed results from UnifiedQueryPreprocessor
+    to avoid duplicate LLM calls.
     """
 
     def __init__(self, llm_client=None):
@@ -107,6 +107,48 @@ class QueryCacheAnalyzer:
         """
         self.llm_client = llm_client
         self._cached_llm_client = None
+
+    def from_unified_result(self, unified_result) -> "UnifiedCacheAnalysis":
+        """
+        Convert UnifiedPreprocessResult to UnifiedCacheAnalysis.
+
+        This allows reusing pre-computed results from the unified preprocessor
+        instead of making a separate LLM call.
+
+        Args:
+            unified_result: UnifiedPreprocessResult from unified preprocessor
+
+        Returns:
+            UnifiedCacheAnalysis with cache decisions
+        """
+        cache = unified_result.cache
+        context = unified_result.context
+
+        return UnifiedCacheAnalysis(
+            dissatisfaction=DissatisfactionAnalysis(
+                is_dissatisfied=cache.is_dissatisfied,
+                type=DissatisfactionType(cache.dissatisfaction_type.value) if hasattr(cache.dissatisfaction_type, 'value') else DissatisfactionType.NONE,
+                should_bypass_cache=cache.should_bypass_cache,
+                should_invalidate_previous_cache=cache.should_invalidate_previous
+            ),
+            question_analysis=QuestionAnalysis(
+                is_self_contained=cache.is_self_contained,
+                has_unresolved_references=cache.has_unresolved_references,
+                reference_types=[],
+                can_be_enhanced=context.has_pronouns
+            ),
+            enhancement=QuestionEnhancement(
+                enhanced_question=context.resolved_message if context.has_pronouns else None,
+                context_used=[]
+            ),
+            cache_decision=CacheDecision(
+                is_cacheable=cache.is_cacheable,
+                reason=cache.cache_reason,
+                cache_key_question=cache.cache_key_question or unified_result.original_message
+            ),
+            original_question=unified_result.original_message,
+            analysis_method="unified_preprocessor"
+        )
 
     def _get_llm_client(self):
         """Lazily initialize LLM client if not provided."""

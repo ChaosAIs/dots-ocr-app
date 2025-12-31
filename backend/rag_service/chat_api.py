@@ -34,6 +34,12 @@ from analytics_service.query_cache_service import (
     UnifiedCacheAnalysis,
     CacheSearchResult
 )
+from analytics_service.unified_query_preprocessor import (
+    get_unified_preprocessor,
+    UnifiedPreprocessResult
+)
+from analytics_service.query_cache_analyzer import get_query_cache_analyzer
+from analytics_service.intent_classifier import IntentClassifier
 from db.user_document_repository import UserDocumentRepository
 from db.document_repository import DocumentRepository
 
@@ -52,9 +58,13 @@ ANALYTICS_ENABLED = os.getenv("ANALYTICS_ENABLED", "true").lower() == "true"
 # Query Cache configuration
 QUERY_CACHE_ENABLED = os.getenv("QUERY_CACHE_ENABLED", "true").lower() == "true"
 
+# Unified Preprocessing - combines context analysis, cache analysis, and intent classification into ONE LLM call
+UNIFIED_PREPROCESSING_ENABLED = os.getenv("UNIFIED_PREPROCESSING_ENABLED", "true").lower() == "true"
+
 logger.info(f"Chat Context Configuration: ENABLE_CONTEXT_ANALYSIS={CHAT_ENABLE_CONTEXT_ANALYSIS}, ENABLE_METADATA_TRACKING={CHAT_ENABLE_METADATA_TRACKING}")
 logger.info(f"Chat Intent Routing: ENABLE_INTENT_ROUTING={CHAT_ENABLE_INTENT_ROUTING}, ANALYTICS_ENABLED={ANALYTICS_ENABLED}")
 logger.info(f"Query Cache: QUERY_CACHE_ENABLED={QUERY_CACHE_ENABLED}")
+logger.info(f"Unified Preprocessing: UNIFIED_PREPROCESSING_ENABLED={UNIFIED_PREPROCESSING_ENABLED}")
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
 
@@ -244,8 +254,74 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 logger.info(f"[Document Context]   Previous: workspaces={prev_workspace_ids[:3]}{'...' if len(prev_workspace_ids) > 3 else ''}, docs={prev_document_ids[:3]}{'...' if len(prev_document_ids) > 3 else ''}")
                                 logger.info(f"[Document Context]   Current: workspaces={curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}, docs={curr_document_ids[:3]}{'...' if len(curr_document_ids) > 3 else ''}")
 
-                        # ENHANCEMENT: Analyze context for pronouns and entities
-                        if CHAT_ENABLE_CONTEXT_ANALYSIS:
+                        # ====== UNIFIED PREPROCESSING (SINGLE LLM CALL) ======
+                        # This replaces THREE separate LLM calls with ONE:
+                        # 1. Context Analysis (pronouns, entities, topics)
+                        # 2. Cache Analysis (dissatisfaction, self-contained, cacheable)
+                        # 3. Intent Classification (routing decision)
+                        unified_result = None
+
+                        if UNIFIED_PREPROCESSING_ENABLED and CHAT_ENABLE_CONTEXT_ANALYSIS:
+                            logger.info("=" * 80)
+                            logger.info("[UnifiedPreprocessing] ========== UNIFIED PREPROCESSING START ==========")
+                            logger.info("=" * 80)
+                            logger.info(f"[UnifiedPreprocessing] Message: '{message[:100]}...'")
+                            logger.info(f"[UnifiedPreprocessing] History messages: {len(history)}")
+                            try:
+                                # Get previous response for dissatisfaction detection
+                                prev_response = None
+                                if history:
+                                    for msg in reversed(history):
+                                        if msg.get("role") == "assistant":
+                                            prev_response = msg.get("content", "")[:500]
+                                            break
+
+                                # Get available schemas for intent classification
+                                available_schemas = None
+                                try:
+                                    from chat_service.chat_orchestrator import ChatOrchestrator
+                                    temp_orchestrator = ChatOrchestrator(db)
+                                    available_schemas = temp_orchestrator._get_available_schemas()
+                                except Exception:
+                                    pass
+
+                                # Single unified LLM call for all preprocessing
+                                preprocessor = get_unified_preprocessor()
+                                unified_result = preprocessor.preprocess(
+                                    message=message,
+                                    chat_history=history,
+                                    previous_response=prev_response,
+                                    available_schemas=available_schemas
+                                )
+
+                                # Extract context analysis from unified result
+                                enhanced_message = unified_result.context.resolved_message or message
+                                context_info = {
+                                    "entities": unified_result.context.entities,
+                                    "topics": unified_result.context.topics,
+                                    "has_pronouns": unified_result.context.has_pronouns,
+                                    "detected_pronouns": unified_result.context.detected_pronouns
+                                }
+
+                                if unified_result.context.has_pronouns:
+                                    logger.info(f"[UnifiedPreprocessing] Pronouns detected: {context_info['detected_pronouns']}")
+                                    logger.info(f"[UnifiedPreprocessing] Original: '{message[:50]}...' → Enhanced: '{enhanced_message[:50]}...'")
+                                else:
+                                    logger.info(f"[UnifiedPreprocessing] No pronouns detected in message")
+
+                                logger.info(f"[UnifiedPreprocessing] Extracted topics: {context_info['topics']}")
+                                logger.info(f"[UnifiedPreprocessing] Intent: {unified_result.intent.intent.value} (confidence: {unified_result.intent.confidence:.2f})")
+                                logger.info(f"[UnifiedPreprocessing] Cacheable: {unified_result.cache.is_cacheable}")
+                                logger.info(f"[UnifiedPreprocessing] Processing time: {unified_result.processing_time_ms:.2f}ms")
+                                logger.info("=" * 80)
+
+                            except Exception as e:
+                                logger.error(f"[UnifiedPreprocessing] Error: {e}", exc_info=True)
+                                unified_result = None
+                                enhanced_message = message
+
+                        elif CHAT_ENABLE_CONTEXT_ANALYSIS:
+                            # Fallback to individual context analysis if unified preprocessing disabled
                             logger.info(f"[Context Analysis] Analyzing message: '{message[:100]}...' with {len(history)} history messages")
                             try:
                                 analyzer = ContextAnalyzer()
@@ -275,7 +351,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 logger.error(f"[Context Analysis] Error analyzing context: {e}", exc_info=True)
                                 enhanced_message = message
                         else:
-                            logger.warning(f"[Context Analysis] Context analysis is DISABLED (CHAT_ENABLE_CONTEXT_ANALYSIS={CHAT_ENABLE_CONTEXT_ANALYSIS})")
+                            logger.warning(f"[Context Analysis] Context analysis is DISABLED")
 
                     except Exception as e:
                         logger.error(f"Error loading conversation history: {e}")
@@ -291,20 +367,18 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         last_progress_message = [""]  # Track last message for stage-specific delays
 
                         # Stage-specific minimum display times (in seconds)
-                        # Some stages complete quickly but we want users to see the message
+                        # Set to 0 for maximum performance - no artificial delays
                         STAGE_MIN_DISPLAY_TIMES = {
-                            # Initial stages - these are followed by LLM calls that take time
-                            "Understanding your question...": 2,  # Show longer, LLM call follows
-                            "Analyzing key topics in your question...": 0.2,  # LLM call follows, naturally takes time
-                            "Finding relevant documents...": 2,  # Vector search follows
-                            # Analytics stages - some are very fast
-                            "Analyzing data structure...": 1.5,  # Fast operation, need display time
-                            "Building database query...": 0.2,  # LLM SQL generation follows, takes time
-                            "Running database query...": 1.5,  # SQL execution is fast
-                            "Found": 2.0,  # Results found message (prefix match), user wants to see count
-                            "Writing your report...": 1.5,  # Show before streaming starts
-                            # Default for any other messages
-                            "default": 1.0
+                            # All delays disabled for performance
+                            "Understanding your question...": 0,
+                            "Analyzing key topics in your question...": 0,
+                            "Finding relevant documents...": 0,
+                            "Analyzing data structure...": 0,
+                            "Building database query...": 0,
+                            "Running database query...": 0,
+                            "Found": 0,
+                            "Writing your report...": 0,
+                            "default": 0
                         }
 
                         def get_min_display_time(message: str) -> float:
@@ -451,18 +525,25 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                                 cache_service = get_query_cache_service()
 
-                                # Step 1: Unified pre-cache analysis (single LLM call)
-                                # This determines: dissatisfaction, question enhancement, cache worthiness
-                                logger.info("[QueryCache] STEP 1: Running unified pre-cache analysis (single LLM call)...")
-                                await progress_callback("Analyzing your question...")
-                                cache_analysis = cache_service.analyze_for_cache(
-                                    question=enhanced_message,
-                                    chat_history=history[-10:] if history else None,  # Last 10 messages
-                                    previous_response=history[-1].get("content") if history and history[-1].get("role") == "assistant" else None
-                                )
+                                # Step 1: Get cache analysis
+                                # If unified preprocessing was done, use its result; otherwise do separate analysis
+                                if unified_result is not None:
+                                    # Use pre-computed cache analysis from unified preprocessing (NO additional LLM call)
+                                    logger.info("[QueryCache] STEP 1: Using cache analysis from unified preprocessing (NO additional LLM call)")
+                                    cache_analyzer = get_query_cache_analyzer()
+                                    cache_analysis = cache_analyzer.from_unified_result(unified_result)
+                                else:
+                                    # Fallback: Run separate cache analysis (LLM call)
+                                    logger.info("[QueryCache] STEP 1: Running separate pre-cache analysis (LLM call)...")
+                                    await progress_callback("Analyzing your question...")
+                                    cache_analysis = cache_service.analyze_for_cache(
+                                        question=enhanced_message,
+                                        chat_history=history[-10:] if history else None,
+                                        previous_response=history[-1].get("content") if history and history[-1].get("role") == "assistant" else None
+                                    )
 
                                 logger.info("-" * 80)
-                                logger.info("[QueryCache] PRE-CACHE ANALYSIS RESULT:")
+                                logger.info("[QueryCache] CACHE ANALYSIS RESULT:")
                                 logger.info(f"[QueryCache]   • Method: {cache_analysis.analysis_method}")
                                 logger.info(f"[QueryCache]   • Dissatisfied: {cache_analysis.dissatisfaction.is_dissatisfied} ({cache_analysis.dissatisfaction.type.value})")
                                 logger.info(f"[QueryCache]   • Bypass cache: {cache_analysis.dissatisfaction.should_bypass_cache}")
@@ -616,9 +697,17 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 # Initialize orchestrator
                                 orchestrator = ChatOrchestrator(db)
 
-                                # Classify the query intent
-                                await progress_callback("Understanding your question...")
-                                classification = orchestrator.classify_query(enhanced_message, history)
+                                # Get intent classification
+                                # If unified preprocessing was done, use its result; otherwise do separate classification
+                                if unified_result is not None:
+                                    # Use pre-computed intent from unified preprocessing (NO additional LLM call)
+                                    logger.info("[Intent Routing] Using intent from unified preprocessing (NO additional LLM call)")
+                                    intent_classifier = IntentClassifier()
+                                    classification = intent_classifier.from_unified_result(unified_result)
+                                else:
+                                    # Fallback: Run separate intent classification (LLM call)
+                                    await progress_callback("Understanding your question...")
+                                    classification = orchestrator.classify_query(enhanced_message, history)
 
                                 logger.info(f"[Intent Routing] Query: '{enhanced_message[:50]}...' -> Intent: {classification.intent.value}, Confidence: {classification.confidence:.2f}")
 

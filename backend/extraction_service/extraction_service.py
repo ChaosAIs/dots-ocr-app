@@ -827,7 +827,16 @@ Document section:
         try:
             import pandas as pd
 
+            # Get the input directory path from env (same pattern as OUTPUT_DIR)
+            input_dir = os.getenv("INPUT_DIR", os.path.join(os.path.dirname(__file__), "..", "input"))
+
+            # Resolve relative file path to absolute path
             file_path = document.file_path
+            if not os.path.isabs(file_path):
+                file_path = os.path.join(input_dir, file_path)
+
+            logger.debug(f"[Extraction] Parsing spreadsheet file: {file_path}")
+
             if file_path.endswith('.csv'):
                 df = pd.read_csv(file_path)
             elif file_path.endswith(('.xlsx', '.xls')):

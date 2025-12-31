@@ -35,6 +35,14 @@ from .query_cache_service import (
     store_answer_in_cache
 )
 
+# Unified Query Preprocessor exports
+from .unified_query_preprocessor import (
+    UnifiedQueryPreprocessor,
+    UnifiedPreprocessResult,
+    get_unified_preprocessor,
+    preprocess_query
+)
+
 __all__ = [
     # Session management
     'RedisSessionManager',
@@ -60,4 +68,10 @@ __all__ = [
     'analyze_question_for_cache',
     'lookup_cached_answer',
     'store_answer_in_cache',
+
+    # Unified Query Preprocessor
+    'UnifiedQueryPreprocessor',
+    'UnifiedPreprocessResult',
+    'get_unified_preprocessor',
+    'preprocess_query',
 ]

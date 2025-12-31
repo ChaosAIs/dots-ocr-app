@@ -8,7 +8,7 @@ This module contains all prompts used for:
 - Multi-turn reasoning
 """
 
-from rag_service.chunking.document_types import (
+from ..chunking.document_types import (
     generate_type_prompt_section,
     DOCUMENT_TYPES,
 )
@@ -243,40 +243,40 @@ SECTION SUMMARIES:
 DOCUMENT OVERVIEW:"""
 
 
-METADATA_STRUCTURED_EXTRACTION_PROMPT = """You are a document metadata extraction expert. Extract structured metadata from a document overview.
+# Use centralized document types - DO NOT hardcode types here!
+from ..chunking.document_types import generate_metadata_extraction_types
 
-DOCUMENT NAME: {source_name}
+
+def _build_metadata_extraction_prompt(document_types_section: str) -> str:
+    """
+    Build the complete metadata extraction prompt with the given document types section.
+
+    Note: Uses single braces for LangChain ChatPromptTemplate variables: {source_name}, {meta_summary}, {first_chunk}
+    """
+    return f"""You are a document metadata extraction expert. Extract structured metadata from a document overview.
+
+DOCUMENT NAME: {{source_name}}
 
 DOCUMENT OVERVIEW:
-{meta_summary}
+{{meta_summary}}
 
 FIRST CHUNK PREVIEW (for additional context):
-{first_chunk}
+{{first_chunk}}
 
 INSTRUCTIONS:
 Extract the following metadata and respond in valid JSON format:
 
-1. **document_type**: Classify as one of:
-   - "receipt" - Meal receipts, restaurant bills, dining expenses, food purchases, grocery receipts
-   - "invoice" - Product invoices, equipment purchases, order confirmations, billing documents for goods/services
-   - "resume" - CV, resume, or professional profile
-   - "manual" - User manual, guide, or how-to document
-   - "report" - Business report, analysis, or white paper
-   - "article" - Article, blog post, or news piece
-   - "technical_doc" - Technical documentation, API docs, or specifications
-   - "book" - Book, ebook, or long-form publication
-   - "other" - Anything else
+1. **document_type**: Classify as one of the following types (choose the MOST SPECIFIC match):
+{document_types_section}
 
-   **IMPORTANT Classification Rules**:
-   - If document mentions food, meals, restaurant, dining, or groceries → use "receipt"
-   - If document mentions product purchases (electronics, equipment, hardware, software) → use "invoice"
-   - Look at the document name for hints: "Meal-*" → receipt, "*Invoice*" → invoice
+   Use "other" ONLY if the document truly does not fit any category above.
 
 2. **subject_name**: The PRIMARY subject of the document
    - **IMPORTANT**: Analyze BOTH the document name (provided above) AND the content to determine the most appropriate subject
    - The document name may contain useful patterns (dates, IDs, categories) that provide context
    - Extract the most semantically meaningful subject based on your analysis:
      * For receipts/invoices: The business/vendor name, transaction date, transaction type and amount, or a combination that best represents the transaction
+     * For policies: The policy name or topic (e.g., "Return Policy", "Refund Guidelines")
      * For resumes: The person's name, year, and role
      * For manuals: The product/system name
      * For reports: The main topic or company
@@ -290,6 +290,7 @@ Extract the following metadata and respond in valid JSON format:
    - "product" - Product, service, or system
    - "concept" - Abstract concept, technology, or methodology
    - "transaction" - Receipt, invoice, or financial transaction
+   - "policy" - Business policy, guidelines, or rules document
    - Set to null if subject_name is null
 
 4. **title**: Document title (extract from overview or source_name)
@@ -299,14 +300,16 @@ Extract the following metadata and respond in valid JSON format:
 6. **summary**: Brief 1-2 sentence summary of the document
    - **IMPORTANT**: Include key searchable terms relevant to the document type
    - For receipts: Include vendor/business name, transaction type, date, and amount
+   - For policies: Include policy type, key rules, and scope
    - For other documents: Include main topic, key dates, and important details
 
 7. **topics**: Array of 3-5 main topics/themes (lowercase, e.g., ["software development", "cloud computing"])
    - For meal receipts (document_type="receipt"), include terms like: "meal receipt", "restaurant expense", "dining expense", "food purchase", "grocery receipt"
    - For product invoices (document_type="invoice"), include terms like: "product invoice", "equipment purchase", "order invoice", "hardware purchase", "software purchase"
+   - For policies (document_type="policy"), include terms like: "policy", "guidelines", "rules", "procedures" plus specific topic (e.g., "return policy", "refund guidelines")
 
 8. **key_entities**: Array of 5-10 most important entities with scores
-   Format: [{{"name": "Entity Name", "type": "person|organization|technology|location|date|financial|product", "score": 0-100}}]
+   Format: [{{{{"name": "Entity Name", "type": "person|organization|technology|location|date|financial|product|policy", "score": 0-100}}}}]
    Score based on importance/frequency in the document
 
 9. **confidence**: Your confidence in the extraction (0.0 to 1.0)
@@ -316,7 +319,7 @@ Extract the following metadata and respond in valid JSON format:
    - Below 0.5: Low confidence or unclear document
 
 RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
-{{
+{{{{
   "document_type": "...",
   "subject_name": "...",
   "subject_type": "...",
@@ -326,7 +329,20 @@ RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
   "topics": [...],
   "key_entities": [...],
   "confidence": 0.0
-}}"""
+}}}}"""
+
+
+def get_metadata_extraction_prompt() -> str:
+    """
+    Get the metadata extraction prompt with dynamically generated document types.
+    This ensures the prompt always uses the centralized type definitions.
+    """
+    document_types = generate_metadata_extraction_types()
+    return _build_metadata_extraction_prompt(document_types)
+
+
+# Generate the prompt once at module load time for efficiency
+METADATA_STRUCTURED_EXTRACTION_PROMPT = get_metadata_extraction_prompt()
 
 
 # =============================================================================
@@ -382,13 +398,13 @@ Before submitting, verify:
 - [ ] Will this query find ALL relevant documents, not just some?
 
 Return ONLY valid JSON in this exact format:
-{{{{{{{{
+{{{{
   "enhanced_query": "A detailed, comprehensive query that captures the full intent with ALL specific terms, dates, entities, and context - nothing missing",
   "entities": ["entity1", "entity2", "entity3"],
   "topics": ["topic1", "topic2", "topic3"],
   "document_type_hints": ["type1", "type2"],
   "intent": "detailed description of what the user wants to find, including scope (single/multiple/all)"
-}}}}}}}}
+}}}}
 
 {document_types_section}
 

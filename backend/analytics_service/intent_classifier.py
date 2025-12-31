@@ -60,6 +60,7 @@ class IntentClassifier:
 
     Uses LLM to understand query semantics rather than keyword matching.
     Falls back to simple heuristics only when LLM is unavailable.
+    Can accept pre-computed results from UnifiedQueryPreprocessor.
     """
 
     def __init__(self, llm_client=None):
@@ -71,6 +72,35 @@ class IntentClassifier:
         """
         self.llm_client = llm_client
         self._cached_llm_client = None
+
+    def from_unified_result(self, unified_result) -> IntentClassification:
+        """
+        Convert UnifiedPreprocessResult.intent to IntentClassification.
+
+        This allows reusing pre-computed results from the unified preprocessor
+        instead of making a separate LLM call.
+
+        Args:
+            unified_result: UnifiedPreprocessResult from unified preprocessor
+
+        Returns:
+            IntentClassification with routing decision
+        """
+        intent_result = unified_result.intent
+
+        # Map unified intent to local QueryIntent enum
+        intent_value = intent_result.intent.value if hasattr(intent_result.intent, 'value') else str(intent_result.intent)
+
+        return IntentClassification(
+            intent=QueryIntent(intent_value),
+            confidence=intent_result.confidence,
+            reasoning=intent_result.reasoning,
+            requires_extracted_data=intent_result.requires_extracted_data,
+            suggested_schemas=intent_result.suggested_schemas,
+            detected_entities=intent_result.detected_entities,
+            detected_metrics=intent_result.detected_metrics,
+            detected_time_range=intent_result.detected_time_range
+        )
 
     def _get_llm_client(self):
         """Lazily initialize LLM client if not provided."""

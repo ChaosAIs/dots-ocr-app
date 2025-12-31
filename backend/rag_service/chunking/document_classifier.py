@@ -377,11 +377,12 @@ class DocumentClassifier:
             "clinical_report": DocumentDomain.MEDICAL,
             "prescription": DocumentDomain.MEDICAL,
             "lab_result": DocumentDomain.MEDICAL,
-            # Legal types -> Legal domain
+            # Legal types -> Legal domain (includes policies)
             "contract": DocumentDomain.LEGAL,
             "agreement": DocumentDomain.LEGAL,
             "terms_of_service": DocumentDomain.LEGAL,
             "privacy_policy": DocumentDomain.LEGAL,
+            "policy": DocumentDomain.LEGAL,  # Return policies, refund policies, etc.
             # Financial types -> Financial domain
             "receipt": DocumentDomain.FINANCIAL,
             "invoice": DocumentDomain.FINANCIAL,

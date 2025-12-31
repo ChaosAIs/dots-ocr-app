@@ -5,7 +5,8 @@ Provides unified LLM-driven document type classification for:
 - Extraction eligibility (schema type for data extraction)
 - Chunking strategy (document structure for RAG)
 
-Document types are consistent with data_schemas table and can be extended.
+IMPORTANT: This module imports document types from rag_service.chunking.document_types
+which is the single source of truth for all document type definitions.
 """
 
 import os
@@ -15,404 +16,61 @@ from typing import Dict, Any, Optional, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
+# Import from the single source of truth
+# Note: Using absolute import because this is in 'common' module, not 'rag_service'
+try:
+    from rag_service.chunking.document_types import (
+        DOCUMENT_TYPES,
+        DocumentTypeInfo,
+        DocumentCategory,
+        TYPE_ALIASES,
+        get_document_type_info,
+        is_extractable_type,
+        get_schema_type,
+        get_chunking_config,
+        get_extractable_types,
+        get_all_document_types,
+        generate_metadata_extraction_types,
+    )
+except ImportError:
+    # Fallback for standalone testing
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from rag_service.chunking.document_types import (
+        DOCUMENT_TYPES,
+        DocumentTypeInfo,
+        DocumentCategory,
+        TYPE_ALIASES,
+        get_document_type_info,
+        is_extractable_type,
+        get_schema_type,
+        get_chunking_config,
+        get_extractable_types,
+        get_all_document_types,
+        generate_metadata_extraction_types,
+    )
+
 logger = logging.getLogger(__name__)
 
 
+# Re-export DocumentCategory as DocumentDomain for backward compatibility
 class DocumentDomain(str, Enum):
-    """Document domain categories."""
-    FINANCIAL = "financial"
+    """Document domain categories (alias for DocumentCategory)."""
+    FINANCIAL = "business_finance"
     LEGAL = "legal"
     MEDICAL = "medical"
     ACADEMIC = "academic"
     EDUCATION = "education"
-    ENGINEERING = "engineering"
+    ENGINEERING = "technical"
     GOVERNMENT = "government"
     PROFESSIONAL = "professional"
     LOGISTICS = "logistics"
-    INVENTORY = "inventory"
-    GENERIC = "generic"
+    GENERIC = "general"
 
 
-@dataclass
-class DocumentTypeInfo:
-    """Information about a document type."""
-    type_name: str
-    display_name: str
-    domain: DocumentDomain
-    description: str
-    is_extractable: bool  # Has structured data to extract
-    schema_type: Optional[str]  # Maps to data_schemas.schema_type
-    chunking_strategy: str  # semantic, hierarchical, fixed, hybrid
-    chunk_size: int
-    chunk_overlap: int
-
-
-# Unified document type definitions
-# Combines types from extraction (data_schemas) and chunking systems
-DOCUMENT_TYPES: Dict[str, DocumentTypeInfo] = {
-    # ==========================================================================
-    # EXTRACTABLE TYPES (have structured data, map to data_schemas)
-    # ==========================================================================
-
-    # Financial - Extractable
-    "invoice": DocumentTypeInfo(
-        type_name="invoice",
-        display_name="Invoice",
-        domain=DocumentDomain.FINANCIAL,
-        description="Vendor invoices, billing documents, purchase invoices with line items",
-        is_extractable=True,
-        schema_type="invoice",
-        chunking_strategy="semantic",
-        chunk_size=1000,
-        chunk_overlap=100
-    ),
-    "receipt": DocumentTypeInfo(
-        type_name="receipt",
-        display_name="Receipt",
-        domain=DocumentDomain.FINANCIAL,
-        description="Retail receipts, restaurant bills, transaction receipts with itemized purchases",
-        is_extractable=True,
-        schema_type="receipt",
-        chunking_strategy="semantic",
-        chunk_size=800,
-        chunk_overlap=80
-    ),
-    "bank_statement": DocumentTypeInfo(
-        type_name="bank_statement",
-        display_name="Bank Statement",
-        domain=DocumentDomain.FINANCIAL,
-        description="Bank account statements with transaction history",
-        is_extractable=True,
-        schema_type="bank_statement",
-        chunking_strategy="semantic",
-        chunk_size=1200,
-        chunk_overlap=120
-    ),
-    "expense_report": DocumentTypeInfo(
-        type_name="expense_report",
-        display_name="Expense Report",
-        domain=DocumentDomain.FINANCIAL,
-        description="Employee expense claims and reimbursement requests",
-        is_extractable=True,
-        schema_type="expense_report",
-        chunking_strategy="semantic",
-        chunk_size=1000,
-        chunk_overlap=100
-    ),
-    "purchase_order": DocumentTypeInfo(
-        type_name="purchase_order",
-        display_name="Purchase Order",
-        domain=DocumentDomain.FINANCIAL,
-        description="Purchase orders and procurement documents",
-        is_extractable=True,
-        schema_type="purchase_order",
-        chunking_strategy="semantic",
-        chunk_size=1000,
-        chunk_overlap=100
-    ),
-
-    # Logistics - Extractable
-    "shipping_manifest": DocumentTypeInfo(
-        type_name="shipping_manifest",
-        display_name="Shipping Manifest",
-        domain=DocumentDomain.LOGISTICS,
-        description="Shipping documents, delivery notes, packing lists, bills of lading",
-        is_extractable=True,
-        schema_type="shipping_manifest",
-        chunking_strategy="semantic",
-        chunk_size=1000,
-        chunk_overlap=100
-    ),
-
-    # Inventory - Extractable
-    "inventory_report": DocumentTypeInfo(
-        type_name="inventory_report",
-        display_name="Inventory Report",
-        domain=DocumentDomain.INVENTORY,
-        description="Inventory reports, stock level documents, warehouse reports",
-        is_extractable=True,
-        schema_type="inventory_report",
-        chunking_strategy="semantic",
-        chunk_size=1200,
-        chunk_overlap=120
-    ),
-
-    # Generic - Extractable
-    "spreadsheet": DocumentTypeInfo(
-        type_name="spreadsheet",
-        display_name="Spreadsheet",
-        domain=DocumentDomain.GENERIC,
-        description="Excel files, CSV files, tabular data with dynamic structure",
-        is_extractable=True,
-        schema_type="spreadsheet",
-        chunking_strategy="fixed",
-        chunk_size=1500,
-        chunk_overlap=150
-    ),
-
-    # ==========================================================================
-    # NON-EXTRACTABLE TYPES (no structured line items, for RAG only)
-    # ==========================================================================
-
-    # Legal
-    "contract": DocumentTypeInfo(
-        type_name="contract",
-        display_name="Contract",
-        domain=DocumentDomain.LEGAL,
-        description="Legal contracts and agreements",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-    "terms_of_service": DocumentTypeInfo(
-        type_name="terms_of_service",
-        display_name="Terms of Service",
-        domain=DocumentDomain.LEGAL,
-        description="Terms of service and conditions documents",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-    "privacy_policy": DocumentTypeInfo(
-        type_name="privacy_policy",
-        display_name="Privacy Policy",
-        domain=DocumentDomain.LEGAL,
-        description="Privacy policy documents",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-    "patent": DocumentTypeInfo(
-        type_name="patent",
-        display_name="Patent",
-        domain=DocumentDomain.LEGAL,
-        description="Patent documents and filings",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=2000,
-        chunk_overlap=300
-    ),
-
-    # Medical
-    "medical_record": DocumentTypeInfo(
-        type_name="medical_record",
-        display_name="Medical Record",
-        domain=DocumentDomain.MEDICAL,
-        description="Patient medical records, clinical notes",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=1200,
-        chunk_overlap=150
-    ),
-    "prescription": DocumentTypeInfo(
-        type_name="prescription",
-        display_name="Prescription",
-        domain=DocumentDomain.MEDICAL,
-        description="Medical prescriptions",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=500,
-        chunk_overlap=50
-    ),
-    "lab_result": DocumentTypeInfo(
-        type_name="lab_result",
-        display_name="Lab Result",
-        domain=DocumentDomain.MEDICAL,
-        description="Laboratory test results",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=800,
-        chunk_overlap=80
-    ),
-    "clinical_report": DocumentTypeInfo(
-        type_name="clinical_report",
-        display_name="Clinical Report",
-        domain=DocumentDomain.MEDICAL,
-        description="Clinical reports and diagnostic documents",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=1200,
-        chunk_overlap=150
-    ),
-
-    # Academic
-    "research_paper": DocumentTypeInfo(
-        type_name="research_paper",
-        display_name="Research Paper",
-        domain=DocumentDomain.ACADEMIC,
-        description="Academic research papers and journal articles",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-    "thesis": DocumentTypeInfo(
-        type_name="thesis",
-        display_name="Thesis/Dissertation",
-        domain=DocumentDomain.ACADEMIC,
-        description="Academic theses and dissertations",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=2000,
-        chunk_overlap=300
-    ),
-    "academic_article": DocumentTypeInfo(
-        type_name="academic_article",
-        display_name="Academic Article",
-        domain=DocumentDomain.ACADEMIC,
-        description="Academic articles with citations",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-
-    # Education
-    "textbook": DocumentTypeInfo(
-        type_name="textbook",
-        display_name="Textbook",
-        domain=DocumentDomain.EDUCATION,
-        description="Educational textbooks",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-    "course_material": DocumentTypeInfo(
-        type_name="course_material",
-        display_name="Course Material",
-        domain=DocumentDomain.EDUCATION,
-        description="Course materials, lecture notes, learning content",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1200,
-        chunk_overlap=150
-    ),
-    "syllabus": DocumentTypeInfo(
-        type_name="syllabus",
-        display_name="Syllabus",
-        domain=DocumentDomain.EDUCATION,
-        description="Course syllabi",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=1000,
-        chunk_overlap=100
-    ),
-    "exam": DocumentTypeInfo(
-        type_name="exam",
-        display_name="Exam/Quiz",
-        domain=DocumentDomain.EDUCATION,
-        description="Exams, quizzes, and assessments",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=800,
-        chunk_overlap=80
-    ),
-
-    # Engineering/Technical
-    "technical_spec": DocumentTypeInfo(
-        type_name="technical_spec",
-        display_name="Technical Specification",
-        domain=DocumentDomain.ENGINEERING,
-        description="Technical specifications and requirements documents",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1500,
-        chunk_overlap=200
-    ),
-    "api_documentation": DocumentTypeInfo(
-        type_name="api_documentation",
-        display_name="API Documentation",
-        domain=DocumentDomain.ENGINEERING,
-        description="API documentation and reference guides",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1200,
-        chunk_overlap=150
-    ),
-    "user_manual": DocumentTypeInfo(
-        type_name="user_manual",
-        display_name="User Manual",
-        domain=DocumentDomain.ENGINEERING,
-        description="User manuals and guides",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="hierarchical",
-        chunk_size=1200,
-        chunk_overlap=150
-    ),
-
-    # Professional
-    "resume": DocumentTypeInfo(
-        type_name="resume",
-        display_name="Resume/CV",
-        domain=DocumentDomain.PROFESSIONAL,
-        description="Resumes and curriculum vitae",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=800,
-        chunk_overlap=80
-    ),
-    "cover_letter": DocumentTypeInfo(
-        type_name="cover_letter",
-        display_name="Cover Letter",
-        domain=DocumentDomain.PROFESSIONAL,
-        description="Job application cover letters",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=600,
-        chunk_overlap=60
-    ),
-
-    # Generic/Fallback
-    "report": DocumentTypeInfo(
-        type_name="report",
-        display_name="Report",
-        domain=DocumentDomain.GENERIC,
-        description="General reports and documents",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="semantic",
-        chunk_size=1200,
-        chunk_overlap=150
-    ),
-    "other": DocumentTypeInfo(
-        type_name="other",
-        display_name="Other Document",
-        domain=DocumentDomain.GENERIC,
-        description="Unclassified documents",
-        is_extractable=False,
-        schema_type=None,
-        chunking_strategy="fixed",
-        chunk_size=1000,
-        chunk_overlap=100
-    ),
-}
-
-# Aliases for common variations
-TYPE_ALIASES: Dict[str, str] = {
+# Backward compatibility: simple alias mapping for resolve_type
+SIMPLE_TYPE_ALIASES: Dict[str, str] = {
     # Receipt aliases
     "sales_receipt": "receipt",
     "transaction": "receipt",
@@ -454,9 +112,11 @@ TYPE_ALIASES: Dict[str, str] = {
     "table": "spreadsheet",
     "tabular_data": "spreadsheet",
 
-    # Legal aliases
+    # Legal/Policy aliases
     "agreement": "contract",
     "terms_and_conditions": "terms_of_service",
+    "return_policy": "policy",
+    "refund_policy": "policy",
 
     # Academic aliases
     "dissertation": "thesis",
@@ -465,10 +125,15 @@ TYPE_ALIASES: Dict[str, str] = {
     # Resume aliases
     "cv": "resume",
     "curriculum_vitae": "resume",
+
+    # Technical aliases
+    "technical_spec": "technical_doc",
+    "manual": "user_manual",
+    "guide": "user_manual",
 }
 
 
-# LLM Classification Prompt
+# LLM Classification Prompt - uses dynamically generated type list
 DOCUMENT_CLASSIFICATION_PROMPT = """You are a document classification expert. Analyze the provided document information and classify it into one of the supported document types.
 
 ## Available Document Types:
@@ -492,7 +157,10 @@ DOCUMENT_CLASSIFICATION_PROMPT = """You are a document classification expert. An
 4. For Excel/CSV files with tabular data, use "spreadsheet"
 5. For bank account statements, use "bank_statement"
 6. For shipping/delivery documents, use "shipping_manifest"
-7. If the document doesn't clearly match any type, use "other"
+7. For company policies, return policies, refund policies, use "policy"
+8. For terms of service documents, use "terms_of_service"
+9. For privacy policies, use "privacy_policy"
+10. If the document doesn't clearly match any type, use "other"
 
 ## Response Format (JSON only):
 {{
@@ -646,9 +314,18 @@ class DocumentTypeClassifier:
         if type_lower in DOCUMENT_TYPES:
             return type_lower
 
-        # Check aliases
+        # Check simple aliases first (direct mapping)
+        if type_lower in SIMPLE_TYPE_ALIASES:
+            return SIMPLE_TYPE_ALIASES[type_lower]
+
+        # Check TYPE_ALIASES (returns list, take first match)
         if type_lower in TYPE_ALIASES:
-            return TYPE_ALIASES[type_lower]
+            alias_list = TYPE_ALIASES[type_lower]
+            if alias_list and isinstance(alias_list, list) and len(alias_list) > 0:
+                # Return first alias that exists in DOCUMENT_TYPES
+                for alias in alias_list:
+                    if alias in DOCUMENT_TYPES:
+                        return alias
 
         return None
 
@@ -709,23 +386,8 @@ class DocumentTypeClassifier:
 
     def _get_available_types_description(self) -> str:
         """Get formatted list of available types for LLM."""
-        lines = []
-
-        # Group by domain
-        by_domain: Dict[str, List[DocumentTypeInfo]] = {}
-        for info in DOCUMENT_TYPES.values():
-            domain = info.domain.value
-            if domain not in by_domain:
-                by_domain[domain] = []
-            by_domain[domain].append(info)
-
-        for domain, types in sorted(by_domain.items()):
-            lines.append(f"\n### {domain.upper()} Domain:")
-            for info in sorted(types, key=lambda x: x.type_name):
-                extractable = " [EXTRACTABLE]" if info.is_extractable else ""
-                lines.append(f"- {info.type_name}: {info.description}{extractable}")
-
-        return "\n".join(lines)
+        # Use the centralized function to generate type list
+        return generate_metadata_extraction_types()
 
     def _classify_with_llm(self, context: Dict[str, Any]) -> Optional[ClassificationResult]:
         """Use LLM to classify document."""
@@ -793,6 +455,9 @@ class DocumentTypeClassifier:
 
         This is the fallback when LLM is not available.
 
+        IMPORTANT: Filename patterns are checked FIRST with higher confidence,
+        since filename is usually the most reliable indicator of document type.
+
         Args:
             filename: Document filename
             context: Classification context
@@ -804,65 +469,129 @@ class DocumentTypeClassifier:
         content_preview = (context.get('content_preview', '') or '').lower()
         summary = (context.get('summary', '') or '').lower()
 
-        # Combined text for pattern matching
-        combined = f"{filename_lower} {content_preview} {summary}"
+        # STEP 1: Check FILENAME patterns FIRST with higher confidence
+        # Filename is the most reliable indicator since it's explicitly named by the user
+        filename_pattern_rules = [
+            # Policy documents - check these early since "policy" in filename is definitive
+            ("policy", ["policy", "policies", "_policy", "-policy"], 0.90),
+            ("privacy_policy", ["privacy_policy", "privacy-policy", "privacypolicy"], 0.90),
+            ("terms_of_service", ["terms_of_service", "terms-of-service", "tos", "terms_and_conditions"], 0.90),
 
-        # Pattern definitions: (doc_type, patterns, confidence)
-        # Ordered by specificity (more specific first)
-        pattern_rules = [
-            # Financial - Extractable
-            ("receipt", ["receipt", "rcpt", "meal-", "transaction", "purchase receipt"], 0.75),
-            ("invoice", ["invoice", "inv-", "bill to", "amount due", "billing"], 0.75),
-            ("bank_statement", ["bank statement", "bank_statement", "account balance", "statement of account"], 0.75),
-            ("expense_report", ["expense report", "expense_report", "expense claim", "reimbursement"], 0.75),
-            ("purchase_order", ["purchase order", "p.o.", "po-"], 0.75),
+            # Financial documents
+            ("receipt", ["receipt", "rcpt", "_receipt", "-receipt"], 0.85),
+            ("invoice", ["invoice", "inv_", "inv-", "_invoice", "-invoice"], 0.85),
+            ("bank_statement", ["bank_statement", "bank-statement", "statement"], 0.85),
+            ("expense_report", ["expense_report", "expense-report", "expenses"], 0.85),
+            ("purchase_order", ["purchase_order", "purchase-order", "po_", "po-"], 0.85),
 
-            # Logistics - Extractable
-            ("shipping_manifest", ["shipping", "packing list", "delivery note", "bill of lading"], 0.75),
+            # Inventory - require more specific patterns in filename
+            ("inventory_report", ["inventory_report", "inventory-report", "stock_report", "stock-report"], 0.85),
 
-            # Inventory - Extractable
-            ("inventory_report", ["inventory", "stock report", "warehouse"], 0.75),
+            # Logistics
+            ("shipping_manifest", ["shipping", "manifest", "packing_list", "delivery_note", "bill_of_lading"], 0.85),
 
             # Legal
-            ("contract", ["contract", "agreement", "whereas", "hereby"], 0.7),
-            ("terms_of_service", ["terms of service", "terms and conditions"], 0.7),
-            ("privacy_policy", ["privacy policy"], 0.7),
-            ("patent", ["patent"], 0.7),
+            ("contract", ["contract", "_contract", "-contract"], 0.85),
+            ("patent", ["patent"], 0.85),
 
             # Academic
-            ("research_paper", ["research paper", "abstract", "methodology", "references"], 0.7),
-            ("thesis", ["thesis", "dissertation"], 0.7),
-            ("academic_article", ["et al.", "et al,", "[1]", "[2]"], 0.65),
+            ("research_paper", ["research_paper", "research-paper"], 0.85),
+            ("thesis", ["thesis", "dissertation"], 0.85),
 
             # Medical
-            ("medical_record", ["chief complaint", "history of present", "assessment", "plan", "hpi"], 0.7),
-            ("prescription", ["prescription", "rx"], 0.7),
-            ("lab_result", ["lab result", "laboratory", "blood test"], 0.7),
-            ("clinical_report", ["clinical", "diagnosis"], 0.65),
+            ("medical_record", ["medical_record", "medical-record", "patient_record"], 0.85),
+            ("prescription", ["prescription", "rx_"], 0.85),
+            ("lab_result", ["lab_result", "lab-result", "blood_test"], 0.85),
 
-            # Education
-            ("textbook", ["textbook"], 0.7),
-            ("course_material", ["chapter", "learning objective"], 0.65),
-            ("syllabus", ["syllabus"], 0.7),
-            ("exam", ["exam", "quiz"], 0.65),
-
-            # Technical/Engineering
-            ("technical_spec", ["requirement", "req-", "spec-", "specification"], 0.7),
-            ("api_documentation", ["api", "endpoint"], 0.65),
-            ("user_manual", ["user manual", "user_manual", "user guide", "instructions"], 0.7),
+            # Technical
+            ("technical_spec", ["spec_", "specification", "requirement"], 0.85),
+            ("user_manual", ["manual", "user_guide", "user-guide"], 0.85),
 
             # Professional
-            ("resume", ["resume", "curriculum vitae", "cv"], 0.7),
-            ("cover_letter", ["cover letter", "dear hiring"], 0.7),
+            ("resume", ["resume", "cv_", "_cv"], 0.85),
         ]
 
-        for doc_type, patterns, confidence in pattern_rules:
+        for doc_type, patterns, confidence in filename_pattern_rules:
             for pattern in patterns:
-                if pattern in combined:
+                if pattern in filename_lower:
                     return self._create_result(
                         doc_type,
                         confidence,
-                        f"Pattern match: '{pattern}' in filename/content"
+                        f"Filename pattern match: '{pattern}'"
+                    )
+
+        # STEP 2: Check CONTENT patterns with standard confidence
+        # Content is a secondary indicator
+        content_combined = f"{content_preview} {summary}"
+
+        # Pattern definitions: (doc_type, patterns, confidence)
+        # Ordered by specificity - more specific patterns first within each category
+        content_pattern_rules = [
+            # Legal/Policy - Check BEFORE financial/inventory to catch policy documents
+            ("policy", ["return policy", "refund policy", "exchange policy", "company policy",
+                       "our policy", "this policy", "policy applies", "policy statement"], 0.75),
+            ("privacy_policy", ["privacy policy", "data protection", "personal information", "gdpr"], 0.75),
+            ("terms_of_service", ["terms of service", "terms and conditions", "by using this"], 0.75),
+            ("contract", ["contract", "agreement", "whereas", "hereby", "party agrees"], 0.70),
+
+            # Financial - Extractable (specific patterns)
+            ("receipt", ["receipt", "rcpt", "meal-", "transaction receipt", "purchase receipt",
+                        "your receipt", "receipt number"], 0.75),
+            ("invoice", ["invoice", "inv-", "bill to", "amount due", "invoice number",
+                        "invoice date", "payment terms"], 0.75),
+            ("bank_statement", ["bank statement", "account balance", "statement of account",
+                               "opening balance", "closing balance", "account summary"], 0.75),
+            ("expense_report", ["expense report", "expense claim", "reimbursement request",
+                               "employee expenses"], 0.75),
+            ("purchase_order", ["purchase order", "p.o. number", "po number", "order confirmation"], 0.75),
+
+            # Logistics - Extractable
+            ("shipping_manifest", ["shipping manifest", "packing list", "delivery note",
+                                  "bill of lading", "shipment details", "tracking number"], 0.75),
+
+            # Inventory - Use MORE SPECIFIC patterns to avoid false positives
+            # "inventory" alone is too generic and matches policy docs that mention inventory
+            ("inventory_report", ["inventory report", "inventory list", "stock report",
+                                 "warehouse inventory", "inventory count", "stock level",
+                                 "inventory management", "stock on hand", "quantity in stock"], 0.75),
+
+            # Academic
+            ("research_paper", ["research paper", "abstract", "methodology", "literature review",
+                               "findings", "conclusion", "references"], 0.70),
+            ("thesis", ["thesis", "dissertation", "submitted in partial fulfillment"], 0.70),
+            ("academic_article", ["et al.", "et al,", "[1]", "[2]", "doi:"], 0.65),
+
+            # Medical
+            ("medical_record", ["chief complaint", "history of present illness", "assessment and plan",
+                               "physical examination", "hpi", "ros"], 0.70),
+            ("prescription", ["prescription", "rx", "take as directed", "refills"], 0.70),
+            ("lab_result", ["lab result", "laboratory report", "blood test", "reference range"], 0.70),
+            ("clinical_report", ["clinical report", "diagnosis", "treatment plan"], 0.65),
+
+            # Education
+            ("textbook", ["textbook", "chapter exercises", "learning objectives"], 0.70),
+            ("course_material", ["chapter", "learning objective", "key concepts"], 0.65),
+            ("syllabus", ["syllabus", "course schedule", "grading policy"], 0.70),
+            ("exam", ["exam", "quiz", "test questions", "answer the following"], 0.65),
+
+            # Technical/Engineering
+            ("technical_spec", ["requirement", "req-", "spec-", "specification",
+                               "functional requirement", "technical requirement"], 0.70),
+            ("api_documentation", ["api", "endpoint", "request body", "response format"], 0.65),
+            ("user_manual", ["user manual", "user guide", "instructions", "how to use"], 0.70),
+
+            # Professional
+            ("resume", ["resume", "curriculum vitae", "work experience", "education background"], 0.70),
+            ("cover_letter", ["cover letter", "dear hiring manager", "position applied"], 0.70),
+        ]
+
+        for doc_type, patterns, confidence in content_pattern_rules:
+            for pattern in patterns:
+                if pattern in content_combined:
+                    return self._create_result(
+                        doc_type,
+                        confidence,
+                        f"Content pattern match: '{pattern}'"
                     )
 
         return None

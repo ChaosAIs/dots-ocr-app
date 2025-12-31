@@ -243,11 +243,19 @@ class HierarchicalMetadataExtractor:
         chain = prompt | self.llm | self.str_parser
 
         try:
+            # Log input for debugging classification issues
+            logger.info(f"[Metadata] L3 input for {source_name}:")
+            logger.info(f"[Metadata]   meta_summary: {meta_summary[:300]}...")
+            logger.info(f"[Metadata]   first_chunk: {first_chunk[:200]}...")
+
             response = await chain.ainvoke({
                 "source_name": source_name,
                 "meta_summary": meta_summary,
                 "first_chunk": first_chunk,
             })
+
+            # Log raw LLM response for debugging
+            logger.info(f"[Metadata] L3 raw response for {source_name}: {response[:500]}...")
 
             # Parse JSON response
             # Remove markdown code blocks if present
@@ -258,7 +266,7 @@ class HierarchicalMetadataExtractor:
                 response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
 
             metadata = json.loads(response_clean)
-            logger.debug(f"[Metadata] Structured metadata extracted: {metadata.get('document_type')}")
+            logger.info(f"[Metadata] Extracted type for {source_name}: {metadata.get('document_type')}")
             return metadata
 
         except json.JSONDecodeError as e:

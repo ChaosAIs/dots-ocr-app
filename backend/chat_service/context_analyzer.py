@@ -68,6 +68,7 @@ class ContextAnalyzer:
     - Topic and scope detection
 
     Uses LLM for intelligent analysis when enabled, falls back to heuristics otherwise.
+    Can also accept pre-computed results from UnifiedQueryPreprocessor.
     """
 
     # Pronouns to track (used for fallback heuristic detection)
@@ -89,6 +90,30 @@ class ContextAnalyzer:
         self.entity_cache: Dict[str, Any] = {}
         self.topic_cache: Set[str] = set()
         logger.info(f"ContextAnalyzer initialized with use_llm={self.use_llm}")
+
+    def from_unified_result(self, unified_result: Any) -> Dict[str, Any]:
+        """
+        Convert UnifiedPreprocessResult.context to ContextAnalyzer result format.
+
+        This allows reusing pre-computed results from the unified preprocessor
+        instead of making a separate LLM call.
+
+        Args:
+            unified_result: UnifiedPreprocessResult from unified preprocessor
+
+        Returns:
+            Analysis result in ContextAnalyzer format
+        """
+        context = unified_result.context
+        return {
+            "has_pronouns": context.has_pronouns,
+            "detected_pronouns": context.detected_pronouns,
+            "entities": context.entities,
+            "topics": context.topics,
+            "resolved_message": context.resolved_message,
+            "original_message": unified_result.original_message,
+            "main_intent": unified_result.intent.reasoning if hasattr(unified_result, 'intent') else ""
+        }
 
     def analyze_message(
         self,
