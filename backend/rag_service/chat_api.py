@@ -151,7 +151,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
     All messages are persisted to the database under the given session_id.
     """
     await websocket.accept()
-    logger.info(f"WebSocket connection established for chat session: {session_id}")
+    logger.debug(f"WebSocket connection established for chat session: {session_id}")
 
     # Get database session using context manager
     with get_db_session() as db:

@@ -24,6 +24,7 @@ import {
   exportAsExcel,
   generateFilename,
 } from "../../utils/exportUtils";
+import { useConnectionStatus } from "../../contexts/ConnectionStatusContext";
 import "./AgenticChatBot.scss";
 
 // Get WebSocket URL from environment or use default
@@ -32,6 +33,7 @@ const WS_BASE_URL = process.env.REACT_APP_WS_URL || "ws://localhost:8080";
 export const AgenticChatBot = () => {
   const { t } = useTranslation();
   const { user } = useAuth();
+  const { updateChatStatus } = useConnectionStatus();
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -206,6 +208,7 @@ export const AgenticChatBot = () => {
 
     ws.onopen = () => {
       setIsConnected(true);
+      updateChatStatus(true, true, false); // connected, session active, not reconnecting
       reconnectAttemptsRef.current = 0; // Reset counter on successful connection
       isManualCloseRef.current = false;
       console.log("[WebSocket] Connected successfully");
@@ -216,6 +219,7 @@ export const AgenticChatBot = () => {
 
     ws.onclose = (event) => {
       setIsConnected(false);
+      updateChatStatus(false, !!sessionId, false); // disconnected, session may still be active
       stopHeartbeat();
       console.log(`[WebSocket] Disconnected - code: ${event.code}, reason: ${event.reason || 'none'}, wasManualClose: ${isManualCloseRef.current}`);
 
@@ -243,6 +247,7 @@ export const AgenticChatBot = () => {
         reconnectAttemptsRef.current += 1;
         console.log(`[WebSocket] Scheduling reconnection in ${delay}ms (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts})`);
 
+        updateChatStatus(false, true, true); // disconnected, session active, reconnecting
         reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
       } else {
         toast.current?.show({
@@ -390,7 +395,7 @@ export const AgenticChatBot = () => {
     };
 
     wsRef.current = ws;
-  }, [sessionId, startHeartbeat, stopHeartbeat, getReconnectDelay]);
+  }, [sessionId, startHeartbeat, stopHeartbeat, getReconnectDelay, updateChatStatus]);
 
   // Handle visibility change - reconnect when tab becomes visible
   useEffect(() => {
@@ -1110,6 +1115,7 @@ export const AgenticChatBot = () => {
     streamingContentRef.current = "";
     setStreamingContent("");
     setIsConnected(false);
+    updateChatStatus(false, false, false); // disconnected, no session, not reconnecting
 
     // Reset workspace/document selection to user preferences for new chat
     // This ensures new chat starts with user's default document sources
@@ -1267,13 +1273,6 @@ export const AgenticChatBot = () => {
                 <span>Document Chat Assistant</span>
               </div>
               <div className="header-actions">
-                {/* Only show connection status when there's an active session */}
-                {sessionId && (
-                  <span className={`connection-status ${isConnected ? "connected" : "disconnected"}`}>
-                    <i className={`pi ${isConnected ? "pi-check-circle" : "pi-exclamation-triangle"}`} />
-                    {isConnected ? "Ready" : "Reconnecting..."}
-                  </span>
-                )}
                 {/* Mobile workspace browser toggle */}
                 <Button
                   icon="pi pi-database"

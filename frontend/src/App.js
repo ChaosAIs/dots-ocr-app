@@ -1,4 +1,4 @@
-import React, { useEffect } from "react";
+import React from "react";
 // Theme CSS is loaded dynamically via index.html and ThemePicker
 import "primereact/resources/primereact.min.css";
 import "primeicons/primeicons.css";
@@ -16,6 +16,8 @@ import { ConfirmDialog } from "primereact/confirmdialog";
 
 import { AuthProvider } from "./core/auth/components/authProvider";
 import { WorkspaceProvider } from "./contexts/WorkspaceContext";
+import { ConnectionStatusProvider } from "./contexts/ConnectionStatusContext";
+import { ConnectionStatusFooter } from "./components/base/ConnectionStatusFooter";
 import { BrowserRouter, useLocation } from "react-router-dom";
 import { AppRoutes } from "./routes/routes";
 import { NavBar } from "./components/base/navbar";
@@ -58,21 +60,25 @@ function App() {
                 Note: Any nested components inside "AuthProvider",
                 it can call useContext(AuthContext) to get reference of authService.
             */}
-        <WorkspaceProvider>
-          {/* WorkspaceProvider provides centralized workspace state management */}
-          {/* As for "basename", it is the base URL for all locations.
-                If your app is served from a sub-directory on your server,
-                you'll want to set this to the sub-directory.
-                A properly formatted basename should have a leading slash,
-                but no trailing slash.
-              */}
-          <BrowserRouter basename={`${APP_CONFIG.basePath.length > 0 ? APP_CONFIG.basePath : "/"}`}>
-            <ConditionalNavBar />
-            <div className="body-area">
-              <AppRoutes />
-            </div>
-          </BrowserRouter>
-        </WorkspaceProvider>
+        <ConnectionStatusProvider>
+          {/* ConnectionStatusProvider tracks global connection status */}
+          <WorkspaceProvider>
+            {/* WorkspaceProvider provides centralized workspace state management */}
+            {/* As for "basename", it is the base URL for all locations.
+                  If your app is served from a sub-directory on your server,
+                  you'll want to set this to the sub-directory.
+                  A properly formatted basename should have a leading slash,
+                  but no trailing slash.
+                */}
+            <BrowserRouter basename={`${APP_CONFIG.basePath.length > 0 ? APP_CONFIG.basePath : "/"}`}>
+              <ConditionalNavBar />
+              <div className="body-area">
+                <AppRoutes />
+              </div>
+              <ConnectionStatusFooter />
+            </BrowserRouter>
+          </WorkspaceProvider>
+        </ConnectionStatusProvider>
       </AuthProvider>
       </div>
     </PrimeReactProvider>

@@ -1,0 +1,59 @@
+.connection-status-footer {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  background: var(--surface-ground, #1e1e2e);
+  border-top: 1px solid var(--surface-border, #3f3f5a);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+  font-size: 0.75rem;
+
+  .footer-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .footer-left {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+
+    .copyright {
+      color: #a0a0b0;
+      font-size: 0.7rem;
+    }
+
+    .version-separator {
+      color: #606070;
+      font-size: 0.7rem;
+    }
+
+    .app-version {
+      color: #a0a0b0;
+      font-size: 0.7rem;
+    }
+  }
+
+  .connection-indicator {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+}
+
+// Adjust body padding to account for fixed footer
+body {
+  padding-bottom: 28px;
+}
+
+// Ensure main content doesn't get hidden behind footer
+.body-area {
+  margin-bottom: 28px;
+}

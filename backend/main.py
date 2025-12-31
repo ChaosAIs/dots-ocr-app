@@ -120,6 +120,12 @@ from services import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Suppress noisy APScheduler executor logs
+logging.getLogger("apscheduler.executors.default").setLevel(logging.WARNING)
+
+# Suppress noisy WebSocket connection logs
+logging.getLogger("uvicorn.protocols.websockets.websockets_impl").setLevel(logging.WARNING)
+
 # Log deferred analytics import error if any
 if _analytics_import_error:
     logger.warning(f"Analytics service not available: {_analytics_import_error}")
