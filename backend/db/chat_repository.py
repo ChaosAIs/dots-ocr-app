@@ -78,24 +78,28 @@ class ChatRepository:
         is_active: Optional[bool] = None
     ) -> Optional[ChatSession]:
         """Update chat session."""
+        from sqlalchemy.orm.attributes import flag_modified
+
         session = self.get_session(session_id)
-        
+
         if not session:
             return None
-        
+
         if session_name is not None:
             session.session_name = session_name
-        
+
         if session_metadata is not None:
             session.session_metadata = session_metadata
-        
+            # Explicitly mark the JSONB column as modified to ensure SQLAlchemy detects the change
+            flag_modified(session, "session_metadata")
+
         if is_active is not None:
             session.is_active = is_active
-        
+
         session.updated_at = datetime.utcnow()
         self.db.commit()
         self.db.refresh(session)
-        
+
         return session
     
     def delete_session(self, session_id: UUID) -> bool:

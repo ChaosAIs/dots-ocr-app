@@ -44,9 +44,35 @@ export const ChatHistory = forwardRef(({ currentSessionId, onSessionSelect }, re
     loadSessions();
   }, [loadSessions]);
 
-  // Expose loadSessions method to parent component
+  // Update a specific session's metadata in local state (without re-fetching all)
+  const updateSessionMetadata = useCallback((sessionId, metadata) => {
+    console.log("[ChatHistory] updateSessionMetadata called:", { sessionId, metadata });
+    setSessions(prevSessions =>
+      prevSessions.map(session =>
+        session.id === sessionId
+          ? { ...session, session_metadata: { ...session.session_metadata, ...metadata } }
+          : session
+      )
+    );
+  }, []);
+
+  // Update a specific session in local state (for title updates, etc.)
+  const updateSession = useCallback((sessionId, updates) => {
+    console.log("[ChatHistory] updateSession called:", { sessionId, updates });
+    setSessions(prevSessions =>
+      prevSessions.map(session =>
+        session.id === sessionId
+          ? { ...session, ...updates }
+          : session
+      )
+    );
+  }, []);
+
+  // Expose methods to parent component
   useImperativeHandle(ref, () => ({
-    loadSessions
+    loadSessions,
+    updateSessionMetadata,
+    updateSession
   }));
 
   const handleDeleteSession = (sessionId, sessionName) => {

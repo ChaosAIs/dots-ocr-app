@@ -1,6 +1,7 @@
 """
 Chat session API endpoints for managing conversation history.
 """
+import copy
 import logging
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -211,12 +212,16 @@ def update_session_metadata(
         )
 
     # Merge new metadata with existing metadata
-    existing_metadata = session.session_metadata or {}
+    # IMPORTANT: Make a deep copy to ensure SQLAlchemy detects the change
+    existing_metadata = copy.deepcopy(session.session_metadata) if session.session_metadata else {}
 
     if request.workspace_ids is not None:
         existing_metadata["_prev_workspace_ids"] = request.workspace_ids
     if request.document_ids is not None:
         existing_metadata["_prev_document_ids"] = request.document_ids
+
+    logger.info(f"Updating session {session_id} metadata: workspace_ids={request.workspace_ids}, document_ids={request.document_ids}")
+    logger.info(f"New metadata will be: {existing_metadata}")
 
     # Update session metadata
     updated_session = conv_manager.update_session_metadata(

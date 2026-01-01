@@ -12,7 +12,6 @@ import { Checkbox } from "primereact/checkbox";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
-import authService from "../../services/authService";
 import workspaceService from "../../services/workspaceService";
 import { ChatHistory } from "./ChatHistory";
 import { WorkspaceBrowser } from "./WorkspaceBrowser";
@@ -72,10 +71,23 @@ export const AgenticChatBot = () => {
   const [progressStep, setProgressStep] = useState(null);
 
   // Workspace browser state
-  const [selectedWorkspaceIds, setSelectedWorkspaceIds] = useState([]);
-  const [selectedDocumentIds, setSelectedDocumentIds] = useState([]);
+  const [selectedWorkspaceIds, setSelectedWorkspaceIdsInternal] = useState([]);
+  const [selectedDocumentIds, setSelectedDocumentIdsInternal] = useState([]);
   const [workspaceBrowserCollapsed, setWorkspaceBrowserCollapsed] = useState(false);
   const [mobileWorkspaceDrawerOpen, setMobileWorkspaceDrawerOpen] = useState(false);
+
+  // Wrapper functions to log all selection changes
+  const setSelectedWorkspaceIds = useCallback((newIds) => {
+    const ids = typeof newIds === 'function' ? newIds(selectedWorkspaceIds) : newIds;
+    console.log("[AgenticChatBot] setSelectedWorkspaceIds called:", ids, new Error().stack?.split('\n').slice(1, 4).join('\n'));
+    setSelectedWorkspaceIdsInternal(ids);
+  }, [selectedWorkspaceIds]);
+
+  const setSelectedDocumentIds = useCallback((newIds) => {
+    const ids = typeof newIds === 'function' ? newIds(selectedDocumentIds) : newIds;
+    console.log("[AgenticChatBot] setSelectedDocumentIds called:", ids, new Error().stack?.split('\n').slice(1, 4).join('\n'));
+    setSelectedDocumentIdsInternal(ids);
+  }, [selectedDocumentIds]);
 
   // Graph RAG knowledge reasoning toggle
   const [graphRagEnabled, setGraphRagEnabled] = useState(true); // Default to true, will be updated from config
@@ -107,31 +119,6 @@ export const AgenticChatBot = () => {
     setIsInitializing(false);
   }, []);
 
-  // Load chat preferences (selected workspaces and documents) on mount
-  useEffect(() => {
-    const loadChatPreferences = async () => {
-      try {
-        const result = await authService.getChatPreferences();
-        if (result.success && result.chat) {
-          if (result.chat.selectedWorkspaceIds) {
-            console.log("[AgenticChatBot] Loaded workspace preferences:", result.chat.selectedWorkspaceIds);
-            setSelectedWorkspaceIds(result.chat.selectedWorkspaceIds);
-          }
-          if (result.chat.selectedDocumentIds) {
-            console.log("[AgenticChatBot] Loaded document preferences:", result.chat.selectedDocumentIds);
-            setSelectedDocumentIds(result.chat.selectedDocumentIds);
-          }
-        }
-      } catch (error) {
-        console.error("[AgenticChatBot] Error loading chat preferences:", error);
-      }
-    };
-
-    if (user) {
-      loadChatPreferences();
-    }
-  }, [user]);
-
   // Load chat config (graph RAG enabled setting) on mount
   useEffect(() => {
     const loadChatConfig = async () => {
@@ -143,69 +130,94 @@ export const AgenticChatBot = () => {
         }
       } catch (error) {
         console.error("[AgenticChatBot] Error loading chat config:", error);
-        // Keep default value on error
       }
     };
 
     loadChatConfig();
   }, []);
 
-  // Track if selection was initialized (to avoid saving on initial load)
-  const selectionInitializedRef = useRef(false);
-  const lastSavedSelectionRef = useRef({ workspaceIds: [], documentIds: [] });
+  // Track last saved selection to avoid duplicate saves
+  const lastSavedSelectionRef = useRef({ sessionId: null, workspaceIds: [], documentIds: [] });
+  const saveTimeoutRef = useRef(null);
+  const isSavingRef = useRef(false);
 
   // Save workspace/document selection to current session metadata when it changes
-  // This ensures the selection is persisted and restored when reopening the session
+  // Using debounce to ensure state changes are captured
   useEffect(() => {
-    const saveSelectionToSession = async () => {
-      // Only save if there's an active session
-      if (!sessionId) return;
+    // Only save if there's an active session
+    if (!sessionId) return;
 
-      // Skip saving on initial load - wait until selection is initialized
-      if (!selectionInitializedRef.current) {
-        // Mark as initialized after first render with a session
-        selectionInitializedRef.current = true;
-        lastSavedSelectionRef.current = {
-          workspaceIds: [...selectedWorkspaceIds],
-          documentIds: [...selectedDocumentIds]
-        };
+    // Clear any pending save timeout to restart debounce
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    // Capture current values for this save attempt
+    const workspaceIdsToSave = [...selectedWorkspaceIds];
+    const documentIdsToSave = [...selectedDocumentIds];
+
+    // Debounce the save
+    saveTimeoutRef.current = setTimeout(async () => {
+      // Skip if already saving
+      if (isSavingRef.current) {
+        console.log("[AgenticChatBot] Save already in progress, skipping");
         return;
       }
 
-      // Check if selection actually changed
-      const workspacesSame =
-        selectedWorkspaceIds.length === lastSavedSelectionRef.current.workspaceIds.length &&
-        selectedWorkspaceIds.every(id => lastSavedSelectionRef.current.workspaceIds.includes(id));
-      const documentsSame =
-        selectedDocumentIds.length === lastSavedSelectionRef.current.documentIds.length &&
-        selectedDocumentIds.every(id => lastSavedSelectionRef.current.documentIds.includes(id));
+      // Check if this is the same data we already saved
+      const isSameSession = lastSavedSelectionRef.current.sessionId === sessionId;
+      const workspacesSame = isSameSession &&
+        workspaceIdsToSave.length === lastSavedSelectionRef.current.workspaceIds.length &&
+        workspaceIdsToSave.every(id => lastSavedSelectionRef.current.workspaceIds.includes(id));
+      const documentsSame = isSameSession &&
+        documentIdsToSave.length === lastSavedSelectionRef.current.documentIds.length &&
+        documentIdsToSave.every(id => lastSavedSelectionRef.current.documentIds.includes(id));
 
       if (workspacesSame && documentsSame) {
-        return; // No change, skip save
+        console.log("[AgenticChatBot] Selection unchanged, skipping save");
+        return;
       }
 
+      isSavingRef.current = true;
       try {
+        console.log("[AgenticChatBot] Saving selection to session:", {
+          sessionId,
+          workspaceIds: workspaceIdsToSave,
+          documentIds: documentIdsToSave
+        });
+
         await chatService.updateSessionMetadata(
           sessionId,
-          selectedWorkspaceIds,
-          selectedDocumentIds
+          workspaceIdsToSave,
+          documentIdsToSave
         );
         lastSavedSelectionRef.current = {
-          workspaceIds: [...selectedWorkspaceIds],
-          documentIds: [...selectedDocumentIds]
-        };
-        console.log("[AgenticChatBot] Saved selection to session metadata:", {
           sessionId,
-          workspaceIds: selectedWorkspaceIds,
-          documentIds: selectedDocumentIds
-        });
+          workspaceIds: workspaceIdsToSave,
+          documentIds: documentIdsToSave
+        };
+        console.log("[AgenticChatBot] Selection saved successfully");
+
+        // Notify ChatHistory to update the session's metadata in local state
+        if (chatHistoryRef.current?.updateSessionMetadata) {
+          chatHistoryRef.current.updateSessionMetadata(sessionId, {
+            _prev_workspace_ids: workspaceIdsToSave,
+            _prev_document_ids: documentIdsToSave
+          });
+        }
       } catch (error) {
-        // Silently fail - this is not critical
         console.error("[AgenticChatBot] Error saving selection to session:", error);
+      } finally {
+        isSavingRef.current = false;
+      }
+    }, 500); // 500ms debounce
+
+    // Cleanup on unmount or session change
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
       }
     };
-
-    saveSelectionToSession();
   }, [sessionId, selectedWorkspaceIds, selectedDocumentIds]);
 
   // Calculate exponential backoff delay for reconnection
@@ -538,7 +550,7 @@ export const AgenticChatBot = () => {
     loadHistory();
   }, [sessionId]);
 
-  // Load session context (metadata) when session changes
+  // Load session context (metadata) and restore workspace/document selection when session changes
   useEffect(() => {
     const loadSessionContext = async () => {
       if (!sessionId) {
@@ -548,7 +560,27 @@ export const AgenticChatBot = () => {
 
       try {
         const session = await chatService.getSession(sessionId);
-        setSessionContext(session.session_metadata || {});
+        const metadata = session.session_metadata || {};
+        setSessionContext(metadata);
+
+        // Restore workspace/document selection from session metadata
+        const sessionWorkspaceIds = metadata._prev_workspace_ids || [];
+        const sessionDocumentIds = metadata._prev_document_ids || [];
+
+        console.log("[AgenticChatBot] Restoring selection from session metadata:", {
+          workspaceIds: sessionWorkspaceIds,
+          documentIds: sessionDocumentIds
+        });
+
+        setSelectedWorkspaceIds(sessionWorkspaceIds);
+        setSelectedDocumentIds(sessionDocumentIds);
+
+        // Update lastSavedSelectionRef to prevent re-saving the same data
+        lastSavedSelectionRef.current = {
+          sessionId,
+          workspaceIds: [...sessionWorkspaceIds],
+          documentIds: [...sessionDocumentIds]
+        };
       } catch (error) {
         console.error("Error loading session context:", error);
         setSessionContext(null);
@@ -1200,21 +1232,12 @@ export const AgenticChatBot = () => {
     setIsConnected(false);
     updateChatStatus(false, false, false); // disconnected, no session, not reconnecting
 
-    // Reset workspace/document selection to user preferences for new chat
-    // This ensures new chat starts with user's default document sources
-    try {
-      const result = await authService.getChatPreferences();
-      if (result.success && result.chat) {
-        const prefWorkspaceIds = result.chat.selectedWorkspaceIds || [];
-        const prefDocumentIds = result.chat.selectedDocumentIds || [];
-        console.log("[AgenticChatBot] New chat - restoring user preferences:", prefWorkspaceIds);
-        setSelectedWorkspaceIds(prefWorkspaceIds);
-        setSelectedDocumentIds(prefDocumentIds);
-      }
-    } catch (error) {
-      console.error("[AgenticChatBot] Error loading chat preferences for new chat:", error);
-      // On error, keep current selection rather than clearing it
-    }
+    // Clear workspace/document selection for new chat
+    // User can select documents before sending first message
+    setSelectedWorkspaceIds([]);
+    setSelectedDocumentIds([]);
+    lastSavedSelectionRef.current = { sessionId: null, workspaceIds: [], documentIds: [] };
+    console.log("[AgenticChatBot] New chat - cleared selection");
 
     // Reload chat history to show the new session will be created
     if (chatHistoryRef.current) {
@@ -1278,47 +1301,39 @@ export const AgenticChatBot = () => {
 
       // Restore workspace/document selection from session metadata (if available)
       // This allows reopening a chat with the same document context it was using
-      // Note: This does NOT update user preferences - only applies to this session
-      console.log("[AgenticChatBot] Session metadata:", sessionDetails?.session_metadata);
+      const metadata = sessionDetails?.session_metadata || {};
+      const sessionWorkspaceIds = metadata._prev_workspace_ids || [];
+      const sessionDocumentIds = metadata._prev_document_ids || [];
 
-      if (sessionDetails?.session_metadata) {
-        const metadata = sessionDetails.session_metadata;
-        const sessionWorkspaceIds = metadata._prev_workspace_ids || [];
-        const sessionDocumentIds = metadata._prev_document_ids || [];
+      console.log("[AgenticChatBot] Restoring selection from session:", {
+        sessionId: newSessionId,
+        workspaceIds: sessionWorkspaceIds,
+        documentIds: sessionDocumentIds
+      });
 
-        console.log("[AgenticChatBot] Restoring selection from session:", {
-          workspaceIds: sessionWorkspaceIds,
-          documentIds: sessionDocumentIds
-        });
+      // Set the selection from session metadata
+      setSelectedWorkspaceIds(sessionWorkspaceIds);
+      setSelectedDocumentIds(sessionDocumentIds);
 
-        // Always set the selection from session metadata (even if empty)
-        // This ensures the WorkspaceBrowser reflects the session's state
-        setSelectedWorkspaceIds(sessionWorkspaceIds);
-        setSelectedDocumentIds(sessionDocumentIds);
-
-        // Update the last saved selection to match what we just restored
-        // This prevents the save effect from immediately re-saving the same data
-        lastSavedSelectionRef.current = {
-          workspaceIds: [...sessionWorkspaceIds],
-          documentIds: [...sessionDocumentIds]
-        };
-        // Mark as initialized since we have valid data from session
-        selectionInitializedRef.current = true;
-      } else {
-        // Session has no metadata - clear the selection to start fresh
-        console.log("[AgenticChatBot] Session has no metadata, clearing selection");
-        setSelectedWorkspaceIds([]);
-        setSelectedDocumentIds([]);
-        lastSavedSelectionRef.current = { workspaceIds: [], documentIds: [] };
-        selectionInitializedRef.current = true;
-      }
+      // Update the last saved selection to match what we just restored
+      // This prevents the save effect from immediately re-saving the same data
+      lastSavedSelectionRef.current = {
+        sessionId: newSessionId,
+        workspaceIds: [...sessionWorkspaceIds],
+        documentIds: [...sessionDocumentIds]
+      };
 
       // Check if title needs regeneration (do this in background)
+      // Note: We don't reload all sessions to avoid re-sorting the list
       chatService.regenerateSessionTitle(newSessionId)
         .then((result) => {
           if (result.new_title && result.new_title !== "New Chat") {
-            // Refresh chat history to show new title
-            chatHistoryRef.current?.loadSessions();
+            // Update just this session's title in local state (no re-sorting)
+            if (chatHistoryRef.current?.updateSession) {
+              chatHistoryRef.current.updateSession(newSessionId, {
+                session_name: result.new_title
+              });
+            }
           }
         })
         .catch((error) => {
