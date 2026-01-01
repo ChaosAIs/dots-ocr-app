@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from .rag_agent import stream_agent_response, create_agent_executor
 from .vectorstore import get_collection_info
 from .indexer import get_indexed_count
+from .timing_metrics import TimingMetrics, set_current_metrics, clear_current_metrics
 from db.database import get_db_session
 from chat_service.conversation_manager import ConversationManager
 from chat_service.context_analyzer import ContextAnalyzer
@@ -229,6 +230,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                     logger.info(f"Received chat message for session {session_id}: {message[:100]}...")
 
+                    # Initialize timing metrics for this query
+                    import uuid as uuid_module
+                    timing_metrics = TimingMetrics(
+                        query_id=f"{session_id[:8]}-{str(uuid_module.uuid4())[:8]}",
+                        query_preview=message[:100]
+                    )
+                    set_current_metrics(timing_metrics)
+
                     # Save user message to database
                     try:
                         conv_manager.add_message(
@@ -311,13 +320,17 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     pass
 
                                 # Single unified LLM call for all preprocessing
-                                preprocessor = get_unified_preprocessor()
-                                unified_result = preprocessor.preprocess(
-                                    message=message,
-                                    chat_history=history,
-                                    previous_response=prev_response,
-                                    available_schemas=available_schemas
-                                )
+                                with timing_metrics.measure("unified_preprocessing"):
+                                    preprocessor = get_unified_preprocessor()
+                                    unified_result = preprocessor.preprocess(
+                                        message=message,
+                                        chat_history=history,
+                                        previous_response=prev_response,
+                                        available_schemas=available_schemas
+                                    )
+
+                                # Record the internal processing time from preprocessor
+                                timing_metrics.record("unified_preprocessing_llm", unified_result.processing_time_ms)
 
                                 # Extract context analysis from unified result
                                 enhanced_message = unified_result.context.resolved_message or message
@@ -441,6 +454,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # Get accessible document IDs for the current user
                         # This ensures chat only searches documents the user has access to
                         accessible_doc_ids = None
+                        access_control_start = time.time()
                         logger.info(f"[Access Control] Checking document access for user_id: {user_id}")
                         if user_id:
                             try:
@@ -523,6 +537,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 accessible_doc_ids = set()
                         else:
                             logger.warning(f"[Access Control] No user_id provided - cannot enforce access control")
+                        timing_metrics.record("access_control", (time.time() - access_control_start) * 1000)
 
                         # Use enhanced message with resolved pronouns and pass session context
                         chunk_count = 0
@@ -539,6 +554,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         source_document_ids_for_cache = []
 
                         if QUERY_CACHE_ENABLED and accessible_doc_ids_list:
+                            cache_start = time.time()
                             try:
                                 logger.info("=" * 80)
                                 logger.info("[QueryCache] ========== QUERY CACHE PROCESS START ==========")
@@ -697,9 +713,12 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 logger.error(f"[QueryCache] Error during cache operations: {cache_error}", exc_info=True)
                                 logger.error(f"[QueryCache] → Continuing without cache...")
                                 # Continue without cache on error
+                            finally:
+                                timing_metrics.record("cache_lookup", (time.time() - cache_start) * 1000)
 
                         # Skip full pipeline if cache hit
                         if cache_hit:
+                            timing_metrics.record("cache_hit_response", 0)  # Mark cache hit
                             # Save cached response to conversation
                             conv_manager.add_message(
                                 session_id=session_id,
@@ -707,6 +726,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 content=full_response,
                                 metadata={"source": "cache", "cache_entry_id": cache_result.entry.id if cache_result else None}
                             )
+                            # Log timing summary for cache hit
+                            timing_metrics.log_summary()
+                            clear_current_metrics()
                             # Send end message and continue to next message
                             await websocket.send_json({"type": "end"})
                             continue
@@ -859,6 +881,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                         # ====== RAG PATH (if needed) ======
                         if use_rag_path:
+                            rag_start = time.time()
                             # Prepare context injection for hybrid queries
                             hybrid_context = None
                             if use_analytics_path and analytics_result and classification:
@@ -931,6 +954,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                             })
                                     except Exception:
                                         pass  # WebSocket might be closed
+
+                        # Record RAG pipeline time if RAG path was used
+                        if use_rag_path:
+                            timing_metrics.record("rag_pipeline_total", (time.time() - rag_start) * 1000)
 
                         # Save assistant response to database ONLY if no error occurred
                         # Don't save error messages to chat history - let user retry
@@ -1064,6 +1091,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 logger.info(f"[WebSocket] End/error message sent successfully")
                         except Exception as ws_error:
                             logger.error(f"[WebSocket] Error sending end/error message: {ws_error}", exc_info=True)
+
+                        # Log final timing summary
+                        timing_metrics.log_summary()
+                        clear_current_metrics()
 
                     except Exception as e:
                         error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"

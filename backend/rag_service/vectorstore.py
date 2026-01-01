@@ -5,6 +5,7 @@ Connects to Qdrant running at localhost:6333.
 
 import os
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Set, Dict, Any
 from qdrant_client import QdrantClient
@@ -13,6 +14,7 @@ from langchain_qdrant import QdrantVectorStore
 from langchain_core.documents import Document
 
 from .local_qwen_embedding import LocalQwen3Embedding
+from .timing_metrics import get_current_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -419,6 +421,10 @@ def unified_vector_search(
 
     logger.info(f"[VectorSearch] Access Control: {len(document_ids)} documents accessible")
 
+    # Get timing metrics context
+    timing_metrics = get_current_metrics()
+    vector_search_start = time.time()
+
     vectorstore = get_vectorstore()
     all_chunks = []
     seen_chunk_ids = set()
@@ -498,6 +504,10 @@ def unified_vector_search(
         logger.info("=" * 80)
         logger.info("[VectorSearch] ========== UNIFIED VECTOR SEARCH COMPLETE ==========")
         logger.info("=" * 80)
+
+        # Record timing
+        if timing_metrics:
+            timing_metrics.record("vector_search", (time.time() - vector_search_start) * 1000)
 
         return UnifiedSearchResult(
             chunks=all_chunks,

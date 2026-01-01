@@ -15,10 +15,12 @@ The reasoning process:
 import os
 import re
 import logging
+import time
 from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 
 from .unified_retriever import UnifiedRetriever, RetrievalResult
+from .timing_metrics import get_current_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,10 @@ class IterativeReasoningEngine:
             logger.info("[IterativeReasoning] Disabled, using single-shot retrieval")
             return await self._single_shot_retrieval(question)
 
+        # Get timing metrics context
+        timing_metrics = get_current_metrics()
+        reasoning_start = time.time()
+
         logger.info("=" * 70)
         logger.info("[IterativeReasoning] STARTING ITERATIVE REASONING")
         logger.info("=" * 70)
@@ -279,7 +285,10 @@ class IterativeReasoningEngine:
             await progress_callback("Preparing search strategy...")
 
         logger.info("[IterativeReasoning] Generating initial query...")
+        query_gen_start = time.time()
         current_query = await self._generate_initial_query(question, INITIAL_QUERY_PROMPT)
+        if timing_metrics:
+            timing_metrics.record("ir_query_generation", (time.time() - query_gen_start) * 1000)
 
         # Log query comparison for debugging
         logger.info("-" * 70)
@@ -312,7 +321,10 @@ class IterativeReasoningEngine:
                 logger.info("[IterativeReasoning] Retrieving knowledge (GRAPH-ONLY, skipping vector search)...")
             else:
                 logger.info("[IterativeReasoning] Retrieving knowledge...")
+            retrieval_step_start = time.time()
             result = await self.retriever.retrieve(current_query, top_k=20, skip_vector_search=skip_vector)
+            if timing_metrics:
+                timing_metrics.record(f"ir_retrieval_step_{step}", (time.time() - retrieval_step_start) * 1000)
 
             # Track this retrieval step
             knowledge_step = {
@@ -410,9 +422,12 @@ class IterativeReasoningEngine:
             # Get LLM response
             # Reduced from 4000 to 2000 tokens for THINKING - it only needs decision + optional query
             from langchain_core.messages import HumanMessage
+            thinking_llm_start = time.time()
             llm = self._get_llm_service().get_chat_model(temperature=0.2, num_predict=2000)
             think_response_msg = await llm.ainvoke([HumanMessage(content=think_prompt)])
             think_response = think_response_msg.content.strip()
+            if timing_metrics:
+                timing_metrics.record(f"ir_thinking_llm_step_{step}", (time.time() - thinking_llm_start) * 1000)
 
             logger.info(f"[IterativeReasoning] LLM response preview: {think_response[:200]}...")
             logger.info(f"[IterativeReasoning] LLM response length: {len(think_response)} chars")
@@ -467,7 +482,15 @@ class IterativeReasoningEngine:
             # Generate answer from accumulated knowledge if none was provided
             if progress_callback:
                 await progress_callback("Preparing your answer...")
+            answer_gen_start = time.time()
             final_answer = await self._generate_final_answer(question, retrieved_knowledge)
+            if timing_metrics:
+                timing_metrics.record("ir_final_answer_generation", (time.time() - answer_gen_start) * 1000)
+
+        # Record timing
+        reasoning_duration = (time.time() - reasoning_start) * 1000
+        if timing_metrics:
+            timing_metrics.record("iterative_reasoning", reasoning_duration)
 
         # Log summary
         logger.info("=" * 70)
@@ -482,6 +505,7 @@ class IterativeReasoningEngine:
         logger.info(f"  - Total parent chunks: {len(all_parent_chunks)}")
         logger.info(f"  - Sources: {all_sources}")
         logger.info(f"  - Final answer: {'Yes' if final_answer else 'No'} ({len(final_answer)} chars)")
+        logger.info(f"  - Duration: {reasoning_duration:.2f}ms")
         logger.info("=" * 70)
 
         return ReasoningResult(
@@ -617,8 +641,8 @@ Your answer:"""
         from langchain_core.messages import HumanMessage
         # 4000 tokens allows for comprehensive fallback answers with multiple products
         llm = self._get_llm_service().get_chat_model(temperature=0.3, num_predict=4000)
-        response_msg = await llm.ainvoke([HumanMessage(content=prompt)])
 
+        response_msg = await llm.ainvoke([HumanMessage(content=prompt)])
         return response_msg.content.strip()
 
     def _format_knowledge_summary(

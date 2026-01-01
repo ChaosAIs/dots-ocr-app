@@ -6,6 +6,8 @@ Supports multiple LLM backends: Ollama and vLLM.
 import os
 import logging
 import json
+import time
+import asyncio
 from typing import Annotated, TypedDict, List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
@@ -18,6 +20,7 @@ from .vectorstore import unified_vector_search, UnifiedSearchResult
 from .llm_service import get_llm_service
 from .utils.date_normalizer import normalize_query_dates
 from .context_builder import build_token_aware_context, get_context_builder
+from .timing_metrics import get_current_metrics, record_step
 
 # Set up early logger for GraphRAG import debugging
 _early_logger = logging.getLogger(__name__)
@@ -1091,6 +1094,10 @@ def search_documents(query: str) -> str:
     Returns:
         Relevant document chunks as a formatted string.
     """
+    import time
+    search_start = time.time()
+    timing_metrics = get_current_metrics()
+
     try:
         # Get accessible document IDs from global context (set by stream_agent_response)
         global _accessible_doc_ids
@@ -1145,6 +1152,7 @@ def search_documents(query: str) -> str:
         )
 
         # If we have preprocessing topics and simple query, skip full analysis
+        query_analysis_start = time.time()
         if preprocessing_topics and is_simple_query:
             logger.info(f"[Search] OPTIMIZATION: Using preprocessing topics, skipping redundant analysis")
             # Use heuristic max_steps for simple queries
@@ -1194,6 +1202,9 @@ def search_documents(query: str) -> str:
             logger.info(f"[Search] Query complexity analysis: max_steps={max_steps}, "
                        f"reasoning='{complexity_analysis.reasoning}'")
 
+        if timing_metrics:
+            timing_metrics.record("query_analysis", (time.time() - query_analysis_start) * 1000)
+
         logger.info(f"[Search] Original query: '{query[:50]}...'")
         logger.info(f"[Search] Enhanced query: '{enhanced_query[:100]}...'")
         logger.info(f"[Search] Extracted entities: {query_metadata.get('entities', [])}")
@@ -1209,6 +1220,7 @@ def search_documents(query: str) -> str:
 
         # Step 2.5: Route to relevant documents based on metadata (with access control)
         _send_progress("Finding relevant documents...")
+        routing_start = time.time()
 
         from .document_router import DocumentRouter
         from .llm_service import get_llm_service
@@ -1221,12 +1233,16 @@ def search_documents(query: str) -> str:
             accessible_document_ids=accessible_document_ids
         )
 
+        if timing_metrics:
+            timing_metrics.record("document_routing", (time.time() - routing_start) * 1000)
+
         if routed_document_ids:
             logger.info(
                 f"[Search] Document router selected {len(routed_document_ids)} document IDs: {routed_document_ids}"
             )
 
         # Step 3: Use Iterative Reasoning Engine (unified for GraphRAG and vector-only)
+        retrieval_start = time.time()
         if iterative_enabled:
             # Determine graph RAG enabled status:
             # - If UI toggle is set (not None), use that value
@@ -1234,7 +1250,7 @@ def search_documents(query: str) -> str:
             effective_graph_rag_enabled = _graph_rag_enabled if _graph_rag_enabled is not None else GRAPH_RAG_QUERY_ENABLED
             logger.info(f"[Search] GraphRAG enabled: {effective_graph_rag_enabled} (UI: {_graph_rag_enabled}, .env: {GRAPH_RAG_QUERY_ENABLED})")
 
-            return _search_with_iterative_reasoning(
+            result = _search_with_iterative_reasoning(
                 query=query,
                 max_steps=max_steps,
                 relevant_sources=None,  # Deprecated - use routed_document_ids
@@ -1244,12 +1260,18 @@ def search_documents(query: str) -> str:
             )
         else:
             # Simple vector-only search (no iterative reasoning)
-            return _simple_vector_search(
+            result = _simple_vector_search(
                 query=query,
                 enhanced_query=enhanced_query,
                 accessible_doc_ids=accessible_doc_ids,
                 routed_document_ids=routed_document_ids
             )
+
+        if timing_metrics:
+            timing_metrics.record("iterative_retrieval", (time.time() - retrieval_start) * 1000)
+            timing_metrics.record("search_documents_total", (time.time() - search_start) * 1000)
+
+        return result
 
     except Exception as e:
         logger.error(f"Error searching documents: {e}")
@@ -1313,7 +1335,10 @@ def _search_with_iterative_reasoning(
         async def progress_callback(message: str, percent: int = None):
             _send_progress(message, percent)
 
-        return await engine.reason(query, progress_callback=progress_callback)
+        return await engine.reason(
+            query,
+            progress_callback=progress_callback
+        )
 
     # Run async reasoning in sync context
     try:
@@ -1350,10 +1375,13 @@ def _format_reasoning_result(result) -> str:
 
     results = []
 
-    # If we have a final answer from iterative reasoning, prioritize it
+    # If we have a final answer from iterative reasoning, return it directly
+    # No need to append chunks - the answer is already complete and self-contained
     if result.final_answer:
         logger.info(f"[Search] Using final answer from iterative reasoning ({len(result.final_answer)} chars)")
-        results.append(f"[Iterative Reasoning Answer]\n{result.final_answer}")
+        # Return just the answer without appending source chunks
+        # The iterative reasoning already synthesized the answer from the chunks
+        return f"[Iterative Reasoning Answer]\n{result.final_answer}"
 
     # Build graph context string from entities and relationships
     graph_context = _format_graph_context(result.entities, result.relationships)
@@ -1371,12 +1399,16 @@ def _format_reasoning_result(result) -> str:
 
     # Use token-aware context builder for chunks and parent chunks
     try:
+        context_build_start = time.time()
         built_context = build_token_aware_context(
             chunks=result.chunks,
             parent_chunks=getattr(result, 'parent_chunks', []),
             graph_context=graph_context,
             query=initial_query,  # Pass query for centralized relevance scoring
         )
+        timing_metrics = get_current_metrics()
+        if timing_metrics:
+            timing_metrics.record("context_building", (time.time() - context_build_start) * 1000)
 
         # Log context building stats
         logger.info(
@@ -1756,18 +1788,13 @@ def call_model(state: AgentState) -> AgentState:
                     logger.info(f"[vLLM] Searching documents for query: {enhanced_query[:50]}...")
                     context = search_documents.invoke({"query": enhanced_query})
 
-                    # Add context to the system message with explicit instructions
-                    if context.startswith("[GraphRAG Final Answer]"):
-                        # GraphRAG generated a complete answer - use it directly
-                        context_message = f"\n\nRelevant document context:\n{context}"
-                    else:
-                        # Normalize dates in the user query for better matching
-                        normalized_query = normalize_query_dates(user_query)
-                        if normalized_query != user_query:
-                            logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
+                    # Normalize dates in the user query for better matching
+                    normalized_query = normalize_query_dates(user_query)
+                    if normalized_query != user_query:
+                        logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
 
-                        # Simple context message - dates are already normalized in the content
-                        context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
+                    # Simple context message - dates are already normalized in the content
+                    context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
 
                 augmented_messages = list(messages)
                 if isinstance(augmented_messages[0], SystemMessage):
@@ -1784,7 +1811,13 @@ def call_model(state: AgentState) -> AgentState:
                     logger.info(f"[vLLM] System message length: {len(augmented_messages[0].content)} chars")
                     logger.info(f"[vLLM] System message preview (last 500 chars): ...{augmented_messages[0].content[-500:]}")
 
+                # Record LLM generation timing
+                llm_start = time.time()
                 response = llm.invoke(augmented_messages)
+                llm_duration = (time.time() - llm_start) * 1000
+                timing_metrics = get_current_metrics()
+                if timing_metrics:
+                    timing_metrics.record("llm_generation", llm_duration)
 
                 # DEBUG: Log the LLM's raw response
                 if hasattr(response, 'content'):
@@ -1965,6 +1998,10 @@ async def stream_agent_response(
     _preprocessing_topics = preprocessing_topics
     _graph_rag_enabled = graph_rag_enabled
 
+    # Get timing metrics for detailed RAG pipeline tracking
+    timing_metrics = get_current_metrics()
+    rag_pipeline_start = time.time()
+
     # Log graph RAG setting
     if graph_rag_enabled is not None:
         logger.info(f"[Graph RAG] UI override: graph_rag_enabled={graph_rag_enabled}")
@@ -1990,7 +2027,10 @@ async def stream_agent_response(
         logger.info(f"[Document Context] Document/workspace selection changed - forcing new document search")
 
     # Classify query with conversation context and retry flag
+    query_class_start = time.time()
     query_classification = _classify_query_with_context(query, conversation_history, is_retry=is_retry or force_new_search)
+    if timing_metrics:
+        timing_metrics.record("rag_query_classification", (time.time() - query_class_start) * 1000)
     logger.info(f"[Query Classification] Query: '{query}' -> {query_classification}")
 
     # Handle CONVERSATION_ONLY queries - answer directly from conversation history without document search

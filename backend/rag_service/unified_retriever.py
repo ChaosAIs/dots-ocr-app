@@ -6,10 +6,12 @@ allowing the iterative reasoning engine to use the same logic regardless of back
 """
 
 import logging
+import time
 from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass, field
 
 from .vectorstore import PARENT_CHUNK_AUTO_INCLUDE
+from .timing_metrics import get_current_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,10 @@ class UnifiedRetriever:
 
         await self._init_graphrag()
 
+        # Get timing metrics context
+        timing_metrics = get_current_metrics()
+        retrieval_start = time.time()
+
         # Retrieval decision
         logger.info("[Retriever] RETRIEVAL DECISION:")
         logger.info(f"[Retriever]   - GraphRAG Enabled: {self.graphrag_enabled}")
@@ -167,6 +173,10 @@ class UnifiedRetriever:
             result = await self._graph_retrieval(query, top_k, mode)
         else:
             result = await self._vector_only_retrieval(query, top_k)
+
+        # Record timing
+        if timing_metrics:
+            timing_metrics.record("unified_retrieval", (time.time() - retrieval_start) * 1000)
 
         # Log results
         logger.info("-" * 80)
