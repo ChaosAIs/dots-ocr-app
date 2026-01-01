@@ -926,6 +926,7 @@ def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
     - Source name and document type are the most distinctive identifiers
     - Key entities provide specific names/terms for matching
     - Topics categorize the document type
+    - For tabular data: include column headers for field-based search
     - Summary is EXCLUDED to avoid diluting the semantic signal with generic words
 
     Args:
@@ -933,10 +934,13 @@ def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
         source_name: Document source name
 
     Returns:
-        Formatted text string for embedding (concise, ~200-300 chars)
+        Formatted text string for embedding (concise, ~200-400 chars)
     """
-    document_type = metadata.get("document_type", "document")
+    # Use document_types list (multi-type classification)
+    document_types = metadata.get("document_types", ["document"])
+
     subject_name = metadata.get("subject_name", source_name)
+    is_tabular = metadata.get("is_tabular", False)
 
     # Join key entities - limit to top 8 for conciseness
     key_entities = metadata.get("key_entities", [])
@@ -949,26 +953,48 @@ def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
     topics = metadata.get("topics", [])
     topics_str = ", ".join(topics[:5]) if topics else ""
 
+    # Get column headers for tabular documents
+    columns = metadata.get("columns", [])
+    columns_str = ", ".join(columns[:15]) if columns else ""  # Limit to 15 columns
+
     # Format the embedding text - CONCISE for better semantic matching
-    # Format: "source_name. Key entities: ... document_type: subject. Topics: ..."
+    # Format: "source_name. Key entities: ... document_types: subject. Topics: ..."
     # NO SUMMARY - summaries contain generic words that dilute entity matching
     parts = []
 
     # 1. Source name FIRST (most distinctive)
     parts.append(source_name)
 
-    # 2. Entities SECOND (key identifiers)
+    # 2. For tabular documents, include columns prominently for field-based search
+    if is_tabular and columns_str:
+        parts.append(f"Data columns: {columns_str}")
+        # Add row count for context
+        row_count = metadata.get("row_count", 0)
+        if row_count:
+            parts.append(f"Contains {row_count} data records")
+
+    # 3. Entities (key identifiers)
     if entities_str:
         parts.append(f"Key entities: {entities_str}")
 
-    # 3. Document type and subject
-    parts.append(f"{document_type}: {subject_name}")
+    # 4. Document types (all applicable types) and subject - richer semantic signal
+    types_str = ", ".join(document_types)
+    parts.append(f"Document types: {types_str}. Subject: {subject_name}")
 
-    # 4. Topics
+    # 5. Topics
     if topics_str:
         parts.append(f"Topics: {topics_str}")
 
-    # NOTE: Summary is intentionally excluded to keep embedding text focused
+    # 6. For tabular data, add summary snippet if available (brief context)
+    if is_tabular:
+        summary = metadata.get("summary", "")
+        if summary:
+            # Take first 150 chars of summary for context
+            summary_snippet = summary[:150].strip()
+            if summary_snippet:
+                parts.append(f"Summary: {summary_snippet}")
+
+    # NOTE: Full summary is intentionally excluded for non-tabular docs
     # Long summaries introduce generic words that confuse vector similarity
 
     return ". ".join(parts)
@@ -1006,17 +1032,27 @@ def upsert_document_metadata_embedding(
         # Generate embedding
         embedding_vector = embeddings.embed_query(embedding_text)
 
-        # Prepare payload
+        # Prepare payload with document_types list
+        document_types = metadata.get("document_types", ["unknown"])
+
         payload = {
             "document_id": document_id,
             "source_name": source_name,
             "filename": filename,
-            "document_type": metadata.get("document_type", "unknown"),
+            "document_types": document_types,
             "subject_name": metadata.get("subject_name", source_name),
             "confidence": metadata.get("confidence", 0.0),
             "topics": metadata.get("topics", []),
             "embedding_text": embedding_text,  # Store for debugging
         }
+
+        # Add tabular-specific fields for better filtering and display
+        if metadata.get("is_tabular"):
+            payload["is_tabular"] = True
+            payload["schema_type"] = metadata.get("schema_type", "spreadsheet")
+            payload["columns"] = metadata.get("columns", [])
+            payload["row_count"] = metadata.get("row_count", 0)
+            payload["column_count"] = metadata.get("column_count", 0)
 
         # Add date information if available
         dates = metadata.get("dates", {})
@@ -1041,7 +1077,7 @@ def upsert_document_metadata_embedding(
 
         logger.info(
             f"[MetadataVector] Upserted metadata embedding for {source_name} "
-            f"(type={metadata.get('document_type')}, confidence={metadata.get('confidence', 0):.2f})"
+            f"(types={document_types}, confidence={metadata.get('confidence', 0):.2f})"
         )
         return True
 
@@ -1292,16 +1328,25 @@ def search_document_metadata(
         # Format results
         formatted_results = []
         for point in results.points:
-            formatted_results.append({
+            doc_types = point.payload.get("document_types", ["unknown"])
+
+            result = {
                 "document_id": str(point.id),
                 "source_name": point.payload.get("source_name"),
                 "filename": point.payload.get("filename"),
                 "score": point.score,
-                "document_type": point.payload.get("document_type"),
+                "document_types": doc_types,
                 "subject_name": point.payload.get("subject_name"),
                 "confidence": point.payload.get("confidence", 0),
                 "payload": point.payload
-            })
+            }
+            # Include tabular-specific fields at top level for easier access
+            if point.payload.get("is_tabular"):
+                result["is_tabular"] = True
+                result["columns"] = point.payload.get("columns", [])
+                result["row_count"] = point.payload.get("row_count", 0)
+                result["schema_type"] = point.payload.get("schema_type")
+            formatted_results.append(result)
 
         logger.info(
             f"[MetadataVector] Search returned {len(formatted_results)} results "

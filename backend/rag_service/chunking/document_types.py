@@ -836,7 +836,7 @@ TYPE_ALIASES: Dict[str, List[str]] = {
 
     # Logistics aliases
     "shipping": ["shipping_manifest", "inventory_report"],
-    "inventory": ["inventory_report"],
+    "inventory": ["inventory_report"],  # Query for "inventory" matches inventory_report docs
     "delivery": ["shipping_manifest"],
 
     # Legal/Policy aliases - IMPORTANT for routing
@@ -1044,40 +1044,76 @@ def expand_type_aliases(type_hints: List[str]) -> Set[str]:
     return expanded
 
 
-def types_match(query_type_hints: List[str], doc_type: str) -> bool:
+def types_match(query_type_hints: List[str], doc_types: List[str], doc_metadata: dict = None) -> bool:
     """
-    Check if document type matches any of the query type hints.
+    Check if document types match any of the query type hints.
     Uses alias expansion for flexible matching.
 
     Args:
         query_type_hints: List of type hints from query enhancement
-        doc_type: Document type from stored document
+        doc_types: List of document types (multi-type classification)
+        doc_metadata: Optional document metadata for content-based inference
+                      (e.g., columns, schema_type, is_tabular)
 
     Returns:
         True if there's a match, False otherwise
     """
-    if not query_type_hints or not doc_type:
-        return True  # No filtering if no hints or no doc type
+    if not query_type_hints:
+        return True  # No filtering if no hints
 
-    doc_type_lower = doc_type.lower().strip()
+    # Normalize doc_types - accept both list and single string for compatibility
+    if isinstance(doc_types, str):
+        doc_types = [doc_types] if doc_types else []
+    elif not doc_types:
+        doc_types = doc_metadata.get("document_types", []) if doc_metadata else []
+
+    if not doc_types:
+        return True  # No filtering if no doc types
+
+    doc_types_lower = [t.lower().strip() for t in doc_types]
     expanded_hints = expand_type_aliases(query_type_hints)
 
-    # Direct match
-    if doc_type_lower in expanded_hints:
+    # Check if any document type matches any expanded hint
+    if set(doc_types_lower).intersection(expanded_hints):
         return True
 
-    # Check if document type has aliases that match
-    for hint in expanded_hints:
-        if hint in TYPE_ALIASES:
-            if doc_type_lower in TYPE_ALIASES[hint]:
+    # Check aliases for each document type
+    for dt in doc_types_lower:
+        if dt in TYPE_ALIASES:
+            if set(TYPE_ALIASES[dt]).intersection(expanded_hints):
                 return True
 
-    # Category-based match (if doc is in same category as any hint)
-    doc_category = get_type_category(doc_type_lower)
-    for hint in query_type_hints:
-        hint_category = get_type_category(hint.lower())
-        if doc_category == hint_category and doc_category != DocumentCategory.GENERAL.value:
-            return True
+    # ========== Content-based type inference for tabular documents ==========
+    # Fallback for tabular documents based on column content
+    if doc_metadata:
+        is_tabular = doc_metadata.get("is_tabular", False)
+        columns = doc_metadata.get("columns", [])
+
+        if is_tabular and columns:
+            columns_text = " ".join([c.lower() for c in columns])
+
+            # Check if columns suggest inventory data
+            if any(kw in columns_text for kw in {"product", "inventory", "stock", "sku", "quantity", "price", "item"}):
+                if "inventory_report" in expanded_hints or "inventory" in expanded_hints:
+                    return True
+
+            # Check if columns suggest financial data
+            if any(kw in columns_text for kw in {"amount", "total", "payment", "invoice", "transaction", "balance"}):
+                if "financial_report" in expanded_hints or "financial" in expanded_hints:
+                    return True
+
+            # Check if columns suggest sales data
+            if any(kw in columns_text for kw in {"sale", "order", "revenue", "customer", "purchase"}):
+                if "report" in expanded_hints:
+                    return True
+
+    # Category-based match
+    for dt in doc_types_lower:
+        doc_category = get_type_category(dt)
+        for hint in query_type_hints:
+            hint_category = get_type_category(hint.lower())
+            if doc_category == hint_category and doc_category != DocumentCategory.GENERAL.value:
+                return True
 
     return False
 

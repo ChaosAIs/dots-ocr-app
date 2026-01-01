@@ -2,25 +2,19 @@
 Extraction Configuration
 
 Defines which document types are extractable and maps them to schemas.
+
+NOTE: As of migration 022, the following have been REMOVED:
+- ExtractionStrategy enum (LLM_DIRECT, LLM_CHUNKED, HYBRID, PARSED)
+- EXTRACTION_*_MAX_ROWS thresholds
+- determine_extraction_strategy() function
+- EXTRACTION_STRATEGIES configuration
+
+All tabular data extraction now uses direct parsing only.
+LLM is only used for document classification and field mapping inference.
+All extracted row data is stored in documents_data_line_items table (external storage only).
 """
 
-import os
 from typing import Dict, Optional, List
-from enum import Enum
-
-
-class ExtractionStrategy(str, Enum):
-    """Extraction strategy types."""
-    LLM_DIRECT = "llm_direct"       # Single LLM call (< 50 rows)
-    LLM_CHUNKED = "llm_chunked"     # Parallel chunked LLM (50-500 rows)
-    HYBRID = "hybrid"                # LLM for headers, rules for data (500-5000 rows)
-    PARSED = "parsed"                # Pure pattern matching (> 5000 rows)
-
-
-# Thresholds from environment
-DIRECT_LLM_MAX_ROWS = int(os.getenv("EXTRACTION_DIRECT_LLM_MAX_ROWS", "50"))
-CHUNKED_LLM_MAX_ROWS = int(os.getenv("EXTRACTION_CHUNKED_LLM_MAX_ROWS", "500"))
-HYBRID_MAX_ROWS = int(os.getenv("EXTRACTION_HYBRID_MAX_ROWS", "5000"))
 
 
 # Document types that can be extracted to structured data
@@ -91,44 +85,6 @@ NON_EXTRACTABLE_TYPES: List[str] = [
 ]
 
 
-# Strategies for each source type
-EXTRACTION_STRATEGIES: Dict[str, Dict[str, str]] = {
-    # Spreadsheet sources can use parsing more easily
-    "xlsx": {
-        "default": ExtractionStrategy.PARSED.value,
-        "small": ExtractionStrategy.LLM_DIRECT.value,
-    },
-    "xls": {
-        "default": ExtractionStrategy.PARSED.value,
-        "small": ExtractionStrategy.LLM_DIRECT.value,
-    },
-    "csv": {
-        "default": ExtractionStrategy.PARSED.value,
-        "small": ExtractionStrategy.LLM_DIRECT.value,
-    },
-
-    # PDF needs more LLM involvement
-    "pdf": {
-        "default": ExtractionStrategy.HYBRID.value,
-        "small": ExtractionStrategy.LLM_DIRECT.value,
-        "medium": ExtractionStrategy.LLM_CHUNKED.value,
-    },
-
-    # Images need OCR + LLM
-    "image": {
-        "default": ExtractionStrategy.LLM_DIRECT.value,
-        "small": ExtractionStrategy.LLM_DIRECT.value,
-    },
-    "png": {
-        "default": ExtractionStrategy.LLM_DIRECT.value,
-    },
-    "jpg": {
-        "default": ExtractionStrategy.LLM_DIRECT.value,
-    },
-    "jpeg": {
-        "default": ExtractionStrategy.LLM_DIRECT.value,
-    },
-}
 
 
 def is_extractable_document_type(document_type: str) -> bool:
@@ -171,40 +127,9 @@ def get_schema_for_document_type(document_type: str) -> Optional[str]:
     return EXTRACTABLE_DOCUMENT_TYPES.get(doc_type_lower)
 
 
-def determine_extraction_strategy(
-    source_type: str,
-    estimated_rows: int
-) -> ExtractionStrategy:
-    """
-    Determine the best extraction strategy based on document characteristics.
-
-    Args:
-        source_type: Source file type (pdf, xlsx, csv, etc.)
-        estimated_rows: Estimated number of rows in the document
-
-    Returns:
-        ExtractionStrategy enum value
-    """
-    source_lower = source_type.lower() if source_type else "unknown"
-
-    # Get strategy config for source type
-    strategy_config = EXTRACTION_STRATEGIES.get(source_lower, {
-        "default": ExtractionStrategy.LLM_DIRECT.value,
-        "small": ExtractionStrategy.LLM_DIRECT.value,
-    })
-
-    # Determine based on row count
-    if estimated_rows < DIRECT_LLM_MAX_ROWS:
-        return ExtractionStrategy(strategy_config.get("small", strategy_config["default"]))
-    elif estimated_rows < CHUNKED_LLM_MAX_ROWS:
-        return ExtractionStrategy(strategy_config.get("medium", strategy_config["default"]))
-    elif estimated_rows < HYBRID_MAX_ROWS:
-        return ExtractionStrategy(strategy_config.get("large", ExtractionStrategy.HYBRID.value))
-    else:
-        return ExtractionStrategy.PARSED
-
-
 # Default extraction prompts for each schema type
+# NOTE: These prompts are used for LLM-based header/metadata extraction only.
+# Row data is extracted via direct parsing, not LLM.
 EXTRACTION_PROMPTS: Dict[str, str] = {
     "invoice": """Extract structured data from this invoice document.
 

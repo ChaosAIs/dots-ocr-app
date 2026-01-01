@@ -3,6 +3,11 @@ Extraction Eligibility Checker
 
 Determines if a document is eligible for structured data extraction.
 Uses the centralized DocumentTypeClassifier for LLM-driven analysis.
+
+NOTE: As of migration 022, extraction strategies have been simplified:
+- All tabular data uses direct parsing (no LLM for row extraction)
+- All line items stored in external table (documents_data_line_items)
+- The determine_strategy() method now returns a simple string, not ExtractionStrategy enum
 """
 
 import os
@@ -16,10 +21,6 @@ from db.models import Document
 from common.document_type_classifier import (
     DocumentTypeClassifier,
     ClassificationResult,
-)
-from .extraction_config import (
-    determine_extraction_strategy,
-    ExtractionStrategy,
 )
 
 logger = logging.getLogger(__name__)
@@ -134,37 +135,41 @@ class ExtractionEligibilityChecker:
     def determine_strategy(
         self,
         document_id: UUID
-    ) -> Tuple[ExtractionStrategy, Dict[str, Any]]:
+    ) -> Tuple[str, Dict[str, Any]]:
         """
         Determine the extraction strategy for a document.
+
+        NOTE: As of migration 022, all extraction uses direct parsing.
+        This method now returns a simple string ("direct_parsing") instead
+        of the deprecated ExtractionStrategy enum.
 
         Args:
             document_id: Document UUID
 
         Returns:
-            Tuple of (strategy, metadata)
+            Tuple of (strategy_string, metadata)
         """
         document = self.db.query(Document).filter(Document.id == document_id).first()
         if not document:
-            return ExtractionStrategy.LLM_DIRECT, {"error": "Document not found"}
+            return "direct_parsing", {"error": "Document not found"}
 
         # Get source type from filename
         source_type = self._get_source_type(document)
 
-        # Estimate row count
+        # Estimate row count (for metadata, not strategy selection)
         estimated_rows = self._estimate_row_count(document)
 
-        # Determine strategy
-        strategy = determine_extraction_strategy(source_type, estimated_rows)
+        # All extraction now uses direct parsing (no LLM strategies)
+        strategy = "direct_parsing"
 
         metadata = {
             "source_type": source_type,
             "estimated_rows": estimated_rows,
-            "strategy": strategy.value,
+            "strategy": strategy,
             "total_pages": document.total_pages,
         }
 
-        logger.info(f"Document {document_id}: strategy={strategy.value}, rows~{estimated_rows}")
+        logger.info(f"Document {document_id}: strategy={strategy}, rows~{estimated_rows}")
         return strategy, metadata
 
     def _get_source_type(self, document: Document) -> str:

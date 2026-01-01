@@ -374,42 +374,136 @@ class DocumentRouter:
                 if max_boosted_score == 0.0 and results:
                     max_boosted_score = results[0].get("score", 0)
 
-            # ========== DOCUMENT TYPE FILTERING ==========
-            # If document_type_hints are provided, filter/penalize mismatched types
-            # Uses centralized type matching with alias expansion for flexible matching
+            # ========== TABULAR DATA BOOST ==========
+            # Boost tabular documents (CSV/Excel) when query appears to be data analytics
+            # This ensures tabular data sources are found for aggregate queries
+            TABULAR_ANALYTICS_KEYWORDS = {
+                'max', 'min', 'maximum', 'minimum', 'average', 'avg', 'sum', 'total',
+                'count', 'highest', 'lowest', 'top', 'bottom', 'most', 'least',
+                'inventory', 'stock', 'product', 'products', 'items', 'records',
+                'price', 'prices', 'quantity', 'quantities', 'sales', 'revenue',
+                'list', 'find', 'show', 'display', 'get', 'filter', 'search',
+                'data', 'dataset', 'spreadsheet', 'csv', 'excel', 'table'
+            }
+            query_lower = original_query.lower()
+            query_words = set(query_lower.split())
+
+            analytics_keyword_count = len(query_words.intersection(TABULAR_ANALYTICS_KEYWORDS))
+
+            if analytics_keyword_count >= 2:  # At least 2 analytics-related keywords
+                TABULAR_DATA_BOOST = float(os.getenv("TABULAR_DATA_BOOST", "0.35"))
+                logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info(f"[Router Vector] TABULAR DATA BOOST:")
+                logger.info(f"[Router Vector]   • Analytics keywords found: {analytics_keyword_count}")
+                logger.info(f"[Router Vector]   • Matching keywords: {query_words.intersection(TABULAR_ANALYTICS_KEYWORDS)}")
+                logger.info(f"[Router Vector]   • Boost factor: {TABULAR_DATA_BOOST}")
+
+                for result in results:
+                    # Check if document is tabular (from payload or top-level field)
+                    payload = result.get("payload", {})
+                    is_tabular = result.get("is_tabular") or payload.get("is_tabular", False)
+
+                    if is_tabular:
+                        source_name = result.get("source_name", "")
+                        original_score = result.get("score", 0)
+                        boost = TABULAR_DATA_BOOST
+
+                        # Apply boost
+                        result["score"] = min(1.0, original_score + boost)
+                        result["_tabular_boosted"] = True
+                        result["_tabular_boost_amount"] = boost
+
+                        # Update max boosted score
+                        max_boosted_score = max(max_boosted_score, result["score"])
+
+                        # Get column info for logging
+                        columns = payload.get("columns", [])
+                        columns_str = ", ".join(columns[:5]) + ("..." if len(columns) > 5 else "")
+
+                        logger.info(
+                            f"[Router Vector]   ↑ TABULAR BOOST: {source_name:40s} "
+                            f"{original_score:.4f} → {result['score']:.4f} (+{boost:.4f}) "
+                            f"[columns: {columns_str}]"
+                        )
+
+                # Re-sort after tabular boost
+                results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+            # ========== DOCUMENT TYPES MATCHING BOOST ==========
+            # Boost documents whose document_types match query hints
+            # This rewards documents that are semantically classified to match the query
             doc_type_hints = [t.lower() for t in query_metadata.get("document_type_hints", [])]
             if doc_type_hints:
+                DOC_TYPE_MATCH_BOOST = float(os.getenv("DOC_TYPE_MATCH_BOOST", "0.25"))
                 DOC_TYPE_MISMATCH_PENALTY = float(os.getenv("DOC_TYPE_MISMATCH_PENALTY", "0.5"))
                 # Expand type hints to include aliases (e.g., "technical_doc" -> includes "report", "research_paper")
                 expanded_hints = expand_type_aliases(doc_type_hints)
-                logger.info(f"[Router Vector] DOCUMENT TYPE FILTERING:")
-                logger.info(f"[Router Vector]   • Required types: {doc_type_hints}")
+                logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+                logger.info(f"[Router Vector] DOCUMENT TYPES MATCHING:")
+                logger.info(f"[Router Vector]   • Query type hints: {doc_type_hints}")
                 logger.info(f"[Router Vector]   • Expanded types (with aliases): {sorted(expanded_hints)}")
-                logger.info(f"[Router Vector]   • Mismatch penalty: {DOC_TYPE_MISMATCH_PENALTY}")
+                logger.info(f"[Router Vector]   • Match boost: +{DOC_TYPE_MATCH_BOOST}")
+                logger.info(f"[Router Vector]   • Mismatch penalty: ×{DOC_TYPE_MISMATCH_PENALTY}")
 
                 for result in results:
-                    doc_type = (result.get("document_type") or "").lower()
+                    # Get document_types list
+                    payload = result.get("payload", {})
+                    doc_types = result.get("document_types") or payload.get("document_types", [])
+                    doc_types = [t.lower() for t in doc_types] if doc_types else []
+
                     source_name = result.get("source_name", "")
                     original_score = result.get("score", 0)
 
-                    # Use centralized type matching with alias expansion
-                    type_matches_result = types_match(doc_type_hints, doc_type)
+                    # Build document metadata for content-based type inference (fallback)
+                    doc_metadata = {
+                        "is_tabular": result.get("is_tabular") or payload.get("is_tabular", False),
+                        "columns": result.get("columns") or payload.get("columns", []),
+                        "schema_type": result.get("schema_type") or payload.get("schema_type", ""),
+                        "document_types": doc_types,
+                    }
 
-                    if not type_matches_result and doc_type:
-                        # Apply penalty for type mismatch
-                        result["score"] = original_score * DOC_TYPE_MISMATCH_PENALTY
-                        result["_type_penalized"] = True
+                    # Calculate match score based on how many document types match query hints
+                    matching_types = set(doc_types).intersection(expanded_hints)
+
+                    if matching_types:
+                        # BOOST: document types directly match query type hints
+                        # More matches = higher boost (up to 2x the base boost for 2+ matches)
+                        match_count = len(matching_types)
+                        boost = DOC_TYPE_MATCH_BOOST * min(match_count, 2)  # Cap at 2x boost
+                        result["score"] = min(1.0, original_score + boost)
+                        result["_type_boosted"] = True
+                        result["_type_boost_amount"] = boost
+                        max_boosted_score = max(max_boosted_score, result["score"])
                         logger.info(
-                            f"[Router Vector]   ↓ PENALIZED: {source_name:40s} "
-                            f"type='{doc_type}' not in {list(expanded_hints)} "
-                            f"({original_score:.4f} → {result['score']:.4f})"
+                            f"[Router Vector]   ↑ TYPE BOOST: {source_name:40s} "
+                            f"types={doc_types} matches {list(matching_types)} "
+                            f"({original_score:.4f} → {result['score']:.4f} +{boost:.4f})"
                         )
                     else:
-                        logger.debug(
-                            f"[Router Vector]   ✓ TYPE OK: {source_name:40s} type='{doc_type}'"
-                        )
+                        # Use centralized type matching for fallback (content-based inference, aliases)
+                        type_matches_result = types_match(doc_type_hints, doc_types, doc_metadata)
 
-                # Re-sort after type penalty
+                        if type_matches_result:
+                            # Matched via aliases or content-based inference - smaller boost
+                            boost = DOC_TYPE_MATCH_BOOST * 0.5
+                            result["score"] = min(1.0, original_score + boost)
+                            max_boosted_score = max(max_boosted_score, result["score"])
+                            logger.info(
+                                f"[Router Vector]   ↑ TYPE INFER: {source_name:40s} "
+                                f"types={doc_types} inferred match "
+                                f"({original_score:.4f} → {result['score']:.4f} +{boost:.4f})"
+                            )
+                        elif doc_types:
+                            # Apply penalty for type mismatch
+                            result["score"] = original_score * DOC_TYPE_MISMATCH_PENALTY
+                            result["_type_penalized"] = True
+                            logger.info(
+                                f"[Router Vector]   ↓ PENALIZED: {source_name:40s} "
+                                f"types={doc_types} not in {list(expanded_hints)} "
+                                f"({original_score:.4f} → {result['score']:.4f})"
+                            )
+
+                # Re-sort after type boost/penalty
                 results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
             # ========== ADAPTIVE THRESHOLD CALCULATION ==========

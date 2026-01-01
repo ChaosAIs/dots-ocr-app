@@ -695,11 +695,11 @@ class DocumentData(Base):
 
     # Extracted Data
     header_data = Column(JSONB, nullable=False, default=dict)
-    line_items = Column(JSONB, default=list)
     summary_data = Column(JSONB, default=dict)
 
-    # For large tables
-    line_items_storage = Column(String(16), default='inline')
+    # Line items count (actual data stored in documents_data_line_items table)
+    # NOTE: line_items and line_items_storage columns removed in migration 022
+    # All line items now stored externally in documents_data_line_items table
     line_items_count = Column(Integer, default=0)
 
     # Validation & Quality
@@ -728,7 +728,7 @@ class DocumentData(Base):
             "schema_type": self.schema_type,
             "schema_version": self.schema_version,
             "header_data": self.header_data,
-            "line_items": self.line_items if self.line_items_storage == 'inline' else f"[{self.line_items_count} items in external storage]",
+            "line_items": f"[{self.line_items_count} items in external storage]",
             "summary_data": self.summary_data,
             "line_items_count": self.line_items_count,
             "validation_status": self.validation_status,

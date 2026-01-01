@@ -215,3 +215,103 @@ class TaskQueueChunk(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class TaskQueueDocument(Base):
+    """
+    Document-level task queue for classification, extraction, and processing path routing.
+
+    This table coordinates document-level tasks that happen BEFORE chunk-level processing:
+    - Convert: OCR/document conversion coordination
+    - Classification: Document type detection and metadata extraction
+    - Extraction: Tabular data extraction (for tabular documents only)
+
+    Processing path determines subsequent workflow:
+    - 'standard': Document goes through chunking → vector indexing → GraphRAG
+    - 'tabular': Document goes through data extraction → summary chunks → vector indexing
+    """
+    __tablename__ = "task_queue_document"
+
+    id = Column(PGUUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid())
+    document_id = Column(PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, unique=True)
+
+    # === Phase 1: Convert (OCR/Document Conversion) ===
+    convert_status = Column(
+        SQLEnum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=TaskStatus.PENDING
+    )
+    convert_worker_id = Column(String(100), nullable=True)
+    convert_started_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    convert_completed_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    convert_error = Column(Text, nullable=True)
+    convert_retry_count = Column(Integer, default=0)
+    convert_last_heartbeat = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # === Phase 2: Classification & Metadata Extraction ===
+    classification_status = Column(
+        SQLEnum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=TaskStatus.PENDING
+    )
+    classification_worker_id = Column(String(100), nullable=True)
+    classification_started_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    classification_completed_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    classification_error = Column(Text, nullable=True)
+    classification_retry_count = Column(Integer, default=0)
+    classification_last_heartbeat = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # === Phase 3: Data Extraction (Tabular Documents Only) ===
+    extraction_status = Column(
+        SQLEnum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=TaskStatus.PENDING
+    )
+    extraction_worker_id = Column(String(100), nullable=True)
+    extraction_started_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    extraction_completed_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    extraction_error = Column(Text, nullable=True)
+    extraction_retry_count = Column(Integer, default=0)
+    extraction_last_heartbeat = Column(TIMESTAMP(timezone=True), nullable=True)
+
+    # Routing decision after classification
+    processing_path = Column(String(20), default='standard')  # 'standard' or 'tabular'
+
+    # Common metadata
+    max_retries = Column(Integer, default=3)
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return {
+            "id": str(self.id),
+            "document_id": str(self.document_id),
+            # Convert phase
+            "convert_status": self.convert_status.value if self.convert_status else None,
+            "convert_worker_id": self.convert_worker_id,
+            "convert_started_at": self.convert_started_at.isoformat() if self.convert_started_at else None,
+            "convert_completed_at": self.convert_completed_at.isoformat() if self.convert_completed_at else None,
+            "convert_error": self.convert_error,
+            "convert_retry_count": self.convert_retry_count,
+            # Classification phase
+            "classification_status": self.classification_status.value if self.classification_status else None,
+            "classification_worker_id": self.classification_worker_id,
+            "classification_started_at": self.classification_started_at.isoformat() if self.classification_started_at else None,
+            "classification_completed_at": self.classification_completed_at.isoformat() if self.classification_completed_at else None,
+            "classification_error": self.classification_error,
+            "classification_retry_count": self.classification_retry_count,
+            # Extraction phase
+            "extraction_status": self.extraction_status.value if self.extraction_status else None,
+            "extraction_worker_id": self.extraction_worker_id,
+            "extraction_started_at": self.extraction_started_at.isoformat() if self.extraction_started_at else None,
+            "extraction_completed_at": self.extraction_completed_at.isoformat() if self.extraction_completed_at else None,
+            "extraction_error": self.extraction_error,
+            "extraction_retry_count": self.extraction_retry_count,
+            # Routing
+            "processing_path": self.processing_path,
+            # Metadata
+            "max_retries": self.max_retries,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

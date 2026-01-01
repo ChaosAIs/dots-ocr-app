@@ -302,13 +302,20 @@ export const DocumentList = forwardRef((props, ref) => {
           if (data.event_type && data.document_id) {
             console.log(`🔄 Received status update for document ${data.document_id}: ${data.event_type}`, data);
 
-            // Always reload documents to get the latest status from backend
-            console.log(`🔄 Reloading all documents due to ${data.event_type} for document ${data.document_id}`);
-            if (loadDocumentsRef.current) {
+            // Reload documents for completion events and significant progress updates
+            const shouldReload = data.event_type === "indexing_completed" ||
+                                 data.event_type === "ocr_completed" ||
+                                 data.event_type === "extraction_completed" ||
+                                 data.event_type === "extraction_failed" ||
+                                 data.event_type === "extraction_progress" ||
+                                 data.event_type === "document_uploaded";
+
+            if (shouldReload && loadDocumentsRef.current) {
+              console.log(`🔄 Reloading all documents due to ${data.event_type} for document ${data.document_id}`);
               loadDocumentsRef.current();
             }
 
-            // If indexing/conversion/extraction completed, remove from subscriptions
+            // If indexing/conversion/extraction completed or failed, remove from subscriptions
             if (data.event_type === "indexing_completed" || data.event_type === "ocr_completed" ||
                 data.event_type === "extraction_completed" || data.event_type === "extraction_failed") {
               subscribedDocIdsRef.current.delete(data.document_id);

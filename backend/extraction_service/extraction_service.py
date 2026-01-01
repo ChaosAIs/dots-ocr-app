@@ -22,10 +22,8 @@ from sqlalchemy.orm import Session as DBSession
 
 from db.models import Document, DocumentData, DocumentDataLineItem, DataSchema
 from .extraction_config import (
-    ExtractionStrategy,
     get_extraction_prompt,
     get_schema_for_document_type,
-    CHUNKED_LLM_MAX_ROWS,
 )
 from .eligibility_checker import ExtractionEligibilityChecker
 
@@ -36,11 +34,10 @@ class ExtractionService:
     """
     Service for extracting structured data from documents.
 
-    Supports multiple extraction strategies:
-    - LLM Direct: Single LLM call for small documents
-    - LLM Chunked: Parallel chunked extraction for medium documents
-    - Hybrid: LLM for headers, rules for data
-    - Parsed: Pure pattern matching for large documents
+    Extraction Approach:
+    - Direct parsing for all tabular data (CSV, Excel, markdown tables)
+    - LLM used only for document classification and field mapping inference
+    - All extracted row data stored in documents_data_line_items table (external storage only)
 
     Schema Management:
     - Looks up formal schemas from DataSchema table
@@ -233,11 +230,11 @@ IMPORTANT:
             self._update_extraction_status(document_id, "skipped", error=reason)
             return None
 
-        # Determine strategy
+        # Determine strategy (now always returns "direct_parsing")
         logger.info("-" * 80)
         logger.info("[Extraction] STEP 3: Determining extraction strategy...")
         strategy, strategy_metadata = self.eligibility_checker.determine_strategy(document_id)
-        logger.info(f"[Extraction] Strategy selected: {strategy.value}")
+        logger.info(f"[Extraction] Strategy selected: {strategy}")
         if strategy_metadata:
             logger.info(f"[Extraction] Strategy metadata: {strategy_metadata}")
 
@@ -266,26 +263,16 @@ IMPORTANT:
             if schema_field_mappings:
                 logger.info(f"[Extraction] Pre-defined field mappings: {len(schema_field_mappings)} fields")
 
-            # Execute extraction based on strategy
+            # Execute extraction using direct parsing (unified strategy since migration 022)
             logger.info("-" * 80)
             logger.info("[Extraction] STEP 6: Executing extraction...")
-            logger.info(f"[Extraction] Using strategy: {strategy.value}")
+            logger.info(f"[Extraction] Using strategy: {strategy}")
 
-            if strategy == ExtractionStrategy.LLM_DIRECT:
-                logger.info("[Extraction] Running LLM_DIRECT extraction (single LLM call)...")
-                result = self._extract_llm_direct(content, schema_type, extraction_prompt)
-            elif strategy == ExtractionStrategy.LLM_CHUNKED:
-                logger.info("[Extraction] Running LLM_CHUNKED extraction (parallel chunked calls)...")
-                result = self._extract_llm_chunked(content, schema_type, strategy_metadata, extraction_prompt)
-            elif strategy == ExtractionStrategy.HYBRID:
-                logger.info("[Extraction] Running HYBRID extraction (LLM for headers, rules for data)...")
-                result = self._extract_hybrid(content, schema_type, strategy_metadata, extraction_prompt)
-            elif strategy == ExtractionStrategy.PARSED:
-                logger.info("[Extraction] Running PARSED extraction (pure pattern matching)...")
-                result = self._extract_parsed(content, schema_type, document)
-            else:
-                logger.info("[Extraction] Running default LLM_DIRECT extraction...")
-                result = self._extract_llm_direct(content, schema_type, extraction_prompt)
+            # All extraction now uses direct parsing approach
+            # For spreadsheets: parse tables directly
+            # For other documents: use LLM for metadata, parse for row data
+            logger.info("[Extraction] Running direct_parsing extraction...")
+            result = self._extract_direct_parsing(content, schema_type, extraction_prompt, document)
 
             # Validate and save
             if result:
@@ -334,7 +321,7 @@ IMPORTANT:
                 logger.info(f"[Extraction] FINAL SUMMARY:")
                 logger.info(f"[Extraction]   - Document ID: {document_id}")
                 logger.info(f"[Extraction]   - Schema type: {schema_type}")
-                logger.info(f"[Extraction]   - Strategy: {strategy.value}")
+                logger.info(f"[Extraction]   - Strategy: {strategy}")
                 logger.info(f"[Extraction]   - Line items extracted: {line_items_count}")
                 logger.info(f"[Extraction]   - Total duration: {duration_ms}ms")
                 logger.info(f"[Extraction]   - Status: COMPLETED")
@@ -406,8 +393,13 @@ IMPORTANT:
         if not document:
             return None
 
-        # Get the output directory path
+        # Get the output directory path - resolve to absolute path
         output_dir = os.getenv("OUTPUT_DIR", os.path.join(os.path.dirname(__file__), "..", "output"))
+        # If relative path, resolve relative to backend directory (where .env is loaded from)
+        if not os.path.isabs(output_dir):
+            backend_dir = os.path.dirname(os.path.dirname(__file__))  # extraction_service/../ = backend/
+            output_dir = os.path.join(backend_dir, output_dir.lstrip("./"))
+        output_dir = os.path.abspath(output_dir)
 
         try:
             # Get filename without extension
@@ -663,6 +655,83 @@ IMPORTANT:
             logger.error(f"LLM extraction failed: {e}")
             raise
 
+    def _extract_direct_parsing(
+        self,
+        content: str,
+        schema_type: str,
+        extraction_prompt: Optional[str] = None,
+        document: Optional[Document] = None
+    ) -> Dict[str, Any]:
+        """
+        Unified extraction using direct parsing approach.
+
+        This is the primary extraction method as of migration 022.
+        All row data is extracted via direct parsing, LLM is only used
+        for header/metadata extraction when needed.
+
+        Strategy:
+        1. For spreadsheets: Direct table parsing (no LLM for row data)
+        2. For other tabular documents: Parse tables first, use LLM for metadata
+        3. Fallback: LLM extraction for complex/unstructured content
+
+        Args:
+            content: Document content
+            schema_type: Target schema type
+            extraction_prompt: Schema-specific extraction prompt
+            document: Document model for file access
+
+        Returns:
+            Extracted data dictionary with header_data, line_items, summary_data
+        """
+        # For spreadsheet types, always try direct parsing first
+        if schema_type == "spreadsheet":
+            # Try parsing spreadsheet file directly
+            if document:
+                file_result = self._parse_spreadsheet_file(document)
+                if file_result and file_result.get("line_items"):
+                    logger.info(f"[DirectParsing] Parsed {len(file_result['line_items'])} rows from spreadsheet file")
+                    return file_result
+
+            # Try parsing markdown tables in content
+            parsed_result = self._parse_markdown_table(content)
+            if parsed_result and parsed_result.get("line_items"):
+                logger.info(f"[DirectParsing] Parsed {len(parsed_result['line_items'])} rows from markdown table")
+                return parsed_result
+
+            logger.info("[DirectParsing] Direct parsing found no data, falling back to LLM")
+
+        # For non-spreadsheet documents with tables, try hybrid approach
+        if '|' in content:
+            # Content has tables, try to parse them
+            parsed_result = self._parse_markdown_table(content)
+            if parsed_result and parsed_result.get("line_items"):
+                # We have table data, now get metadata via LLM if available
+                if self.llm_client and extraction_prompt:
+                    try:
+                        # Extract only header/metadata from first section
+                        first_section = content[:10000]
+                        prompt = extraction_prompt or get_extraction_prompt(schema_type)
+                        metadata_prompt = f"""{prompt}
+
+IMPORTANT: Focus only on extracting the header_data (document metadata) and summary_data.
+The line_items have already been extracted separately.
+
+Document content:
+{first_section}"""
+                        response = self.llm_client.generate(metadata_prompt)
+                        llm_result = self._parse_llm_response(response)
+                        # Merge LLM metadata with parsed line items
+                        parsed_result["header_data"] = llm_result.get("header_data", {})
+                        parsed_result["summary_data"] = llm_result.get("summary_data", {})
+                        logger.info(f"[DirectParsing] Merged LLM metadata with {len(parsed_result['line_items'])} parsed rows")
+                    except Exception as e:
+                        logger.warning(f"[DirectParsing] LLM metadata extraction failed: {e}")
+                return parsed_result
+
+        # Fallback: Use LLM extraction for complex/unstructured content
+        # This is only for non-tabular documents where parsing doesn't work
+        return self._extract_llm_direct(content, schema_type, extraction_prompt)
+
     def _extract_llm_chunked(
         self,
         content: str,
@@ -848,11 +917,17 @@ Document section:
             columns = df.columns.tolist()
             line_items = df.to_dict('records')
 
-            # Convert NaN to None
+            # Convert NaN to None and Timestamps to ISO strings for JSON serialization
             for item in line_items:
                 for key, value in item.items():
                     if pd.isna(value):
                         item[key] = None
+                    elif isinstance(value, (pd.Timestamp, datetime)):
+                        # Convert Timestamp/datetime to ISO string for JSON serialization
+                        item[key] = value.isoformat()
+                    elif hasattr(value, 'item'):
+                        # Convert numpy types (int64, float64, etc.) to Python native types
+                        item[key] = value.item()
 
             return {
                 "header_data": {
@@ -1537,7 +1612,7 @@ Document section:
         document_id: UUID,
         schema_type: str,
         result: Dict[str, Any],
-        strategy: ExtractionStrategy,
+        strategy: str,
         duration_ms: int,
         metadata: Dict[str, Any],
         field_mappings: Optional[Dict[str, Any]] = None
@@ -1545,11 +1620,14 @@ Document section:
         """
         Save extraction result to database with field_mappings cached in extraction_metadata.
 
+        NOTE: As of migration 022, strategy is always "direct_parsing" (string).
+        The ExtractionStrategy enum has been removed.
+
         Args:
             document_id: Document UUID
             schema_type: Schema type
             result: Extraction result
-            strategy: Strategy used
+            strategy: Strategy string (always "direct_parsing")
             duration_ms: Extraction duration
             metadata: Additional metadata
             field_mappings: Field mappings to cache in extraction_metadata
@@ -1577,20 +1655,19 @@ Document section:
                     header_data["currency"] = None
                     logger.debug(f"Cleared invalid currency value: {currency_val}")
 
-        # Determine storage method
+        # All line items stored externally (external-only storage since migration 022)
         line_items_count = len(line_items)
-        if line_items_count > CHUNKED_LLM_MAX_ROWS:
-            storage = "external"
-            inline_items = []  # Will store in overflow table
-        else:
-            storage = "inline"
-            inline_items = line_items
 
         # Build extraction_metadata with field_mappings cache
         extraction_metadata = metadata.copy() if metadata else {}
         if field_mappings:
             extraction_metadata['field_mappings'] = field_mappings
         extraction_metadata['cached_at'] = datetime.utcnow().isoformat()
+
+        # Determine extraction method string (for tracking purposes)
+        extraction_method = "direct_parsing"
+        if strategy:
+            extraction_method = strategy if isinstance(strategy, str) else getattr(strategy, 'value', 'direct_parsing')
 
         # Create or update DocumentData
         existing = self.db.query(DocumentData).filter(
@@ -1600,11 +1677,9 @@ Document section:
         if existing:
             existing.schema_type = schema_type
             existing.header_data = header_data
-            existing.line_items = inline_items
             existing.summary_data = summary_data
-            existing.line_items_storage = storage
             existing.line_items_count = line_items_count
-            existing.extraction_method = strategy.value
+            existing.extraction_method = extraction_method
             existing.extraction_duration_ms = duration_ms
             existing.extraction_metadata = extraction_metadata
             existing.validation_status = "pending"
@@ -1614,11 +1689,9 @@ Document section:
                 document_id=document_id,
                 schema_type=schema_type,
                 header_data=header_data,
-                line_items=inline_items,
                 summary_data=summary_data,
-                line_items_storage=storage,
                 line_items_count=line_items_count,
-                extraction_method=strategy.value,
+                extraction_method=extraction_method,
                 extraction_duration_ms=duration_ms,
                 extraction_metadata=extraction_metadata,
                 validation_status="pending"
@@ -1630,23 +1703,24 @@ Document section:
 
         logger.info(f"[Extraction] Saved document_data with field_mappings cached in extraction_metadata")
 
-        # Store overflow line items if needed
-        if storage == "external":
-            # Delete existing overflow items
+        # Store ALL line items in external table (external-only storage)
+        if line_items:
+            # Delete existing line items
             self.db.query(DocumentDataLineItem).filter(
                 DocumentDataLineItem.documents_data_id == document_data.id
             ).delete()
 
-            # Insert new overflow items
+            # Insert all line items to external table
             for i, item in enumerate(line_items):
-                overflow_item = DocumentDataLineItem(
+                line_item = DocumentDataLineItem(
                     documents_data_id=document_data.id,
                     line_number=i,
                     data=item
                 )
-                self.db.add(overflow_item)
+                self.db.add(line_item)
 
             self.db.commit()
+            logger.info(f"[Extraction] Stored {line_items_count} line items in external table")
 
         return document_data
 

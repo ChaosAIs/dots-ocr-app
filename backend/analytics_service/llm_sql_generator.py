@@ -374,19 +374,15 @@ class LLMSQLGenerator:
     SQL_GENERATION_PROMPT = """You are a SQL expert. Generate a PostgreSQL query to answer the user's question.
 
 ## Data Structure
-The data is stored in PostgreSQL tables. Line items can be stored in two ways:
-1. **Inline storage**: line_items JSONB array in documents_data table
-2. **External storage**: Separate documents_data_line_items table (for large datasets)
+The data is stored in PostgreSQL tables with line items in external storage.
 
 ### Tables:
-- documents_data (alias: dd) - Document metadata and optional inline line_items
-- documents_data_line_items (alias: li) - External line items storage (data JSONB column)
-
-Storage type for this query: {storage_type}
+- documents_data (alias: dd) - Document metadata with header_data JSONB
+- documents_data_line_items (alias: li) - Line items storage (data JSONB column)
 
 CRITICAL: Fields have different sources:
-- source='header': Access via dd.header_data->>'field_name'
-- source='line_item': Access via data->>'field_name' (external) or item->>'field_name' (inline)
+- source='header': Access via dd.header_data->>'field_name' or header_data->>'field_name'
+- source='line_item': Access via li.data->>'field_name' or item->>'field_name'
 
 ### Available Fields and Their Types:
 {field_schema}
@@ -394,8 +390,8 @@ CRITICAL: Fields have different sources:
 ## User Query:
 "{user_query}"
 
-## Requirements (based on storage type):
-### For EXTERNAL storage (use documents_data_line_items):
+## Required SQL Structure (EXTERNAL STORAGE):
+Always use this pattern for accessing line items:
 ```sql
 WITH items AS (
     SELECT dd.header_data, li.data as item
@@ -406,18 +402,8 @@ WITH items AS (
 SELECT ... FROM items ...
 ```
 
-### For INLINE storage (use jsonb_array_elements):
-```sql
-WITH expanded_items AS (
-    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
-    FROM documents_data dd
-    {{WHERE_CLAUSE}}
-)
-SELECT ... FROM expanded_items ...
-```
-
 ### Common requirements:
-1. For header fields (source='header'): Use dd.header_data->>'field_name' or header_data->>'field_name'
+1. For header fields (source='header'): Use header_data->>'field_name'
 2. For line_item fields (source='line_item'): Use item->>'field_name'
 3. Use proper type casting: ::numeric for numbers, ::timestamp for dates
 4. Use ROUND() for monetary values to 2 decimal places
@@ -1113,7 +1099,7 @@ Respond with JSON only:"""
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
         table_filter: Optional[str] = None,
-        storage_type: str = "inline"
+        storage_type: str = "external"
     ) -> SQLGenerationResult:
         """
         Generate SQL query based on user query and field mappings.
@@ -1123,11 +1109,15 @@ Respond with JSON only:"""
         - Round 2: Field mapping to match user terms to actual schema fields
         - Round 3: SQL generation with verified parameters
 
+        NOTE: As of migration 022, storage_type defaults to "external".
+        All line items are now stored in documents_data_line_items table.
+        The "inline" storage (jsonb_array_elements) is deprecated.
+
         Args:
             user_query: User's natural language query
             field_mappings: Dynamic field mappings from extracted data
             table_filter: Optional WHERE clause filter for specific documents
-            storage_type: "inline" or "external" - determines SQL query structure
+            storage_type: "external" (default) - inline is deprecated
 
         Returns:
             SQLGenerationResult with generated SQL and metadata
@@ -1162,7 +1152,7 @@ Respond with JSON only:"""
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
         table_filter: Optional[str] = None,
-        storage_type: str = "inline"
+        storage_type: str = "external"
     ) -> Tuple[Optional[SQLGenerationResult], Optional[SQLGenerationResult]]:
         """
         Generate two separate SQL queries for MIN and MAX aggregations.
@@ -1171,11 +1161,13 @@ Respond with JSON only:"""
         have max inventory and min inventory"). Instead of generating one complex UNION ALL
         query, we generate two simple queries and let the executor run them separately.
 
+        NOTE: As of migration 022, storage_type defaults to "external".
+
         Args:
             user_query: User's natural language query
             field_mappings: Dynamic field mappings from extracted data
             table_filter: Optional WHERE clause filter for specific documents
-            storage_type: "inline" or "external" - determines SQL query structure
+            storage_type: "external" (default) - inline is deprecated
 
         Returns:
             Tuple of (min_query_result, max_query_result)
@@ -1290,7 +1282,7 @@ Respond with JSON only:"""
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
         table_filter: Optional[str] = None,
-        storage_type: str = "inline"
+        storage_type: str = "external"
     ) -> SQLGenerationResult:
         """
         Generate SQL using multi-round LLM analysis.
@@ -1298,6 +1290,8 @@ Respond with JSON only:"""
         Round 1: Analyze query to understand grouping order and intent
         Round 2: Map user terms to actual schema field names
         Round 3: Generate SQL with verified parameters
+
+        NOTE: As of migration 022, always uses external storage (documents_data_line_items).
         """
         field_schema = self._format_field_schema(field_mappings)
         field_schema_json = self._format_field_schema_json(field_mappings)
@@ -1674,6 +1668,10 @@ Respond with JSON only:"""
         Convert SQL from inline line_items (jsonb_array_elements) to external storage
         (documents_data_line_items table).
 
+        DEPRECATED: As of migration 022, all storage is external.
+        This function is kept for backward compatibility with any cached/legacy
+        SQL that might still use inline patterns.
+
         This is a post-processing step that rewrites SQL generated for inline storage
         to work with external storage.
 
@@ -1996,12 +1994,14 @@ Respond with JSON only:"""
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
         table_filter: Optional[str] = None,
-        storage_type: str = "inline"
+        storage_type: str = "external"
     ) -> SQLGenerationResult:
         """
         Generate SQL using heuristics when LLM is not available.
 
         This provides a fallback that handles common query patterns.
+
+        NOTE: As of migration 022, always uses external storage (documents_data_line_items).
         """
         query_lower = user_query.lower()
 

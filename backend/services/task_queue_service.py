@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from db.models import Document, ConvertStatus, IndexStatus, TaskStatus
 from db.document_repository import DocumentRepository
 from db.database import get_db_session
+from datetime import timezone
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +145,13 @@ class TaskQueueService:
 
         try:
             with get_db_session() as db:
+                # ================================================================
+                # SECTION 1: DOCUMENT LOOKUP
+                # ================================================================
+                logger.info("=" * 80)
+                logger.info("[OCR Task] ========== SECTION 1: DOCUMENT LOOKUP ==========")
+                logger.info("=" * 80)
+
                 repo = DocumentRepository(db)
                 doc = repo.get_by_id(page_task.document_id)
 
@@ -152,7 +160,21 @@ class TaskQueueService:
 
                 filename = doc.filename
                 base_name = os.path.splitext(filename)[0]
-                logger.info(f"🔄 Processing OCR for page {page_task.page_number} of document: {filename}")
+
+                logger.info(f"[OCR Task] Document ID: {page_task.document_id}")
+                logger.info(f"[OCR Task] Filename: {filename}")
+                logger.info(f"[OCR Task] Base name: {base_name}")
+                logger.info(f"[OCR Task] Page number: {page_task.page_number}")
+                logger.info(f"[OCR Task] Total pages: {doc.total_pages}")
+                logger.info(f"[OCR Task] Current convert_status: {doc.convert_status}")
+                logger.info("-" * 80)
+
+                # ================================================================
+                # SECTION 2: FILE PATH RESOLUTION
+                # ================================================================
+                logger.info("=" * 80)
+                logger.info("[OCR Task] ========== SECTION 2: FILE PATH RESOLUTION ==========")
+                logger.info("=" * 80)
 
                 # Get input file path from database
                 db_file_path = doc.file_path
@@ -160,6 +182,9 @@ class TaskQueueService:
                     db_file_path = filename
 
                 input_path = self.resolve_file_path(db_file_path)
+                logger.info(f"[OCR Task] DB file_path: {db_file_path}")
+                logger.info(f"[OCR Task] Resolved input_path: {input_path}")
+                logger.info(f"[OCR Task] Input file exists: {os.path.exists(input_path)}")
 
                 if not os.path.exists(input_path):
                     raise FileNotFoundError(f"Input file not found: {input_path}")
@@ -170,6 +195,9 @@ class TaskQueueService:
                 else:
                     rel_dir = os.path.dirname(db_file_path)
                     page_output_dir = os.path.join(self.output_dir, rel_dir, base_name) if rel_dir else os.path.join(self.output_dir, base_name)
+
+                logger.info(f"[OCR Task] Output directory: {page_output_dir}")
+                logger.info("-" * 80)
 
                 # Helper function to find the actual page markdown file
                 def find_page_markdown(page_num: int, total_pages: int) -> str:
@@ -191,8 +219,20 @@ class TaskQueueService:
                 total_pages = doc.total_pages or 1
                 page_output_path = find_page_markdown(page_task.page_number, total_pages)
 
+                # ================================================================
+                # SECTION 3: DOCUMENT CONVERSION
+                # ================================================================
+                logger.info("=" * 80)
+                logger.info("[OCR Task] ========== SECTION 3: DOCUMENT CONVERSION ==========")
+                logger.info("=" * 80)
+                logger.info(f"[OCR Task] Looking for existing markdown...")
+                logger.info(f"[OCR Task] Page markdown found: {page_output_path is not None}")
+                if page_output_path:
+                    logger.info(f"[OCR Task] Markdown path: {page_output_path}")
+
                 if not page_output_path:
-                    logger.info(f"📄 Page markdown not found, triggering conversion for document: {filename}")
+                    logger.info(f"[OCR Task] Page markdown NOT found, triggering conversion...")
+                    logger.info(f"[OCR Task] Document: {filename}")
 
                     lock_file = os.path.join(page_output_dir, f".{base_name}.converting")
 
@@ -216,28 +256,46 @@ class TaskQueueService:
 
                             # Check if file should use doc_service converter (Excel, Word, CSV, etc.)
                             file_ext = Path(input_path).suffix.lower()
+                            logger.info(f"[OCR Task] File extension: {file_ext}")
+                            logger.info(f"[OCR Task] DOC_SERVICE_EXTENSIONS: {self.DOC_SERVICE_EXTENSIONS}")
+
                             if file_ext in self.DOC_SERVICE_EXTENSIONS:
                                 # Use doc_service converter for Excel/Word/CSV files (skip OCR)
-                                logger.info(f"📊 Using doc_service converter for {filename} (extension: {file_ext})")
+                                logger.info("-" * 40)
+                                logger.info(f"[OCR Task] >>> Using DOC_SERVICE converter (non-OCR)")
+                                logger.info(f"[OCR Task] Converter type: PlainTextConverter or similar")
+                                logger.info(f"[OCR Task] Input: {input_path}")
+                                logger.info(f"[OCR Task] Output dir: {page_output_dir}")
+                                logger.info("-" * 40)
+
                                 page_output_path = self._convert_with_doc_service(
                                     input_path=input_path,
                                     output_dir=page_output_dir,
                                     base_name=base_name
                                 )
-                                logger.info(f"✅ Doc service conversion completed for {filename}")
+
+                                logger.info(f"[OCR Task] Doc service conversion COMPLETED")
+                                logger.info(f"[OCR Task] Output file: {page_output_path}")
                             else:
                                 # Use OCR for PDFs and images
                                 parser_output_dir = os.path.dirname(page_output_dir)
-                                logger.info(f"🚀 Starting OCR conversion for {filename} -> {parser_output_dir}")
+                                logger.info("-" * 40)
+                                logger.info(f"[OCR Task] >>> Using OCR converter")
+                                logger.info(f"[OCR Task] Input: {input_path}")
+                                logger.info(f"[OCR Task] Output dir: {parser_output_dir}")
+                                logger.info("-" * 40)
+
                                 results = self.parser.parse_file(
                                     input_path,
                                     output_dir=parser_output_dir,
                                     prompt_mode="prompt_layout_all_en",
                                 )
-                                logger.info(f"✅ OCR conversion completed for {filename}: {len(results)} pages")
+
+                                logger.info(f"[OCR Task] OCR conversion COMPLETED: {len(results)} pages")
 
                             doc.output_path = self.to_relative_output_path(page_output_dir)
                             db.commit()
+                            logger.info(f"[OCR Task] Updated doc.output_path: {doc.output_path}")
 
                         finally:
                             if os.path.exists(lock_file):
@@ -253,13 +311,55 @@ class TaskQueueService:
                         f"{base_name}_nohf.md or {base_name}_page_{page_task.page_number}_nohf.md"
                     )
 
-                # V2.0: Tabular detection moved to AdaptiveChunker
-                # The chunker will analyze content and decide whether to skip row chunking
-                # and generate summary chunks instead. This allows content-based detection
-                # instead of just extension-based detection at upload time.
+                logger.info(f"[OCR Task] Conversion complete. Markdown file: {page_output_path}")
+                logger.info("-" * 80)
 
-                # Read the page content and create chunks
-                logger.info(f"📚 Chunking page {page_task.page_number} content...")
+                # ================================================================
+                # SECTION 4: DOCUMENT CLASSIFICATION & ROUTING
+                # ================================================================
+                logger.info("=" * 80)
+                logger.info("[OCR Task] ========== SECTION 4: CLASSIFICATION & ROUTING ==========")
+                logger.info("=" * 80)
+                logger.info("[OCR Task] Determining processing path: TABULAR vs STANDARD")
+                logger.info("[OCR Task]   - TABULAR: CSV, Excel, invoices → data extraction")
+                logger.info("[OCR Task]   - STANDARD: Other documents → semantic chunking")
+
+                file_ext = Path(doc.filename).suffix.lower() if doc.filename else ''
+                logger.info(f"[OCR Task] File extension for routing: {file_ext}")
+
+                # Check if this is a tabular document that should skip chunking
+                logger.info("[OCR Task] Calling _check_and_route_tabular_document()...")
+                is_tabular_doc = self._check_and_route_tabular_document(
+                    document_id=page_task.document_id,
+                    filename=filename,
+                    file_ext=file_ext,
+                    output_dir=page_output_dir,
+                    page_output_path=page_output_path,
+                    db=db
+                )
+
+                logger.info(f"[OCR Task] Routing result: is_tabular={is_tabular_doc}")
+
+                if is_tabular_doc:
+                    # Document routed to TABULAR PATH
+                    # Data extraction has been triggered, skip chunking
+                    logger.info("=" * 80)
+                    logger.info("[OCR Task] ========== TABULAR PATH - EXTRACTION TRIGGERED ==========")
+                    logger.info("=" * 80)
+                    logger.info(f"[OCR Task] Document routed to TABULAR extraction path")
+                    logger.info(f"[OCR Task] Chunking SKIPPED for tabular document")
+                    logger.info(f"[OCR Task] Page task completed for: {filename}")
+                    logger.info("=" * 80)
+                    return page_output_path
+
+                # ================================================================
+                # SECTION 5: STANDARD PATH - CHUNKING
+                # ================================================================
+                logger.info("=" * 80)
+                logger.info("[OCR Task] ========== SECTION 5: STANDARD PATH - CHUNKING ==========")
+                logger.info("=" * 80)
+                logger.info(f"[OCR Task] Document routed to STANDARD chunking path")
+                logger.info(f"[OCR Task] Page {page_task.page_number} will be chunked for semantic indexing")
 
                 page_record = db.query(TaskQueuePage).filter(
                     TaskQueuePage.id == page_task.id
@@ -268,7 +368,7 @@ class TaskQueueService:
                 if page_record:
                     # Check if this is a single-file document (non-PDF like Excel, Word, CSV)
                     # These produce a single output file, so we should only create chunks once
-                    file_ext = Path(doc.filename).suffix.lower() if doc.filename else ''
+                    # Note: file_ext already defined above in classification section
                     is_single_file_doc = file_ext in self.DOC_SERVICE_EXTENSIONS
 
                     if is_single_file_doc:
@@ -394,6 +494,252 @@ class TaskQueueService:
 
         logger.info(f"✅ Successfully converted {file_path_obj.name} using {converter.get_converter_info()['name']}")
         return str(output_path)
+
+    def _check_and_route_tabular_document(
+        self,
+        document_id: UUID,
+        filename: str,
+        file_ext: str,
+        output_dir: str,
+        page_output_path: str,
+        db: Session
+    ) -> bool:
+        """
+        Check if document should use TABULAR path and trigger extraction if so.
+
+        This implements the CLASSIFICATION & ROUTING step from the Task Queue
+        Workflow Redesign Plan. It runs AFTER convert but BEFORE chunking.
+
+        Routing Logic:
+        - CSV, Excel (.csv, .xlsx, .xls) → Always TABULAR
+        - PDF/images with invoice/receipt/bank_statement → TABULAR
+        - All other documents → STANDARD (continue to chunking)
+
+        Args:
+            document_id: Document UUID
+            filename: Original filename
+            file_ext: File extension (lowercase, with dot)
+            output_dir: Output directory path
+            page_output_path: Path to converted markdown file
+            db: Database session
+
+        Returns:
+            True if document routed to TABULAR path (skip chunking)
+            False if document should continue to STANDARD path (chunking)
+        """
+        from common.document_type_classifier import TabularDataDetector
+        from queue_service import TaskQueueDocument
+
+        logger.info("=" * 80)
+        logger.info("[Routing] ========== DOCUMENT CLASSIFICATION & ROUTING START ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Routing] Document ID: {document_id}")
+        logger.info(f"[Routing] Filename: {filename}")
+        logger.info(f"[Routing] File extension: {file_ext}")
+        logger.info(f"[Routing] Output dir: {output_dir}")
+        logger.info(f"[Routing] Page output path: {page_output_path}")
+        logger.info("-" * 80)
+
+        # ----------------------------------------------------------------
+        # STEP 4.1: Get or create task_queue_document record
+        # ----------------------------------------------------------------
+        logger.info("[Routing] --- STEP 4.1: TaskQueueDocument Record ---")
+        tq_doc = db.query(TaskQueueDocument).filter(
+            TaskQueueDocument.document_id == document_id
+        ).first()
+
+        if not tq_doc:
+            logger.info("[Routing] TaskQueueDocument NOT found, creating new record...")
+            tq_doc = TaskQueueDocument(
+                document_id=document_id,
+                convert_status=TaskStatus.COMPLETED,
+                convert_completed_at=datetime.now(timezone.utc),
+                classification_status=TaskStatus.PROCESSING,
+                classification_started_at=datetime.now(timezone.utc)
+            )
+            db.add(tq_doc)
+            db.flush()
+            logger.info(f"[Routing] Created TaskQueueDocument with convert_status=COMPLETED")
+        else:
+            logger.info(f"[Routing] Found existing TaskQueueDocument")
+            logger.info(f"[Routing]   - Current convert_status: {tq_doc.convert_status}")
+            logger.info(f"[Routing]   - Current processing_path: {tq_doc.processing_path}")
+            # Update classification status
+            tq_doc.classification_status = TaskStatus.PROCESSING
+            tq_doc.classification_started_at = datetime.now(timezone.utc)
+            db.flush()
+            logger.info(f"[Routing] Updated classification_status to PROCESSING")
+
+        try:
+            # ----------------------------------------------------------------
+            # STEP 4.2: Run TabularDataDetector
+            # ----------------------------------------------------------------
+            logger.info("-" * 80)
+            logger.info("[Routing] --- STEP 4.2: Tabular Data Detection ---")
+            logger.info(f"[Routing] Calling TabularDataDetector.is_tabular_data()...")
+            logger.info(f"[Routing]   - filename: {filename}")
+
+            # Check if this is a tabular document
+            # TabularDataDetector checks file extension first (fast path)
+            is_tabular, reason = TabularDataDetector.is_tabular_data(
+                filename=filename,
+                document_type=None,  # Will be detected
+                content=None  # Skip content analysis for speed
+            )
+
+            logger.info(f"[Routing] Detection result:")
+            logger.info(f"[Routing]   - is_tabular: {is_tabular}")
+            logger.info(f"[Routing]   - reason: {reason}")
+
+            # ----------------------------------------------------------------
+            # STEP 4.3: Update Document Record
+            # ----------------------------------------------------------------
+            logger.info("-" * 80)
+            logger.info("[Routing] --- STEP 4.3: Update Document Record ---")
+            doc = db.query(Document).filter(Document.id == document_id).first()
+            if doc:
+                logger.info(f"[Routing] Found document record")
+                logger.info(f"[Routing]   - Current is_tabular_data: {doc.is_tabular_data}")
+                logger.info(f"[Routing]   - Current processing_path: {doc.processing_path}")
+                logger.info(f"[Routing]   - Current convert_status: {doc.convert_status}")
+
+                doc.is_tabular_data = is_tabular
+                doc.processing_path = 'tabular' if is_tabular else 'standard'
+                # IMPORTANT: Update convert_status to CONVERTED so eligibility check passes
+                # This is needed because the extraction eligibility checker checks document.convert_status
+                from db.models import ConvertStatus
+                doc.convert_status = ConvertStatus.CONVERTED
+                db.flush()
+
+                logger.info(f"[Routing] Updated document record:")
+                logger.info(f"[Routing]   - is_tabular_data: {doc.is_tabular_data}")
+                logger.info(f"[Routing]   - processing_path: {doc.processing_path}")
+                logger.info(f"[Routing]   - convert_status: {doc.convert_status}")
+            else:
+                logger.error(f"[Routing] ERROR: Document {document_id} not found!")
+
+            # Update task_queue_document
+            tq_doc.processing_path = 'tabular' if is_tabular else 'standard'
+            tq_doc.classification_status = TaskStatus.COMPLETED
+            tq_doc.classification_completed_at = datetime.now(timezone.utc)
+            logger.info(f"[Routing] Updated TaskQueueDocument: processing_path={tq_doc.processing_path}, classification_status=COMPLETED")
+
+            # ----------------------------------------------------------------
+            # STEP 4.4: Route to appropriate path
+            # ----------------------------------------------------------------
+            logger.info("-" * 80)
+            logger.info("[Routing] --- STEP 4.4: Execute Routing Decision ---")
+
+            if is_tabular:
+                # TABULAR PATH: Trigger data extraction
+                logger.info("[Routing] *** DECISION: TABULAR PATH ***")
+                logger.info("[Routing] Action: Trigger tabular data extraction")
+                logger.info("[Routing] Action: Skip chunking")
+
+                # Update extraction status to pending
+                tq_doc.extraction_status = TaskStatus.PENDING
+                db.commit()
+                logger.info(f"[Routing] Set extraction_status to PENDING")
+
+                # Trigger tabular extraction in background
+                source_name = os.path.splitext(filename)[0]
+                logger.info(f"[Routing] Calling _trigger_tabular_extraction()...")
+                logger.info(f"[Routing]   - source_name: {source_name}")
+                logger.info(f"[Routing]   - output_dir: {output_dir}")
+
+                self._trigger_tabular_extraction(
+                    document_id=document_id,
+                    source_name=source_name,
+                    output_dir=output_dir,
+                    filename=filename
+                )
+
+                logger.info("=" * 80)
+                logger.info("[Routing] ========== CLASSIFICATION & ROUTING COMPLETE ==========")
+                logger.info("[Routing] Result: TABULAR PATH")
+                logger.info("[Routing] Extraction thread started in background")
+                logger.info("=" * 80)
+                return True
+            else:
+                # STANDARD PATH: Continue to chunking
+                logger.info("[Routing] *** DECISION: STANDARD PATH ***")
+                logger.info("[Routing] Action: Continue to semantic chunking")
+                logger.info("[Routing] Action: Skip extraction")
+
+                tq_doc.extraction_status = TaskStatus.SKIPPED
+                db.commit()
+                logger.info(f"[Routing] Set extraction_status to SKIPPED")
+
+                logger.info("=" * 80)
+                logger.info("[Routing] ========== CLASSIFICATION & ROUTING COMPLETE ==========")
+                logger.info("[Routing] Result: STANDARD PATH")
+                logger.info("[Routing] Document will proceed to chunking")
+                logger.info("=" * 80)
+                return False
+
+        except Exception as e:
+            logger.error(f"[Routing] Classification failed: {e}", exc_info=True)
+            # On error, default to STANDARD path
+            tq_doc.classification_status = TaskStatus.FAILED
+            tq_doc.classification_error = str(e)
+            tq_doc.processing_path = 'standard'
+            db.commit()
+            return False
+
+    def _trigger_tabular_extraction(
+        self,
+        document_id: UUID,
+        source_name: str,
+        output_dir: str,
+        filename: str
+    ) -> None:
+        """
+        Trigger tabular data extraction in background thread.
+
+        Args:
+            document_id: Document UUID
+            source_name: Document source name (filename without extension)
+            output_dir: Output directory path
+            filename: Original filename
+        """
+        logger.info("=" * 80)
+        logger.info("[Extraction] ========== TRIGGER TABULAR EXTRACTION ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Extraction] Document ID: {document_id}")
+        logger.info(f"[Extraction] Source name: {source_name}")
+        logger.info(f"[Extraction] Output dir: {output_dir}")
+        logger.info(f"[Extraction] Filename: {filename}")
+        logger.info("-" * 80)
+
+        try:
+            from services.tabular_extraction_service import trigger_tabular_extraction
+
+            logger.info(f"[Extraction] Importing trigger_tabular_extraction from tabular_extraction_service...")
+            logger.info(f"[Extraction] Calling trigger_tabular_extraction()...")
+
+            trigger_tabular_extraction(
+                document_id=document_id,
+                source_name=source_name,
+                output_dir=output_dir,
+                filename=filename,
+                conversion_id=None,
+                broadcast_callback=self.document_status_broadcast
+            )
+
+            logger.info(f"[Extraction] ✅ Tabular extraction TRIGGERED successfully")
+            logger.info(f"[Extraction] Background thread started for: {source_name}")
+            logger.info("=" * 80)
+
+        except ImportError as e:
+            logger.error("=" * 80)
+            logger.error(f"[Extraction] ❌ IMPORT ERROR: Tabular extraction service not available")
+            logger.error(f"[Extraction] Error: {e}")
+            logger.error("=" * 80)
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error(f"[Extraction] ❌ FAILED to trigger extraction")
+            logger.error(f"[Extraction] Error: {e}")
+            logger.error("=" * 80, exc_info=True)
 
     def process_vector_chunk_task(self, chunk_task) -> bool:
         """
@@ -856,13 +1202,34 @@ class TaskQueueService:
                             started_at=datetime.now().isoformat()
                         )
 
-                        trigger_embedding_func(
-                            source_name=file_name_without_ext,
-                            output_dir=self.output_dir,
-                            filename=doc.filename,
-                            conversion_id=conversion_id,
-                            broadcast_callback=None
-                        )
+                        # Check if this is a tabular document - use different processing path
+                        if doc.is_tabular_data or doc.processing_path == 'tabular':
+                            # Tabular documents need extraction, not standard chunking
+                            logger.info(f"[Recovery] Resuming TABULAR extraction for: {doc.filename}")
+
+                            # Get the output directory from the document
+                            if doc.output_path:
+                                output_dir = self.resolve_file_path(doc.output_path, self.output_dir)
+                            else:
+                                base_name = os.path.splitext(doc.filename)[0]
+                                output_dir = os.path.join(self.output_dir, base_name)
+
+                            self._trigger_tabular_extraction(
+                                document_id=doc.id,
+                                source_name=file_name_without_ext,
+                                output_dir=output_dir,
+                                filename=doc.filename
+                            )
+                        else:
+                            # Standard documents use chunking + vector indexing
+                            logger.info(f"[Recovery] Resuming STANDARD indexing for: {doc.filename}")
+                            trigger_embedding_func(
+                                source_name=file_name_without_ext,
+                                output_dir=self.output_dir,
+                                filename=doc.filename,
+                                conversion_id=conversion_id,
+                                broadcast_callback=None
+                            )
 
                         logger.info(f"Triggered background indexing for: {doc.filename}")
 

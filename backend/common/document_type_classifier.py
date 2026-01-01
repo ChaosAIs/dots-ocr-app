@@ -173,11 +173,66 @@ DOCUMENT_CLASSIFICATION_PROMPT = """You are a document classification expert. An
 Respond with JSON only:"""
 
 
+# LLM Multi-Type Classification Prompt - for documents that can match multiple types
+MULTI_TYPE_CLASSIFICATION_PROMPT = """You are a document classification expert. A document can belong to MULTIPLE types based on its content and format.
+
+For example:
+- A CSV file with product inventory data is both a "spreadsheet" AND an "inventory_report"
+- A PDF with financial transactions could be both a "report" AND a "financial_report"
+- An Excel file with sales data could be "spreadsheet", "report", and potentially "invoice" if it contains invoice data
+
+## Available Document Types:
+{available_types}
+
+## Document Information:
+- Filename: {filename}
+- File Extension: {file_extension}
+- Column Headers (if tabular): {columns}
+- Row Count: {row_count}
+- Sample Data Preview: {data_preview}
+- Is Tabular Data: {is_tabular}
+
+## Classification Guidelines:
+1. Identify ALL document types that apply to this document
+2. The PRIMARY type should be the most specific match
+3. Include SECONDARY types based on the data content:
+   - If columns contain product/SKU/stock/inventory → include "inventory_report"
+   - If columns contain amount/price/payment/total → include "financial_report"
+   - If columns contain customer/order/sale → include "report"
+   - If columns contain shipping/delivery/tracking → include "shipping_manifest"
+   - If columns contain invoice/bill → include "invoice"
+   - If columns contain receipt/tip/subtotal → include "receipt"
+   - If columns contain expense/reimbursement → include "expense_report"
+4. Always include "spreadsheet" for CSV/Excel files
+5. Return types ordered by relevance (most specific first)
+
+## Response Format (JSON only):
+{{
+    "document_types": ["primary_type", "secondary_type1", "secondary_type2"],
+    "primary_type": "the_most_specific_type",
+    "confidence": 0.0-1.0,
+    "reasoning": "Brief explanation of why each type applies"
+}}
+
+Respond with JSON only:"""
+
+
 @dataclass
 class ClassificationResult:
     """Result of document classification."""
     document_type: str
     type_info: DocumentTypeInfo
+    confidence: float
+    reasoning: str
+    is_extractable: bool
+    schema_type: Optional[str]
+
+
+@dataclass
+class MultiTypeClassificationResult:
+    """Result of multi-type document classification."""
+    document_types: List[str]  # List of all applicable types
+    primary_type: str  # The most specific/relevant type
     confidence: float
     reasoning: str
     is_extractable: bool
@@ -258,6 +313,167 @@ class DocumentTypeClassifier:
         domain = metadata.get('domain', '').lower()
         default_type = self._get_domain_default(domain, context)
         return self._create_result(default_type, 0.5, f"Default for domain: {domain or 'unknown'}")
+
+    def classify_multi_type(
+        self,
+        filename: str,
+        columns: List[str] = None,
+        row_count: int = 0,
+        data_preview: str = None,
+        is_tabular: bool = False
+    ) -> MultiTypeClassificationResult:
+        """
+        Classify a document into multiple applicable types using LLM.
+
+        This is especially useful for tabular documents (CSV/Excel) where the
+        data content determines additional semantic types beyond just "spreadsheet".
+
+        Args:
+            filename: Document filename
+            columns: Column headers for tabular data
+            row_count: Number of data rows
+            data_preview: Sample of data content
+            is_tabular: Whether this is tabular data
+
+        Returns:
+            MultiTypeClassificationResult with list of applicable types
+        """
+        columns = columns or []
+        data_preview = data_preview or ""
+
+        # Get file extension
+        file_ext = self._get_file_extension(filename)
+
+        # Try LLM classification if available
+        if self.llm_client:
+            try:
+                prompt = MULTI_TYPE_CLASSIFICATION_PROMPT.format(
+                    available_types=self._get_available_types_description(),
+                    filename=filename,
+                    file_extension=file_ext,
+                    columns=", ".join(columns[:20]) if columns else "N/A",
+                    row_count=row_count,
+                    data_preview=data_preview[:500] if data_preview else "N/A",
+                    is_tabular=is_tabular
+                )
+
+                # Use query model for classification (lighter model, faster)
+                model = self.llm_client.get_query_model(temperature=0.1, num_predict=512)
+                from langchain_core.messages import HumanMessage
+                response_msg = model.invoke([HumanMessage(content=prompt)])
+                response = response_msg.content if hasattr(response_msg, 'content') else str(response_msg)
+                result = self._parse_llm_response(response)
+
+                if result and result.get('document_types'):
+                    doc_types = result['document_types']
+                    # Validate and resolve each type
+                    valid_types = []
+                    for t in doc_types:
+                        resolved = self._resolve_type(t)
+                        if resolved:
+                            valid_types.append(resolved)
+
+                    if valid_types:
+                        primary = result.get('primary_type', valid_types[0])
+                        resolved_primary = self._resolve_type(primary) or valid_types[0]
+                        confidence = float(result.get('confidence', 0.8))
+                        reasoning = result.get('reasoning', 'LLM multi-type classification')
+
+                        # Check if any type is extractable
+                        is_extractable = any(
+                            DOCUMENT_TYPES.get(t, DocumentTypeInfo("", "", DocumentDomain.GENERIC, [])).is_extractable
+                            for t in valid_types
+                        )
+                        schema_type = self.get_schema_type(resolved_primary)
+
+                        logger.info(
+                            f"[DocTypeClassifier] LLM multi-type: {valid_types} "
+                            f"(primary: {resolved_primary}, confidence: {confidence:.2f})"
+                        )
+
+                        return MultiTypeClassificationResult(
+                            document_types=valid_types,
+                            primary_type=resolved_primary,
+                            confidence=confidence,
+                            reasoning=reasoning,
+                            is_extractable=is_extractable,
+                            schema_type=schema_type
+                        )
+
+            except Exception as e:
+                logger.warning(f"[DocTypeClassifier] LLM multi-type classification failed: {e}")
+
+        # Fallback: Determine types from filename and columns
+        types = self._infer_types_from_content(filename, columns, is_tabular)
+        primary = types[0] if types else "other"
+
+        is_extractable = any(
+            DOCUMENT_TYPES.get(t, DocumentTypeInfo("", "", DocumentDomain.GENERIC, [])).is_extractable
+            for t in types
+        )
+        schema_type = self.get_schema_type(primary)
+
+        logger.info(f"[DocTypeClassifier] Fallback multi-type: {types} (primary: {primary})")
+
+        return MultiTypeClassificationResult(
+            document_types=types,
+            primary_type=primary,
+            confidence=0.7,
+            reasoning="Inferred from filename and column headers",
+            is_extractable=is_extractable,
+            schema_type=schema_type
+        )
+
+    def _infer_types_from_content(
+        self,
+        filename: str,
+        columns: List[str],
+        is_tabular: bool
+    ) -> List[str]:
+        """Fallback type inference from filename and columns."""
+        types = set()
+        file_ext = self._get_file_extension(filename)
+
+        # Base type from extension
+        if file_ext in ('.csv', '.xlsx', '.xls'):
+            types.add("spreadsheet")
+
+        if is_tabular and columns:
+            columns_text = " ".join([c.lower() for c in columns])
+
+            # Inventory/Product
+            if any(kw in columns_text for kw in ["product", "inventory", "stock", "sku", "quantity", "item", "warehouse"]):
+                types.add("inventory_report")
+
+            # Financial
+            if any(kw in columns_text for kw in ["amount", "total", "payment", "transaction", "balance", "credit", "debit"]):
+                types.add("financial_report")
+                if "invoice" in columns_text:
+                    types.add("invoice")
+
+            # Sales/Orders
+            if any(kw in columns_text for kw in ["sale", "order", "revenue", "customer", "purchase"]):
+                types.add("report")
+                if "order" in columns_text or "purchase" in columns_text:
+                    types.add("purchase_order")
+
+            # Bank
+            if any(kw in columns_text for kw in ["account", "bank", "deposit", "withdrawal"]):
+                types.add("bank_statement")
+
+            # Receipt
+            if any(kw in columns_text for kw in ["receipt", "tip", "subtotal", "tax", "meal"]):
+                types.add("receipt")
+
+            # Shipping
+            if any(kw in columns_text for kw in ["shipping", "delivery", "tracking", "freight"]):
+                types.add("shipping_manifest")
+
+            # Expense
+            if any(kw in columns_text for kw in ["expense", "reimbursement", "claim"]):
+                types.add("expense_report")
+
+        return list(types) if types else ["spreadsheet" if is_tabular else "other"]
 
     def get_extractable_types(self) -> List[str]:
         """Get list of document types that support data extraction."""
@@ -690,10 +906,16 @@ class TabularDataDetector:
             # Check direct match
             if doc_type_lower in TABULAR_DOCUMENT_TYPES:
                 return True, f"document_type:{doc_type_lower}"
-            # Check aliases
+            # Check aliases (TYPE_ALIASES returns a list, so we need to handle it properly)
             resolved = TYPE_ALIASES.get(doc_type_lower)
-            if resolved and resolved in TABULAR_DOCUMENT_TYPES:
-                return True, f"document_type:{resolved}"
+            if resolved:
+                # TYPE_ALIASES returns a list of aliases
+                if isinstance(resolved, list):
+                    for alias in resolved:
+                        if alias in TABULAR_DOCUMENT_TYPES:
+                            return True, f"document_type:{alias}"
+                elif isinstance(resolved, str) and resolved in TABULAR_DOCUMENT_TYPES:
+                    return True, f"document_type:{resolved}"
 
         # Check 3: Content analysis (if provided)
         if content:

@@ -281,21 +281,28 @@ class SQLQueryExecutor:
             return {"rows": [], "summary": {"total_records": 0}}
 
         # Extract data from each document
-        # For documents with line_items (spreadsheets), expand each line item as a row
+        # NOTE: As of migration 022, line items are stored externally in documents_data_line_items table
         rows = []
         for doc_data in results:
             # Check if this document has line items that should be expanded
-            if doc_data.line_items and isinstance(doc_data.line_items, list) and len(doc_data.line_items) > 0:
-                # Check if line_items are actual data rows (dicts) vs just column names (strings)
-                first_item = doc_data.line_items[0]
-                if isinstance(first_item, dict):
-                    # Expand line items into individual rows for aggregation
-                    for item in doc_data.line_items:
-                        row = self._extract_line_item_data(doc_data, item)
+            if doc_data.line_items_count and doc_data.line_items_count > 0:
+                # Fetch line items from external storage
+                line_items = self._fetch_line_items_from_external_storage(doc_data.id)
+                if line_items:
+                    # Check if line_items are actual data rows (dicts) vs just column names (strings)
+                    first_item = line_items[0] if line_items else None
+                    if first_item and isinstance(first_item, dict):
+                        # Expand line items into individual rows for aggregation
+                        for item in line_items:
+                            row = self._extract_line_item_data(doc_data, item)
+                            rows.append(row)
+                        logger.info(f"[SQL Query] Expanded {len(line_items)} line items from document {doc_data.document_id}")
+                    else:
+                        # Line items are column headers, use document-level data
+                        row = self._extract_row_data(doc_data)
                         rows.append(row)
-                    logger.info(f"[SQL Query] Expanded {len(doc_data.line_items)} line items from document {doc_data.document_id}")
                 else:
-                    # Line items are column headers, use document-level data
+                    # No line items found, use document-level data
                     row = self._extract_row_data(doc_data)
                     rows.append(row)
             else:
@@ -357,6 +364,31 @@ class SQLQueryExecutor:
             "summary_data": summary,
             "line_items_count": doc_data.line_items_count or 0
         }
+
+    def _fetch_line_items_from_external_storage(self, documents_data_id) -> List[Dict[str, Any]]:
+        """
+        Fetch line items from external storage (documents_data_line_items table).
+
+        As of migration 022, all line items are stored externally.
+
+        Args:
+            documents_data_id: UUID of the documents_data record
+
+        Returns:
+            List of line item dictionaries
+        """
+        try:
+            from db.models import DocumentDataLineItem
+
+            line_items = self.db.query(DocumentDataLineItem).filter(
+                DocumentDataLineItem.documents_data_id == documents_data_id
+            ).order_by(DocumentDataLineItem.line_number).all()
+
+            return [item.data for item in line_items]
+
+        except Exception as e:
+            logger.error(f"[SQL Query] Failed to fetch line items from external storage: {e}")
+            return []
 
     def _extract_line_item_data(self, doc_data: DocumentData, item: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1555,49 +1587,36 @@ class SQLQueryExecutor:
 
     def _get_storage_type(self, accessible_doc_ids: List[UUID]) -> str:
         """
-        Get the storage type (inline or external) for the given documents.
+        Get the storage type for the given documents.
+
+        NOTE: As of migration 022, all storage is external.
+        This method is kept for backward compatibility and always returns "external".
 
         Returns:
-            "inline" or "external"
+            "external" (always)
         """
-        try:
-            doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
-
-            result = self.db.execute(text(f"""
-                SELECT line_items_storage, line_items_count
-                FROM documents_data
-                WHERE document_id IN ({doc_ids_str})
-                AND line_items_count > 0
-                LIMIT 1
-            """))
-
-            row = result.fetchone()
-            if row:
-                storage_type = row[0] or 'inline'
-                logger.info(f"[Storage Type] Detected storage type: {storage_type} ({row[1]} items)")
-                return storage_type
-
-            return 'inline'  # Default
-
-        except Exception as e:
-            logger.error(f"Failed to get storage type: {e}")
-            return 'inline'
+        # As of migration 022, all line items are stored externally
+        # in the documents_data_line_items table
+        logger.info("[Storage Type] Using external storage (migration 022)")
+        return 'external'
 
     def _get_field_mappings_and_storage_type(self, accessible_doc_ids: List[UUID]) -> Tuple[Dict[str, Dict[str, Any]], str]:
         """
         Get field mappings and storage type from documents with extracted data.
 
+        NOTE: As of migration 022, storage_type is always "external".
+
         Returns:
             Tuple of (field_mappings, storage_type)
         """
-        storage_type = 'inline'  # Default
+        storage_type = 'external'  # Always external as of migration 022
 
         try:
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
 
-            # First try: Look for explicit field_mappings and get storage type
+            # First try: Look for explicit field_mappings in header_data
             result = self.db.execute(text(f"""
-                SELECT header_data->'field_mappings' as field_mappings, line_items_storage
+                SELECT header_data->'field_mappings' as field_mappings
                 FROM documents_data
                 WHERE document_id IN ({doc_ids_str})
                 AND header_data->'field_mappings' IS NOT NULL
@@ -1606,22 +1625,18 @@ class SQLQueryExecutor:
 
             row = result.fetchone()
             if row and row[0]:
-                storage_type = row[1] or 'inline'
-                logger.info(f"[Field Mappings] Found explicit field mappings with {len(row[0])} fields, storage={storage_type}")
+                logger.info(f"[Field Mappings] Found explicit field mappings with {len(row[0])} fields, storage=external")
                 return dict(row[0]), storage_type
 
             # Second: Dynamically infer field mappings from actual data structure
             logger.info("[Field Mappings] No explicit mappings found, inferring from data structure...")
             field_mappings = self._infer_field_mappings_from_data(accessible_doc_ids)
 
-            # Get storage type separately
-            storage_type = self._get_storage_type(accessible_doc_ids)
-
             return field_mappings, storage_type
 
         except Exception as e:
             logger.error(f"Failed to get field mappings: {e}")
-            return {}, 'inline'
+            return {}, 'external'
 
     def _infer_field_mappings_from_data(self, accessible_doc_ids: List[UUID]) -> Dict[str, Dict[str, Any]]:
         """
@@ -1633,27 +1648,22 @@ class SQLQueryExecutor:
         For spreadsheet data, uses flexible matching to map column headers
         like "Total Sales", "Purchase Date", etc. to semantic types.
 
-        Supports both inline line_items (JSONB) and external storage
-        (documents_data_line_items table).
+        NOTE: As of migration 022, all line items are stored externally
+        in documents_data_line_items table.
         """
         try:
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
 
-            # First, try to get document with inline line_items
+            # Get document with line items (always external storage as of migration 022)
             result = self.db.execute(text(f"""
                 SELECT
                     dd.id,
                     dd.schema_type,
                     dd.header_data,
-                    dd.line_items->0 as sample_line_item,
-                    dd.line_items_storage,
                     dd.line_items_count
                 FROM documents_data dd
                 WHERE dd.document_id IN ({doc_ids_str})
-                AND (
-                    (dd.line_items_storage = 'inline' AND dd.line_items IS NOT NULL AND jsonb_array_length(dd.line_items) > 0)
-                    OR (dd.line_items_storage = 'external' AND dd.line_items_count > 0)
-                )
+                AND dd.line_items_count > 0
                 LIMIT 1
             """))
 
@@ -1665,26 +1675,23 @@ class SQLQueryExecutor:
             documents_data_id = row[0]
             schema_type = row[1]
             header_data = row[2] or {}
-            sample_item = row[3] or {}
-            line_items_storage = row[4]
-            line_items_count = row[5]
+            line_items_count = row[3]
 
-            # If external storage, fetch sample from documents_data_line_items table
-            if line_items_storage == 'external' and not sample_item:
-                logger.info(f"[Field Mappings] Line items stored externally ({line_items_count} items), fetching sample...")
-                ext_result = self.db.execute(text(f"""
-                    SELECT data FROM documents_data_line_items
-                    WHERE documents_data_id = '{documents_data_id}'
-                    ORDER BY line_number
-                    LIMIT 1
-                """))
-                ext_row = ext_result.fetchone()
-                if ext_row:
-                    sample_item = ext_row[0] or {}
-                    logger.info(f"[Field Mappings] Retrieved sample from external storage: {list(sample_item.keys())}")
-                else:
-                    logger.warning("[Field Mappings] No sample found in external line items table")
-                    return {}
+            # Fetch sample from external storage (documents_data_line_items table)
+            logger.info(f"[Field Mappings] Fetching sample from external storage ({line_items_count} items)...")
+            ext_result = self.db.execute(text(f"""
+                SELECT data FROM documents_data_line_items
+                WHERE documents_data_id = '{documents_data_id}'
+                ORDER BY line_number
+                LIMIT 1
+            """))
+            ext_row = ext_result.fetchone()
+            if ext_row:
+                sample_item = ext_row[0] or {}
+                logger.info(f"[Field Mappings] Retrieved sample from external storage: {list(sample_item.keys())}")
+            else:
+                logger.warning("[Field Mappings] No sample found in external line items table")
+                return {}
 
             # Build field mappings based on discovered fields
             field_mappings = {}

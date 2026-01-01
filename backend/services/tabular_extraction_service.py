@@ -27,8 +27,8 @@ from sqlalchemy.orm import Session as DBSession
 from db.database import get_db_session
 from db.models import Document, DocumentData, IndexStatus
 from extraction_service.extraction_service import ExtractionService
-from common.document_type_classifier import TabularDataDetector
-from rag_service.vectorstore import get_vectorstore, get_embeddings
+from common.document_type_classifier import TabularDataDetector, DocumentTypeClassifier
+from rag_service.vectorstore import get_vectorstore, get_embeddings, upsert_document_metadata_embedding
 from rag_service.llm_service import get_llm_service
 
 from langchain_core.documents import Document as LangchainDocument
@@ -116,7 +116,7 @@ class TabularExtractionService:
 
             # Update status
             self._update_extraction_status(document_id, "processing")
-            self._broadcast(broadcast_callback, conversion_id, {
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "extracting",
                 "message": "Extracting structured data...",
                 "progress": 10
@@ -147,7 +147,7 @@ class TabularExtractionService:
             logger.info(f"[Tabular]   - Headers: {document_data.header_data.get('column_headers', [])[:5]}...")
             logger.info("-" * 80)
 
-            self._broadcast(broadcast_callback, conversion_id, {
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "extracting",
                 "message": f"Extracted {document_data.line_items_count} rows",
                 "progress": 40
@@ -162,13 +162,20 @@ class TabularExtractionService:
 
             field_mappings = document_data.extraction_metadata.get("field_mappings", {}) if document_data.extraction_metadata else {}
             logger.info(f"[Tabular] Field mappings count: {len(field_mappings)}")
+            logger.info(f"[Tabular] Field mappings type: {type(field_mappings)}")
+
+            # Safely log field mappings (handle both dict and string values)
             for field_name, mapping in list(field_mappings.items())[:5]:
-                logger.info(f"[Tabular]   - {field_name}: type={mapping.get('semantic_type')}, agg={mapping.get('aggregation')}")
+                if isinstance(mapping, dict):
+                    logger.info(f"[Tabular]   - {field_name}: type={mapping.get('semantic_type')}, agg={mapping.get('aggregation')}")
+                else:
+                    # mapping might be a string or other type
+                    logger.info(f"[Tabular]   - {field_name}: {mapping}")
             if len(field_mappings) > 5:
                 logger.info(f"[Tabular]   ... and {len(field_mappings) - 5} more fields")
             logger.info("-" * 80)
 
-            self._broadcast(broadcast_callback, conversion_id, {
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "generating_summary",
                 "message": "Generating document summary...",
                 "progress": 50
@@ -198,7 +205,7 @@ class TabularExtractionService:
                 logger.info(f"[Tabular]            preview: '{content_preview}...'")
             logger.info("-" * 80)
 
-            self._broadcast(broadcast_callback, conversion_id, {
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "indexing_summary",
                 "message": "Indexing document summary...",
                 "progress": 70
@@ -219,7 +226,78 @@ class TabularExtractionService:
                 logger.info(f"[Tabular]   - {chunk_id}")
             logger.info("-" * 80)
 
-            self._broadcast(broadcast_callback, conversion_id, {
+            # ========== STEP 4.5: Create Metadata Embedding for Document Routing ==========
+            logger.info("[Tabular] ========== STEP 4.5: METADATA EMBEDDING ==========")
+            logger.info("[Tabular] Creating metadata embedding for document routing...")
+
+            try:
+                columns = document_data.header_data.get("column_headers", [])
+
+                # Get workspace_id from document
+                doc = self.db.query(Document).filter(Document.id == document_id).first() if self.db else None
+                workspace_id = str(doc.workspace_id) if doc and doc.workspace_id else None
+
+                # Use LLM-based multi-type classification to determine all applicable document types
+                llm_service = get_llm_service()
+                classifier = DocumentTypeClassifier(llm_client=llm_service)
+
+                # Get sample data for classification context (from external storage)
+                sample_rows = self._fetch_sample_line_items(document_data.id, limit=3)
+                data_preview = ""
+                if sample_rows:
+                    data_preview = "\n".join([str(row) for row in sample_rows])
+
+                multi_type_result = classifier.classify_multi_type(
+                    filename=filename,
+                    columns=columns,
+                    row_count=document_data.line_items_count,
+                    data_preview=data_preview,
+                    is_tabular=True
+                )
+
+                logger.info(f"[Tabular] Multi-type classification result:")
+                logger.info(f"[Tabular]   - document_types: {multi_type_result.document_types}")
+                logger.info(f"[Tabular]   - primary_type: {multi_type_result.primary_type}")
+                logger.info(f"[Tabular]   - confidence: {multi_type_result.confidence}")
+                logger.info(f"[Tabular]   - reasoning: {multi_type_result.reasoning}")
+
+                # Build metadata for embedding with document_types list
+                metadata = {
+                    "document_types": multi_type_result.document_types,
+                    "subject_name": source_name,
+                    "schema_type": document_data.schema_type,
+                    "is_tabular": True,
+                    "row_count": document_data.line_items_count,
+                    "column_count": len(columns),
+                    "columns": columns,
+                    "confidence": multi_type_result.confidence,
+                }
+
+                # Add workspace_id if available
+                if workspace_id:
+                    metadata["workspace_id"] = workspace_id
+
+                # Use the first summary chunk content as the base for embedding
+                if summary_chunks:
+                    metadata["summary"] = summary_chunks[0].page_content[:500]
+
+                success = upsert_document_metadata_embedding(
+                    document_id=str(document_id),
+                    source_name=source_name,
+                    filename=filename,
+                    metadata=metadata
+                )
+
+                if success:
+                    logger.info(f"[Tabular] ✅ Metadata embedding created for document routing")
+                    logger.info(f"[Tabular]   - Stored document_types: {multi_type_result.document_types}")
+                else:
+                    logger.warning(f"[Tabular] ⚠️ Failed to create metadata embedding")
+            except Exception as meta_error:
+                logger.warning(f"[Tabular] ⚠️ Metadata embedding error: {meta_error}", exc_info=True)
+            logger.info("-" * 80)
+
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "finalizing",
                 "message": "Finalizing...",
                 "progress": 90
@@ -241,7 +319,7 @@ class TabularExtractionService:
             logger.info("-" * 80)
 
             column_count = len(document_data.header_data.get("column_headers", []))
-            self._broadcast(broadcast_callback, conversion_id, {
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "completed",
                 "message": f"Document ready ({document_data.line_items_count} rows, {len(chunk_ids)} index entries)",
                 "progress": 100,
@@ -274,12 +352,43 @@ class TabularExtractionService:
             logger.error("=" * 80, exc_info=True)
 
             self._update_extraction_status(document_id, "failed", error=str(e))
-            self._broadcast(broadcast_callback, conversion_id, {
+            self._broadcast(broadcast_callback, document_id, {
                 "status": "error",
                 "message": f"Processing failed: {str(e)}",
                 "progress": 0
             })
             return False, str(e)
+
+    def _fetch_sample_line_items(self, documents_data_id: UUID, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Fetch sample line items from external storage (documents_data_line_items table).
+
+        As of migration 022, all line items are stored externally.
+
+        Args:
+            documents_data_id: UUID of the documents_data record
+            limit: Maximum number of rows to fetch (default 10)
+
+        Returns:
+            List of line item dictionaries
+        """
+        try:
+            from db.models import DocumentDataLineItem
+
+            if not self.db:
+                logger.warning("[Tabular] No database session, cannot fetch line items")
+                return []
+
+            line_items = self.db.query(DocumentDataLineItem).filter(
+                DocumentDataLineItem.documents_data_id == documents_data_id
+            ).order_by(DocumentDataLineItem.line_number).limit(limit).all()
+
+            logger.debug(f"[Tabular] Fetched {len(line_items)} sample line items from external storage")
+            return [item.data for item in line_items]
+
+        except Exception as e:
+            logger.error(f"[Tabular] Failed to fetch line items from external storage: {e}")
+            return []
 
     def _generate_summary_chunks(
         self,
@@ -328,20 +437,21 @@ class TabularExtractionService:
         if workspace_id:
             base_metadata["workspace_id"] = workspace_id
 
-        # Extract field type information
+        # Extract field type information (safely handle both dict and string values)
         amount_fields = [k for k, v in field_mappings.items()
-                        if v.get("semantic_type") == "amount"]
+                        if isinstance(v, dict) and v.get("semantic_type") == "amount"]
         date_fields = [k for k, v in field_mappings.items()
-                      if v.get("semantic_type") == "date"]
+                      if isinstance(v, dict) and v.get("semantic_type") == "date"]
         category_fields = [k for k, v in field_mappings.items()
-                         if v.get("aggregation") == "group_by"]
+                         if isinstance(v, dict) and v.get("aggregation") == "group_by"]
 
         logger.debug(f"[Tabular] Amount fields: {amount_fields}")
         logger.debug(f"[Tabular] Date fields: {date_fields}")
         logger.debug(f"[Tabular] Category fields: {category_fields}")
 
-        # Get sample rows for LLM analysis
-        sample_rows = document_data.line_items[:10] if document_data.line_items else []
+        # Get sample rows for LLM analysis from external storage
+        # NOTE: As of migration 022, line_items are stored in documents_data_line_items table
+        sample_rows = self._fetch_sample_line_items(document_data.id, limit=10)
         logger.debug(f"[Tabular] Sample rows for LLM: {len(sample_rows)}")
 
         # ===== CHUNK 1: Document Summary =====
@@ -520,13 +630,13 @@ Summary:"""
 
         logger.debug(f"[Tabular] Detected doc_type: {doc_type}")
 
-        # Extract field types
+        # Extract field types (safely handle both dict and string values)
         amount_fields = [k for k, v in field_mappings.items()
-                        if v.get("semantic_type") == "amount"]
+                        if isinstance(v, dict) and v.get("semantic_type") == "amount"]
         date_fields = [k for k, v in field_mappings.items()
-                      if v.get("semantic_type") == "date"]
+                      if isinstance(v, dict) and v.get("semantic_type") == "date"]
         category_fields = [k for k, v in field_mappings.items()
-                         if v.get("aggregation") == "group_by"]
+                         if isinstance(v, dict) and v.get("aggregation") == "group_by"]
 
         # Build summary
         summary = f"'{filename}' containing {row_count} rows of {doc_type}. "
@@ -623,10 +733,13 @@ Schema Description:"""
             f"Column names: {', '.join(headers)}.",
         ]
 
-        # Group fields by semantic type
+        # Group fields by semantic type (safely handle both dict and string values)
         by_type = {}
         for field, mapping in field_mappings.items():
-            sem_type = mapping.get("semantic_type", "unknown")
+            if isinstance(mapping, dict):
+                sem_type = mapping.get("semantic_type", "unknown")
+            else:
+                sem_type = "unknown"
             if sem_type not in by_type:
                 by_type[sem_type] = []
             by_type[sem_type].append(field)
@@ -667,10 +780,10 @@ Schema Description:"""
             try:
                 logger.info("[Tabular] Using LLM for business context generation...")
 
-                # Extract unique values from categorical fields for context
+                # Extract unique values from categorical fields for context (safely handle both dict and string values)
                 category_values = {}
                 for field, mapping in field_mappings.items():
-                    if mapping.get("aggregation") == "group_by":
+                    if isinstance(mapping, dict) and mapping.get("aggregation") == "group_by":
                         values = set()
                         for row in sample_rows:
                             if field in row and row[field]:
@@ -730,10 +843,10 @@ Business Context:"""
         if not sample_rows:
             return ""
 
-        # Extract unique values from categorical fields
+        # Extract unique values from categorical fields (safely handle both dict and string values)
         category_values = {}
         for field, mapping in field_mappings.items():
-            if mapping.get("aggregation") == "group_by":
+            if isinstance(mapping, dict) and mapping.get("aggregation") == "group_by":
                 values = set()
                 for row in sample_rows:
                     if field in row and row[field]:
@@ -881,6 +994,11 @@ Business Context:"""
                 "summary_chunks_indexed": indexed_chunks,
                 "completed_at": datetime.utcnow().isoformat()
             }
+            # Also update metadata_extraction status to completed
+            if "metadata_extraction" not in doc.indexing_details:
+                doc.indexing_details["metadata_extraction"] = {}
+            doc.indexing_details["metadata_extraction"]["status"] = "completed"
+            doc.indexing_details["metadata_extraction"]["updated_at"] = datetime.utcnow().isoformat()
             # Skip GraphRAG for tabular documents
             doc.skip_graphrag = True
             doc.skip_graphrag_reason = "tabular_data_structured_rows"
@@ -889,12 +1007,46 @@ Business Context:"""
         else:
             logger.warning(f"[Tabular] Document {document_id} not found")
 
-    def _broadcast(self, callback, conversion_id, message):
-        """Send WebSocket broadcast if callback available."""
-        if callback and conversion_id:
+    def _broadcast(self, callback, document_id, message):
+        """
+        Send WebSocket broadcast if callback available.
+
+        NOTE: The callback is document_status_manager.broadcast_from_thread which
+        expects a single dict argument (not conversion_id, message tuple).
+
+        Args:
+            callback: The broadcast function (document_status_manager.broadcast_from_thread)
+            document_id: Document UUID for frontend identification
+            message: Status message dict with status, message, progress fields
+        """
+        if callback:
             try:
-                logger.debug(f"[Tabular] Broadcasting: {message.get('status')} - {message.get('message')}")
-                callback(conversion_id, message)
+                # Convert document_id to string for JSON serialization
+                doc_id_str = str(document_id) if document_id else None
+
+                # Map internal status to frontend event_type
+                status = message.get("status", "")
+                if status == "completed":
+                    event_type = "extraction_completed"
+                elif status == "error":
+                    event_type = "extraction_failed"
+                else:
+                    event_type = "extraction_progress"
+
+                # Build broadcast message with document_id and event_type for frontend
+                broadcast_message = {
+                    "event_type": event_type,
+                    "document_id": doc_id_str,
+                    "status": status,
+                    "message": message.get("message", ""),
+                    "progress": message.get("progress", 0),
+                    "timestamp": datetime.now().isoformat(),
+                    # Include additional data if present
+                    **{k: v for k, v in message.items() if k not in ["status", "message", "progress"]}
+                }
+
+                logger.info(f"[Tabular] Broadcasting: event_type={event_type}, document_id={doc_id_str}, status={status}")
+                callback(broadcast_message)
             except Exception as e:
                 logger.warning(f"[Tabular] Broadcast failed: {e}")
 

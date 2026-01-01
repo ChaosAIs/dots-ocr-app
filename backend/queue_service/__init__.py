@@ -17,6 +17,7 @@ from .models import (
     TaskStatus,
     TaskQueuePage,
     TaskQueueChunk,
+    TaskQueueDocument,
 )
 
 from .hierarchical_task_manager import (
@@ -36,6 +37,7 @@ __all__ = [
     "TaskStatus",
     "TaskQueuePage",
     "TaskQueueChunk",
+    "TaskQueueDocument",
     "HierarchicalTaskQueueManager",
     "PageTaskData",
     "ChunkTaskData",
