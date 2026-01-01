@@ -301,9 +301,11 @@ Previous System Response: "{previous_response_str}"
 Perform ALL of the following analyses:
 
 ### 1. DISSATISFACTION CHECK
-Is the user expressing dissatisfaction with the previous response?
+Is the user expressing dissatisfaction with the previous response OR requesting fresh/latest data?
 - Look for: complaints about correctness, requests to refresh/retry, confusion, negative sentiment
+- Look for: requests for latest/fresh/current data (should bypass cache to get fresh results)
 - Signals: "that's wrong", "check again", "not what I asked", "are you sure?", "refresh", "try again"
+- Fresh data signals: "latest data", "latest", "fresh data", "current data", "most recent", "from latest", "up to date"
 
 ### 2. QUESTION ANALYSIS
 Analyze the current message as a question:
@@ -333,6 +335,7 @@ Should this question-answer pair be cached for future reuse?
 - Worth caching: policy questions, how-to questions, procedure questions, specific queries, entity lookups
 - Questions with "my/your" wording about general topics ARE cacheable (e.g., "how to return my tire?")
 - NOT worth caching: meta questions about conversation, greetings, highly temporal ("what time is it")
+- NOT worth caching: queries explicitly asking for "latest", "fresh", "current", or "most recent" data
 
 Respond with ONLY valid JSON (no markdown, no code blocks, no explanation):
 {{
@@ -479,6 +482,10 @@ Respond with ONLY valid JSON (no markdown, no code blocks, no explanation):
         refresh_patterns = [
             r"\b(refresh|try again|get latest|update|reload)\b",
             r"\b(check again|recheck|re-check)\b",
+            # Patterns for requesting fresh/latest data (should bypass cache)
+            r"\b(latest data|latest|fresh data|current data|up to date|most recent)\b",
+            r"\bfrom (latest|current|fresh|newest)\b",
+            r"\b(get|show|fetch|retrieve).*(latest|current|fresh|newest)\b",
         ]
         verification_patterns = [
             r"\b(are you sure|double check|verify|is that right)\b",

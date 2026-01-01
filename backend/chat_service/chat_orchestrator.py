@@ -930,6 +930,16 @@ Write the {report_type} report in markdown format using hierarchical layout when
         parts.append("")
         parts.append("**IMPORTANT: Use the EXACT values from the table above. Do not make up or estimate any values.**")
 
+        # Add document sources section if available
+        document_sources = metadata.get('document_sources', [])
+        if document_sources:
+            parts.append("")
+            parts.append("---")
+            parts.append("**Data Sources:**")
+            for source in document_sources:
+                filename = source.get('filename', 'Unknown')
+                parts.append(f"- {filename}")
+
         return "\n".join(parts)
 
     def _summarize_dynamic_sql_for_context(self, summary: Dict[str, Any], data: list) -> str:

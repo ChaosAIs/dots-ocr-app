@@ -49,6 +49,144 @@ class SQLQueryExecutor:
         self.schema_service = schema_service
         self.llm_client = llm_client
 
+    def _get_document_sources(self, doc_ids: List[UUID]) -> List[Dict[str, str]]:
+        """
+        Get document source names for the given document IDs.
+
+        Args:
+            doc_ids: List of document UUIDs
+
+        Returns:
+            List of dicts with 'document_id' and 'filename'
+        """
+        if not doc_ids:
+            return []
+
+        try:
+            doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in doc_ids)
+            result = self.db.execute(text(f"""
+                SELECT id, original_filename
+                FROM documents
+                WHERE id IN ({doc_ids_str})
+            """))
+
+            sources = []
+            for row in result.fetchall():
+                sources.append({
+                    "document_id": str(row[0]),
+                    "filename": row[1] or "Unknown"
+                })
+            return sources
+        except Exception as e:
+            logger.warning(f"[SQL Executor] Failed to get document sources: {e}")
+            return []
+
+    def _get_document_sources_from_results(self, data: List[Dict[str, Any]], sql_query: str) -> List[Dict[str, str]]:
+        """
+        Extract document sources from query results by modifying the SQL to include document_id.
+
+        This runs a modified version of the query that extracts DISTINCT document_ids
+        from the actual result set, then fetches the corresponding filenames.
+
+        Args:
+            data: The query result data (not used directly, but indicates query succeeded)
+            sql_query: The generated SQL query
+
+        Returns:
+            List of dicts with 'document_id' and 'filename' for documents actually used
+        """
+        if not sql_query or not data:
+            return []
+
+        try:
+            # The SQL typically has a CTE like:
+            # WITH expanded_items AS (
+            #     SELECT dd.header_data, li.data as item
+            #     FROM documents_data dd
+            #     JOIN documents_data_line_items li ON ...
+            #     WHERE dd.document_id IN (...)
+            # )
+            # SELECT ... FROM expanded_items WHERE ...
+            #
+            # We need to rebuild it with dd.document_id included and extract unique values
+
+            if 'WITH expanded_items AS' in sql_query or 'WITH items AS' in sql_query:
+                # Extract document_id filter from the CTE's WHERE clause
+                doc_filter_match = re.search(r"dd\.document_id\s+IN\s*\(([^)]+)\)", sql_query, re.IGNORECASE)
+
+                if doc_filter_match:
+                    doc_ids_in_filter = doc_filter_match.group(1)
+
+                    # Find the outer WHERE clause (after the CTE ends with ")")
+                    # Look for the pattern: ) SELECT ... FROM expanded_items WHERE ...
+                    outer_where_match = re.search(
+                        r'\)\s*SELECT[^W]+WHERE\s+(.+?)(?:ORDER BY|GROUP BY|LIMIT|;|$)',
+                        sql_query,
+                        re.IGNORECASE | re.DOTALL
+                    )
+
+                    if outer_where_match:
+                        where_clause = outer_where_match.group(1).strip().rstrip(';')
+
+                        # Build query to get document_ids from records matching the filter
+                        doc_id_query = f"""
+                            WITH expanded_items AS (
+                                SELECT dd.document_id, dd.header_data, li.data as item
+                                FROM documents_data dd
+                                JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+                                WHERE dd.document_id IN ({doc_ids_in_filter})
+                            )
+                            SELECT DISTINCT document_id FROM expanded_items WHERE {where_clause}
+                        """
+                    else:
+                        # No outer WHERE clause, get all document_ids from the CTE
+                        doc_id_query = f"""
+                            WITH expanded_items AS (
+                                SELECT dd.document_id, dd.header_data, li.data as item
+                                FROM documents_data dd
+                                JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+                                WHERE dd.document_id IN ({doc_ids_in_filter})
+                            )
+                            SELECT DISTINCT document_id FROM expanded_items
+                        """
+
+                    # Execute to get document IDs
+                    try:
+                        logger.info(f"[SQL Executor] Extracting document sources with query:\n{doc_id_query[:300]}...")
+                        result = self.db.execute(text(doc_id_query))
+                        doc_ids = [str(row[0]) for row in result.fetchall()]
+                        logger.info(f"[SQL Executor] Found {len(doc_ids)} unique document(s) in results")
+
+                        if doc_ids:
+                            # Get filenames for these document IDs
+                            doc_ids_str = ", ".join(f"'{doc_id}'" for doc_id in doc_ids)
+                            filename_result = self.db.execute(text(f"""
+                                SELECT id, original_filename
+                                FROM documents
+                                WHERE id IN ({doc_ids_str})
+                            """))
+
+                            sources = []
+                            for row in filename_result.fetchall():
+                                sources.append({
+                                    "document_id": str(row[0]),
+                                    "filename": row[1] or "Unknown"
+                                })
+                            logger.info(f"[SQL Executor] Document sources: {[s['filename'] for s in sources]}")
+                            return sources
+                    except Exception as inner_e:
+                        logger.warning(f"[SQL Executor] Failed to execute document_id extraction query: {inner_e}")
+                        # Try rollback in case of error
+                        try:
+                            self.db.rollback()
+                        except:
+                            pass
+
+            return []
+        except Exception as e:
+            logger.warning(f"[SQL Executor] Failed to extract document sources from results: {e}")
+            return []
+
     def execute_analytics_query(
         self,
         accessible_doc_ids: List[UUID],
@@ -1144,6 +1282,12 @@ class SQLQueryExecutor:
                 # Generate summary report
                 summary_report = generator.generate_summary_report(query, data, field_mappings)
 
+                # Get document sources from actual query results (not just accessible docs)
+                document_sources = self._get_document_sources_from_results(data, current_sql)
+                # Fallback to accessible_doc_ids if extraction failed
+                if not document_sources:
+                    document_sources = self._get_document_sources(accessible_doc_ids)
+
                 return {
                     "data": data,
                     "summary": summary_report,
@@ -1156,7 +1300,8 @@ class SQLQueryExecutor:
                         "time_granularity": sql_result.time_granularity,
                         "row_count": len(data),
                         "correction_attempts": attempt,
-                        "correction_history": correction_history if correction_history else None
+                        "correction_history": correction_history if correction_history else None,
+                        "document_sources": document_sources
                     }
                 }
 
@@ -1228,7 +1373,8 @@ class SQLQueryExecutor:
         field_mappings: Dict[str, Dict[str, Any]],
         doc_filter: str,
         storage_type: str,
-        send_progress
+        send_progress,
+        accessible_doc_ids: List[UUID] = None
     ) -> Dict[str, Any]:
         """
         Execute separate MIN and MAX queries and combine results.
@@ -1245,6 +1391,7 @@ class SQLQueryExecutor:
             doc_filter: Document filter WHERE clause
             storage_type: "inline" or "external"
             send_progress: Async progress callback function
+            accessible_doc_ids: List of document IDs used in the query (for source tracking)
 
         Returns:
             Combined query results with both MIN and MAX data
@@ -1344,6 +1491,17 @@ class SQLQueryExecutor:
             if max_data:
                 max_value = max(float(r.get(amount_col, 0) or 0) for r in max_data)
 
+        # Get document sources from actual query results (not just accessible docs)
+        document_sources = []
+        # Try to extract from MIN data/SQL first, then MAX data/SQL
+        if min_data and min_sql:
+            document_sources = self._get_document_sources_from_results(min_data, min_sql)
+        if not document_sources and max_data and max_sql:
+            document_sources = self._get_document_sources_from_results(max_data, max_sql)
+        # Fallback to accessible_doc_ids if extraction failed
+        if not document_sources and accessible_doc_ids:
+            document_sources = self._get_document_sources(accessible_doc_ids)
+
         return {
             "data": combined_data,
             "summary": {
@@ -1363,7 +1521,8 @@ class SQLQueryExecutor:
                 "time_granularity": min_result.time_granularity if min_result else None,
                 "row_count": len(combined_data),
                 "is_min_max_query": True,
-                "errors": errors if errors else None
+                "errors": errors if errors else None,
+                "document_sources": document_sources
             },
             # Include generator and field_mappings for streaming report
             "_stream_generator": generator,
@@ -1442,7 +1601,8 @@ class SQLQueryExecutor:
             logger.info("[Dynamic SQL] Detected MIN/MAX query - using separate query approach")
             await send_progress("Generating separate MIN and MAX queries...")
             return await self._execute_min_max_queries_async(
-                generator, query, field_mappings, doc_filter, storage_type, send_progress
+                generator, query, field_mappings, doc_filter, storage_type, send_progress,
+                accessible_doc_ids=accessible_doc_ids
             )
 
         sql_result = generator.generate_sql(query, field_mappings, doc_filter, storage_type)
@@ -1489,6 +1649,12 @@ class SQLQueryExecutor:
                         break
                 grand_total = sum(float(r.get(amount_col, 0) or 0) for r in data) if amount_col else 0
 
+                # Get document sources from actual query results (not just accessible docs)
+                document_sources = self._get_document_sources_from_results(data, current_sql)
+                # Fallback to accessible_doc_ids if extraction failed
+                if not document_sources:
+                    document_sources = self._get_document_sources(accessible_doc_ids)
+
                 # Return data with streaming generator and field_mappings for report streaming
                 return {
                     "data": data,
@@ -1506,7 +1672,8 @@ class SQLQueryExecutor:
                         "time_granularity": sql_result.time_granularity,
                         "row_count": len(data),
                         "correction_attempts": attempt,
-                        "correction_history": correction_history if correction_history else None
+                        "correction_history": correction_history if correction_history else None,
+                        "document_sources": document_sources
                     },
                     # Include generator and field_mappings for streaming report
                     "_stream_generator": generator,

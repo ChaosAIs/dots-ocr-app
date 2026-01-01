@@ -269,8 +269,8 @@ Previous response: "{previous_response_str}"
 
 Tasks:
 1. PRONOUNS: If message has pronouns (it, they, this, that) referring to history, resolve them.
-2. DISSATISFIED: Is user unhappy with previous response? ("wrong", "check again", "refresh", "are you sure")
-3. CACHEABLE: Worth caching? No for greetings/meta questions. Yes for factual queries.
+2. DISSATISFIED: Is user unhappy with previous response OR requesting fresh/latest data? ("wrong", "check again", "refresh", "are you sure", "latest data", "latest", "fresh data", "current data", "up to date", "most recent")
+3. CACHEABLE: Worth caching? No for greetings/meta questions. Yes for factual queries. NO if user explicitly asks for "latest" or "fresh" data.
 4. INTENT: DOCUMENT_SEARCH (find/read docs, policies, how-to) | DATA_ANALYTICS (counts, totals, averages, comparisons) | HYBRID (both) | GENERAL (greetings only)
 
 JSON only, no markdown:
@@ -492,11 +492,15 @@ JSON only, no markdown:
         return detected
 
     def _detect_dissatisfaction_heuristic(self, message_lower: str) -> bool:
-        """Detect dissatisfaction signals."""
+        """Detect dissatisfaction signals or requests for fresh/latest data."""
         patterns = [
             r"\b(that's wrong|that is wrong|not correct|incorrect)\b",
             r"\b(check again|try again|refresh)\b",
             r"\b(are you sure|doesn't look right)\b",
+            # Patterns for requesting fresh/latest data (should bypass cache)
+            r"\b(latest data|latest|fresh data|current data|up to date|most recent)\b",
+            r"\bfrom (latest|current|fresh|newest)\b",
+            r"\b(get|show|fetch|retrieve).*(latest|current|fresh|newest)\b",
         ]
         return any(re.search(p, message_lower) for p in patterns)
 

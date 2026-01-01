@@ -1769,6 +1769,7 @@ def call_model(state: AgentState) -> AgentState:
 ║  2. Use the EXACT values shown above - they are computed from the complete dataset                  ║
 ║  3. Include all groups and sub-groups shown - do not skip any categories                            ║
 ║  4. Present totals by year and by category as requested                                             ║
+║  5. If "Data Sources" are listed, include them at the end of your response                          ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
 """
                     # Build fresh messages without conversation history
