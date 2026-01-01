@@ -67,6 +67,74 @@ class GraphRAG:
         self._embedding_service = None
         self._llm_service = None
         self._vector_search_enabled = GRAPH_RAG_VECTOR_SEARCH_ENABLED
+        self._graphrag_status_cache = {}  # Cache for document graphrag status checks
+
+    def _check_documents_graphrag_status(self, document_ids: set) -> Dict[str, Any]:
+        """
+        Check if any of the referenced documents have pending GraphRAG indexing.
+
+        When GraphRAG indexing is still pending/processing for some documents,
+        vector search should be enabled as a fallback even if GRAPH_RAG_VECTOR_SEARCH_ENABLED=false.
+
+        Args:
+            document_ids: Set of document IDs to check
+
+        Returns:
+            Dict with status information:
+                - all_completed: True if all documents have completed GraphRAG
+                - pending_count: Number of documents with pending GraphRAG
+                - should_enable_vector_search: True if vector search should be enabled
+        """
+        if not document_ids:
+            return {
+                "all_completed": True,
+                "pending_count": 0,
+                "should_enable_vector_search": False
+            }
+
+        # Convert to list of strings for caching
+        doc_id_list = sorted([str(doc_id) for doc_id in document_ids])
+        cache_key = ",".join(doc_id_list[:10])  # Use first 10 IDs as cache key
+
+        # Check cache first (valid for current request)
+        if cache_key in self._graphrag_status_cache:
+            return self._graphrag_status_cache[cache_key]
+
+        try:
+            from db.database import get_db_session
+            from db.document_repository import DocumentRepository
+
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+                status = repo.check_graphrag_status_by_ids(doc_id_list)
+
+                result = {
+                    "all_completed": status["all_completed"],
+                    "pending_count": status["pending_count"],
+                    "pending_doc_ids": status["pending_doc_ids"],
+                    "should_enable_vector_search": not status["all_completed"]
+                }
+
+                # Cache the result
+                self._graphrag_status_cache[cache_key] = result
+
+                if not status["all_completed"]:
+                    logger.info(
+                        f"[GraphRAG] Documents with pending GraphRAG indexing detected: "
+                        f"{status['pending_count']} pending, {status['completed_count']} completed. "
+                        f"Vector search will be ENABLED as fallback."
+                    )
+
+                return result
+
+        except Exception as e:
+            logger.warning(f"[GraphRAG] Failed to check document GraphRAG status: {e}")
+            # On error, return safe defaults (enable vector search as fallback)
+            return {
+                "all_completed": False,
+                "pending_count": 0,
+                "should_enable_vector_search": True  # Enable vector search as safe fallback
+            }
 
     async def _init_storage(self):
         """Initialize Neo4j storage backend lazily."""
@@ -213,6 +281,10 @@ class GraphRAG:
         This ensures we always have vector search results even if graph knowledge
         is not ready or incomplete.
 
+        IMPORTANT: Vector search is dynamically enabled when any of the accessible
+        documents have pending GraphRAG indexing, even if GRAPH_RAG_VECTOR_SEARCH_ENABLED=false.
+        This ensures users can still search documents while graph indexing is in progress.
+
         Args:
             query: User query string
             top_k: Number of chunks to retrieve
@@ -222,8 +294,23 @@ class GraphRAG:
         Returns:
             List of chunk dictionaries with page_content and metadata
         """
-        if not GRAPH_RAG_VECTOR_SEARCH_ENABLED:
-            logger.debug("[GraphRAG] Qdrant vector search is disabled")
+        # Check if vector search should be enabled
+        # 1. If GRAPH_RAG_VECTOR_SEARCH_ENABLED=true, always enabled
+        # 2. If disabled, check if any documents have pending GraphRAG indexing
+        vector_search_enabled = GRAPH_RAG_VECTOR_SEARCH_ENABLED
+
+        if not vector_search_enabled and accessible_doc_ids:
+            # Check if any documents have pending GraphRAG indexing
+            status = self._check_documents_graphrag_status(accessible_doc_ids)
+            if status["should_enable_vector_search"]:
+                vector_search_enabled = True
+                logger.info(
+                    f"[GraphRAG] Vector search ENABLED dynamically: "
+                    f"{status['pending_count']} documents have pending GraphRAG indexing"
+                )
+
+        if not vector_search_enabled:
+            logger.debug("[GraphRAG] Qdrant vector search is disabled (all documents have completed GraphRAG)")
             return []
 
         try:
@@ -265,11 +352,23 @@ class GraphRAG:
                 )
                 logger.info(f"[GraphRAG] Access control: filtering to {len(doc_id_strings)} accessible document IDs")
 
-            # Combine filters with AND logic if we have multiple conditions
-            if len(filter_conditions) > 1:
-                search_kwargs["filter"] = models.Filter(must=filter_conditions)
-            elif len(filter_conditions) == 1:
-                search_kwargs["filter"] = filter_conditions[0]
+            # Combine filters - always wrap in Filter object for Qdrant API compatibility
+            if len(filter_conditions) > 0:
+                # Check if we have any raw FieldCondition objects that need wrapping
+                must_conditions = []
+                for cond in filter_conditions:
+                    if isinstance(cond, models.Filter):
+                        # Nested Filter - add to must list
+                        must_conditions.append(cond)
+                    else:
+                        # FieldCondition - wrap in Filter and add
+                        must_conditions.append(models.Filter(must=[cond]))
+
+                # Combine all conditions with AND logic
+                if len(must_conditions) == 1:
+                    search_kwargs["filter"] = must_conditions[0]
+                else:
+                    search_kwargs["filter"] = models.Filter(must=must_conditions)
 
             # Perform vector search using similarity_search with filter
             docs = vectorstore.similarity_search(query, **search_kwargs)

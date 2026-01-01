@@ -32,6 +32,12 @@ class UpdateSessionRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
+class UpdateSessionMetadataRequest(BaseModel):
+    """Update chat session metadata request."""
+    workspace_ids: Optional[List[str]] = None
+    document_ids: Optional[List[str]] = None
+
+
 class UpdateMessageRequest(BaseModel):
     """Update chat message request."""
     content: str = Field(..., min_length=1, description="The new message content")
@@ -176,6 +182,52 @@ def update_session(
     # Compute message count at runtime for consistency
     message_count = conv_manager.chat_repo.get_message_count(UUID(session_id))
 
+    return SessionResponse(**updated_session.to_dict(message_count=message_count))
+
+
+@router.patch("/{session_id}/metadata", response_model=SessionResponse)
+def update_session_metadata(
+    session_id: str,
+    request: UpdateSessionMetadataRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """Update chat session metadata (workspace and document selection)."""
+    conv_manager = ConversationManager(db)
+
+    # Verify session exists and user owns it
+    session = conv_manager.get_session(session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Session not found"
+        )
+
+    # Verify ownership
+    if str(session.user_id) != str(current_user.id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+
+    # Merge new metadata with existing metadata
+    existing_metadata = session.session_metadata or {}
+
+    if request.workspace_ids is not None:
+        existing_metadata["_prev_workspace_ids"] = request.workspace_ids
+    if request.document_ids is not None:
+        existing_metadata["_prev_document_ids"] = request.document_ids
+
+    # Update session metadata
+    updated_session = conv_manager.update_session_metadata(
+        session_id=UUID(session_id),
+        metadata=existing_metadata
+    )
+
+    # Compute message count at runtime for consistency
+    message_count = conv_manager.chat_repo.get_message_count(UUID(session_id))
+
+    logger.info(f"Updated metadata for session {session_id}: workspaces={request.workspace_ids}, documents={request.document_ids}")
     return SessionResponse(**updated_session.to_dict(message_count=message_count))
 
 

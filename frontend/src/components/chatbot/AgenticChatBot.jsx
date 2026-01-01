@@ -8,6 +8,7 @@ import { Toast } from "primereact/toast";
 import { Dialog } from "primereact/dialog";
 import { RadioButton } from "primereact/radiobutton";
 import { Dropdown } from "primereact/dropdown";
+import { Checkbox } from "primereact/checkbox";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import chatService from "../../services/chatService";
@@ -76,6 +77,9 @@ export const AgenticChatBot = () => {
   const [workspaceBrowserCollapsed, setWorkspaceBrowserCollapsed] = useState(false);
   const [mobileWorkspaceDrawerOpen, setMobileWorkspaceDrawerOpen] = useState(false);
 
+  // Graph RAG knowledge reasoning toggle
+  const [graphRagEnabled, setGraphRagEnabled] = useState(true); // Default to true, will be updated from config
+
   const wsRef = useRef(null);
   const workspaceBrowserRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -127,6 +131,82 @@ export const AgenticChatBot = () => {
       loadChatPreferences();
     }
   }, [user]);
+
+  // Load chat config (graph RAG enabled setting) on mount
+  useEffect(() => {
+    const loadChatConfig = async () => {
+      try {
+        const config = await chatService.getChatConfig();
+        if (config && typeof config.graph_rag_query_enabled === 'boolean') {
+          console.log("[AgenticChatBot] Loaded chat config, graph_rag_query_enabled:", config.graph_rag_query_enabled);
+          setGraphRagEnabled(config.graph_rag_query_enabled);
+        }
+      } catch (error) {
+        console.error("[AgenticChatBot] Error loading chat config:", error);
+        // Keep default value on error
+      }
+    };
+
+    loadChatConfig();
+  }, []);
+
+  // Track if selection was initialized (to avoid saving on initial load)
+  const selectionInitializedRef = useRef(false);
+  const lastSavedSelectionRef = useRef({ workspaceIds: [], documentIds: [] });
+
+  // Save workspace/document selection to current session metadata when it changes
+  // This ensures the selection is persisted and restored when reopening the session
+  useEffect(() => {
+    const saveSelectionToSession = async () => {
+      // Only save if there's an active session
+      if (!sessionId) return;
+
+      // Skip saving on initial load - wait until selection is initialized
+      if (!selectionInitializedRef.current) {
+        // Mark as initialized after first render with a session
+        selectionInitializedRef.current = true;
+        lastSavedSelectionRef.current = {
+          workspaceIds: [...selectedWorkspaceIds],
+          documentIds: [...selectedDocumentIds]
+        };
+        return;
+      }
+
+      // Check if selection actually changed
+      const workspacesSame =
+        selectedWorkspaceIds.length === lastSavedSelectionRef.current.workspaceIds.length &&
+        selectedWorkspaceIds.every(id => lastSavedSelectionRef.current.workspaceIds.includes(id));
+      const documentsSame =
+        selectedDocumentIds.length === lastSavedSelectionRef.current.documentIds.length &&
+        selectedDocumentIds.every(id => lastSavedSelectionRef.current.documentIds.includes(id));
+
+      if (workspacesSame && documentsSame) {
+        return; // No change, skip save
+      }
+
+      try {
+        await chatService.updateSessionMetadata(
+          sessionId,
+          selectedWorkspaceIds,
+          selectedDocumentIds
+        );
+        lastSavedSelectionRef.current = {
+          workspaceIds: [...selectedWorkspaceIds],
+          documentIds: [...selectedDocumentIds]
+        };
+        console.log("[AgenticChatBot] Saved selection to session metadata:", {
+          sessionId,
+          workspaceIds: selectedWorkspaceIds,
+          documentIds: selectedDocumentIds
+        });
+      } catch (error) {
+        // Silently fail - this is not critical
+        console.error("[AgenticChatBot] Error saving selection to session:", error);
+      }
+    };
+
+    saveSelectionToSession();
+  }, [sessionId, selectedWorkspaceIds, selectedDocumentIds]);
 
   // Calculate exponential backoff delay for reconnection
   const getReconnectDelay = useCallback((attempt) => {
@@ -557,6 +637,7 @@ export const AgenticChatBot = () => {
           message: userMessage.content,
           user_id: user?.id,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
+          graph_rag_enabled: graphRagEnabled,
         })
       );
     } else {
@@ -569,7 +650,7 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
       connectWebSocket();
     }
-  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds]);
+  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds, graphRagEnabled]);
 
   const handleRetry = useCallback(async (msg, msgIndex) => {
     if (isLoading || !sessionId) return;
@@ -653,10 +734,11 @@ export const AgenticChatBot = () => {
           user_id: user?.id,
           is_retry: true,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
+          graph_rag_enabled: graphRagEnabled,
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, graph_rag_enabled=${graphRagEnabled}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -667,7 +749,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket]);
+  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket, graphRagEnabled, user?.id]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -1060,10 +1142,11 @@ export const AgenticChatBot = () => {
           user_id: user?.id,
           is_retry: true,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
+          graph_rag_enabled: graphRagEnabled,
         })
       );
 
-      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, graph_rag_enabled=${graphRagEnabled}: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({
@@ -1074,7 +1157,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedDocumentIds, connectWebSocket]);
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedDocumentIds, connectWebSocket, graphRagEnabled, user?.id]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1196,22 +1279,38 @@ export const AgenticChatBot = () => {
       // Restore workspace/document selection from session metadata (if available)
       // This allows reopening a chat with the same document context it was using
       // Note: This does NOT update user preferences - only applies to this session
+      console.log("[AgenticChatBot] Session metadata:", sessionDetails?.session_metadata);
+
       if (sessionDetails?.session_metadata) {
         const metadata = sessionDetails.session_metadata;
-        const sessionWorkspaceIds = metadata._prev_workspace_ids;
-        const sessionDocumentIds = metadata._prev_document_ids;
+        const sessionWorkspaceIds = metadata._prev_workspace_ids || [];
+        const sessionDocumentIds = metadata._prev_document_ids || [];
 
-        if (sessionWorkspaceIds && sessionWorkspaceIds.length > 0) {
-          console.log("[AgenticChatBot] Restoring workspace selection from session:", sessionWorkspaceIds);
-          setSelectedWorkspaceIds(sessionWorkspaceIds);
-        }
-        if (sessionDocumentIds && sessionDocumentIds.length > 0) {
-          console.log("[AgenticChatBot] Restoring document selection from session:", sessionDocumentIds);
-          setSelectedDocumentIds(sessionDocumentIds);
-        }
+        console.log("[AgenticChatBot] Restoring selection from session:", {
+          workspaceIds: sessionWorkspaceIds,
+          documentIds: sessionDocumentIds
+        });
 
-        // If session has no stored selection, keep current selection (user preferences)
-        // This handles old sessions created before this feature was added
+        // Always set the selection from session metadata (even if empty)
+        // This ensures the WorkspaceBrowser reflects the session's state
+        setSelectedWorkspaceIds(sessionWorkspaceIds);
+        setSelectedDocumentIds(sessionDocumentIds);
+
+        // Update the last saved selection to match what we just restored
+        // This prevents the save effect from immediately re-saving the same data
+        lastSavedSelectionRef.current = {
+          workspaceIds: [...sessionWorkspaceIds],
+          documentIds: [...sessionDocumentIds]
+        };
+        // Mark as initialized since we have valid data from session
+        selectionInitializedRef.current = true;
+      } else {
+        // Session has no metadata - clear the selection to start fresh
+        console.log("[AgenticChatBot] Session has no metadata, clearing selection");
+        setSelectedWorkspaceIds([]);
+        setSelectedDocumentIds([]);
+        lastSavedSelectionRef.current = { workspaceIds: [], documentIds: [] };
+        selectionInitializedRef.current = true;
       }
 
       // Check if title needs regeneration (do this in background)
@@ -1468,24 +1567,39 @@ export const AgenticChatBot = () => {
             </div>
           )}
 
-          {/* Input Area */}
-          <div className="chatbot-input">
-            <InputTextarea
-              ref={inputRef}
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder="Ask a question about your documents..."
-              rows={2}
-              autoResize
-              disabled={isLoading || (sessionId && !isConnected)}
-            />
-            <Button
-              icon={isLoading ? "pi pi-spin pi-spinner" : "pi pi-send"}
-              onClick={sendMessage}
-              disabled={!inputValue.trim() || isLoading || (sessionId && !isConnected)}
-              className="send-button"
-            />
+          {/* Input Area with Graph RAG Toggle */}
+          <div className="chatbot-input-wrapper">
+            {/* Graph RAG Toggle */}
+            <div className="graph-rag-toggle">
+              <Checkbox
+                inputId="graphRagEnabled"
+                checked={graphRagEnabled}
+                onChange={(e) => setGraphRagEnabled(e.checked)}
+                disabled={isLoading}
+              />
+              <label htmlFor="graphRagEnabled" className="graph-rag-label">
+                <i className="pi pi-sitemap" />
+                {t("Chat.EnableGraphKnowledgeReasoning", "Enable Graph Knowledge Reasoning")}
+              </label>
+            </div>
+            <div className="chatbot-input">
+              <InputTextarea
+                ref={inputRef}
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask a question about your documents..."
+                rows={2}
+                autoResize
+                disabled={isLoading || (sessionId && !isConnected)}
+              />
+              <Button
+                icon={isLoading ? "pi pi-spin pi-spinner" : "pi pi-send"}
+                onClick={sendMessage}
+                disabled={!inputValue.trim() || isLoading || (sessionId && !isConnected)}
+                className="send-button"
+              />
+            </div>
           </div>
           </>
         )}

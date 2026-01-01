@@ -15,7 +15,7 @@ The reasoning process:
 import os
 import re
 import logging
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 
 from .unified_retriever import UnifiedRetriever, RetrievalResult
@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 # Environment configuration
 ITERATIVE_REASONING_ENABLED = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
 DEFAULT_MAX_STEPS = int(os.getenv("ITERATIVE_REASONING_DEFAULT_MAX_STEPS", "3"))
+
+# Performance optimization thresholds
+SKIP_THINKING_CHUNK_THRESHOLD = int(os.getenv("SKIP_THINKING_CHUNK_THRESHOLD", "15"))  # Skip THINKING if >= this many chunks
+EARLY_TERMINATION_SCORE_THRESHOLD = float(os.getenv("EARLY_TERMINATION_SCORE_THRESHOLD", "0.6"))  # Skip THINKING if top chunk score >= this
+THINKING_TOP_CHUNKS_COUNT = int(os.getenv("THINKING_TOP_CHUNKS_COUNT", "10"))  # Send only top N chunks to THINKING
+FOLLOWUP_SKIP_VECTOR_SEARCH = os.getenv("FOLLOWUP_SKIP_VECTOR_SEARCH", "true").lower() == "true"  # Skip vector search for follow-up queries when GraphRAG enabled
 
 
 @dataclass
@@ -65,7 +71,8 @@ class IterativeReasoningEngine:
         source_names: Optional[List[str]] = None,
         workspace_id: str = "default",
         accessible_doc_ids: Optional[set] = None,
-        routed_document_ids: Optional[List[str]] = None
+        routed_document_ids: Optional[List[str]] = None,
+        preprocessing_topics: Optional[List[str]] = None  # Reuse topics from unified preprocessing
     ):
         """
         Initialize the iterative reasoning engine.
@@ -78,6 +85,7 @@ class IterativeReasoningEngine:
             accessible_doc_ids: Optional set of document IDs the user can access (for access control)
             routed_document_ids: List of document IDs from router (already filtered by access control).
                                  When provided, this takes precedence over accessible_doc_ids.
+            preprocessing_topics: Topics from unified preprocessing to avoid redundant extraction
         """
         self.graphrag_enabled = graphrag_enabled
         self.max_steps = max_steps or DEFAULT_MAX_STEPS
@@ -85,6 +93,14 @@ class IterativeReasoningEngine:
         self.workspace_id = workspace_id
         self.accessible_doc_ids = accessible_doc_ids
         self.routed_document_ids = routed_document_ids
+        self.preprocessing_topics = preprocessing_topics or []
+
+        # Detect if this is a single-document query (for optimization)
+        self.is_single_document_query = (
+            routed_document_ids is not None and len(routed_document_ids) == 1
+        ) or (
+            accessible_doc_ids is not None and len(accessible_doc_ids) == 1
+        )
 
         # Determine which document IDs to use for filtering
         # Priority: routed_document_ids > accessible_doc_ids
@@ -115,6 +131,88 @@ class IterativeReasoningEngine:
             from .llm_service import get_llm_service
             self._llm_service = get_llm_service()
         return self._llm_service
+
+    def _should_skip_thinking(
+        self,
+        chunks: List[Dict],
+        step: int
+    ) -> Tuple[bool, str]:
+        """
+        Determine if THINKING step can be skipped based on heuristics.
+
+        Implements Option 1 (single-doc) + Option 7 (early termination).
+
+        Args:
+            chunks: Retrieved chunks with scores
+            step: Current iteration step
+
+        Returns:
+            Tuple of (should_skip, reason)
+        """
+        # Only consider skipping on first iteration
+        if step > 1:
+            return False, ""
+
+        chunk_count = len(chunks)
+
+        # Option 1: Single-document query with sufficient chunks
+        if self.is_single_document_query and chunk_count >= SKIP_THINKING_CHUNK_THRESHOLD:
+            return True, f"single-doc with {chunk_count} chunks (>= {SKIP_THINKING_CHUNK_THRESHOLD})"
+
+        # Option 7: Early termination based on relevance score
+        if chunks:
+            # Get top chunk score
+            top_score = max(c.get("_score", 0) for c in chunks)
+            if top_score >= EARLY_TERMINATION_SCORE_THRESHOLD and chunk_count >= 10:
+                return True, f"high relevance (top_score={top_score:.2f} >= {EARLY_TERMINATION_SCORE_THRESHOLD})"
+
+        return False, ""
+
+    def _get_top_chunks_summary(
+        self,
+        chunks: List[Dict],
+        top_n: int = None
+    ) -> List[Dict]:
+        """
+        Get top N highest-scoring chunks with summarized content for THINKING.
+
+        Implements Option 2: reduce context sent to THINKING LLM.
+
+        Args:
+            chunks: All retrieved chunks
+            top_n: Number of top chunks to return (default: THINKING_TOP_CHUNKS_COUNT)
+
+        Returns:
+            List of top chunks with truncated content
+        """
+        if not chunks:
+            return []
+
+        top_n = top_n or THINKING_TOP_CHUNKS_COUNT
+
+        # Sort by score and take top N
+        sorted_chunks = sorted(
+            chunks,
+            key=lambda c: c.get("_score", 0),
+            reverse=True
+        )[:top_n]
+
+        # Create summarized versions (truncate content for faster processing)
+        summarized = []
+        for chunk in sorted_chunks:
+            content = chunk.get("page_content", chunk.get("content", ""))
+            # Truncate to 400 chars for THINKING (was 800)
+            if len(content) > 400:
+                content = content[:400] + "..."
+
+            summarized.append({
+                **chunk,
+                "page_content": content,
+                "content": content,
+                "_summarized": True
+            })
+
+        return summarized
 
     async def reason(
         self,
@@ -207,8 +305,14 @@ class IterativeReasoningEngine:
                     await progress_callback(f"Refining search (round {step})...")
 
             # Step 2: Retrieve knowledge
-            logger.info("[IterativeReasoning] Retrieving knowledge...")
-            result = await self.retriever.retrieve(current_query, top_k=20)
+            # For follow-up queries (step > 1), optionally skip vector search when GraphRAG is enabled
+            # This avoids redundant results since initial vector search already found similar chunks
+            skip_vector = (step > 1) and FOLLOWUP_SKIP_VECTOR_SEARCH and self.graphrag_enabled
+            if skip_vector:
+                logger.info("[IterativeReasoning] Retrieving knowledge (GRAPH-ONLY, skipping vector search)...")
+            else:
+                logger.info("[IterativeReasoning] Retrieving knowledge...")
+            result = await self.retriever.retrieve(current_query, top_k=20, skip_vector_search=skip_vector)
 
             # Track this retrieval step
             knowledge_step = {
@@ -262,12 +366,32 @@ class IterativeReasoningEngine:
             logger.info("-" * 50)
             logger.info("[IterativeReasoning] THINKING: Should I continue or answer?")
 
+            # Option 1 + 7: Check if we can skip THINKING entirely
+            should_skip, skip_reason = self._should_skip_thinking(all_chunks, step)
+            if should_skip:
+                logger.info(f"[IterativeReasoning] SKIP THINKING: {skip_reason}")
+                logger.info("[IterativeReasoning] Proceeding directly to answer generation (optimized path)")
+                is_complete = True
+                # Don't set final_answer here - let the fallback answer generator handle it
+                continue
+
             if progress_callback:
                 await progress_callback("Analyzing what I found...")
 
-            # Format knowledge summary for LLM
+            # Option 2: Use top N summarized chunks for THINKING (reduce context)
+            thinking_chunks = self._get_top_chunks_summary(all_chunks, THINKING_TOP_CHUNKS_COUNT)
+            thinking_knowledge = [{
+                "query": current_query,
+                "mode": result.retrieval_mode,
+                "entities": result.entities[:5],  # Limit entities too
+                "relationships": result.relationships[:5],  # Limit relationships
+                "chunks": thinking_chunks,  # Use summarized chunks
+                "parent_chunks": [],  # Skip parent chunks for THINKING
+            }]
+
+            # Format knowledge summary for LLM (using reduced context)
             knowledge_summary = self._format_knowledge_summary(
-                retrieved_knowledge,
+                thinking_knowledge,
                 KNOWLEDGE_FORMAT_TEMPLATE,
                 NO_KNOWLEDGE_TEMPLATE
             )
@@ -284,9 +408,9 @@ class IterativeReasoningEngine:
             )
 
             # Get LLM response
-            # 4000 tokens allows for comprehensive answers with multiple products/items
+            # Reduced from 4000 to 2000 tokens for THINKING - it only needs decision + optional query
             from langchain_core.messages import HumanMessage
-            llm = self._get_llm_service().get_chat_model(temperature=0.2, num_predict=4000)
+            llm = self._get_llm_service().get_chat_model(temperature=0.2, num_predict=2000)
             think_response_msg = await llm.ainvoke([HumanMessage(content=think_prompt)])
             think_response = think_response_msg.content.strip()
 

@@ -107,7 +107,8 @@ class UnifiedRetriever:
         self,
         query: str,
         top_k: int = 20,
-        mode: str = "hybrid"
+        mode: str = "hybrid",
+        skip_vector_search: bool = False
     ) -> RetrievalResult:
         """
         Retrieve relevant content for the given query.
@@ -116,6 +117,8 @@ class UnifiedRetriever:
             query: Search query string
             top_k: Maximum number of results to retrieve
             mode: Retrieval mode ("local", "global", "hybrid") - only used when GraphRAG enabled
+            skip_vector_search: If True and GraphRAG enabled, use graph-only retrieval (no vector search)
+                               Used for follow-up queries to avoid redundant results.
 
         Returns:
             RetrievalResult with entities, relationships, and chunks
@@ -126,6 +129,7 @@ class UnifiedRetriever:
         logger.info(f"[Retriever] Query: {query[:100]}...")
         logger.info(f"[Retriever] Top K: {top_k}")
         logger.info(f"[Retriever] Mode: {mode}")
+        logger.info(f"[Retriever] Skip Vector Search: {skip_vector_search}")
         logger.info(f"[Retriever] Workspace ID: {self.workspace_id}")
         if self.accessible_doc_ids:
             logger.info(f"[Retriever] Accessible Doc IDs: {len(self.accessible_doc_ids)} documents")
@@ -139,12 +143,27 @@ class UnifiedRetriever:
         logger.info("[Retriever] RETRIEVAL DECISION:")
         logger.info(f"[Retriever]   - GraphRAG Enabled: {self.graphrag_enabled}")
         logger.info(f"[Retriever]   - GraphRAG Instance: {'Available' if self._graphrag else 'Not Available'}")
+        logger.info(f"[Retriever]   - Skip Vector Search: {skip_vector_search}")
 
-        retrieval_method = 'graph_retrieval' if (self.graphrag_enabled and self._graphrag) else 'vector_only'
-        logger.info(f"[Retriever]   - Selected Method: {retrieval_method.upper()}")
+        # Determine retrieval method
+        # If skip_vector_search is True and GraphRAG is available, use graph-only
+        # Otherwise, use the normal decision logic
+        if self.graphrag_enabled and self._graphrag:
+            if skip_vector_search:
+                retrieval_method = 'graph_only'
+                logger.info(f"[Retriever]   - Selected Method: GRAPH_ONLY (skip_vector_search=True)")
+            else:
+                retrieval_method = 'graph_retrieval'
+                logger.info(f"[Retriever]   - Selected Method: GRAPH_RETRIEVAL (hybrid)")
+        else:
+            retrieval_method = 'vector_only'
+            logger.info(f"[Retriever]   - Selected Method: VECTOR_ONLY")
         logger.info("-" * 80)
 
-        if self.graphrag_enabled and self._graphrag:
+        if retrieval_method == 'graph_only':
+            # Graph-only: use local mode to focus on entity/relationship traversal
+            result = await self._graph_retrieval(query, top_k, mode="local")
+        elif retrieval_method == 'graph_retrieval':
             result = await self._graph_retrieval(query, top_k, mode)
         else:
             result = await self._vector_only_retrieval(query, top_k)

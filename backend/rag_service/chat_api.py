@@ -98,6 +98,30 @@ class StatusResponse(BaseModel):
     collection_info: dict
 
 
+class ChatConfigResponse(BaseModel):
+    """Chat configuration response model."""
+
+    graph_rag_query_enabled: bool
+
+
+@router.get("/config", response_model=ChatConfigResponse)
+async def get_chat_config():
+    """Get chat configuration settings for the frontend."""
+    try:
+        # Import GRAPH_RAG_QUERY_ENABLED from graph_rag module
+        try:
+            from .graph_rag import GRAPH_RAG_QUERY_ENABLED
+        except ImportError:
+            GRAPH_RAG_QUERY_ENABLED = False
+
+        return ChatConfigResponse(
+            graph_rag_query_enabled=GRAPH_RAG_QUERY_ENABLED
+        )
+    except Exception as e:
+        logger.error(f"Error getting chat config: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/status", response_model=StatusResponse)
 async def get_chat_status():
     """Get the status of the RAG service."""
@@ -194,6 +218,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     is_retry = request.get("is_retry", False)  # Flag for retry action
                     workspace_ids = request.get("workspace_ids", [])  # Optional workspace filter
                     document_ids = request.get("document_ids", [])  # Optional document filter
+                    graph_rag_enabled = request.get("graph_rag_enabled", None)  # Optional graph RAG toggle from UI
 
                     if not message:
                         await websocket.send_json({
@@ -845,6 +870,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     logger.warning(f"[Intent Routing] Failed to prepare hybrid context: {e}")
 
                             try:
+                                # Get preprocessing topics to pass to agent (Option 5: avoid redundant extraction)
+                                preprocessing_topics = context_info.get('topics', []) if context_info else []
+
                                 async for chunk in stream_agent_response(
                                     enhanced_message,
                                     history,
@@ -853,7 +881,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     is_retry=is_retry,
                                     accessible_doc_ids=accessible_doc_ids,
                                     analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
-                                    document_context_changed=document_context_changed  # Force new search if selection changed
+                                    document_context_changed=document_context_changed,  # Force new search if selection changed
+                                    preprocessing_topics=preprocessing_topics,  # Pass topics from unified preprocessing
+                                    graph_rag_enabled=graph_rag_enabled  # Pass graph RAG toggle from UI
                                 ):
                                     chunk_count += 1
                                     full_response += chunk

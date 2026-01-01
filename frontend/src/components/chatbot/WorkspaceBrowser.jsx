@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, forwardRef, useImperativeHandle } from "react";
+import { useState, useEffect, useCallback, forwardRef, useImperativeHandle, useRef } from "react";
 import { Button } from "primereact/button";
 import { Checkbox } from "primereact/checkbox";
 import { Badge } from "primereact/badge";
@@ -41,20 +41,39 @@ export const WorkspaceBrowser = forwardRef(({
   const [workspaceDocuments, setWorkspaceDocuments] = useState({});
   const [loadingDocuments, setLoadingDocuments] = useState({});
 
+  // Track if we're syncing from parent (to avoid saving during sync)
+  const isSyncingFromParentRef = useRef(false);
+
   // Sync with parent's selectedWorkspaceIds
   useEffect(() => {
+    isSyncingFromParentRef.current = true;
     setLocalSelectedIds(selectedWorkspaceIds || []);
+    // Reset after a tick to allow state to settle
+    setTimeout(() => {
+      isSyncingFromParentRef.current = false;
+    }, 100);
   }, [selectedWorkspaceIds]);
 
   // Sync with parent's selectedDocumentIds
   useEffect(() => {
+    isSyncingFromParentRef.current = true;
     setLocalSelectedDocIds(selectedDocumentIds || []);
+    // Reset after a tick to allow state to settle
+    setTimeout(() => {
+      isSyncingFromParentRef.current = false;
+    }, 100);
   }, [selectedDocumentIds]);
 
-  // Validate and clean up stale document IDs when workspace documents are loaded
-  // This ensures selectedDocumentIds only contains documents from selected workspaces
+  // Validate and clean up stale document IDs and workspace IDs when workspace documents are loaded
+  // This ensures selectedDocumentIds only contains valid documents and workspace selection matches
   useEffect(() => {
-    const validateDocumentSelection = async () => {
+    const validateSelection = async () => {
+      // Skip validation while syncing from parent (e.g., when switching sessions)
+      if (isSyncingFromParentRef.current) {
+        console.log("[WorkspaceBrowser] Skipping validation during parent sync");
+        return;
+      }
+
       if (localSelectedIds.length === 0) {
         // No workspaces selected - clear document selection if any
         if (localSelectedDocIds.length > 0) {
@@ -66,8 +85,9 @@ export const WorkspaceBrowser = forwardRef(({
         return;
       }
 
-      // Collect all valid document IDs from selected workspaces
+      // Collect all valid document IDs from selected workspaces and track which workspaces have selected docs
       const validDocIds = new Set();
+      const workspacesWithDocs = new Set();
       let needsLoad = false;
 
       for (const wsId of localSelectedIds) {
@@ -81,19 +101,51 @@ export const WorkspaceBrowser = forwardRef(({
       }
 
       // If we have all workspace documents loaded, validate the selection
-      if (!needsLoad && localSelectedDocIds.length > 0) {
-        const staleIds = localSelectedDocIds.filter(id => !validDocIds.has(id));
-        if (staleIds.length > 0) {
-          console.log(`[WorkspaceBrowser] Removing ${staleIds.length} stale document IDs not in selected workspaces:`, staleIds);
-          const cleanedDocIds = localSelectedDocIds.filter(id => validDocIds.has(id));
+      if (!needsLoad) {
+        let cleanedDocIds = localSelectedDocIds;
+        let cleanedWorkspaceIds = localSelectedIds;
+        let hasChanges = false;
+
+        // First, clean up stale document IDs
+        if (localSelectedDocIds.length > 0) {
+          const staleDocIds = localSelectedDocIds.filter(id => !validDocIds.has(id));
+          if (staleDocIds.length > 0) {
+            console.log(`[WorkspaceBrowser] Removing ${staleDocIds.length} stale document IDs:`, staleDocIds);
+            cleanedDocIds = localSelectedDocIds.filter(id => validDocIds.has(id));
+            hasChanges = true;
+          }
+        }
+
+        // Then, check which workspaces actually have selected documents
+        for (const wsId of localSelectedIds) {
+          const docs = workspaceDocuments[wsId] || [];
+          const workspaceDocIds = docs.map(doc => doc.id);
+          const hasSelectedDocs = cleanedDocIds.some(id => workspaceDocIds.includes(id));
+          if (hasSelectedDocs) {
+            workspacesWithDocs.add(wsId);
+          }
+        }
+
+        // Clean up workspaces that have no selected documents
+        const workspacesWithNoSelectedDocs = localSelectedIds.filter(wsId => !workspacesWithDocs.has(wsId));
+        if (workspacesWithNoSelectedDocs.length > 0) {
+          console.log(`[WorkspaceBrowser] Removing ${workspacesWithNoSelectedDocs.length} workspaces with no selected documents:`, workspacesWithNoSelectedDocs);
+          cleanedWorkspaceIds = localSelectedIds.filter(wsId => workspacesWithDocs.has(wsId));
+          hasChanges = true;
+        }
+
+        // Apply changes if needed
+        if (hasChanges) {
           setLocalSelectedDocIds(cleanedDocIds);
+          setLocalSelectedIds(cleanedWorkspaceIds);
           onDocumentSelectionChange?.(cleanedDocIds);
-          savePreferences(localSelectedIds, cleanedDocIds);
+          onSelectionChange?.(cleanedWorkspaceIds);
+          savePreferences(cleanedWorkspaceIds, cleanedDocIds);
         }
       }
     };
 
-    validateDocumentSelection();
+    validateSelection();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [localSelectedIds, workspaceDocuments]); // Re-run when workspaces or their documents change (callbacks are stable)
 
@@ -356,9 +408,9 @@ export const WorkspaceBrowser = forwardRef(({
     const selectedDocsInWorkspace = localSelectedDocIds.filter(id => workspaceDocIds.includes(id));
 
     if (selectedDocsInWorkspace.length === 0) {
-      // No documents selected - but workspace might still be selected (legacy state or just added)
-      // Use workspace selection state as the source of truth
-      return { checked: isWorkspaceSelected, indeterminate: false };
+      // No documents selected in this workspace - workspace should NOT be checked
+      // This handles the case where documents were deleted but workspace was still in selection
+      return { checked: false, indeterminate: false };
     } else if (selectedDocsInWorkspace.length === workspaceDocIds.length) {
       return { checked: true, indeterminate: false };
     } else {

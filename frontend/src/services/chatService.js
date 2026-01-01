@@ -101,6 +101,29 @@ class ChatService {
   }
 
   /**
+   * Update session metadata (workspace and document selection)
+   * @param {string} sessionId - Session UUID
+   * @param {Array<string>} workspaceIds - Selected workspace IDs
+   * @param {Array<string>} documentIds - Selected document IDs
+   * @returns {Promise<Object>} Updated session object
+   */
+  async updateSessionMetadata(sessionId, workspaceIds, documentIds) {
+    try {
+      const response = await http.patch(
+        `${API_BASE_URL}/api/chat/sessions/${sessionId}/metadata`,
+        {
+          workspace_ids: workspaceIds,
+          document_ids: documentIds
+        }
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error updating session metadata:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Delete a chat session
    * @param {string} sessionId - Session UUID
    * @returns {Promise<Object>} Success message
@@ -206,6 +229,22 @@ class ChatService {
       return response.data;
     } catch (error) {
       console.error("Error regenerating all titles:", error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get chat configuration settings
+   * @returns {Promise<Object>} Object with graph_rag_query_enabled
+   */
+  async getChatConfig() {
+    try {
+      const response = await http.get(
+        `${API_BASE_URL}/api/chat/config`
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error getting chat config:", error);
       throw error;
     }
   }

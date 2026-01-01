@@ -1068,3 +1068,74 @@ class DocumentRepository:
 
         return {doc.id for doc in documents}
 
+    def check_graphrag_status_by_ids(self, document_ids: List[str]) -> Dict[str, Any]:
+        """
+        Check GraphRAG indexing status for a list of document IDs.
+
+        This is used to determine if vector search should be enabled as a fallback
+        when GraphRAG indexing is still pending/processing for some documents.
+
+        Args:
+            document_ids: List of document ID strings to check
+
+        Returns:
+            Dict with:
+                - all_completed: True if all documents have completed GraphRAG indexing
+                - pending_count: Number of documents with pending/processing GraphRAG
+                - pending_doc_ids: List of document IDs with pending GraphRAG
+                - completed_count: Number of documents with completed/skipped GraphRAG
+        """
+        from .models import TaskStatus
+
+        if not document_ids:
+            return {
+                "all_completed": True,
+                "pending_count": 0,
+                "pending_doc_ids": [],
+                "completed_count": 0
+            }
+
+        # Convert string IDs to UUIDs
+        try:
+            uuid_ids = [UUID(doc_id) if isinstance(doc_id, str) else doc_id for doc_id in document_ids]
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid document ID format: {e}")
+            return {
+                "all_completed": True,
+                "pending_count": 0,
+                "pending_doc_ids": [],
+                "completed_count": 0
+            }
+
+        # Query documents to get their graphrag_status
+        documents = self.db.query(Document.id, Document.graphrag_status, Document.skip_graphrag).filter(
+            and_(
+                Document.id.in_(uuid_ids),
+                Document.deleted_at.is_(None)
+            )
+        ).all()
+
+        pending_doc_ids = []
+        completed_count = 0
+
+        for doc in documents:
+            # GraphRAG is considered complete if:
+            # 1. graphrag_status is COMPLETED or SKIPPED
+            # 2. OR skip_graphrag is True (document type doesn't need GraphRAG)
+            is_complete = (
+                doc.graphrag_status in [TaskStatus.COMPLETED, TaskStatus.SKIPPED]
+                or doc.skip_graphrag is True
+            )
+
+            if is_complete:
+                completed_count += 1
+            else:
+                pending_doc_ids.append(str(doc.id))
+
+        return {
+            "all_completed": len(pending_doc_ids) == 0,
+            "pending_count": len(pending_doc_ids),
+            "pending_doc_ids": pending_doc_ids,
+            "completed_count": completed_count
+        }
+

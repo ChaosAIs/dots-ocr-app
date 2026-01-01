@@ -496,6 +496,14 @@ class ParentChunkSummarizer:
         if original_tokens <= available_tokens:
             return content, original_tokens
 
+        # If summarization is disabled, truncate instead of using LLM
+        if not self.enabled:
+            max_chars = available_tokens * 4  # Approximate chars per token
+            truncated = content[:max_chars]
+            if not truncated.endswith("..."):
+                truncated = truncated.rsplit(' ', 1)[0] + "..." if ' ' in truncated else truncated + "..."
+            return truncated, estimate_tokens(truncated)
+
         # Try LLM summarization with specific target
         temp_max = self.max_summary_tokens
         self.max_summary_tokens = min(available_tokens, temp_max)

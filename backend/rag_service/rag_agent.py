@@ -69,6 +69,12 @@ _accessible_doc_ids = None
 # Global analytics context for hybrid queries (pre-computed SQL aggregation results)
 _analytics_context = None
 
+# Global preprocessing topics (reused from unified preprocessing to avoid redundant LLM calls)
+_preprocessing_topics = None
+
+# Global graph RAG enabled flag (from UI toggle, overrides .env setting if set)
+_graph_rag_enabled = None
+
 
 def _estimate_token_count(text: str) -> int:
     """
@@ -993,8 +999,10 @@ def _get_graphrag_context(query: str, max_steps: int = None, source_names: List[
         logger.debug("[GraphRAG Query] Skipping - GraphRAG module not available")
         return ""
 
-    if not GRAPH_RAG_QUERY_ENABLED:
-        logger.debug("[GraphRAG Query] Skipping - GRAPH_RAG_QUERY_ENABLED=false in .env")
+    # Determine effective graph RAG enabled status from UI toggle or .env
+    effective_graph_rag_enabled = _graph_rag_enabled if _graph_rag_enabled is not None else GRAPH_RAG_QUERY_ENABLED
+    if not effective_graph_rag_enabled:
+        logger.debug(f"[GraphRAG Query] Skipping - graph_rag_enabled=false (UI: {_graph_rag_enabled}, .env: {GRAPH_RAG_QUERY_ENABLED})")
         return ""
 
     try:
@@ -1110,27 +1118,81 @@ def search_documents(query: str) -> str:
         # Send progress update: Analyzing query
         _send_progress("Analyzing your question...")
 
-        # Step 0: Analyze query complexity and determine max_steps (COMBINED LLM CALL)
-        from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
-        complexity_analysis = analyze_complexity(query)
-        llm_max_steps = complexity_analysis.max_steps
+        # Get preprocessing topics if available (Option 5: reuse from unified preprocessing)
+        global _preprocessing_topics
+        preprocessing_topics = _preprocessing_topics or []
 
-        # Cap max_steps to configured maximum (prevent LLM from setting too high)
-        config_max_steps = int(os.getenv("GRAPH_RAG_MAX_STEPS", "5"))
-        max_steps = min(llm_max_steps, config_max_steps)
+        # Option 4: Parallelize query complexity + query enhancement using ThreadPoolExecutor
+        # Option 8: Use heuristics for simple queries to skip/reduce LLM calls
+        import concurrent.futures
 
-        if llm_max_steps > config_max_steps:
-            logger.info(f"[Search] LLM suggested max_steps={llm_max_steps}, capped to config max={config_max_steps}")
+        # Heuristic check for simple queries (Option 8)
+        # Expanded patterns to catch more common simple question forms
+        query_lower = query.lower().strip()
+        simple_query_prefixes = (
+            "what is", "what's", "what are",
+            "define", "explain", "describe",
+            "tell me what", "tell me about",
+            "can you explain", "can you describe", "can you tell me",
+            "how does", "how do", "how is",
+            "who is", "who are",
+            "where is", "where are",
+            "when is", "when was",
+        )
+        is_simple_query = (
+            query_lower.startswith(simple_query_prefixes) or
+            len(query.split()) <= 10  # Increased from 8 to 10 words
+        )
 
-        logger.info(f"[Search] Query complexity analysis: max_steps={max_steps}, "
-                   f"reasoning='{complexity_analysis.reasoning}'")
+        # If we have preprocessing topics and simple query, skip full analysis
+        if preprocessing_topics and is_simple_query:
+            logger.info(f"[Search] OPTIMIZATION: Using preprocessing topics, skipping redundant analysis")
+            # Use heuristic max_steps for simple queries
+            max_steps = 1
+            enhanced_query = query
+            query_metadata = {
+                "entities": [],
+                "topics": preprocessing_topics,
+                "document_type_hints": [],
+                "intent": "document_search",
+            }
+            logger.info(f"[Search] Using cached topics: {preprocessing_topics}")
+        else:
+            # Run complexity analysis and query enhancement in parallel
+            from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
 
-        # Step 1: Enhance query and extract metadata (SINGLE LLM CALL)
-        _send_progress("Identifying key topics and entities...")
+            def run_complexity_analysis():
+                return analyze_complexity(query)
 
-        query_analysis = _analyze_query_with_llm(query)
-        enhanced_query = query_analysis["enhanced_query"]
-        query_metadata = query_analysis["metadata"]
+            def run_query_enhancement():
+                return _analyze_query_with_llm(query)
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                complexity_future = executor.submit(run_complexity_analysis)
+                enhancement_future = executor.submit(run_query_enhancement)
+
+                # Wait for both to complete
+                complexity_analysis = complexity_future.result()
+                query_analysis = enhancement_future.result()
+
+            llm_max_steps = complexity_analysis.max_steps
+            enhanced_query = query_analysis["enhanced_query"]
+            query_metadata = query_analysis["metadata"]
+
+            # Option 8: Reduce max_steps for simple "what is X" queries
+            if is_simple_query and llm_max_steps > 1:
+                logger.info(f"[Search] OPTIMIZATION: Simple query detected, reducing max_steps from {llm_max_steps} to 1")
+                llm_max_steps = 1
+
+            # Cap max_steps to configured maximum
+            config_max_steps = int(os.getenv("GRAPH_RAG_MAX_STEPS", "5"))
+            max_steps = min(llm_max_steps, config_max_steps)
+
+            if llm_max_steps > config_max_steps:
+                logger.info(f"[Search] LLM suggested max_steps={llm_max_steps}, capped to config max={config_max_steps}")
+
+            logger.info(f"[Search] Query complexity analysis: max_steps={max_steps}, "
+                       f"reasoning='{complexity_analysis.reasoning}'")
 
         logger.info(f"[Search] Original query: '{query[:50]}...'")
         logger.info(f"[Search] Enhanced query: '{enhanced_query[:100]}...'")
@@ -1166,11 +1228,17 @@ def search_documents(query: str) -> str:
 
         # Step 3: Use Iterative Reasoning Engine (unified for GraphRAG and vector-only)
         if iterative_enabled:
+            # Determine graph RAG enabled status:
+            # - If UI toggle is set (not None), use that value
+            # - Otherwise, fall back to .env setting
+            effective_graph_rag_enabled = _graph_rag_enabled if _graph_rag_enabled is not None else GRAPH_RAG_QUERY_ENABLED
+            logger.info(f"[Search] GraphRAG enabled: {effective_graph_rag_enabled} (UI: {_graph_rag_enabled}, .env: {GRAPH_RAG_QUERY_ENABLED})")
+
             return _search_with_iterative_reasoning(
                 query=query,
                 max_steps=max_steps,
                 relevant_sources=None,  # Deprecated - use routed_document_ids
-                graphrag_enabled=GRAPHRAG_AVAILABLE and GRAPH_RAG_QUERY_ENABLED,
+                graphrag_enabled=GRAPHRAG_AVAILABLE and effective_graph_rag_enabled,
                 accessible_doc_ids=accessible_doc_ids,
                 routed_document_ids=routed_document_ids
             )
@@ -1224,13 +1292,18 @@ def _search_with_iterative_reasoning(
     logger.info(f"[Search]   - routed_document_ids count={len(routed_document_ids) if routed_document_ids else 'None'}")
     logger.info(f"[Search] Using Iterative Reasoning Engine (graphrag={graphrag_enabled}, max_steps={max_steps})")
 
-    # Create reasoning engine with routed document IDs
+    # Get preprocessing topics from global context (Option 5: reuse from unified preprocessing)
+    global _preprocessing_topics
+    preprocessing_topics = _preprocessing_topics or []
+
+    # Create reasoning engine with routed document IDs and preprocessing topics
     engine = IterativeReasoningEngine(
         graphrag_enabled=graphrag_enabled,
         max_steps=max_steps,
         source_names=None,  # DEPRECATED - not used
         accessible_doc_ids=accessible_doc_ids,
-        routed_document_ids=routed_document_ids
+        routed_document_ids=routed_document_ids,
+        preprocessing_topics=preprocessing_topics  # Pass topics to avoid redundant extraction
     )
 
     # Define async reasoning function
@@ -1862,7 +1935,9 @@ async def stream_agent_response(
     is_retry: bool = False,
     accessible_doc_ids: Optional[set] = None,
     analytics_context: Optional[str] = None,
-    document_context_changed: bool = False
+    document_context_changed: bool = False,
+    preprocessing_topics: Optional[List[str]] = None,
+    graph_rag_enabled: Optional[bool] = None
 ):
     """
     Stream the agent response for a query.
@@ -1876,15 +1951,25 @@ async def stream_agent_response(
         accessible_doc_ids: Optional set of document IDs the user has access to (for access control filtering).
         analytics_context: Optional pre-computed analytics context for hybrid queries (from SQL aggregation).
         document_context_changed: If True, the document/workspace selection has changed - force new search.
+        preprocessing_topics: Optional topics from unified preprocessing to avoid redundant LLM calls.
+        graph_rag_enabled: Optional boolean from UI to enable/disable graph RAG reasoning. If None, uses .env setting.
 
     Yields:
         Chunks of the response text.
     """
     # Store progress callback and accessible doc IDs in global variables so tools can access them
-    global _progress_callback, _accessible_doc_ids, _analytics_context
+    global _progress_callback, _accessible_doc_ids, _analytics_context, _preprocessing_topics, _graph_rag_enabled
     _progress_callback = progress_callback
     _accessible_doc_ids = accessible_doc_ids
     _analytics_context = analytics_context
+    _preprocessing_topics = preprocessing_topics
+    _graph_rag_enabled = graph_rag_enabled
+
+    # Log graph RAG setting
+    if graph_rag_enabled is not None:
+        logger.info(f"[Graph RAG] UI override: graph_rag_enabled={graph_rag_enabled}")
+    else:
+        logger.info(f"[Graph RAG] Using .env setting: GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
 
     # Log analytics context if provided (for hybrid queries)
     if analytics_context:
