@@ -833,10 +833,14 @@ Write the {report_type} report in markdown format using hierarchical layout when
         This creates a structured summary that the LLM should use for data statistics
         instead of trying to calculate from document chunks.
 
+        For small result sets (<=50 rows), includes actual data rows so LLM can
+        generate accurate responses without hallucination.
+
         Supports both standard and dynamic SQL result formats.
         """
         summary = analytics_result.get('summary', {})
         data = analytics_result.get('data', [])
+        metadata = analytics_result.get('metadata', {})
 
         parts = []
 
@@ -844,7 +848,12 @@ Write the {report_type} report in markdown format using hierarchical layout when
         if 'hierarchical_data' in summary or 'summary_by_year' in summary:
             return self._summarize_dynamic_sql_for_context(summary, data)
 
-        # Standard format handling
+        # For small result sets (<=100 rows), include actual data as markdown table
+        # This prevents LLM hallucination for tabular queries like MIN/MAX
+        if data and len(data) <= 100:
+            return self._format_data_as_markdown_table(data, summary, metadata)
+
+        # Standard format handling for larger datasets
         # Add summary stats
         if 'total_amount' in summary:
             parts.append(f"Total amount: ${summary['total_amount']:,.2f}")
@@ -865,6 +874,61 @@ Write the {report_type} report in markdown format using hierarchical layout when
                 total = row.get('total_amount', 0)
                 count = row.get('count', 0)
                 parts.append(f"  - {group}: ${total:,.2f} ({count} documents)")
+
+        return "\n".join(parts)
+
+    def _format_data_as_markdown_table(self, data: List[Dict[str, Any]], summary: Dict[str, Any], metadata: Dict[str, Any]) -> str:
+        """
+        Format data rows as a markdown table for LLM context.
+
+        This ensures the LLM uses actual data values instead of hallucinating.
+
+        Args:
+            data: List of data rows from SQL query
+            summary: Summary statistics
+            metadata: Query metadata
+
+        Returns:
+            Markdown formatted table with data
+        """
+        if not data:
+            return "No data found."
+
+        parts = []
+
+        # Add report title if available
+        report_title = summary.get('report_title', 'Query Results')
+        parts.append(f"## {report_title}")
+        parts.append(f"Total records: {len(data)}")
+        parts.append("")
+
+        # Build markdown table from data
+        # Get all columns from the first row
+        columns = list(data[0].keys())
+
+        # Create header row
+        header = "| " + " | ".join(columns) + " |"
+        separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+        parts.append(header)
+        parts.append(separator)
+
+        # Create data rows
+        for row in data:
+            values = []
+            for col in columns:
+                val = row.get(col, "")
+                # Format the value
+                if val is None:
+                    val = "-"
+                elif isinstance(val, float):
+                    val = f"{val:,.2f}"
+                else:
+                    val = str(val)
+                values.append(val)
+            parts.append("| " + " | ".join(values) + " |")
+
+        parts.append("")
+        parts.append("**IMPORTANT: Use the EXACT values from the table above. Do not make up or estimate any values.**")
 
         return "\n".join(parts)
 

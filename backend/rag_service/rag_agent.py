@@ -1744,17 +1744,21 @@ def call_model(state: AgentState) -> AgentState:
                 if _analytics_context:
                     # ANALYTICS-FOCUSED HYBRID MODE:
                     # Skip document chunk search - use analytics data + document summary only
-                    logger.info(f"[vLLM] Analytics context available - skipping chunk retrieval for cleaner response")
+                    # IMPORTANT: Do NOT include conversation history for tabular SQL queries
+                    # because the fresh SQL data is authoritative and history may contain outdated/wrong values
+                    logger.info(f"[vLLM] Analytics context available - skipping chunk retrieval and conversation history for cleaner response")
 
                     # Normalize the query
                     normalized_query = normalize_query_dates(user_query)
                     if normalized_query != user_query:
                         logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
 
-                    # Build context with ONLY analytics data (no confusing chunks)
-                    context_message = f"""
+                    # Build a fresh system message WITHOUT conversation history for tabular queries
+                    # This prevents hallucination from outdated conversation history
+                    analytics_system_prompt = f"""You are a helpful AI assistant. Answer the user's question based ONLY on the SQL query results provided below.
+
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════════╗
-║  📊 PRE-COMPUTED ANALYTICS DATA - USE THESE EXACT VALUES IN YOUR RESPONSE                           ║
+║  📊 FRESH SQL QUERY RESULTS - USE THESE EXACT VALUES IN YOUR RESPONSE                               ║
 ╠══════════════════════════════════════════════════════════════════════════════════════════════════════╣
 
 {_analytics_context}
@@ -1766,9 +1770,15 @@ def call_model(state: AgentState) -> AgentState:
 ║  3. Include all groups and sub-groups shown - do not skip any categories                            ║
 ║  4. Present totals by year and by category as requested                                             ║
 ╚══════════════════════════════════════════════════════════════════════════════════════════════════════╝
-
-**USER QUESTION**: {normalized_query}
 """
+                    # Build fresh messages without conversation history
+                    augmented_messages = [
+                        SystemMessage(content=analytics_system_prompt),
+                        HumanMessage(content=normalized_query)
+                    ]
+
+                    # Build context_message for logging purposes
+                    context_message = analytics_system_prompt
                 else:
                     # STANDARD RAG MODE: Search for document chunks
                     # Extract conversation history from messages for context-aware search
@@ -1799,15 +1809,19 @@ def call_model(state: AgentState) -> AgentState:
                     # Simple context message - dates are already normalized in the content
                     context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
 
-                augmented_messages = list(messages)
-                if isinstance(augmented_messages[0], SystemMessage):
-                    augmented_messages[0] = SystemMessage(
-                        content=augmented_messages[0].content + context_message
-                    )
+                    # For non-analytics path, build augmented messages with conversation history
+                    augmented_messages = list(messages)
+                    if isinstance(augmented_messages[0], SystemMessage):
+                        augmented_messages[0] = SystemMessage(
+                            content=augmented_messages[0].content + context_message
+                        )
 
                 # DEBUG: Log the context being sent to LLM
                 logger.info(f"[vLLM] Context message length: {len(context_message)} chars")
                 logger.info(f"[vLLM] Context preview (first 500 chars): {context_message[:500]}")
+                # Log full analytics context for debugging MIN/MAX queries
+                if len(context_message) < 2000:
+                    logger.info(f"[vLLM] Full analytics context:\n{context_message}")
 
                 # DEBUG: Log the full system message being sent
                 if isinstance(augmented_messages[0], SystemMessage):

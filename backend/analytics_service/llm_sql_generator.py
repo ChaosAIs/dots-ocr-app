@@ -815,7 +815,23 @@ ORDER BY (item->>'NumericField')::numeric DESC  -- cast only in ORDER BY if need
 - **sum**: GROUP BY grouping fields, SUM(aggregation_field)
 - **avg**: Use two-step aggregation for per-document averages
 - **count**: COUNT(*) with optional grouping
-- **min/max**: ORDER BY aggregation_field ASC/DESC LIMIT 1. **IMPORTANT: Include ALL schema fields in SELECT, not just the aggregation field. The user wants to see the complete record.**
+- **min/max**: Use subquery with MIN()/MAX() function to find the record. This properly handles NULL values.
+  Example for MIN (finding record with minimum value):
+  ```sql
+  SELECT ... FROM expanded_items
+  WHERE (item->>'AggField')::numeric = (
+      SELECT MIN((item->>'AggField')::numeric) FROM expanded_items
+  )
+  ```
+  Example for MAX (finding record with maximum value):
+  ```sql
+  SELECT ... FROM expanded_items
+  WHERE (item->>'AggField')::numeric = (
+      SELECT MAX((item->>'AggField')::numeric) FROM expanded_items
+  )
+  ```
+  **IMPORTANT: Include ALL schema fields in SELECT, not just the aggregation field. The user wants to see the complete record.**
+  **DO NOT use ORDER BY ... LIMIT 1 for min/max - it fails with NULL values.**
 
 ### 7. Important Notes:
 - Do NOT add WHERE inside base CTE - document filtering is added automatically
@@ -1229,9 +1245,9 @@ Respond with JSON only:"""
             # Handle "max xxx and min xxx" patterns - make more explicit
             modified = re.sub(r'\bmax(?:imum)?\s+(\w+)\s+(?:and|&)\s+min(?:imum)?\s+\1\b', r'the single lowest \1', modified, flags=re.IGNORECASE)
             modified = re.sub(r'\bmin(?:imum)?\s+(\w+)\s+(?:and|&)\s+max(?:imum)?\s+\1\b', r'the single lowest \1', modified, flags=re.IGNORECASE)
-            # Add clarification suffix with explicit instruction to include ALL fields
+            # Add clarification suffix with explicit instruction to use MIN() subquery
             if 'single' not in modified:
-                modified = modified + ' (return only the 1 item with the minimum value, ORDER BY ASC LIMIT 1. IMPORTANT: Include ALL schema fields in SELECT to show complete record details)'
+                modified = modified + ' (return the record with the MINIMUM value. Use WHERE field = (SELECT MIN(field) FROM ...) subquery pattern. IMPORTANT: Include ALL schema fields in SELECT to show complete record details. DO NOT use ORDER BY LIMIT 1.)'
             return modified
         else:  # max
             modified = query_lower
@@ -1243,9 +1259,9 @@ Respond with JSON only:"""
             # Handle "max xxx and min xxx" patterns - make more explicit
             modified = re.sub(r'\bmax(?:imum)?\s+(\w+)\s+(?:and|&)\s+min(?:imum)?\s+\1\b', r'the single highest \1', modified, flags=re.IGNORECASE)
             modified = re.sub(r'\bmin(?:imum)?\s+(\w+)\s+(?:and|&)\s+max(?:imum)?\s+\1\b', r'the single highest \1', modified, flags=re.IGNORECASE)
-            # Add clarification suffix with explicit instruction to include ALL fields
+            # Add clarification suffix with explicit instruction to use MAX() subquery
             if 'single' not in modified:
-                modified = modified + ' (return only the 1 item with the maximum value, ORDER BY DESC LIMIT 1. IMPORTANT: Include ALL schema fields in SELECT to show complete record details)'
+                modified = modified + ' (return the record with the MAXIMUM value. Use WHERE field = (SELECT MAX(field) FROM ...) subquery pattern. IMPORTANT: Include ALL schema fields in SELECT to show complete record details. DO NOT use ORDER BY LIMIT 1.)'
             return modified
 
     def is_min_max_query(self, user_query: str) -> bool:
