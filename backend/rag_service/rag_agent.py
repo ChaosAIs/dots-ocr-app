@@ -75,8 +75,10 @@ _analytics_context = None
 # Global preprocessing topics (reused from unified preprocessing to avoid redundant LLM calls)
 _preprocessing_topics = None
 
-# Global graph RAG enabled flag (from UI toggle, overrides .env setting if set)
-_graph_rag_enabled = None
+# Global iterative reasoning enabled flag (from UI toggle, overrides .env setting if set)
+# When True: use iterative reasoning workflow (with GRAPH_RAG_QUERY_ENABLED controlling graph queries inside)
+# When False: use simple vector search flow
+_iterative_reasoning_enabled = None
 
 
 def _estimate_token_count(text: str) -> int:
@@ -1002,10 +1004,10 @@ def _get_graphrag_context(query: str, max_steps: int = None, source_names: List[
         logger.debug("[GraphRAG Query] Skipping - GraphRAG module not available")
         return ""
 
-    # Determine effective graph RAG enabled status from UI toggle or .env
-    effective_graph_rag_enabled = _graph_rag_enabled if _graph_rag_enabled is not None else GRAPH_RAG_QUERY_ENABLED
-    if not effective_graph_rag_enabled:
-        logger.debug(f"[GraphRAG Query] Skipping - graph_rag_enabled=false (UI: {_graph_rag_enabled}, .env: {GRAPH_RAG_QUERY_ENABLED})")
+    # Use GRAPH_RAG_QUERY_ENABLED from .env to control graph queries
+    # (The UI checkbox now controls iterative vs simple flow, not graph queries)
+    if not GRAPH_RAG_QUERY_ENABLED:
+        logger.debug(f"[GraphRAG Query] Skipping - GRAPH_RAG_QUERY_ENABLED=false (.env)")
         return ""
 
     try:
@@ -1118,9 +1120,6 @@ def search_documents(query: str) -> str:
             # For security, we should block access in this case
             logger.warning("[Search] Access control: accessible_doc_ids is None - blocking search for security")
             return "Unable to verify your document access permissions. Please try again or contact your administrator."
-
-        # Check if iterative reasoning is enabled
-        iterative_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
 
         # Send progress update: Analyzing query
         _send_progress("Analyzing your question...")
@@ -1241,20 +1240,24 @@ def search_documents(query: str) -> str:
                 f"[Search] Document router selected {len(routed_document_ids)} document IDs: {routed_document_ids}"
             )
 
-        # Step 3: Use Iterative Reasoning Engine (unified for GraphRAG and vector-only)
+        # Step 3: Determine workflow based on UI toggle or .env setting
+        # - If UI toggle is set (not None), use that value
+        # - Otherwise, fall back to ITERATIVE_REASONING_ENABLED .env setting
+        env_iterative_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
+        effective_iterative_enabled = _iterative_reasoning_enabled if _iterative_reasoning_enabled is not None else env_iterative_enabled
+        logger.info(f"[Search] Iterative reasoning: {effective_iterative_enabled} (UI: {_iterative_reasoning_enabled}, .env: {env_iterative_enabled})")
+
         retrieval_start = time.time()
-        if iterative_enabled:
-            # Determine graph RAG enabled status:
-            # - If UI toggle is set (not None), use that value
-            # - Otherwise, fall back to .env setting
-            effective_graph_rag_enabled = _graph_rag_enabled if _graph_rag_enabled is not None else GRAPH_RAG_QUERY_ENABLED
-            logger.info(f"[Search] GraphRAG enabled: {effective_graph_rag_enabled} (UI: {_graph_rag_enabled}, .env: {GRAPH_RAG_QUERY_ENABLED})")
+        if effective_iterative_enabled:
+            # Use iterative reasoning workflow
+            # GRAPH_RAG_QUERY_ENABLED (.env) controls whether graph queries are used inside the iterative flow
+            logger.info(f"[Search] GraphRAG inside iterative: {GRAPH_RAG_QUERY_ENABLED} (.env setting)")
 
             result = _search_with_iterative_reasoning(
                 query=query,
                 max_steps=max_steps,
                 relevant_sources=None,  # Deprecated - use routed_document_ids
-                graphrag_enabled=GRAPHRAG_AVAILABLE and effective_graph_rag_enabled,
+                graphrag_enabled=GRAPHRAG_AVAILABLE and GRAPH_RAG_QUERY_ENABLED,
                 accessible_doc_ids=accessible_doc_ids,
                 routed_document_ids=routed_document_ids
             )
@@ -1970,7 +1973,7 @@ async def stream_agent_response(
     analytics_context: Optional[str] = None,
     document_context_changed: bool = False,
     preprocessing_topics: Optional[List[str]] = None,
-    graph_rag_enabled: Optional[bool] = None
+    iterative_reasoning_enabled: Optional[bool] = None
 ):
     """
     Stream the agent response for a query.
@@ -1985,28 +1988,32 @@ async def stream_agent_response(
         analytics_context: Optional pre-computed analytics context for hybrid queries (from SQL aggregation).
         document_context_changed: If True, the document/workspace selection has changed - force new search.
         preprocessing_topics: Optional topics from unified preprocessing to avoid redundant LLM calls.
-        graph_rag_enabled: Optional boolean from UI to enable/disable graph RAG reasoning. If None, uses .env setting.
+        iterative_reasoning_enabled: Optional boolean from UI checkbox to enable/disable iterative reasoning workflow.
+                                     If None, uses ITERATIVE_REASONING_ENABLED from .env.
+                                     When True: use iterative reasoning (GRAPH_RAG_QUERY_ENABLED controls graph queries inside).
+                                     When False: use simple vector search flow.
 
     Yields:
         Chunks of the response text.
     """
     # Store progress callback and accessible doc IDs in global variables so tools can access them
-    global _progress_callback, _accessible_doc_ids, _analytics_context, _preprocessing_topics, _graph_rag_enabled
+    global _progress_callback, _accessible_doc_ids, _analytics_context, _preprocessing_topics, _iterative_reasoning_enabled
     _progress_callback = progress_callback
     _accessible_doc_ids = accessible_doc_ids
     _analytics_context = analytics_context
     _preprocessing_topics = preprocessing_topics
-    _graph_rag_enabled = graph_rag_enabled
+    _iterative_reasoning_enabled = iterative_reasoning_enabled
 
     # Get timing metrics for detailed RAG pipeline tracking
     timing_metrics = get_current_metrics()
     rag_pipeline_start = time.time()
 
-    # Log graph RAG setting
-    if graph_rag_enabled is not None:
-        logger.info(f"[Graph RAG] UI override: graph_rag_enabled={graph_rag_enabled}")
+    # Log iterative reasoning setting
+    if iterative_reasoning_enabled is not None:
+        logger.info(f"[Iterative Reasoning] UI override: iterative_reasoning_enabled={iterative_reasoning_enabled}")
     else:
-        logger.info(f"[Graph RAG] Using .env setting: GRAPH_RAG_QUERY_ENABLED={GRAPH_RAG_QUERY_ENABLED}")
+        env_setting = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
+        logger.info(f"[Iterative Reasoning] Using .env setting: ITERATIVE_REASONING_ENABLED={env_setting}")
 
     # Log analytics context if provided (for hybrid queries)
     if analytics_context:

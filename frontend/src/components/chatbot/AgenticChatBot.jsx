@@ -89,8 +89,10 @@ export const AgenticChatBot = () => {
     setSelectedDocumentIdsInternal(ids);
   }, [selectedDocumentIds]);
 
-  // Graph RAG knowledge reasoning toggle
-  const [graphRagEnabled, setGraphRagEnabled] = useState(true); // Default to true, will be updated from config
+  // Iterative reasoning toggle (checkbox: "Enable Graph Knowledge Reasoning")
+  // When checked: use iterative reasoning workflow
+  // When unchecked: use simple vector search flow
+  const [iterativeReasoningEnabled, setIterativeReasoningEnabled] = useState(true); // Default to true, will be updated from config
 
   const wsRef = useRef(null);
   const workspaceBrowserRef = useRef(null);
@@ -119,14 +121,14 @@ export const AgenticChatBot = () => {
     setIsInitializing(false);
   }, []);
 
-  // Load chat config (graph RAG enabled setting) on mount
+  // Load chat config (iterative reasoning enabled setting) on mount
   useEffect(() => {
     const loadChatConfig = async () => {
       try {
         const config = await chatService.getChatConfig();
-        if (config && typeof config.graph_rag_query_enabled === 'boolean') {
-          console.log("[AgenticChatBot] Loaded chat config, graph_rag_query_enabled:", config.graph_rag_query_enabled);
-          setGraphRagEnabled(config.graph_rag_query_enabled);
+        if (config && typeof config.iterative_reasoning_enabled === 'boolean') {
+          console.log("[AgenticChatBot] Loaded chat config, iterative_reasoning_enabled:", config.iterative_reasoning_enabled);
+          setIterativeReasoningEnabled(config.iterative_reasoning_enabled);
         }
       } catch (error) {
         console.error("[AgenticChatBot] Error loading chat config:", error);
@@ -669,7 +671,7 @@ export const AgenticChatBot = () => {
           message: userMessage.content,
           user_id: user?.id,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
-          graph_rag_enabled: graphRagEnabled,
+          iterative_reasoning_enabled: iterativeReasoningEnabled,
         })
       );
     } else {
@@ -682,7 +684,7 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
       connectWebSocket();
     }
-  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds, graphRagEnabled]);
+  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds, iterativeReasoningEnabled]);
 
   const handleRetry = useCallback(async (msg, msgIndex) => {
     if (isLoading || !sessionId) return;
@@ -766,11 +768,11 @@ export const AgenticChatBot = () => {
           user_id: user?.id,
           is_retry: true,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
-          graph_rag_enabled: graphRagEnabled,
+          iterative_reasoning_enabled: iterativeReasoningEnabled,
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, graph_rag_enabled=${graphRagEnabled}: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, iterative_reasoning_enabled=${iterativeReasoningEnabled}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -781,7 +783,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket, graphRagEnabled, user?.id]);
+  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket, iterativeReasoningEnabled, user?.id]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -1174,11 +1176,11 @@ export const AgenticChatBot = () => {
           user_id: user?.id,
           is_retry: true,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
-          graph_rag_enabled: graphRagEnabled,
+          iterative_reasoning_enabled: iterativeReasoningEnabled,
         })
       );
 
-      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, graph_rag_enabled=${graphRagEnabled}: ${newContent}`);
+      console.log(`[Retry] Sending edited message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, iterative_reasoning_enabled=${iterativeReasoningEnabled}: ${newContent}`);
     } catch (error) {
       console.error("Error retrying with edit:", error);
       toast.current?.show({
@@ -1189,7 +1191,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedDocumentIds, connectWebSocket, graphRagEnabled, user?.id]);
+  }, [isLoading, sessionId, editingContent, handleCancelEdit, handleRetry, selectedDocumentIds, connectWebSocket, iterativeReasoningEnabled, user?.id]);
 
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -1582,17 +1584,17 @@ export const AgenticChatBot = () => {
             </div>
           )}
 
-          {/* Input Area with Graph RAG Toggle */}
+          {/* Input Area with Iterative Reasoning Toggle */}
           <div className="chatbot-input-wrapper">
-            {/* Graph RAG Toggle */}
+            {/* Iterative Reasoning Toggle */}
             <div className="graph-rag-toggle">
               <Checkbox
-                inputId="graphRagEnabled"
-                checked={graphRagEnabled}
-                onChange={(e) => setGraphRagEnabled(e.checked)}
+                inputId="iterativeReasoningEnabled"
+                checked={iterativeReasoningEnabled}
+                onChange={(e) => setIterativeReasoningEnabled(e.checked)}
                 disabled={isLoading}
               />
-              <label htmlFor="graphRagEnabled" className="graph-rag-label">
+              <label htmlFor="iterativeReasoningEnabled" className="graph-rag-label">
                 <i className="pi pi-sitemap" />
                 {t("Chat.EnableGraphKnowledgeReasoning", "Enable Graph Knowledge Reasoning")}
               </label>

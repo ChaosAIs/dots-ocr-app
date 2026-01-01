@@ -102,21 +102,19 @@ class StatusResponse(BaseModel):
 class ChatConfigResponse(BaseModel):
     """Chat configuration response model."""
 
-    graph_rag_query_enabled: bool
+    iterative_reasoning_enabled: bool
 
 
 @router.get("/config", response_model=ChatConfigResponse)
 async def get_chat_config():
     """Get chat configuration settings for the frontend."""
     try:
-        # Import GRAPH_RAG_QUERY_ENABLED from graph_rag module
-        try:
-            from .graph_rag import GRAPH_RAG_QUERY_ENABLED
-        except ImportError:
-            GRAPH_RAG_QUERY_ENABLED = False
+        # Read ITERATIVE_REASONING_ENABLED from environment
+        # This controls the default checkbox state for "Enable Graph Knowledge Reasoning"
+        iterative_reasoning_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
 
         return ChatConfigResponse(
-            graph_rag_query_enabled=GRAPH_RAG_QUERY_ENABLED
+            iterative_reasoning_enabled=iterative_reasoning_enabled
         )
     except Exception as e:
         logger.error(f"Error getting chat config: {e}")
@@ -219,7 +217,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     is_retry = request.get("is_retry", False)  # Flag for retry action
                     workspace_ids = request.get("workspace_ids", [])  # Optional workspace filter
                     document_ids = request.get("document_ids", [])  # Optional document filter
-                    graph_rag_enabled = request.get("graph_rag_enabled", None)  # Optional graph RAG toggle from UI
+                    iterative_reasoning_enabled = request.get("iterative_reasoning_enabled", None)  # Optional toggle from UI checkbox
 
                     if not message:
                         await websocket.send_json({
@@ -906,7 +904,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
                                     document_context_changed=document_context_changed,  # Force new search if selection changed
                                     preprocessing_topics=preprocessing_topics,  # Pass topics from unified preprocessing
-                                    graph_rag_enabled=graph_rag_enabled  # Pass graph RAG toggle from UI
+                                    iterative_reasoning_enabled=iterative_reasoning_enabled  # Pass UI checkbox toggle for iterative vs simple flow
                                 ):
                                     chunk_count += 1
                                     full_response += chunk
