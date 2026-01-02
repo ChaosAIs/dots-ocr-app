@@ -272,50 +272,78 @@ History: {history_str}
 Previous response: "{previous_response_str}"
 
 Tasks:
-1. CONTEXT RESOLUTION (CRITICAL - MUST DO THIS):
-   If the current message contains contextual references like "above condition", "same criteria", "for above", "based on above", etc., you MUST replace them with the ACTUAL condition from the previous USER message in history.
+1. CONTEXT RESOLUTION (CRITICAL - MUST DO THIS FIRST):
+   STEP 1: Check if the current message contains ANY of these references: "their", "them", "they", "it", "this", "that", "those", "these", "above", "same", "previous"
+   STEP 2: If YES, look at the MOST RECENT USER message in History to find what entity/subject it refers to
+   STEP 3: REPLACE the pronoun/reference with the actual subject + any conditions from history
 
-   References to resolve: "above condition", "same criteria", "previous filter", "those results", "the same", "for above", "based on above", "that criteria", pronouns like "it", "they", "this", "that", "those", "them"
+   CRITICAL RULE: "their details", "list them", "show their info" = user wants details of items from PREVIOUS query!
+   - If previous query asked about "meals/invoices/receipts in 2025" -> resolved_message = "list all meals/invoices/receipts details from 2025"
+   - If previous query asked about "products with inventory < 50" -> resolved_message = "list all product details where inventory < 50"
 
-   RULES:
-   - Look at USER messages in history (not AI responses) to find the condition/filter
-   - REPLACE the reference with the actual condition - do NOT just fix typos
-   - Preserve EXACT condition wording! "lower than 50 but higher than 30" is NOT "between 30 and 50"
-     * "lower than 50 but higher than 30" = > 30 AND < 50 (EXCLUSIVE)
-     * "between 30 and 50" = >= 30 AND <= 50 (INCLUSIVE)
+   EXAMPLE 1:
+   - History: user: "how many meals invoices for 2025"
+   - Current: "can you list all of their details?"
+   - resolved_message MUST BE: "list all meals invoice details from 2025"
+   - INTENT MUST BE: DATA_ANALYTICS (because listing invoice/receipt details requires SQL query on extracted data)
 
-   EXAMPLE:
+   EXAMPLE 2:
    - History: user: "how many products with inventory lower than 50 but higher than 30?"
    - Current: "list all product details for above condition"
    - resolved_message MUST BE: "list all product details where inventory lower than 50 but higher than 30"
-   - NOT just: "list all product details for above condition" (WRONG - reference not resolved!)
+   - INTENT MUST BE: DATA_ANALYTICS
+
+   EXAMPLE 3:
+   - History: user: "count receipts from last month"
+   - Current: "show me their details"
+   - resolved_message MUST BE: "show all receipt details from last month"
+   - INTENT MUST BE: DATA_ANALYTICS
+
+   CRITICAL - IGNORE RESULT COUNTS:
+   - "document_count is 7", "the 7 invoices" = RESULT COUNTS, NOT database filters! IGNORE these numbers.
+   - Use the ORIGINAL CONDITION (e.g., "from 2025") instead.
 2. DISSATISFIED: Is user unhappy with previous response OR requesting fresh/latest data? ("wrong", "check again", "refresh", "are you sure", "latest data", "latest", "fresh data", "current data", "up to date", "most recent")
 3. CACHEABLE: Worth caching? No for greetings/meta questions. Yes for factual queries. NO if user explicitly asks for "latest" or "fresh" data.
-4. INTENT: DOCUMENT_SEARCH (find/read docs, policies, how-to) | DATA_ANALYTICS (counts, totals, averages, comparisons) | HYBRID (both) | GENERAL (greetings only)
+4. INTENT:
+   - DATA_ANALYTICS: counts, totals, averages, comparisons, OR listing/showing details of invoices/receipts/meals/products/transactions (requires SQL on extracted data)
+   - DOCUMENT_SEARCH: find/read policy docs, how-to guides, manuals, documentation
+   - HYBRID: needs both analytics and document content
+   - GENERAL: greetings only
+   NOTE: If resolved_message is about listing invoice/receipt/meal/product details, intent MUST be DATA_ANALYTICS!
 
-JSON only, no markdown:
-{{"topics":["topic1"],"resolved_message":"original or resolved with full conditions from history","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DOCUMENT_SEARCH"}}"""
+JSON only, no markdown. If message has pronouns referencing previous query about invoices/receipts/meals, resolve them and use DATA_ANALYTICS intent:
+{{"topics":["meals","invoice"],"resolved_message":"list all meals invoice details from 2025","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DATA_ANALYTICS"}}"""
 
     def _format_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> str:
         """Format chat history for the prompt.
 
-        Only includes USER messages (last 10) so LLM can find conditions/filters to resolve.
+        Includes USER messages fully and ASSISTANT messages summarized (to avoid token overflow).
+        Assistant responses can be very large (analytics reports), so we only keep a brief summary.
         """
         if not chat_history:
             return "(No chat history)"
 
-        # Extract only USER messages - these contain the conditions we need to resolve
-        user_messages = []
+        formatted_messages = []
         for msg in chat_history:
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if content.strip():
-                    user_messages.append(f"user: {content[:400]}")
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if not content.strip():
+                continue
 
-        # Take last 10 user messages
-        recent_user_messages = user_messages[-10:]
+            if role == "user":
+                # User messages: keep more content (these contain the conditions we need)
+                truncated = content[:400] if len(content) <= 400 else content[:400] + "..."
+                formatted_messages.append(f"user: {truncated}")
+            elif role == "assistant":
+                # Assistant messages: heavily truncate - we only need to know the topic/subject
+                # Extract just the first line or first 100 chars to indicate what was discussed
+                first_line = content.split('\n')[0][:100]
+                formatted_messages.append(f"assistant: {first_line}...")
 
-        return "\n".join(recent_user_messages)
+        # Take last 6 messages (3 exchanges)
+        recent_messages = formatted_messages[-6:]
+
+        return "\n".join(recent_messages)
 
     def _extract_json(self, text: str) -> str:
         """Extract JSON from LLM response, handling markdown code blocks."""
@@ -520,7 +548,7 @@ JSON only, no markdown:
 
     def _detect_pronouns_heuristic(self, message_lower: str) -> List[str]:
         """Detect pronouns and contextual references in message."""
-        pronouns = ['it', 'they', 'them', 'this', 'that', 'these', 'those']
+        pronouns = ['it', 'they', 'them', 'this', 'that', 'these', 'those', 'their']
         detected = []
         words = re.findall(r'\b\w+\b', message_lower)
         for pronoun in pronouns:
@@ -577,6 +605,11 @@ JSON only, no markdown:
 
         # Look for the most recent user message with conditions/filters
         condition_patterns = [
+            # Time/date patterns (important for analytics follow-ups)
+            r'(?:in|from|during|for)\s+(?:year\s+)?\d{4}',  # in 2025, from 2024, during year 2023
+            r'(?:in|from|during)\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)',
+            r'(?:last|this|past)\s+(?:week|month|quarter|year)',
+            r'(?:q[1-4]|quarter\s*[1-4])\s*\d{4}',  # Q1 2025, quarter 1 2024
             # Numeric comparisons
             r'(?:where|with|having|that have|which have)?\s*\w+\s*(?:>|<|>=|<=|=|!=|between|lower than|higher than|greater than|less than|more than|equal to)\s*\d+',
             # Between patterns
@@ -614,24 +647,43 @@ JSON only, no markdown:
         # Extract the actual condition from the previous message
         # Pattern to find the WHERE-like clause
         condition_extract_patterns = [
+            # Time/date patterns - check these first as they're common for analytics follow-ups
+            (r'(?:in|from|during|for)\s+((?:year\s+)?\d{4})', 'year'),  # in 2025, from 2024
+            (r'(?:in|from|during)\s+(january|february|march|april|may|june|july|august|september|october|november|december)(?:\s+(\d{4}))?', 'month'),
+            (r'(last|this|past)\s+(week|month|quarter|year)', 'relative'),
             # "inventory lower than X but higher than Y" pattern
-            r'(\w+)\s+(lower\s+than\s+\d+\s+(?:but\s+)?(?:higher|greater)\s+than\s+\d+)',
-            r'(\w+)\s+(higher\s+than\s+\d+\s+(?:but\s+)?(?:lower|less)\s+than\s+\d+)',
-            r'(\w+)\s+(between\s+\d+\s+and\s+\d+)',
-            r'(\w+)\s*([<>=!]+\s*\d+)',
-            r'(\w+)\s+(lower\s+than\s+\d+)',
-            r'(\w+)\s+(higher\s+than\s+\d+)',
-            r'(\w+)\s+(greater\s+than\s+\d+)',
-            r'(\w+)\s+(less\s+than\s+\d+)',
+            (r'(\w+)\s+(lower\s+than\s+\d+\s+(?:but\s+)?(?:higher|greater)\s+than\s+\d+)', 'comparison'),
+            (r'(\w+)\s+(higher\s+than\s+\d+\s+(?:but\s+)?(?:lower|less)\s+than\s+\d+)', 'comparison'),
+            (r'(\w+)\s+(between\s+\d+\s+and\s+\d+)', 'comparison'),
+            (r'(\w+)\s*([<>=!]+\s*\d+)', 'comparison'),
+            (r'(\w+)\s+(lower\s+than\s+\d+)', 'comparison'),
+            (r'(\w+)\s+(higher\s+than\s+\d+)', 'comparison'),
+            (r'(\w+)\s+(greater\s+than\s+\d+)', 'comparison'),
+            (r'(\w+)\s+(less\s+than\s+\d+)', 'comparison'),
         ]
 
         extracted_condition = None
-        for pattern in condition_extract_patterns:
+        for pattern_tuple in condition_extract_patterns:
+            pattern, condition_type = pattern_tuple
             match = re.search(pattern, previous_condition.lower())
             if match:
-                field = match.group(1)
-                condition = match.group(2)
-                extracted_condition = f"{field} {condition}"
+                if condition_type == 'year':
+                    # Time condition: "in 2025" -> "from 2025"
+                    year_part = match.group(1)
+                    extracted_condition = f"from {year_part}"
+                elif condition_type == 'month':
+                    # Month condition: "in January 2025"
+                    month = match.group(1)
+                    year = match.group(2) if match.lastindex >= 2 else ""
+                    extracted_condition = f"from {month} {year}".strip()
+                elif condition_type == 'relative':
+                    # Relative time: "last month", "this year"
+                    extracted_condition = f"{match.group(1)} {match.group(2)}"
+                else:
+                    # Comparison condition
+                    field = match.group(1)
+                    condition = match.group(2)
+                    extracted_condition = f"{field} {condition}"
                 break
 
         if not extracted_condition:
@@ -676,6 +728,15 @@ JSON only, no markdown:
 
             for ref_pattern, replacement in ref_patterns:
                 resolved = re.sub(ref_pattern, replacement, resolved, flags=re.IGNORECASE)
+
+        # Strip result count references like "document_count is 7", "where count is 10"
+        # These are result counts from previous queries, NOT valid database filters
+        result_count_patterns = [
+            r'\bwhere\s+(?:document_count|count|record_count|total_count)\s*(?:is|=|==)\s*\d+',
+            r'\b(?:document_count|count|record_count|total_count)\s*(?:is|=|==)\s*\d+',
+        ]
+        for pattern in result_count_patterns:
+            resolved = re.sub(pattern, '', resolved, flags=re.IGNORECASE)
 
         # Clean up any double spaces or awkward phrasing
         resolved = re.sub(r'\s+', ' ', resolved).strip()
