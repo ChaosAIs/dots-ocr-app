@@ -8,7 +8,7 @@ from uuid import UUID
 
 from sqlalchemy import Column, String, Integer, BigInteger, DateTime, Text, ForeignKey, Enum, Boolean, ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
-from sqlalchemy.orm import declarative_base, relationship
+from sqlalchemy.orm import declarative_base, relationship, backref
 from sqlalchemy.sql import func
 
 Base = declarative_base()
@@ -718,8 +718,8 @@ class DocumentData(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    # Relationships
-    document = relationship("Document", backref="extracted_data")
+    # Relationships - use passive_deletes=True to let database handle CASCADE
+    document = relationship("Document", backref=backref("extracted_data", passive_deletes=True))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -749,8 +749,8 @@ class DocumentDataLineItem(Base):
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Relationships
-    documents_data = relationship("DocumentData", backref="overflow_line_items")
+    # Relationships - use passive_deletes=True to let database handle CASCADE
+    documents_data = relationship("DocumentData", backref=backref("overflow_line_items", passive_deletes=True))
 
 
 class AnalyticsSession(Base):

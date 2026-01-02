@@ -243,10 +243,8 @@ export const WorkspaceSidebar = ({
   const renderWorkspaceItem = (workspace) => {
     const isSelected = selectedWorkspace?.id === workspace.id;
     const isSharedWithMe = workspace.is_system && workspace.name === "Shared With Me";
-    // Check if workspace has documents being processed
-    const hasInProgressDocuments = workspacesWithInProgress.has(workspace.id);
-    // Can delete if not default, not system, and no in-progress documents
-    const canDelete = !workspace.is_default && !hasInProgressDocuments;
+    // Can delete if not default and not system
+    const canDelete = !workspace.is_default;
 
     return (
       <div
