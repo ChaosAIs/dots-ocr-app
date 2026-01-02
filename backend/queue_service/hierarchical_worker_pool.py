@@ -150,13 +150,13 @@ class HierarchicalWorker(threading.Thread):
         try:
             # Get updated document info from task manager
             from db.database import create_db_session
-            from db.models import Document
+            from db.models import Document, IndexStatus
 
             db = create_db_session()
             try:
                 doc = db.query(Document).filter(Document.id == document_id).first()
                 if doc:
-                    # Broadcast status update
+                    # Broadcast phase-specific status update
                     # Use event_type to match frontend WebSocket handler expectations
                     event_type = f"{phase}_completed" if status == "completed" else f"{phase}_failed"
                     self.status_broadcast_callback({
@@ -173,6 +173,21 @@ class HierarchicalWorker(threading.Thread):
                         "indexing_details": doc.indexing_details
                     })
                     logger.debug(f"Broadcast status update: doc={document_id}, {phase}={status}, event_type={event_type}")
+
+                    # Also broadcast indexing_completed if document is now fully indexed
+                    # This ensures frontend gets the final status update to refresh the document list
+                    if doc.index_status == IndexStatus.INDEXED:
+                        logger.info(f"📤 Document {document_id} fully indexed - broadcasting indexing_completed")
+                        self.status_broadcast_callback({
+                            "event_type": "indexing_completed",
+                            "type": "document_status",
+                            "document_id": str(document_id),
+                            "filename": doc.filename,
+                            "index_status": "indexed",
+                            "progress": 100,
+                            "message": "Indexing completed",
+                            "indexing_details": doc.indexing_details
+                        })
             finally:
                 db.close()
         except Exception as e:

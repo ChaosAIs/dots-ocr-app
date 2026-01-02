@@ -305,6 +305,8 @@ export const DocumentList = forwardRef((props, ref) => {
             // Reload documents for completion events and significant progress updates
             const shouldReload = data.event_type === "indexing_completed" ||
                                  data.event_type === "ocr_completed" ||
+                                 data.event_type === "vector_completed" ||
+                                 data.event_type === "graphrag_completed" ||
                                  data.event_type === "extraction_completed" ||
                                  data.event_type === "extraction_failed" ||
                                  data.event_type === "extraction_progress" ||

@@ -1480,10 +1480,19 @@ class HierarchicalTaskQueueManager:
             if not doc:
                 return
 
-            # Skip if metadata already exists
+            # Skip if FULL metadata extraction already done
+            # Early routing metadata (classification_source="early_routing") is incomplete:
+            # it only has document_types but NOT the full metadata (entities, topics, etc.)
+            # and most importantly, it does NOT upsert to the metadata vector collection
             if doc.document_metadata:
-                logger.debug(f"Metadata already exists for document {document_id}, skipping extraction")
-                return
+                classification_source = doc.document_metadata.get("classification_source", "")
+                if classification_source != "early_routing":
+                    # Full extraction was done, skip
+                    logger.debug(f"Metadata already exists for document {document_id}, skipping extraction")
+                    return
+                else:
+                    # Early routing only - need full extraction for metadata vector embedding
+                    logger.info(f"[Metadata] Early routing metadata exists, proceeding with full extraction for doc={document_id}")
 
             # All vector chunks complete and no metadata yet - trigger extraction
             logger.info(f"[Metadata] All vector chunks complete for doc={document_id}, triggering metadata extraction")
