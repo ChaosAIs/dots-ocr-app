@@ -43,6 +43,31 @@ class BaseLLMService(ABC):
         """Check if the LLM service is available."""
         pass
 
+    def generate(self, prompt: str, temperature: float = 0.2) -> str:
+        """
+        Simple text-in/text-out generation interface.
+
+        This method provides a simple interface for code that expects
+        a generate(prompt) -> response pattern, wrapping the LangChain
+        chat model invocation.
+
+        Args:
+            prompt: The prompt text to send to the LLM
+            temperature: Temperature for generation (default 0.2)
+
+        Returns:
+            The generated text response
+        """
+        from langchain_core.messages import HumanMessage
+
+        chat_model = self.get_chat_model(temperature=temperature)
+        response = chat_model.invoke([HumanMessage(content=prompt)])
+
+        # Extract text content from response
+        if hasattr(response, 'content'):
+            return response.content
+        return str(response)
+
 
 class OllamaLLMService(BaseLLMService):
     """Ollama LLM Service implementation."""

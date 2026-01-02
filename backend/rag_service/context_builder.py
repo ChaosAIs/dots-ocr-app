@@ -69,6 +69,7 @@ class BuiltContext:
     graph_context_tokens: int
     budget_usage: Dict[str, float]
     warnings: List[str] = field(default_factory=list)
+    sources: List[str] = field(default_factory=list)  # Unique source document names
 
 
 def estimate_tokens(text: str) -> int:
@@ -257,8 +258,11 @@ class TokenAwareContextBuilder:
         # 1. Spreadsheet/Excel documents (structured data shouldn't be summarized)
         # 2. Chunks that are close to budget (only summarize if exceeds by >20%)
         # 3. Small chunks below the global threshold (1500 tokens default)
-        doc_type = metadata.get("document_type", "").lower()
-        is_spreadsheet = doc_type in ["spreadsheet", "excel", "csv", "xlsx", "xls"] or \
+        # Use document_types list (standard format)
+        doc_types = [t.lower() for t in metadata.get("document_types", []) if t]
+
+        spreadsheet_types = ["spreadsheet", "excel", "csv", "xlsx", "xls"]
+        is_spreadsheet = any(t in spreadsheet_types for t in doc_types) or \
                          source.lower().endswith(('.xlsx', '.xls', '.csv'))
 
         # Only summarize if chunk significantly exceeds available budget AND is above global threshold
@@ -477,6 +481,16 @@ class TokenAwareContextBuilder:
                         graph_tokens = estimate_tokens(final_graph_context)
                         warnings.append("Graph context truncated due to size")
 
+        # Collect unique source document names from selected chunks
+        unique_sources = set()
+        for chunk in selected_chunks:
+            if chunk.source and chunk.source != "Unknown":
+                unique_sources.add(chunk.source)
+        for chunk in selected_parents:
+            if chunk.source and chunk.source != "Unknown":
+                unique_sources.add(chunk.source)
+        sources_list = sorted(list(unique_sources))
+
         # Build formatted context
         context_parts = []
         doc_num = 1
@@ -494,6 +508,11 @@ class TokenAwareContextBuilder:
         for chunk in selected_parents:
             context_parts.append(self._format_chunk_for_context(chunk, doc_num))
             doc_num += 1
+
+        # Add data sources section at the end
+        if sources_list:
+            sources_section = "\n---\n**Data Sources:**\n" + "\n".join(f"- {source}" for source in sources_list)
+            context_parts.append(sources_section)
 
         formatted_context = "\n\n---\n\n".join(context_parts)
         total_tokens = chunk_tokens + parent_tokens + graph_tokens
@@ -516,7 +535,8 @@ class TokenAwareContextBuilder:
             f"Context built: {total_tokens} tokens "
             f"(chunks={chunk_tokens}, parents={parent_tokens}, graph={graph_tokens}), "
             f"{len(selected_chunks)}/{len(chunks)} chunks, "
-            f"{len(selected_parents)}/{len(parent_chunks)} parents"
+            f"{len(selected_parents)}/{len(parent_chunks)} parents, "
+            f"{len(sources_list)} unique sources"
         )
 
         return BuiltContext(
@@ -529,6 +549,7 @@ class TokenAwareContextBuilder:
             graph_context_tokens=graph_tokens,
             budget_usage=budget_usage,
             warnings=warnings,
+            sources=sources_list,
         )
 
 

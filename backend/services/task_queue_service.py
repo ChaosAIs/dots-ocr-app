@@ -527,8 +527,9 @@ class TaskQueueService:
             True if document routed to TABULAR path (skip chunking)
             False if document should continue to STANDARD path (chunking)
         """
-        from common.document_type_classifier import TabularDataDetector
+        from common.document_type_classifier import TabularDataDetector, DocumentTypeClassifier
         from queue_service import TaskQueueDocument
+        from rag_service.graphrag_skip_config import GRAPHRAG_SKIP_DOCUMENT_TYPES
 
         logger.info("=" * 80)
         logger.info("[Routing] ========== DOCUMENT CLASSIFICATION & ROUTING START ==========")
@@ -572,39 +573,122 @@ class TaskQueueService:
 
         try:
             # ----------------------------------------------------------------
-            # STEP 4.2: Run TabularDataDetector
+            # STEP 4.2: LLM-based Document Type Classification
             # ----------------------------------------------------------------
             logger.info("-" * 80)
-            logger.info("[Routing] --- STEP 4.2: Tabular Data Detection ---")
+            logger.info("[Routing] --- STEP 4.2: LLM Document Type Classification ---")
+
+            # Read content preview from converted markdown for classification
+            content_preview = None
+            detected_document_type = None
+            document_types = []
+
+            if page_output_path and os.path.exists(page_output_path):
+                try:
+                    with open(page_output_path, 'r', encoding='utf-8') as f:
+                        content_preview = f.read(3000)  # First 3000 chars for classification
+                    logger.info(f"[Routing] Loaded content preview: {len(content_preview)} chars")
+                except Exception as e:
+                    logger.warning(f"[Routing] Could not read content preview: {e}")
+
+            # Use DocumentTypeClassifier for LLM-based classification
+            try:
+                from rag_service.llm_service import get_llm_service
+                llm_service = get_llm_service()
+                classifier = DocumentTypeClassifier(llm_client=llm_service)
+
+                classification_result = classifier.classify(
+                    filename=filename,
+                    metadata={},
+                    content_preview=content_preview
+                )
+
+                detected_document_type = classification_result.document_type
+                document_types = [detected_document_type]
+
+                logger.info(f"[Routing] LLM Classification result:")
+                logger.info(f"[Routing]   - document_type: {detected_document_type}")
+                logger.info(f"[Routing]   - confidence: {classification_result.confidence:.2f}")
+                logger.info(f"[Routing]   - is_extractable: {classification_result.is_extractable}")
+                logger.info(f"[Routing]   - schema_type: {classification_result.schema_type}")
+                logger.info(f"[Routing]   - reasoning: {classification_result.reasoning}")
+
+            except Exception as e:
+                logger.warning(f"[Routing] LLM classification failed, using pattern fallback: {e}")
+                # Fallback: use pattern-based classification from filename
+                classifier = DocumentTypeClassifier()
+                classification_result = classifier.classify(
+                    filename=filename,
+                    metadata={},
+                    content_preview=content_preview
+                )
+                detected_document_type = classification_result.document_type
+                document_types = [detected_document_type]
+                logger.info(f"[Routing] Pattern-based classification: {detected_document_type}")
+
+            # ----------------------------------------------------------------
+            # STEP 4.3: Tabular Data Detection (using detected document_type)
+            # ----------------------------------------------------------------
+            logger.info("-" * 80)
+            logger.info("[Routing] --- STEP 4.3: Tabular Data Detection ---")
             logger.info(f"[Routing] Calling TabularDataDetector.is_tabular_data()...")
             logger.info(f"[Routing]   - filename: {filename}")
+            logger.info(f"[Routing]   - document_type: {detected_document_type}")
 
             # Check if this is a tabular document
-            # TabularDataDetector checks file extension first (fast path)
+            # Now passes detected_document_type for better classification
             is_tabular, reason = TabularDataDetector.is_tabular_data(
                 filename=filename,
-                document_type=None,  # Will be detected
-                content=None  # Skip content analysis for speed
+                document_type=detected_document_type,  # Use LLM-detected type
+                content=content_preview  # Also check content patterns
             )
 
             logger.info(f"[Routing] Detection result:")
             logger.info(f"[Routing]   - is_tabular: {is_tabular}")
             logger.info(f"[Routing]   - reason: {reason}")
 
+            # Determine if GraphRAG should be skipped based on document type
+            should_skip_graphrag = detected_document_type in GRAPHRAG_SKIP_DOCUMENT_TYPES
+            skip_graphrag_reason = f"document_type:{detected_document_type}" if should_skip_graphrag else None
+            logger.info(f"[Routing] GraphRAG skip decision:")
+            logger.info(f"[Routing]   - should_skip_graphrag: {should_skip_graphrag}")
+            logger.info(f"[Routing]   - skip_reason: {skip_graphrag_reason}")
+
             # ----------------------------------------------------------------
-            # STEP 4.3: Update Document Record
+            # STEP 4.4: Update Document Record
             # ----------------------------------------------------------------
             logger.info("-" * 80)
-            logger.info("[Routing] --- STEP 4.3: Update Document Record ---")
+            logger.info("[Routing] --- STEP 4.4: Update Document Record ---")
             doc = db.query(Document).filter(Document.id == document_id).first()
             if doc:
                 logger.info(f"[Routing] Found document record")
                 logger.info(f"[Routing]   - Current is_tabular_data: {doc.is_tabular_data}")
                 logger.info(f"[Routing]   - Current processing_path: {doc.processing_path}")
                 logger.info(f"[Routing]   - Current convert_status: {doc.convert_status}")
+                logger.info(f"[Routing]   - Current skip_graphrag: {doc.skip_graphrag}")
 
                 doc.is_tabular_data = is_tabular
                 doc.processing_path = 'tabular' if is_tabular else 'standard'
+
+                # Set skip_graphrag flag based on document type classification
+                doc.skip_graphrag = should_skip_graphrag
+                doc.skip_graphrag_reason = skip_graphrag_reason
+
+                # Store early document_metadata with classification results
+                # This ensures metadata is available BEFORE GraphRAG runs
+                early_metadata = {
+                    "document_types": document_types,  # List of applicable document types
+                    "classification_source": "early_routing",
+                    "classification_confidence": classification_result.confidence if classification_result else 0.5,
+                    "is_extractable": classification_result.is_extractable if classification_result else False,
+                    "schema_type": classification_result.schema_type if classification_result else None,
+                }
+                # Merge with existing metadata if present, or set new
+                if doc.document_metadata:
+                    doc.document_metadata.update(early_metadata)
+                else:
+                    doc.document_metadata = early_metadata
+
                 # IMPORTANT: Update convert_status to CONVERTED so eligibility check passes
                 # This is needed because the extraction eligibility checker checks document.convert_status
                 from db.models import ConvertStatus
@@ -615,6 +699,9 @@ class TaskQueueService:
                 logger.info(f"[Routing]   - is_tabular_data: {doc.is_tabular_data}")
                 logger.info(f"[Routing]   - processing_path: {doc.processing_path}")
                 logger.info(f"[Routing]   - convert_status: {doc.convert_status}")
+                logger.info(f"[Routing]   - skip_graphrag: {doc.skip_graphrag}")
+                logger.info(f"[Routing]   - skip_graphrag_reason: {doc.skip_graphrag_reason}")
+                logger.info(f"[Routing]   - document_metadata.document_types: {document_types}")
             else:
                 logger.error(f"[Routing] ERROR: Document {document_id} not found!")
 
@@ -625,10 +712,10 @@ class TaskQueueService:
             logger.info(f"[Routing] Updated TaskQueueDocument: processing_path={tq_doc.processing_path}, classification_status=COMPLETED")
 
             # ----------------------------------------------------------------
-            # STEP 4.4: Route to appropriate path
+            # STEP 4.5: Route to appropriate path
             # ----------------------------------------------------------------
             logger.info("-" * 80)
-            logger.info("[Routing] --- STEP 4.4: Execute Routing Decision ---")
+            logger.info("[Routing] --- STEP 4.5: Execute Routing Decision ---")
 
             if is_tabular:
                 # TABULAR PATH: Trigger data extraction

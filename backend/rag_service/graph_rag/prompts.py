@@ -266,10 +266,16 @@ FIRST CHUNK PREVIEW (for additional context):
 INSTRUCTIONS:
 Extract the following metadata and respond in valid JSON format:
 
-1. **document_type**: Classify as one of the following types (choose the MOST SPECIFIC match):
+1. **document_types**: Classify as a LIST of applicable document types from the following (include ALL that apply, with the MOST SPECIFIC type first):
 {document_types_section}
 
-   Use "other" ONLY if the document truly does not fit any category above.
+   Rules for multi-type classification:
+   - Include the primary/most specific type first
+   - Add secondary types that also apply (e.g., a receipt is also a "transaction_log", a resume is also a "professional" document)
+   - For spreadsheets/tabular data: always include "spreadsheet" as one of the types
+   - For financial documents: may include both specific type (e.g., "receipt") and broader category (e.g., "expense_report")
+   - Typical list length: 1-3 types
+   - Use "other" ONLY if the document truly does not fit any category above.
 
 2. **subject_name**: The PRIMARY subject of the document
    - **IMPORTANT**: Analyze BOTH the document name (provided above) AND the content to determine the most appropriate subject
@@ -304,9 +310,9 @@ Extract the following metadata and respond in valid JSON format:
    - For other documents: Include main topic, key dates, and important details
 
 7. **topics**: Array of 3-5 main topics/themes (lowercase, e.g., ["software development", "cloud computing"])
-   - For meal receipts (document_type="receipt"), include terms like: "meal receipt", "restaurant expense", "dining expense", "food purchase", "grocery receipt"
-   - For product invoices (document_type="invoice"), include terms like: "product invoice", "equipment purchase", "order invoice", "hardware purchase", "software purchase"
-   - For policies (document_type="policy"), include terms like: "policy", "guidelines", "rules", "procedures" plus specific topic (e.g., "return policy", "refund guidelines")
+   - For meal receipts (document_types includes "receipt"), include terms like: "meal receipt", "restaurant expense", "dining expense", "food purchase", "grocery receipt"
+   - For product invoices (document_types includes "invoice"), include terms like: "product invoice", "equipment purchase", "order invoice", "hardware purchase", "software purchase"
+   - For policies (document_types includes "policy"), include terms like: "policy", "guidelines", "rules", "procedures" plus specific topic (e.g., "return policy", "refund guidelines")
 
 8. **key_entities**: Array of 5-10 most important entities with scores
    Format: [{{{{"name": "Entity Name", "type": "person|organization|technology|location|date|financial|product|policy", "score": 0-100}}}}]
@@ -320,7 +326,7 @@ Extract the following metadata and respond in valid JSON format:
 
 RESPOND ONLY WITH VALID JSON (no markdown, no code blocks):
 {{{{
-  "document_type": "...",
+  "document_types": ["primary_type", "secondary_type"],
   "subject_name": "...",
   "subject_type": "...",
   "title": "...",

@@ -1187,12 +1187,19 @@ class HierarchicalTaskQueueManager:
         if should_skip:
             return True, reason
 
-        # 3. Check document type from metadata
+        # 3. Check document types from metadata
         if doc.document_metadata:
-            doc_type = doc.document_metadata.get('document_type', '')
-            should_skip, reason = should_skip_graphrag_for_document_type(doc_type)
-            if should_skip:
-                return True, reason
+            # Use document_types list (the standard format)
+            doc_types = doc.document_metadata.get('document_types', [])
+
+            # Check ALL document types for skip
+            # A document should skip GraphRAG if ANY of its types is in the skip list
+            for doc_type in doc_types:
+                if doc_type:
+                    should_skip, reason = should_skip_graphrag_for_document_type(doc_type)
+                    if should_skip:
+                        logger.info(f"[GraphRAG Skip] Document {doc.filename} skipping due to document_type: {doc_type}")
+                        return True, reason
 
         return False, None
 
@@ -1580,16 +1587,18 @@ class HierarchicalTaskQueueManager:
 
             # Save metadata to database
             repo = DocumentRepository(db)
+            document_types = metadata.get('document_types', ['unknown'])
             repo.update_document_metadata(
                 doc,
                 metadata,
-                message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
+                message=f"Extracted: {document_types} - {metadata.get('subject_name', 'N/A')}"
             )
             repo.update_metadata_extraction_status(doc, "completed")
 
             # Check if document type should skip GraphRAG and set the flag
-            doc_type = metadata.get('document_type', '')
-            should_skip, skip_reason = should_skip_graphrag_for_document_type(doc_type)
+            # Use primary (first) document type for skip check
+            primary_doc_type = document_types[0] if document_types else ''
+            should_skip, skip_reason = should_skip_graphrag_for_document_type(primary_doc_type)
             if should_skip and not doc.skip_graphrag:
                 doc.skip_graphrag = True
                 doc.skip_graphrag_reason = skip_reason
@@ -1607,10 +1616,11 @@ class HierarchicalTaskQueueManager:
 
             logger.info(
                 f"[Metadata] ✅ Saved for {source_name}: "
-                f"type={metadata.get('document_type')} | "
+                f"document_types={document_types} | "
                 f"subject={metadata.get('subject_name')} | "
                 f"confidence={metadata.get('confidence', 0):.2f}"
             )
+            logger.debug(f"[Metadata] Extracted document_types for {source_name}: {document_types}")
 
             # Trigger data extraction AFTER metadata is populated
             # This ensures document_type is available for eligibility checking

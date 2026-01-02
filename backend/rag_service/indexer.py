@@ -762,15 +762,19 @@ def index_document_now(source_name: str, output_dir: str = None, run_graphrag: b
                             repo.update_document_metadata(
                                 doc,
                                 metadata,
-                                message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
+                                message=f"Extracted: {metadata.get('document_types', ['unknown'])} - {metadata.get('subject_name', 'N/A')}"
                             )
                             # Update granular status: metadata extraction succeeded
                             repo.update_metadata_extraction_status(doc, "completed")
+                            document_types = metadata.get('document_types', ['unknown'])
                             logger.info(
                                 f"[Phase 1.5] Metadata saved for {source_name}: "
-                                f"{metadata.get('document_type')} | "
+                                f"document_types={document_types} | "
                                 f"Subject: {metadata.get('subject_name')} | "
                                 f"Confidence: {metadata.get('confidence', 0):.2f}"
+                            )
+                            logger.debug(
+                                f"[Phase 1.5] Extracted document_types for {source_name}: {document_types}"
                             )
                         else:
                             logger.warning(f"[Phase 1.5] Document not found in database: {lookup_filename}")
@@ -1492,27 +1496,32 @@ def trigger_embedding_for_document(
                                     repo.update_document_metadata(
                                         doc,
                                         metadata,
-                                        message=f"Extracted: {metadata.get('document_type', 'unknown')} - {metadata.get('subject_name', 'N/A')}"
+                                        message=f"Extracted: {metadata.get('document_types', ['unknown'])} - {metadata.get('subject_name', 'N/A')}"
                                     )
                                     # Update granular status: metadata extraction succeeded
                                     repo.update_metadata_extraction_status(doc, "completed")
+                                    document_types = metadata.get('document_types', ['unknown'])
                                     logger.info(
                                         f"[Phase 1.5] Metadata saved for {source_name}: "
-                                        f"{metadata.get('document_type')} | "
+                                        f"document_types={document_types} | "
                                         f"Subject: {metadata.get('subject_name')} | "
                                         f"Confidence: {metadata.get('confidence', 0):.2f}"
+                                    )
+                                    logger.debug(
+                                        f"[Phase 1.5] Extracted document_types for {source_name}: {document_types}"
                                     )
                         except Exception as e:
                             logger.error(f"Failed to save metadata to database: {e}", exc_info=True)
 
                     # Send WebSocket notification that metadata extraction completed
                     if broadcast_callback and conversion_id:
+                        document_types = metadata.get('document_types', ['unknown'])
                         broadcast_callback(conversion_id, {
                             "status": "metadata_extracted",
                             "progress": 100,
-                            "message": f"Metadata extracted: {metadata.get('document_type', 'unknown')} document",
+                            "message": f"Metadata extracted: {document_types} document",
                             "metadata": {
-                                "document_type": metadata.get("document_type"),
+                                "document_types": document_types,
                                 "subject_name": metadata.get("subject_name"),
                                 "confidence": metadata.get("confidence"),
                             },

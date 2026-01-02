@@ -405,7 +405,11 @@ SELECT ... FROM items ...
 ### Common requirements:
 1. For header fields (source='header'): Use header_data->>'field_name'
 2. For line_item fields (source='line_item'): Use item->>'field_name'
-3. Use proper type casting: ::numeric for numbers, ::timestamp for dates
+3. CRITICAL - Type casting for aggregations:
+   - The ->> operator returns TEXT, so SUM/AVG REQUIRE casting!
+   - CORRECT: SUM((item->>'quantity')::numeric)
+   - CORRECT: AVG((item->>'amount')::numeric)
+   - WRONG: SUM(item->>'quantity') -- ERROR: function sum(text) does not exist
 4. Use ROUND() for monetary values to 2 decimal places
 5. Always include COUNT(*) as item_count in aggregations
 6. Order results logically
@@ -565,6 +569,30 @@ Analyze the query and identify:
    - If user asks for "total", "sum", or just wants amounts aggregated -> aggregation_type = "sum"
    - If user asks for "average", "mean" -> aggregation_type = "avg"
    - If user asks for "count", "how many" -> aggregation_type = "count"
+
+   **CRITICAL for COUNT queries - Document vs Line Item counting:**
+   Use the document types and entities from the Available Data Fields schema to determine what to count:
+
+   **count_level="document"** - Count the DOCUMENTS themselves when user mentions:
+   - Document type names from schema: receipt, invoice, order, meal, statement, manifest, report
+   - Header-level entities (source='header'): vendor_name, store_name, receipt_number, invoice_number, transaction_date
+   - Keywords: "how many receipts", "how many meals", "number of invoices", "count of orders"
+
+   **count_level="line_item"** - Count individual LINE ITEMS when user mentions:
+   - Line item fields (source='line_item'): item, product, description, quantity, unit_price
+   - Item-level keywords: "how many items", "how many products", "number of entries", "total items purchased"
+
+   **How to decide using schema context:**
+   1. Look at the Available Data Fields - identify which are header-level (source='header') vs line-item-level (source='line_item')
+   2. If user query mentions terms matching document types or header-level entities → count_level="document"
+   3. If user query mentions terms matching line-item field names → count_level="line_item"
+   4. If ambiguous, default to count_level="document" since users typically ask about document counts
+
+   Examples:
+   - Schema has document_type="receipt" → "how many meals/receipts in 2025" → count_level="document"
+   - Schema has header field "vendor_name" → "how many vendors" → count documents grouped by vendor
+   - Schema has line_item field "Item" → "how many items did I buy" → count_level="line_item"
+   - Schema has line_item field "product" → "how many products" → count_level="line_item"
 7. CRITICAL - Report type detection:
    - "detail": User wants to see INDIVIDUAL LINE ITEMS/RECORDS with their details. Keywords: "details", "included details", "include details", "with details", "list", "show all", "each", "every", "items", "individual", "breakdown", "itemized", "what items", "what did we buy", "line items", "products details", "product details"
    - "summary": User wants AGGREGATED totals only (no individual line items). Keywords: "total only", "sum only", "just the total", "aggregate only"
@@ -634,6 +662,7 @@ This is different from "average per line item" which would just be AVG(item amou
     "time_filter_period": "Q1" | "January" | null,  // Optional: specific quarter or month to filter
     "aggregation_field": "field_name_to_sum",
     "aggregation_type": "sum" | "min" | "max" | "min_max" | "avg" | "count",
+    "count_level": "document" | "line_item",  // For count queries: "document" counts receipts/invoices, "line_item" counts individual items
     "entity_field": "field_to_show_with_min_max",  // For min/max queries, which field identifies the entity (e.g., "receipt_number")
     "filters": {{}},  // Any filter conditions
     "report_type": "summary" | "detail" | "comparison",
@@ -771,6 +800,7 @@ Respond with JSON only:"""
 - Time Filter Only: {time_filter_only}
 - Time Filter Year: {time_filter_year}
 - Time Filter Period: {time_filter_period}
+- Count Level: {count_level} (for count queries: "document" = count receipts/invoices, "line_item" = count items)
 
 ## CRITICAL RULES:
 
@@ -780,12 +810,30 @@ Respond with JSON only:"""
 - For min/max queries (finding record with min or max value): Include ALL fields from the schema in SELECT
 - Never invent or assume fields not in the schema
 
-### 2. Data Type Handling (SIMPLE):
+### 1.5 COUNT QUERIES - DOCUMENT vs LINE ITEM (READ THIS IF aggregation_type="count"):
+**If count_level="document"**: You are counting DOCUMENTS (receipts/meals/invoices), NOT line items!
+```sql
+WITH expanded_items AS (
+    SELECT dd.document_id, dd.header_data, li.data as item  -- MUST include document_id
+    FROM documents_data dd
+    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+    WHERE dd.document_id IN (...)
+)
+SELECT COUNT(DISTINCT document_id) AS document_count  -- Use DISTINCT document_id
+FROM expanded_items
+WHERE (header_data->>'transaction_date')::date BETWEEN ...
+```
+**If count_level="line_item"**: Count all line items with COUNT(*)
+
+### 2. Data Type Handling (CRITICAL):
 - **SELECT columns**: Just use item->>'FieldName' AS alias - NO type casting needed
 - **ORDER BY numeric field**: Cast only in ORDER BY clause: ORDER BY (item->>'Field')::numeric
 - **WHERE comparisons**: Cast only when comparing numbers or dates
-- **Aggregations (SUM, AVG)**: Cast to numeric only for the aggregated field
-- **DO NOT cast in SELECT** - return values as-is from JSONB
+- **Aggregations (SUM, AVG, MIN, MAX on numeric)**: ALWAYS cast to numeric! The ->> operator returns TEXT.
+  - CORRECT: SUM((item->>'quantity')::numeric)
+  - CORRECT: AVG((item->>'amount')::numeric)
+  - WRONG: SUM(item->>'quantity') -- ERROR: function sum(text) does not exist
+- **DO NOT cast in SELECT** for non-aggregated fields - return values as-is from JSONB
 
 ### 3. Filter Application:
 - Apply filters in OUTER WHERE clause (after CTE), not inside CTE
@@ -794,8 +842,9 @@ Respond with JSON only:"""
 ### 4. SQL Structure:
 ```sql
 WITH expanded_items AS (
-    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
+    SELECT dd.document_id, dd.header_data, li.data as item  -- ALWAYS include document_id
     FROM documents_data dd
+    JOIN documents_data_line_items li ON li.documents_data_id = dd.id
     JOIN documents d ON dd.document_id = d.id
 )
 SELECT
@@ -805,16 +854,39 @@ FROM expanded_items
 WHERE -- filters here (cast only for comparisons)
 ORDER BY (item->>'NumericField')::numeric DESC  -- cast only in ORDER BY if needed
 ```
+NOTE: Always include `dd.document_id` in CTE - needed for count_level="document" queries.
 
 ### 5. Report Type Behavior:
 - **detail**: SELECT all schema fields, return individual rows
 - **summary**: GROUP BY and aggregate (SUM, COUNT, AVG, MIN, MAX)
 - **count**: Return COUNT with optional grouping
 
-### 6. Aggregation Patterns:
-- **sum**: GROUP BY grouping fields, SUM(aggregation_field)
-- **avg**: Use two-step aggregation for per-document averages
-- **count**: COUNT(*) with optional grouping
+### 6. Aggregation Patterns (ALWAYS cast to numeric for SUM/AVG):
+- **sum**: GROUP BY grouping fields, SUM((item->>'field')::numeric)
+- **avg**: Use two-step aggregation for per-document averages, AVG((item->>'field')::numeric)
+- **count**: Two types based on count_level parameter - THIS IS CRITICAL:
+  - **count_level="document"**: Count DISTINCT documents (receipts/invoices), NOT line items
+    IMPORTANT: Include document_id in the CTE to enable DISTINCT counting!
+    ```sql
+    WITH expanded_items AS (
+        SELECT dd.document_id, dd.header_data, li.data as item  -- MUST include document_id
+        FROM documents_data dd
+        JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+        WHERE ...
+    )
+    SELECT COUNT(DISTINCT document_id) as document_count  -- Count DISTINCT documents
+    FROM expanded_items
+    WHERE ...
+    ```
+  - **count_level="line_item"**: Count individual line items
+    ```sql
+    SELECT COUNT(*) as item_count FROM expanded_items WHERE ...
+    ```
+
+  **CRITICAL**: When count_level="document", you MUST:
+  1. Add `dd.document_id` to the CTE SELECT
+  2. Use `COUNT(DISTINCT document_id)` in the outer SELECT
+  3. Do NOT use `COUNT(*)` - that counts line items!
 - **min/max**: Use subquery with MIN()/MAX() function to find the record. This properly handles NULL values.
   Example for MIN (finding record with minimum value):
   ```sql
@@ -1342,6 +1414,9 @@ Respond with JSON only:"""
         time_filter_year = query_analysis.get('time_filter_year')
         time_filter_period = query_analysis.get('time_filter_period')
 
+        # Extract count_level for count queries (MUST be logged here to debug)
+        count_level_r1 = query_analysis.get('count_level', 'line_item')
+
         logger.info("-" * 80)
         logger.info("[SQL Generator] ROUND 1 RESULT:")
         logger.info(f"[SQL Generator]   - Grouping Order: {query_analysis.get('grouping_order')}")
@@ -1352,6 +1427,8 @@ Respond with JSON only:"""
         logger.info(f"[SQL Generator]   - Report Type: {report_type}")
         logger.info(f"[SQL Generator]   - Time Filter Only: {time_filter_only}")
         logger.info(f"[SQL Generator]   - Time Filter Year: {time_filter_year}")
+        if aggregation_type == 'count':
+            logger.info(f"[SQL Generator]   - Count Level: {count_level_r1} (document=count receipts, line_item=count items)")
         logger.info(f"[SQL Generator]   - Explanation: {query_analysis.get('explanation', 'N/A')}")
         logger.info("-" * 80)
 
@@ -1435,6 +1512,11 @@ Respond with JSON only:"""
         logger.info(f"[SQL Generator]   - Date Field: {date_field} (source: {date_field_source})")
         logger.info(f"[SQL Generator]   - Report Type: {report_type}")
 
+        # Get count_level for count queries (document vs line_item counting)
+        count_level = query_analysis.get('count_level', 'line_item')
+        if final_aggregation_type == 'count':
+            logger.info(f"[SQL Generator]   - Count Level: {count_level}")
+
         sql_prompt = self.VERIFIED_SQL_PROMPT.format(
             user_query=user_query,
             field_schema=field_schema_json,
@@ -1449,7 +1531,8 @@ Respond with JSON only:"""
             date_field=date_field,
             date_field_source=date_field_source,
             report_type=report_type,
-            filters=json.dumps(query_analysis.get('filters', {}))
+            filters=json.dumps(query_analysis.get('filters', {})),
+            count_level=count_level
         )
 
         logger.info("[SQL Generator] Calling LLM to generate SQL...")
@@ -1471,6 +1554,10 @@ Respond with JSON only:"""
         if storage_type == 'external':
             logger.info("[SQL Generator] Converting SQL for external storage...")
             sql_query = self._convert_to_external_storage_sql(sql_query)
+
+        # Fix document-level counts if LLM used COUNT(*) instead of COUNT(DISTINCT document_id)
+        if count_level == 'document' and final_aggregation_type == 'count':
+            sql_query = self._fix_document_level_count(sql_query)
 
         # Add table filter if provided
         if table_filter:
@@ -1927,6 +2014,61 @@ Respond with JSON only:"""
         logger.debug(f"[SQL Fixer] Fixed SQL:\n{fixed_sql[:300]}...")
 
         return fixed_sql
+
+    def _fix_document_level_count(self, sql: str) -> str:
+        """
+        Fix document-level count queries when LLM generates COUNT(*) instead of COUNT(DISTINCT document_id).
+
+        This is a post-processing step for count_level="document" queries.
+
+        The LLM should generate:
+        - SELECT dd.document_id in the CTE
+        - COUNT(DISTINCT document_id) in the outer SELECT
+
+        But sometimes it generates COUNT(*) which counts line items instead of documents.
+        This method fixes that.
+        """
+        import re
+
+        original_sql = sql
+
+        # Step 1: Check if CTE includes document_id
+        cte_match = re.search(
+            r'WITH\s+\w+\s+AS\s*\(\s*SELECT\s+(.*?)\s+FROM',
+            sql,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if cte_match:
+            cte_select = cte_match.group(1)
+            # Check if document_id is already in the CTE SELECT
+            if 'document_id' not in cte_select.lower():
+                # Add dd.document_id to the CTE SELECT
+                logger.info("[SQL Fix] Adding document_id to CTE for document-level count")
+                sql = re.sub(
+                    r'(WITH\s+\w+\s+AS\s*\(\s*SELECT\s+)',
+                    r'\1dd.document_id, ',
+                    sql,
+                    flags=re.IGNORECASE
+                )
+
+        # Step 2: Replace COUNT(*) with COUNT(DISTINCT document_id) in outer SELECT
+        # Match patterns like: COUNT(*) AS xxx, COUNT(*) as xxx, COUNT(*)
+        if re.search(r'\bCOUNT\s*\(\s*\*\s*\)', sql, re.IGNORECASE):
+            logger.info("[SQL Fix] Replacing COUNT(*) with COUNT(DISTINCT document_id) for document-level count")
+            sql = re.sub(
+                r'\bCOUNT\s*\(\s*\*\s*\)',
+                'COUNT(DISTINCT document_id)',
+                sql,
+                flags=re.IGNORECASE
+            )
+
+        if sql != original_sql:
+            logger.info("[SQL Fix] Document-level count SQL fixed:")
+            logger.debug(f"[SQL Fix] Before: {original_sql[:200]}...")
+            logger.debug(f"[SQL Fix] After: {sql[:200]}...")
+
+        return sql
 
     def _add_table_filter(self, sql: str, table_filter: str) -> str:
         """Add table filter to SQL query.

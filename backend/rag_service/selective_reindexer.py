@@ -416,14 +416,16 @@ def reextract_failed_metadata(
                     metadata=metadata
                 )
 
+        document_types = metadata.get('document_types', ['unknown'])
         logger.info(
             f"[Selective Re-index] Metadata re-extraction complete: "
-            f"{metadata.get('document_type')} | {metadata.get('subject_name')}"
+            f"document_types={document_types} | {metadata.get('subject_name')}"
         )
+        logger.debug(f"[Selective Re-index] Extracted document_types: {document_types}")
 
         return {
             "status": "completed",
-            "document_type": metadata.get("document_type"),
+            "document_types": document_types,
             "subject_name": metadata.get("subject_name")
         }
 

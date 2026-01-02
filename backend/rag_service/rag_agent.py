@@ -1808,7 +1808,8 @@ def call_model(state: AgentState) -> AgentState:
                         logger.info(f"[vLLM] Normalized query: '{user_query}' -> '{normalized_query}'")
 
                     # Simple context message - dates are already normalized in the content
-                    context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question.\n\n**USER QUESTION**: {normalized_query}"
+                    # Include instruction to display data sources at the end of the response
+                    context_message = f"\n\nRelevant document context:\n{context}\n\n**IMPORTANT**: The above context contains actual data from your documents. Use this data to answer the question. If \"Data Sources\" are listed above, include them at the end of your response.\n\n**USER QUESTION**: {normalized_query}"
 
                     # For non-analytics path, build augmented messages with conversation history
                     augmented_messages = list(messages)

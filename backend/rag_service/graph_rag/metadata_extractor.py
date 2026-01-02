@@ -125,8 +125,10 @@ class HierarchicalMetadataExtractor:
                             break
 
             # Create dedicated dates section
-            document_type = structured_metadata.get("document_type", "")
-            primary_date = extract_primary_date(normalized_dates, document_type)
+            # Use primary (first) document type for date extraction
+            document_types = structured_metadata.get("document_types", [])
+            primary_doc_type = document_types[0] if document_types else ""
+            primary_date = extract_primary_date(normalized_dates, primary_doc_type)
 
             dates_section = {
                 "primary_date": primary_date.to_dict() if primary_date else None,
@@ -156,10 +158,18 @@ class HierarchicalMetadataExtractor:
                 },
             }
             
+            # Log extracted document_types for debugging
+            document_types = structured_metadata.get('document_types', ['unknown'])
             logger.info(
                 f"[Metadata] Extraction complete for {source_name}: "
-                f"{structured_metadata.get('document_type', 'unknown')} | "
+                f"document_types={document_types} | "
                 f"{processing_time:.1f}s"
+            )
+            logger.debug(
+                f"[Metadata] Extraction details for {source_name}: "
+                f"document_types={document_types}, "
+                f"subject_name={structured_metadata.get('subject_name')}, "
+                f"confidence={structured_metadata.get('confidence', 0):.2f}"
             )
             
             return metadata
@@ -266,7 +276,26 @@ class HierarchicalMetadataExtractor:
                 response_clean = "\n".join(lines[1:-1]) if len(lines) > 2 else response_clean
 
             metadata = json.loads(response_clean)
-            logger.info(f"[Metadata] Extracted type for {source_name}: {metadata.get('document_type')}")
+
+            # Normalize to always have document_types as a list
+            if "document_types" not in metadata:
+                # LLM returned single document_type - convert to list
+                doc_type = metadata.get("document_type", "unknown")
+                metadata["document_types"] = [doc_type] if doc_type else ["unknown"]
+                logger.debug(f"[Metadata] Converted single document_type to document_types list for {source_name}")
+            elif not isinstance(metadata["document_types"], list):
+                # Ensure document_types is always a list
+                metadata["document_types"] = [metadata["document_types"]]
+
+            # Remove legacy document_type key if present (use document_types only)
+            if "document_type" in metadata:
+                del metadata["document_type"]
+
+            # Log extracted document_types for debugging
+            document_types = metadata.get("document_types", ["unknown"])
+            logger.info(f"[Metadata] Extracted document_types for {source_name}: {document_types}")
+            logger.debug(f"[Metadata] Full extracted metadata for {source_name}: document_types={document_types}, subject={metadata.get('subject_name')}, confidence={metadata.get('confidence')}")
+
             return metadata
 
         except json.JSONDecodeError as e:
@@ -279,10 +308,10 @@ class HierarchicalMetadataExtractor:
     def _create_empty_metadata(self, source_name: str) -> Dict[str, Any]:
         """Create empty metadata for documents with no valid chunks."""
         return {
-            "extraction_version": "1.0",
+            "extraction_version": "2.0",
             "extracted_at": datetime.now().isoformat(),
             "extraction_method": "hierarchical_summarization",
-            "document_type": "unknown",
+            "document_types": ["unknown"],
             "subject_name": None,
             "subject_type": None,
             "title": source_name,
@@ -301,10 +330,10 @@ class HierarchicalMetadataExtractor:
     def _create_error_metadata(self, source_name: str, error: str) -> Dict[str, Any]:
         """Create error metadata when extraction fails."""
         return {
-            "extraction_version": "1.0",
+            "extraction_version": "2.0",
             "extracted_at": datetime.now().isoformat(),
             "extraction_method": "hierarchical_summarization",
-            "document_type": "unknown",
+            "document_types": ["unknown"],
             "subject_name": None,
             "subject_type": None,
             "title": source_name,
@@ -319,7 +348,7 @@ class HierarchicalMetadataExtractor:
     def _create_fallback_metadata(self, source_name: str, meta_summary: str) -> Dict[str, Any]:
         """Create fallback metadata when structured extraction fails."""
         return {
-            "document_type": "other",
+            "document_types": ["other"],
             "subject_name": None,
             "subject_type": None,
             "title": source_name,

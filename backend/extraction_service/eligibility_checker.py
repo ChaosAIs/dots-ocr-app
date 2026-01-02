@@ -105,7 +105,11 @@ class ExtractionEligibilityChecker:
 
     def _classify_document(self, document: Document) -> Optional[ClassificationResult]:
         """
-        Classify document using the centralized DocumentTypeClassifier.
+        Get document classification, preferring already-classified types from metadata.
+
+        Priority:
+        1. Use document_types from document_metadata (set during early routing)
+        2. Fall back to LLM classification if not available
 
         Args:
             document: Document model instance
@@ -120,11 +124,43 @@ class ExtractionEligibilityChecker:
         doc_metadata = document.document_metadata or {}
 
         try:
-            # Use centralized classifier
+            # Priority 1: Use already-classified document_types from metadata
+            # This was set during early routing in task_queue_service.py
+            existing_types = doc_metadata.get("document_types", [])
+            if existing_types and isinstance(existing_types, list) and len(existing_types) > 0:
+                # Use primary (first) document type
+                primary_type = existing_types[0]
+                if primary_type and primary_type != "unknown" and primary_type != "other":
+                    # Get type info and build ClassificationResult from existing data
+                    type_info = self.type_classifier.get_type_info(primary_type)
+                    is_extractable = self.type_classifier.is_extractable(primary_type)
+                    schema_type = self.type_classifier.get_schema_type(primary_type)
+                    confidence = doc_metadata.get("confidence", 0.9)
+
+                    logger.info(
+                        f"[Eligibility] Using existing classification for {document.filename}: "
+                        f"document_types={existing_types}, primary={primary_type}, "
+                        f"is_extractable={is_extractable}"
+                    )
+
+                    return ClassificationResult(
+                        document_type=primary_type,
+                        type_info=type_info,
+                        confidence=confidence,
+                        reasoning=f"Using pre-classified document_types: {existing_types}",
+                        is_extractable=is_extractable,
+                        schema_type=schema_type,
+                    )
+
+            # Priority 2: Fall back to classifier (for documents without pre-classification)
+            logger.info(
+                f"[Eligibility] No valid pre-classification for {document.filename}, "
+                f"falling back to classifier"
+            )
             result = self.type_classifier.classify(
                 filename=document.filename,
                 metadata=doc_metadata,
-                content_preview=None  # Content preview can be added if needed
+                content_preview=None  # Content not available at this stage
             )
             return result
 
@@ -217,16 +253,20 @@ class ExtractionEligibilityChecker:
 
         # Estimate based on page count and document type
         total_pages = document.total_pages or 1
-        document_type = doc_metadata.get("document_type", "").lower()
+
+        # Use document_types list (standard format)
+        doc_types = doc_metadata.get("document_types", [])
+        doc_types = [t.lower() for t in doc_types if t]
 
         # Different document types have different row densities
-        if document_type in ['invoice', 'receipt']:
+        # Check if any of the document types matches
+        if any(t in ['invoice', 'receipt'] for t in doc_types):
             # Typically 5-20 line items per page
             return total_pages * 10
-        elif document_type in ['bank_statement']:
+        elif any(t in ['bank_statement'] for t in doc_types):
             # Typically 20-40 transactions per page
             return total_pages * 30
-        elif document_type in ['inventory_report', 'spreadsheet']:
+        elif any(t in ['inventory_report', 'spreadsheet'] for t in doc_types):
             # Can be very dense
             return total_pages * 50
         else:

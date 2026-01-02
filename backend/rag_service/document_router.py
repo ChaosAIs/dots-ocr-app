@@ -438,6 +438,10 @@ class DocumentRouter:
                 DOC_TYPE_MISMATCH_PENALTY = float(os.getenv("DOC_TYPE_MISMATCH_PENALTY", "0.5"))
                 # Expand type hints to include aliases (e.g., "technical_doc" -> includes "report", "research_paper")
                 expanded_hints = expand_type_aliases(doc_type_hints)
+
+                # Generic types that should get reduced boost (too broad to be meaningful)
+                GENERIC_TYPES = {"report", "spreadsheet", "document", "other", "data"}
+
                 logger.info(f"[Router Vector] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
                 logger.info(f"[Router Vector] DOCUMENT TYPES MATCHING:")
                 logger.info(f"[Router Vector]   • Query type hints: {doc_type_hints}")
@@ -466,16 +470,43 @@ class DocumentRouter:
                     matching_types = set(doc_types).intersection(expanded_hints)
 
                     if matching_types:
-                        # BOOST: document types directly match query type hints
-                        # More matches = higher boost (up to 2x the base boost for 2+ matches)
-                        match_count = len(matching_types)
-                        boost = DOC_TYPE_MATCH_BOOST * min(match_count, 2)  # Cap at 2x boost
+                        # Separate specific matches from generic matches
+                        specific_matches = matching_types - GENERIC_TYPES
+                        generic_matches = matching_types.intersection(GENERIC_TYPES)
+
+                        # Check if document also has receipt type (conflicts with inventory queries)
+                        has_receipt = "receipt" in doc_types
+                        query_is_inventory = "inventory_report" in doc_type_hints or "inventory" in doc_type_hints
+
+                        # If document is a receipt but query is about inventory, penalize instead of boost
+                        if has_receipt and query_is_inventory and not specific_matches:
+                            # Only generic match (like 'report') but document is actually a receipt
+                            result["score"] = original_score * DOC_TYPE_MISMATCH_PENALTY
+                            result["_type_penalized"] = True
+                            logger.info(
+                                f"[Router Vector]   ↓ PENALIZED: {source_name:40s} "
+                                f"types={doc_types} is receipt, not inventory "
+                                f"({original_score:.4f} → {result['score']:.4f})"
+                            )
+                            continue
+
+                        # BOOST: Calculate boost based on match quality
+                        if specific_matches:
+                            # Specific type match (e.g., inventory_report) - full boost
+                            match_count = len(specific_matches)
+                            boost = DOC_TYPE_MATCH_BOOST * min(match_count, 2)  # Cap at 2x boost
+                        else:
+                            # Only generic type match (e.g., report) - reduced boost
+                            boost = DOC_TYPE_MATCH_BOOST * 0.3  # 30% of normal boost for generic
+
                         result["score"] = min(1.0, original_score + boost)
                         result["_type_boosted"] = True
                         result["_type_boost_amount"] = boost
                         max_boosted_score = max(max_boosted_score, result["score"])
+
+                        match_type_label = "specific" if specific_matches else "generic"
                         logger.info(
-                            f"[Router Vector]   ↑ TYPE BOOST: {source_name:40s} "
+                            f"[Router Vector]   ↑ TYPE BOOST ({match_type_label}): {source_name:40s} "
                             f"types={doc_types} matches {list(matching_types)} "
                             f"({original_score:.4f} → {result['score']:.4f} +{boost:.4f})"
                         )
@@ -809,7 +840,9 @@ class DocumentRouter:
         for i, doc in enumerate(documents, 1):
             doc_meta = doc["metadata"]
             doc_subject = doc_meta.get("subject_name", "Unknown")
-            doc_type = doc_meta.get("document_type", "other")
+            # Use document_types list (get primary type for display)
+            doc_types = doc_meta.get("document_types", [])
+            doc_type = doc_types[0] if doc_types else "other"
             doc_summary = doc_meta.get("summary", "No summary available")
             doc_topics = ", ".join(doc_meta.get("topics", []))
 
@@ -1020,11 +1053,13 @@ Document {i}:
 
         # 5. Document type matching
         query_types = set(t.lower() for t in query_meta.get("document_type_hints", []))
-        doc_type = doc_meta.get("document_type", "").lower()
+        # Use document_types list - check if ANY type matches
+        doc_types = [t.lower() for t in doc_meta.get("document_types", []) if t]
 
-        if doc_type in query_types:
+        matching_types = [t for t in doc_types if t in query_types]
+        if matching_types:
             score += 1.0
-            logger.debug(f"[Router] Document type match: '{doc_type}' (+1.0)")
+            logger.debug(f"[Router] Document type match: '{matching_types}' (+1.0)")
 
         # 6. Apply confidence multiplier
         confidence = doc_meta.get("confidence", 0.5)
@@ -1053,7 +1088,9 @@ Document {i}:
         """
         # Prepare document information for LLM
         doc_subject = doc_meta.get("subject_name", "Unknown")
-        doc_type = doc_meta.get("document_type", "other")
+        # Use document_types list (get primary type for display)
+        doc_types = doc_meta.get("document_types", [])
+        doc_type = doc_types[0] if doc_types else "other"
         doc_summary = doc_meta.get("summary", "No summary available")
         doc_topics = ", ".join(doc_meta.get("topics", []))
 

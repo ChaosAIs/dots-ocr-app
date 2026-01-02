@@ -150,24 +150,29 @@ DOCUMENT_CLASSIFICATION_PROMPT = """You are a document classification expert. An
 - Has Monetary Amounts: {has_amounts}
 - File Extension: {file_extension}
 
+## Document Content Preview:
+{content_preview}
+
 ## Classification Guidelines:
-1. Choose the MOST SPECIFIC type that matches the document
-2. For financial transactions with itemized lists (meals, purchases), use "receipt"
-3. For billing documents with charges to pay, use "invoice"
-4. For Excel/CSV files with tabular data, use "spreadsheet"
-5. For bank account statements, use "bank_statement"
-6. For shipping/delivery documents, use "shipping_manifest"
-7. For company policies, return policies, refund policies, use "policy"
-8. For terms of service documents, use "terms_of_service"
-9. For privacy policies, use "privacy_policy"
-10. If the document doesn't clearly match any type, use "other"
+1. IMPORTANT: Analyze the CONTENT PREVIEW above to determine the actual document type
+2. File extension (.png, .jpg, .pdf) does NOT determine the type - the CONTENT does
+3. For financial transactions with itemized lists (meals, purchases, food items with prices), use "receipt"
+4. For billing documents with charges to pay, use "invoice"
+5. For Excel/CSV files with tabular data, use "spreadsheet"
+6. For bank account statements, use "bank_statement"
+7. For shipping/delivery documents, use "shipping_manifest"
+8. For company policies, return policies, refund policies, use "policy"
+9. For terms of service documents, use "terms_of_service"
+10. For privacy policies, use "privacy_policy"
+11. If the content shows items with prices (like a restaurant bill), classify as "receipt"
+12. Only use "other" if the content truly doesn't match any specific type
 
 ## Response Format (JSON only):
 {{
     "document_type": "the_type_name",
     "confidence": 0.0-1.0,
     "domain": "the_domain",
-    "reasoning": "Brief explanation"
+    "reasoning": "Brief explanation based on content analysis"
 }}
 
 Respond with JSON only:"""
@@ -196,15 +201,19 @@ For example:
 1. Identify ALL document types that apply to this document
 2. The PRIMARY type should be the most specific match
 3. Include SECONDARY types based on the data content:
-   - If columns contain product/SKU/stock/inventory → include "inventory_report"
+   - If columns contain product/SKU/stock/inventory/warehouse → include "inventory_report"
    - If columns contain amount/price/payment/total → include "financial_report"
    - If columns contain customer/order/sale → include "report"
    - If columns contain shipping/delivery/tracking → include "shipping_manifest"
    - If columns contain invoice/bill → include "invoice"
-   - If columns contain receipt/tip/subtotal → include "receipt"
+   - If columns contain receipt/tip/subtotal/gratuity → include "receipt"
    - If columns contain expense/reimbursement → include "expense_report"
 4. Always include "spreadsheet" for CSV/Excel files
 5. Return types ordered by relevance (most specific first)
+6. IMPORTANT - Mutual exclusion rules:
+   - If content has "gratuity", "tip", "thank you", "come again", or is clearly a restaurant/meal bill → classify as "receipt", NOT "inventory_report"
+   - "inventory_report" is for tracking stock levels/quantities of products in warehouses, NOT for restaurant receipts with food items
+   - A receipt with food items and prices is a "receipt", even if it looks like a table
 
 ## Response Format (JSON only):
 {{
@@ -461,9 +470,11 @@ class DocumentTypeClassifier:
             if any(kw in columns_text for kw in ["account", "bank", "deposit", "withdrawal"]):
                 types.add("bank_statement")
 
-            # Receipt
-            if any(kw in columns_text for kw in ["receipt", "tip", "subtotal", "tax", "meal"]):
+            # Receipt - also checks for restaurant indicators
+            if any(kw in columns_text for kw in ["receipt", "tip", "subtotal", "tax", "meal", "gratuity", "server", "table"]):
                 types.add("receipt")
+                # If it's a receipt, explicitly remove inventory_report to avoid confusion
+                types.discard("inventory_report")
 
             # Shipping
             if any(kw in columns_text for kw in ["shipping", "delivery", "tracking", "freight"]):
@@ -618,10 +629,15 @@ class DocumentTypeClassifier:
                 entities=context['entities'],
                 has_tables=context['has_tables'],
                 has_amounts=context['has_amounts'],
-                file_extension=context['file_extension']
+                file_extension=context['file_extension'],
+                content_preview=context.get('content_preview', 'No content preview available')
             )
 
-            response = self.llm_client.generate(prompt)
+            # Use LangChain chat model from the LLM service
+            from langchain_core.messages import HumanMessage
+            chat_model = self.llm_client.get_query_model(temperature=0.1, num_predict=512)
+            response_msg = chat_model.invoke([HumanMessage(content=prompt)])
+            response = response_msg.content if hasattr(response_msg, 'content') else str(response_msg)
             result = self._parse_llm_response(response)
 
             if result and result.get('document_type'):
