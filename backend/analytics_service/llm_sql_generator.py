@@ -542,9 +542,19 @@ Analyze the query and identify:
    - "stock <= 50", "at most 50", "50 or less", "no more than 50" -> {{"operator": "<=", "value": 50}}
    - "stock >= 100", "at least 100", "100 or more", "no less than 100" -> {{"operator": ">=", "value": 100}}
 
-   **Range operator (BETWEEN):**
+   **Range operator (BETWEEN) - INCLUSIVE bounds:**
    - "price between 50 and 100", "price from 50 to 100", "price 50-100" -> {{"operator": "between", "value": [50, 100]}}
    - "stock between 10 and 50" -> {{"operator": "between", "value": [10, 50]}}
+   NOTE: BETWEEN is INCLUSIVE (>= AND <=). Only use "between" when user explicitly says "between".
+
+   **Compound comparisons (NOT the same as BETWEEN) - EXCLUSIVE bounds:**
+   CRITICAL: "lower than X but higher than Y" or "higher than Y but lower than X" means TWO SEPARATE conditions with EXCLUSIVE bounds (< and >), NOT BETWEEN!
+   - "stock lower than 50 but higher than 30" -> TWO filters: {{"operator": "<", "value": 50}} AND {{"operator": ">", "value": 30}} (means > 30 AND < 50, EXCLUSIVE)
+   - "price higher than 100 but lower than 500" -> TWO filters: {{"operator": ">", "value": 100}} AND {{"operator": "<", "value": 500}}
+   - "inventory less than 100 but greater than 20" -> TWO filters: {{"operator": "<", "value": 100}} AND {{"operator": ">", "value": 20}}
+
+   For compound conditions on the SAME field, use "compound" operator:
+   - "stock lower than 50 but higher than 30" -> {{"operator": "compound", "conditions": [{{"op": ">", "value": 30}}, {{"op": "<", "value": 50}}]}}
 
    **List operator (IN):**
    - "category in Electronics, Books, Toys" -> {{"operator": "in", "value": ["Electronics", "Books", "Toys"]}}
@@ -837,7 +847,13 @@ WHERE (header_data->>'transaction_date')::date BETWEEN ...
 
 ### 3. Filter Application:
 - Apply filters in OUTER WHERE clause (after CTE), not inside CTE
-- Operators: <, >, =, <=, >=, !=, between, in, not_in, like
+- Operators: <, >, =, <=, >=, !=, between, in, not_in, like, compound
+
+**CRITICAL - Compound vs BETWEEN:**
+- "lower than X but higher than Y" = TWO conditions: field > Y AND field < X (EXCLUSIVE bounds)
+- "between X and Y" = field >= X AND field <= Y (INCLUSIVE bounds)
+- Example: "inventory lower than 50 but higher than 30" means: (item->>'stockquantity')::numeric > 30 AND (item->>'stockquantity')::numeric < 50
+- This is NOT the same as BETWEEN 30 AND 50!
 
 ### 4. SQL Structure:
 ```sql

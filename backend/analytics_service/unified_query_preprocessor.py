@@ -251,6 +251,10 @@ class UnifiedQueryPreprocessor:
         json_str = self._extract_json(response)
         result_dict = json.loads(json_str)
 
+        # Log the LLM response for debugging context resolution
+        logger.info(f"[UnifiedPreprocessor] LLM raw response: {response[:500]}...")
+        logger.info(f"[UnifiedPreprocessor] Parsed resolved_message: {result_dict.get('resolved_message', 'NOT FOUND')[:200]}")
+
         return self._parse_llm_result(result_dict, message, available_schemas)
 
     def _build_unified_prompt(
@@ -268,26 +272,50 @@ History: {history_str}
 Previous response: "{previous_response_str}"
 
 Tasks:
-1. PRONOUNS: If message has pronouns (it, they, this, that) referring to history, resolve them.
+1. CONTEXT RESOLUTION (CRITICAL - MUST DO THIS):
+   If the current message contains contextual references like "above condition", "same criteria", "for above", "based on above", etc., you MUST replace them with the ACTUAL condition from the previous USER message in history.
+
+   References to resolve: "above condition", "same criteria", "previous filter", "those results", "the same", "for above", "based on above", "that criteria", pronouns like "it", "they", "this", "that", "those", "them"
+
+   RULES:
+   - Look at USER messages in history (not AI responses) to find the condition/filter
+   - REPLACE the reference with the actual condition - do NOT just fix typos
+   - Preserve EXACT condition wording! "lower than 50 but higher than 30" is NOT "between 30 and 50"
+     * "lower than 50 but higher than 30" = > 30 AND < 50 (EXCLUSIVE)
+     * "between 30 and 50" = >= 30 AND <= 50 (INCLUSIVE)
+
+   EXAMPLE:
+   - History: user: "how many products with inventory lower than 50 but higher than 30?"
+   - Current: "list all product details for above condition"
+   - resolved_message MUST BE: "list all product details where inventory lower than 50 but higher than 30"
+   - NOT just: "list all product details for above condition" (WRONG - reference not resolved!)
 2. DISSATISFIED: Is user unhappy with previous response OR requesting fresh/latest data? ("wrong", "check again", "refresh", "are you sure", "latest data", "latest", "fresh data", "current data", "up to date", "most recent")
 3. CACHEABLE: Worth caching? No for greetings/meta questions. Yes for factual queries. NO if user explicitly asks for "latest" or "fresh" data.
 4. INTENT: DOCUMENT_SEARCH (find/read docs, policies, how-to) | DATA_ANALYTICS (counts, totals, averages, comparisons) | HYBRID (both) | GENERAL (greetings only)
 
 JSON only, no markdown:
-{{"topics":["topic1"],"resolved_message":"original or resolved","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DOCUMENT_SEARCH"}}"""
+{{"topics":["topic1"],"resolved_message":"original or resolved with full conditions from history","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DOCUMENT_SEARCH"}}"""
 
     def _format_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> str:
-        """Format chat history for the prompt."""
+        """Format chat history for the prompt.
+
+        Only includes USER messages (last 10) so LLM can find conditions/filters to resolve.
+        """
         if not chat_history:
             return "(No chat history)"
 
-        lines = []
-        for msg in chat_history[-5:]:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")[:200]
-            lines.append(f"{role}: {content}")
+        # Extract only USER messages - these contain the conditions we need to resolve
+        user_messages = []
+        for msg in chat_history:
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if content.strip():
+                    user_messages.append(f"user: {content[:400]}")
 
-        return "\n".join(lines)
+        # Take last 10 user messages
+        recent_user_messages = user_messages[-10:]
+
+        return "\n".join(recent_user_messages)
 
     def _extract_json(self, text: str) -> str:
         """Extract JSON from LLM response, handling markdown code blocks."""
@@ -426,15 +454,24 @@ JSON only, no markdown:
 
         message_lower = message.lower().strip()
 
+        # Detect pronouns and contextual references
+        detected_pronouns = self._detect_pronouns_heuristic(message_lower)
+        contextual_refs = self._detect_contextual_references(message_lower)
+        has_context_refs = len(detected_pronouns) > 0 or len(contextual_refs) > 0
+
+        # Try to resolve contextual references from chat history
+        resolved_message = message
+        if has_context_refs and chat_history:
+            resolved_message = self._resolve_context_heuristic(message, chat_history, contextual_refs)
+
         # Context analysis (simple)
         context = ContextAnalysisResult(
             topics=self._detect_topics_heuristic(message_lower),
             entities={"documents": [], "people": [], "topics": [], "objects": [], "dates": []},
-            detected_pronouns=self._detect_pronouns_heuristic(message_lower),
-            resolved_message=message,
-            has_pronouns=False
+            detected_pronouns=detected_pronouns + contextual_refs,  # Include contextual refs as "pronouns" for downstream
+            resolved_message=resolved_message,
+            has_pronouns=has_context_refs
         )
-        context.has_pronouns = len(context.detected_pronouns) > 0
 
         # Cache analysis (simple)
         cache = CacheAnalysisResult(
@@ -482,7 +519,7 @@ JSON only, no markdown:
         return topics[:5]
 
     def _detect_pronouns_heuristic(self, message_lower: str) -> List[str]:
-        """Detect pronouns in message."""
+        """Detect pronouns and contextual references in message."""
         pronouns = ['it', 'they', 'them', 'this', 'that', 'these', 'those']
         detected = []
         words = re.findall(r'\b\w+\b', message_lower)
@@ -490,6 +527,161 @@ JSON only, no markdown:
             if pronoun in words:
                 detected.append(pronoun)
         return detected
+
+    def _detect_contextual_references(self, message_lower: str) -> List[str]:
+        """Detect contextual references that require resolution from chat history."""
+        # Patterns that indicate the user is referencing previous conditions/criteria
+        reference_patterns = [
+            (r'\babove\s+condition', 'above condition'),
+            (r'\bsame\s+criteria', 'same criteria'),
+            (r'\bprevious\s+filter', 'previous filter'),
+            (r'\bthose\s+results', 'those results'),
+            (r'\bthe\s+same\b', 'the same'),
+            (r'\bmentioned\s+before', 'mentioned before'),
+            (r'\bfor\s+above\b', 'for above'),
+            (r'\bsame\s+query', 'same query'),
+            (r'\bbased\s+on\s+above', 'based on above'),
+            (r'\bthat\s+criteria', 'that criteria'),
+            (r'\babove\s+filter', 'above filter'),
+            (r'\bprevious\s+condition', 'previous condition'),
+            (r'\bsame\s+condition', 'same condition'),
+            (r'\babove\s+query', 'above query'),
+            (r'\bpreviously\s+mentioned', 'previously mentioned'),
+        ]
+        detected = []
+        for pattern, label in reference_patterns:
+            if re.search(pattern, message_lower):
+                detected.append(label)
+        return detected
+
+    def _has_context_references(self, message_lower: str) -> bool:
+        """Check if message has any context references that need resolution."""
+        pronouns = self._detect_pronouns_heuristic(message_lower)
+        contextual_refs = self._detect_contextual_references(message_lower)
+        return len(pronouns) > 0 or len(contextual_refs) > 0
+
+    def _resolve_context_heuristic(
+        self,
+        message: str,
+        chat_history: List[Dict[str, str]],
+        contextual_refs: List[str]
+    ) -> str:
+        """
+        Heuristic-based resolution of contextual references from chat history.
+
+        This is a fallback when LLM is not available. It extracts conditions from
+        the most recent user message that contains filter/condition patterns.
+        """
+        if not chat_history or not contextual_refs:
+            return message
+
+        # Look for the most recent user message with conditions/filters
+        condition_patterns = [
+            # Numeric comparisons
+            r'(?:where|with|having|that have|which have)?\s*\w+\s*(?:>|<|>=|<=|=|!=|between|lower than|higher than|greater than|less than|more than|equal to)\s*\d+',
+            # Between patterns
+            r'\w+\s+between\s+\d+\s+and\s+\d+',
+            # Lower/higher than patterns
+            r'(?:lower|higher|greater|less|more)\s+than\s+\d+',
+            # Inventory/quantity specific patterns
+            r'inventory\s+(?:lower|higher|greater|less|more)\s+than\s+\d+',
+            r'inventory\s+(?:>|<|>=|<=)\s*\d+',
+            # Price/amount patterns
+            r'price\s+(?:>|<|>=|<=|lower than|higher than|greater than|less than|more than)\s*\d+',
+        ]
+
+        # Find the most recent user message with conditions
+        previous_condition = None
+        for msg in reversed(chat_history):
+            if msg.get("role") == "user":
+                msg_content = msg.get("content", "")
+                msg_lower = msg_content.lower()
+
+                # Try to extract conditions
+                for pattern in condition_patterns:
+                    match = re.search(pattern, msg_lower)
+                    if match:
+                        # Found a condition - extract the relevant part of the message
+                        previous_condition = msg_content
+                        break
+
+                if previous_condition:
+                    break
+
+        if not previous_condition:
+            return message
+
+        # Extract the actual condition from the previous message
+        # Pattern to find the WHERE-like clause
+        condition_extract_patterns = [
+            # "inventory lower than X but higher than Y" pattern
+            r'(\w+)\s+(lower\s+than\s+\d+\s+(?:but\s+)?(?:higher|greater)\s+than\s+\d+)',
+            r'(\w+)\s+(higher\s+than\s+\d+\s+(?:but\s+)?(?:lower|less)\s+than\s+\d+)',
+            r'(\w+)\s+(between\s+\d+\s+and\s+\d+)',
+            r'(\w+)\s*([<>=!]+\s*\d+)',
+            r'(\w+)\s+(lower\s+than\s+\d+)',
+            r'(\w+)\s+(higher\s+than\s+\d+)',
+            r'(\w+)\s+(greater\s+than\s+\d+)',
+            r'(\w+)\s+(less\s+than\s+\d+)',
+        ]
+
+        extracted_condition = None
+        for pattern in condition_extract_patterns:
+            match = re.search(pattern, previous_condition.lower())
+            if match:
+                field = match.group(1)
+                condition = match.group(2)
+                extracted_condition = f"{field} {condition}"
+                break
+
+        if not extracted_condition:
+            # Fallback: just append the previous user question context
+            extracted_condition = previous_condition
+
+        # Replace the contextual reference with the actual condition
+        resolved = message
+
+        # Sort refs by length (longest first) to avoid partial replacements
+        sorted_refs = sorted(contextual_refs, key=len, reverse=True)
+
+        for ref in sorted_refs:
+            # Different replacement strategies based on the reference type
+            if 'for above' in ref or ref == 'above condition' or ref == 'above filter' or ref == 'above query':
+                # Replace "for above condition" style with "where <condition>"
+                ref_patterns = [
+                    (rf'\bfor\s+{re.escape(ref)}', f'where {extracted_condition}'),
+                    (rf'\b{re.escape(ref)}', f'where {extracted_condition}'),
+                ]
+            elif 'based on above' in ref or 'same criteria' in ref or 'same condition' in ref:
+                # Replace "based on above" style - append the condition
+                ref_patterns = [
+                    (rf'\b{re.escape(ref)}', f'where {extracted_condition}'),
+                ]
+            elif ref == 'the same':
+                # Replace "the same" with condition
+                ref_patterns = [
+                    (rf'\b{re.escape(ref)}\b', f'with {extracted_condition}'),
+                ]
+            elif ref == 'those results':
+                # Replace "for those results" with condition
+                ref_patterns = [
+                    (rf'\bfor\s+{re.escape(ref)}\b', f'where {extracted_condition}'),
+                    (rf'\b{re.escape(ref)}\b', f'where {extracted_condition}'),
+                ]
+            else:
+                # Default: replace with the condition
+                ref_patterns = [
+                    (rf'\b{re.escape(ref)}\b', f'where {extracted_condition}'),
+                ]
+
+            for ref_pattern, replacement in ref_patterns:
+                resolved = re.sub(ref_pattern, replacement, resolved, flags=re.IGNORECASE)
+
+        # Clean up any double spaces or awkward phrasing
+        resolved = re.sub(r'\s+', ' ', resolved).strip()
+
+        logger.info(f"[Heuristic] Resolved contextual reference: '{message}' -> '{resolved}'")
+        return resolved
 
     def _detect_dissatisfaction_heuristic(self, message_lower: str) -> bool:
         """Detect dissatisfaction signals or requests for fresh/latest data."""

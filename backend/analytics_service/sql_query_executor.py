@@ -88,6 +88,12 @@ class SQLQueryExecutor:
         This runs a modified version of the query that extracts DISTINCT document_ids
         from the actual result set, then fetches the corresponding filenames.
 
+        This method works for all query types:
+        - SELECT (detail) queries: Returns documents whose line items appear in results
+        - COUNT queries: Returns documents that contribute to the count
+        - MIN/MAX queries: Returns documents containing the min/max records
+        - Aggregate queries: Returns documents used in the aggregation
+
         Args:
             data: The query result data (not used directly, but indicates query succeeded)
             sql_query: The generated SQL query
@@ -117,10 +123,11 @@ class SQLQueryExecutor:
                 if doc_filter_match:
                     doc_ids_in_filter = doc_filter_match.group(1)
 
-                    # Find the outer WHERE clause (after the CTE ends with ")")
-                    # Look for the pattern: ) SELECT ... FROM expanded_items WHERE ...
+                    # Find the outer WHERE clause (after the CTE ends)
+                    # Look for pattern: ) SELECT ... FROM expanded_items/items WHERE ...
+                    # Use a more robust regex that doesn't fail on uppercase W in column names
                     outer_where_match = re.search(
-                        r'\)\s*SELECT[^W]+WHERE\s+(.+?)(?:ORDER BY|GROUP BY|LIMIT|;|$)',
+                        r'\)\s*SELECT\s+.+?\s+FROM\s+(?:expanded_items|items)\s+WHERE\s+(.+?)(?:\s+ORDER\s+BY|\s+GROUP\s+BY|\s+LIMIT|\s*;|\s*$)',
                         sql_query,
                         re.IGNORECASE | re.DOTALL
                     )
@@ -140,6 +147,7 @@ class SQLQueryExecutor:
                         """
                     else:
                         # No outer WHERE clause, get all document_ids from the CTE
+                        # This handles COUNT queries without filters, aggregate queries, etc.
                         doc_id_query = f"""
                             WITH expanded_items AS (
                                 SELECT dd.document_id, dd.header_data, li.data as item
