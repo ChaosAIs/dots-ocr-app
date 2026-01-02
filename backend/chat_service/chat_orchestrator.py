@@ -316,6 +316,7 @@ class ChatOrchestrator:
             Formatted response string
         """
         summary = analytics_result.get('summary', {})
+        metadata = analytics_result.get('metadata', {})
 
         # Check for errors
         if 'error' in summary:
@@ -325,7 +326,15 @@ class ChatOrchestrator:
         formatted_report = summary.get('formatted_report', '')
         if formatted_report and formatted_report.strip():
             logger.info(f"[Orchestrator] Using LLM-generated formatted_report ({len(formatted_report)} chars)")
-            return formatted_report
+            # Append document sources if available
+            response = formatted_report
+            document_sources = metadata.get('document_sources', [])
+            if document_sources:
+                response += "\n\n---\n**Data Sources:**\n"
+                for source in document_sources:
+                    filename = source.get('filename', 'Unknown')
+                    response += f"- {filename}\n"
+            return response
 
         # No data case
         data = analytics_result.get('data', [])
@@ -335,7 +344,17 @@ class ChatOrchestrator:
         # Fallback: basic summary (should rarely happen with LLM-only path)
         total_amount = summary.get('total_amount', summary.get('grand_total', 0))
         total_records = summary.get('total_records', len(data))
-        return f"Found {total_records} records with a total of ${total_amount:,.2f}."
+        response = f"Found {total_records} records with a total of ${total_amount:,.2f}."
+
+        # Append document sources if available
+        document_sources = metadata.get('document_sources', [])
+        if document_sources:
+            response += "\n\n---\n**Data Sources:**\n"
+            for source in document_sources:
+                filename = source.get('filename', 'Unknown')
+                response += f"- {filename}\n"
+
+        return response
 
     def _format_dynamic_sql_response(
         self,
@@ -846,7 +865,7 @@ Write the {report_type} report in markdown format using hierarchical layout when
 
         # Check for dynamic SQL results (has hierarchical_data or summary_by_year)
         if 'hierarchical_data' in summary or 'summary_by_year' in summary:
-            return self._summarize_dynamic_sql_for_context(summary, data)
+            return self._summarize_dynamic_sql_for_context(summary, data, metadata)
 
         # For small result sets (<=100 rows), include actual data as markdown table
         # This prevents LLM hallucination for tabular queries like MIN/MAX
@@ -874,6 +893,16 @@ Write the {report_type} report in markdown format using hierarchical layout when
                 total = row.get('total_amount', 0)
                 count = row.get('count', 0)
                 parts.append(f"  - {group}: ${total:,.2f} ({count} documents)")
+
+        # Add document sources section if available
+        document_sources = metadata.get('document_sources', [])
+        if document_sources:
+            parts.append("")
+            parts.append("---")
+            parts.append("**Data Sources:**")
+            for source in document_sources:
+                filename = source.get('filename', 'Unknown')
+                parts.append(f"- {filename}")
 
         return "\n".join(parts)
 
@@ -942,7 +971,7 @@ Write the {report_type} report in markdown format using hierarchical layout when
 
         return "\n".join(parts)
 
-    def _summarize_dynamic_sql_for_context(self, summary: Dict[str, Any], data: list) -> str:
+    def _summarize_dynamic_sql_for_context(self, summary: Dict[str, Any], data: list, metadata: Dict[str, Any] = None) -> str:
         """
         Summarize dynamic SQL results for LLM context.
 
@@ -953,6 +982,7 @@ Write the {report_type} report in markdown format using hierarchical layout when
         - Grand totals and record counts
         - Hierarchical data (primary group -> sub-group breakdown)
         - Any summary_by_* fields (dynamically detected)
+        - Document sources (from metadata)
 
         Dimension hierarchy:
         - Primary dimension: First grouping level (e.g., Year, Category)
@@ -962,6 +992,7 @@ Write the {report_type} report in markdown format using hierarchical layout when
         IMPORTANT: Format is optimized for LLM to copy values directly.
         """
         parts = []
+        metadata = metadata or {}
 
         # Grand total and record count - prominent header
         grand_total = summary.get('grand_total', 0) or 0
@@ -1035,6 +1066,16 @@ Write the {report_type} report in markdown format using hierarchical layout when
                 if total is not None and key is not None:
                     # Make totals very explicit for LLM to copy
                     parts.append(f"    ★ {key}: ${float(total):,.2f}")
+
+        # Add document sources section if available
+        document_sources = metadata.get('document_sources', [])
+        if document_sources:
+            parts.append("")
+            parts.append("---")
+            parts.append("**Data Sources:**")
+            for source in document_sources:
+                filename = source.get('filename', 'Unknown')
+                parts.append(f"- {filename}")
 
         return "\n".join(parts)
 

@@ -864,6 +864,21 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                                         "type": "token",
                                                         "content": chunk,
                                                     })
+
+                                            # Append document sources at the end of streamed report
+                                            metadata = analytics_result.get('metadata', {})
+                                            document_sources = metadata.get('document_sources', [])
+                                            if document_sources:
+                                                sources_text = "\n\n---\n**Data Sources:**\n"
+                                                for source in document_sources:
+                                                    filename = source.get('filename', 'Unknown')
+                                                    sources_text += f"- {filename}\n"
+                                                full_response += sources_text
+                                                await websocket.send_json({
+                                                    "type": "token",
+                                                    "content": sources_text,
+                                                })
+
                                             logger.info(f"[Intent Routing] Streamed analytics report ({len(full_response)} chars)")
                                         else:
                                             # Fallback: use format_analytics_response with simulated streaming

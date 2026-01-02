@@ -2941,10 +2941,11 @@ Write the {report_type} report in markdown format:"""
         evaluation: ContentSizeEvaluation
     ):
         """
-        Stream response for small result sets using full LLM processing.
+        Stream response for small result sets.
 
-        This is the original behavior - LLM processes the entire result set
-        and generates a formatted report.
+        Strategy: LLM generates ONLY a brief title/description, then we directly
+        stream the raw markdown table to ensure ALL data rows are shown without
+        LLM truncation.
 
         Args:
             user_query: Original user query
@@ -2952,112 +2953,64 @@ Write the {report_type} report in markdown format:"""
             evaluation: Content size evaluation (contains pre-built markdown table)
 
         Yields:
-            Chunks of the LLM-generated report
+            Chunks of the formatted report
         """
-        # Detect if user wants detailed listing vs summary
-        detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
-                           'each', 'breakdown', 'itemized', 'every', 'specific']
-        query_lower = user_query.lower()
-        wants_details = any(keyword in query_lower for keyword in detail_keywords)
-
-        # Determine instruction based on user intent
-        if wants_details:
-            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details. Do NOT just show a summary total."
-            report_type = "detailed"
-        else:
-            detail_instruction = "4. Be concise but complete - summarize the data appropriately"
-            report_type = "summary"
-
-        # Use the pre-built markdown table from evaluation
-        results_markdown = evaluation.markdown_table
-
-        # Get actual column names from the results to enforce schema adherence
+        # Get actual column names from the results
         actual_columns = list(query_results[0].keys()) if query_results else []
         columns_list = ", ".join(actual_columns)
 
-        # Simple prompt with markdown-formatted data
-        prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
+        # Step 1: LLM generates ONLY a brief title and description (NOT the data)
+        # We only show a few sample rows to help LLM understand the context
+        sample_size = min(3, len(query_results))
+        sample_rows = query_results[:sample_size]
+        sample_markdown = self._convert_results_to_markdown(sample_rows, actual_columns)
+
+        prompt = f"""Based on the user's question, write ONLY a brief title and 1-2 sentence description.
+DO NOT include any data table or list - the data will be shown separately.
 
 ## User's Question:
 "{user_query}"
 
-## AVAILABLE COLUMNS IN THIS DATA (ONLY THESE EXIST):
-{columns_list}
-
-## SQL Query Results ({len(query_results)} rows):
-
-{results_markdown}
-
-## CRITICAL - STRICT DATA ADHERENCE (MOST IMPORTANT RULE):
-**You MUST ONLY report on columns listed in "AVAILABLE COLUMNS" above!**
-- The AVAILABLE COLUMNS list shows ALL fields that exist - there are NO OTHER fields
-- Do NOT add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date", "Notes", "Last Purchase Date", "Last Sale Date"
-- If a field is not in AVAILABLE COLUMNS, it DOES NOT EXIST - NEVER mention it
-- Only use values you can actually see in the SQL Query Results table
-- For each product/item, ONLY show the columns that exist in the data
+## Data Info:
+- Total rows: {len(query_results)}
+- Columns: {columns_list}
+- Sample of first {sample_size} rows:
+{sample_markdown}
 
 ## Instructions:
-1. Directly answer the user's question based on the data above
-2. If they asked for minimum/maximum values, clearly identify who has the min and max amounts for each year/grouping
-3. Format monetary amounts with $ and proper number formatting (e.g., $1,234.56)
-   - IMPORTANT: Only add $ to MONETARY fields (amounts, totals, prices, costs, averages of money)
-   - Do NOT add $ to COUNT fields like "total_receipts", "item_count", "num_records" - these are INTEGER counts, not money!
-   - Example: "7 receipts" or "Total Receipts: 7" (NOT "$7.00")
-   - Example: "Average per Receipt: $142.12" (this IS money, so use $)
-   - Example: "Grand Total: $994.84" (this IS money, so use $)
-{detail_instruction}
-5. Use markdown formatting for readability
+1. Write a markdown title (## Title) that describes what the data shows
+2. Write 1-2 sentences describing the data (mention row count and what was queried)
+3. DO NOT include any table, list, or individual data items
+4. DO NOT try to list or summarize the actual data values
+5. Keep it brief - just title and description
 
-## CRITICAL - Recognize AGGREGATE vs DETAIL Results:
-FIRST, check what type of data you received:
+Example output format:
+## Product Details with Price Between $30 and $50
 
-**AGGREGATE/SUMMARY Results** (1 row with statistics like average, total, count):
-- If the data has columns like "average_per_receipt", "total_receipts", "grand_total", "min_receipt", "max_receipt"
-- This is SUMMARY DATA - just present the statistics directly
-- Do NOT invent "Receipt #1" or similar - there are no individual receipts in this data!
-- Example output for average query:
-  ## Average Meal Cost for 2025
-  - **Average per Receipt:** $142.12
-  - **Total Receipts:** 7
-  - **Grand Total:** $994.84
-  - **Minimum Receipt:** $66.99
-  - **Maximum Receipt:** $228.00
+Below is a list of all 20 products meeting the price criteria, showing all available columns.
 
-**DETAIL Results** (multiple rows with actual receipt data):
-- If the data has columns like "receipt_number", "store_name", "item_description"
-- This is DETAIL DATA - use hierarchical layout with actual receipt numbers
+Write ONLY the title and description:"""
 
-## CRITICAL - Hierarchical/Tree Layout for DETAIL Data Only:
-When showing detailed items (NOT aggregate summaries), use a TREE/HIERARCHICAL structure:
-- If multiple items share the same receipt number, date, or restaurant, group them together
-- Show the parent group (e.g., receipt number, restaurant, date) ONCE as a header
-- List the child items (individual line items) indented under their parent
+        # Stream the LLM-generated title/description
+        try:
+            async for chunk in self.llm_client.astream(prompt):
+                if chunk:
+                    yield chunk
+        except Exception as e:
+            logger.error(f"[LLM Summary] Failed to generate title: {e}")
+            # Fallback: Generate a simple title
+            yield f"## Query Results\n\n"
+            yield f"Found **{len(query_results):,}** records matching your query.\n\n"
 
-IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier!
-- If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
-- NEVER invent receipt numbers like "Receipt #1" - only use values that exist in the data!
+        # Step 2: Add separator and stream the raw markdown table directly
+        yield "\n\n"
 
-## CRITICAL - NO DUPLICATES and NO INVENTED DATA:
-- NEVER show the same receipt/invoice/document more than once
-- NEVER invent receipt numbers, item numbers, or any identifiers that don't exist in the data
-- Each unique receipt_number should appear EXACTLY ONCE in your output
-- If the data is aggregate/summary, just present the numbers - don't create fake detail rows
+        # Use the pre-built markdown table from evaluation (includes all rows)
+        results_markdown = evaluation.markdown_table
+        yield results_markdown
 
-## CRITICAL - ONLY USE COLUMNS FROM THE QUERY RESULTS:
-- ONLY display fields/columns that actually exist in the SQL Query Results table above
-- NEVER assume or add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date" etc.
-- If a column is not in the query results, DO NOT include it in your response
-- Use "-" for NULL/empty values, but NEVER invent field names that don't exist in the data
-- Look at the actual column headers in the results table - those are the ONLY fields you can report on
-
-6. For detail reports, include subtotals for each group and a grand total at the end
-
-Write the {report_type} report in markdown format:"""
-
-        # Stream the response
-        async for chunk in self.llm_client.astream(prompt):
-            if chunk:
-                yield chunk
+        # Step 3: Add summary footer
+        yield f"\n\n*Showing all {len(query_results)} records*\n"
 
     def _convert_results_to_markdown(
         self,
