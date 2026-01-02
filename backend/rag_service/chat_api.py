@@ -172,16 +172,18 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
     - Server sends JSON: {"type": "error", "message": "..."} on error
 
     All messages are persisted to the database under the given session_id.
+
+    THREAD SAFETY NOTE: Database sessions are now created per-message instead of
+    per-connection to avoid holding connections during long-running LLM operations.
+    This prevents connection pool exhaustion when multiple chat sessions are active.
     """
     await websocket.accept()
     logger.debug(f"WebSocket connection established for chat session: {session_id}")
 
-    # Get database session using context manager
-    with get_db_session() as db:
-        conv_manager = ConversationManager(db)
-
-        # Verify session exists
-        try:
+    # Verify session exists using a short-lived DB session
+    try:
+        with get_db_session() as db:
+            conv_manager = ConversationManager(db)
             session = conv_manager.get_session(session_id)
             if not session:
                 await websocket.send_json({
@@ -190,72 +192,77 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 })
                 await websocket.close()
                 return
-        except Exception as e:
-            logger.error(f"Error verifying session: {e}")
-            await websocket.send_json({
-                "type": "error",
-                "message": "Failed to verify session",
-            })
-            await websocket.close()
-            return
+    except Exception as e:
+        logger.error(f"Error verifying session: {e}")
+        await websocket.send_json({
+            "type": "error",
+            "message": "Failed to verify session",
+        })
+        await websocket.close()
+        return
 
-        try:
-            while True:
-                # Receive message from client
-                data = await websocket.receive_text()
+    try:
+        while True:
+            # Receive message from client
+            data = await websocket.receive_text()
 
+            try:
+                request = json.loads(data)
+
+                # Handle ping/pong for keepalive
+                if request.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+
+                message = request.get("message", "")
+                user_id = request.get("user_id")
+                is_retry = request.get("is_retry", False)  # Flag for retry action
+                workspace_ids = request.get("workspace_ids", [])  # Optional workspace filter
+                document_ids = request.get("document_ids", [])  # Optional document filter
+                iterative_reasoning_enabled = request.get("iterative_reasoning_enabled", None)  # Optional toggle from UI checkbox
+
+                if not message:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "Empty message received",
+                    })
+                    continue
+
+                logger.info(f"Received chat message for session {session_id}: {message[:100]}...")
+
+                # Initialize timing metrics for this query
+                import uuid as uuid_module
+                timing_metrics = TimingMetrics(
+                    query_id=f"{session_id[:8]}-{str(uuid_module.uuid4())[:8]}",
+                    query_preview=message[:100]
+                )
+                set_current_metrics(timing_metrics)
+
+                # Save user message to database (short-lived session)
                 try:
-                    request = json.loads(data)
-
-                    # Handle ping/pong for keepalive
-                    if request.get("type") == "ping":
-                        await websocket.send_json({"type": "pong"})
-                        continue
-
-                    message = request.get("message", "")
-                    user_id = request.get("user_id")
-                    is_retry = request.get("is_retry", False)  # Flag for retry action
-                    workspace_ids = request.get("workspace_ids", [])  # Optional workspace filter
-                    document_ids = request.get("document_ids", [])  # Optional document filter
-                    iterative_reasoning_enabled = request.get("iterative_reasoning_enabled", None)  # Optional toggle from UI checkbox
-
-                    if not message:
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": "Empty message received",
-                        })
-                        continue
-
-                    logger.info(f"Received chat message for session {session_id}: {message[:100]}...")
-
-                    # Initialize timing metrics for this query
-                    import uuid as uuid_module
-                    timing_metrics = TimingMetrics(
-                        query_id=f"{session_id[:8]}-{str(uuid_module.uuid4())[:8]}",
-                        query_preview=message[:100]
-                    )
-                    set_current_metrics(timing_metrics)
-
-                    # Save user message to database
-                    try:
+                    with get_db_session() as db:
+                        conv_manager = ConversationManager(db)
                         conv_manager.add_message(
                             session_id=UUID(session_id),
                             role="user",
                             content=message
                         )
-                        db.commit()
-                    except Exception as e:
-                        logger.error(f"Error saving user message: {e}")
-                        db.rollback()
+                except Exception as e:
+                    logger.error(f"Error saving user message: {e}")
 
-                    # Get conversation history from database
-                    history = []
-                    context_info = {}
-                    session_context = {}
-                    enhanced_message = message
-                    document_context_changed = False  # Track if document/workspace selection changed
+                # Get conversation history from database (short-lived session)
+                history = []
+                context_info = {}
+                session_context = {}
+                enhanced_message = message
+                document_context_changed = False  # Track if document/workspace selection changed
+                # Normalize current selections to sorted lists for comparison
+                curr_workspace_ids = sorted(workspace_ids) if workspace_ids else []
+                curr_document_ids = sorted(document_ids) if document_ids else []
 
-                    try:
+                try:
+                    with get_db_session() as db:
+                        conv_manager = ConversationManager(db)
                         context = conv_manager.get_conversation_context(UUID(session_id))
                         # Convert to format expected by RAG agent
                         history = [
@@ -266,196 +273,206 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # Get session metadata for context
                         session_context = context.get("session_metadata", {})
 
-                        # Check if document/workspace selection has changed from previous message in THIS session
-                        # This is important to force a new document search when user changes filters mid-conversation
-                        # Note: For NEW sessions, the initial selection comes from user preferences (users table)
-                        #       and we don't need to force a new search for the first message
-                        prev_workspace_ids = session_context.get("_prev_workspace_ids", [])
-                        prev_document_ids = session_context.get("_prev_document_ids", [])
+                    # Check if document/workspace selection has changed from previous message in THIS session
+                    # This is important to force a new document search when user changes filters mid-conversation
+                    # Note: For NEW sessions, the initial selection comes from user preferences (users table)
+                    #       and we don't need to force a new search for the first message
+                    prev_workspace_ids = session_context.get("_prev_workspace_ids", [])
+                    prev_document_ids = session_context.get("_prev_document_ids", [])
 
-                        # Normalize current selections to sorted lists for comparison
-                        curr_workspace_ids = sorted(workspace_ids) if workspace_ids else []
-                        curr_document_ids = sorted(document_ids) if document_ids else []
+                    # Only detect change if there was a previous selection stored in this session
+                    # This means user has sent at least one message before and is now changing the filter
+                    if prev_workspace_ids or prev_document_ids:
+                        if curr_workspace_ids != prev_workspace_ids or curr_document_ids != prev_document_ids:
+                            document_context_changed = True
+                            logger.info(f"[Document Context] Selection changed mid-conversation!")
+                            logger.info(f"[Document Context]   Previous: workspaces={prev_workspace_ids[:3]}{'...' if len(prev_workspace_ids) > 3 else ''}, docs={prev_document_ids[:3]}{'...' if len(prev_document_ids) > 3 else ''}")
+                            logger.info(f"[Document Context]   Current: workspaces={curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}, docs={curr_document_ids[:3]}{'...' if len(curr_document_ids) > 3 else ''}")
 
-                        # Only detect change if there was a previous selection stored in this session
-                        # This means user has sent at least one message before and is now changing the filter
-                        if prev_workspace_ids or prev_document_ids:
-                            if curr_workspace_ids != prev_workspace_ids or curr_document_ids != prev_document_ids:
-                                document_context_changed = True
-                                logger.info(f"[Document Context] Selection changed mid-conversation!")
-                                logger.info(f"[Document Context]   Previous: workspaces={prev_workspace_ids[:3]}{'...' if len(prev_workspace_ids) > 3 else ''}, docs={prev_document_ids[:3]}{'...' if len(prev_document_ids) > 3 else ''}")
-                                logger.info(f"[Document Context]   Current: workspaces={curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}, docs={curr_document_ids[:3]}{'...' if len(curr_document_ids) > 3 else ''}")
+                except Exception as e:
+                    logger.error(f"Error loading conversation history: {e}")
 
-                        # ====== UNIFIED PREPROCESSING (SINGLE LLM CALL) ======
-                        # This replaces THREE separate LLM calls with ONE:
-                        # 1. Context Analysis (pronouns, entities, topics)
-                        # 2. Cache Analysis (dissatisfaction, self-contained, cacheable)
-                        # 3. Intent Classification (routing decision)
-                        unified_result = None
+                # ====== UNIFIED PREPROCESSING (SINGLE LLM CALL) ======
+                # This replaces THREE separate LLM calls with ONE:
+                # 1. Context Analysis (pronouns, entities, topics)
+                # 2. Cache Analysis (dissatisfaction, self-contained, cacheable)
+                # 3. Intent Classification (routing decision)
+                # NOTE: Run in thread to avoid blocking async event loop
+                unified_result = None
 
-                        if UNIFIED_PREPROCESSING_ENABLED and CHAT_ENABLE_CONTEXT_ANALYSIS:
-                            logger.info("=" * 80)
-                            logger.info("[UnifiedPreprocessing] ========== UNIFIED PREPROCESSING START ==========")
-                            logger.info("=" * 80)
-                            logger.info(f"[UnifiedPreprocessing] Message: '{message[:100]}...'")
-                            logger.info(f"[UnifiedPreprocessing] History messages: {len(history)}")
-                            try:
-                                # Get previous response for dissatisfaction detection
-                                prev_response = None
-                                if history:
-                                    for msg in reversed(history):
-                                        if msg.get("role") == "assistant":
-                                            prev_response = msg.get("content", "")[:500]
-                                            break
-
-                                # Get available schemas for intent classification
-                                available_schemas = None
-                                try:
-                                    from chat_service.chat_orchestrator import ChatOrchestrator
-                                    temp_orchestrator = ChatOrchestrator(db)
-                                    available_schemas = temp_orchestrator._get_available_schemas()
-                                except Exception:
-                                    pass
-
-                                # Single unified LLM call for all preprocessing
-                                with timing_metrics.measure("unified_preprocessing"):
-                                    preprocessor = get_unified_preprocessor()
-                                    unified_result = preprocessor.preprocess(
-                                        message=message,
-                                        chat_history=history,
-                                        previous_response=prev_response,
-                                        available_schemas=available_schemas
-                                    )
-
-                                # Record the internal processing time from preprocessor
-                                timing_metrics.record("unified_preprocessing_llm", unified_result.processing_time_ms)
-
-                                # Extract context analysis from unified result
-                                enhanced_message = unified_result.context.resolved_message or message
-                                context_info = {
-                                    "entities": unified_result.context.entities,
-                                    "topics": unified_result.context.topics,
-                                    "has_pronouns": unified_result.context.has_pronouns,
-                                    "detected_pronouns": unified_result.context.detected_pronouns
-                                }
-
-                                if unified_result.context.has_pronouns:
-                                    logger.info(f"[UnifiedPreprocessing] Pronouns detected: {context_info['detected_pronouns']}")
-                                    logger.info(f"[UnifiedPreprocessing] Original: '{message[:50]}...' → Enhanced: '{enhanced_message[:50]}...'")
-                                else:
-                                    logger.info(f"[UnifiedPreprocessing] No pronouns detected in message")
-
-                                logger.info(f"[UnifiedPreprocessing] Extracted topics: {context_info['topics']}")
-                                logger.info(f"[UnifiedPreprocessing] Intent: {unified_result.intent.intent.value} (confidence: {unified_result.intent.confidence:.2f})")
-                                logger.info(f"[UnifiedPreprocessing] Cacheable: {unified_result.cache.is_cacheable}")
-                                logger.info(f"[UnifiedPreprocessing] Processing time: {unified_result.processing_time_ms:.2f}ms")
-                                logger.info("=" * 80)
-
-                            except Exception as e:
-                                logger.error(f"[UnifiedPreprocessing] Error: {e}", exc_info=True)
-                                unified_result = None
-                                enhanced_message = message
-
-                        elif CHAT_ENABLE_CONTEXT_ANALYSIS:
-                            # Fallback to individual context analysis if unified preprocessing disabled
-                            logger.info(f"[Context Analysis] Analyzing message: '{message[:100]}...' with {len(history)} history messages")
-                            try:
-                                analyzer = ContextAnalyzer()
-                                analysis = analyzer.analyze_message(message, history)
-
-                                # Use resolved message if pronouns were detected
-                                enhanced_message = analysis.get("resolved_message", message)
-
-                                # Store context info for metadata update
-                                context_info = {
-                                    "entities": analysis.get("entities", {}),
-                                    "topics": analysis.get("topics", []),
-                                    "has_pronouns": analysis.get("has_pronouns", False),
-                                    "detected_pronouns": analysis.get("detected_pronouns", [])
-                                }
-
-                                if analysis.get("has_pronouns"):
-                                    logger.info(f"[Context Analysis] Pronouns detected: {context_info['detected_pronouns']}")
-                                    logger.info(f"[Context Analysis] Original: '{message}' → Enhanced: '{enhanced_message}'")
-                                else:
-                                    logger.info(f"[Context Analysis] No pronouns detected in message")
-
-                                logger.info(f"[Context Analysis] Extracted entities: {context_info['entities']}")
-                                logger.info(f"[Context Analysis] Extracted topics: {context_info['topics']}")
-
-                            except Exception as e:
-                                logger.error(f"[Context Analysis] Error analyzing context: {e}", exc_info=True)
-                                enhanced_message = message
-                        else:
-                            logger.warning(f"[Context Analysis] Context analysis is DISABLED")
-
-                    except Exception as e:
-                        logger.error(f"Error loading conversation history: {e}")
-
-                    # Stream response and accumulate content
-                    full_response = ""
-                    streaming_error = None
-
+                if UNIFIED_PREPROCESSING_ENABLED and CHAT_ENABLE_CONTEXT_ANALYSIS:
+                    logger.info("=" * 80)
+                    logger.info("[UnifiedPreprocessing] ========== UNIFIED PREPROCESSING START ==========")
+                    logger.info("=" * 80)
+                    logger.info(f"[UnifiedPreprocessing] Message: '{message[:100]}...'")
+                    logger.info(f"[UnifiedPreprocessing] History messages: {len(history)}")
                     try:
-                        # Track last progress message time for minimum delay
-                        import time
-                        last_progress_time = [0]  # Use list to allow modification in nested function
-                        last_progress_message = [""]  # Track last message for stage-specific delays
+                        # Get previous response for dissatisfaction detection
+                        prev_response = None
+                        if history:
+                            for msg in reversed(history):
+                                if msg.get("role") == "assistant":
+                                    prev_response = msg.get("content", "")[:500]
+                                    break
 
-                        # Stage-specific minimum display times (in seconds)
-                        # Set to 0 for maximum performance - no artificial delays
-                        STAGE_MIN_DISPLAY_TIMES = {
-                            # All delays disabled for performance
-                            "Understanding your question...": 0,
-                            "Analyzing key topics in your question...": 0,
-                            "Finding relevant documents...": 0,
-                            "Analyzing data structure...": 0,
-                            "Building database query...": 0,
-                            "Running database query...": 0,
-                            "Found": 0,
-                            "Writing your report...": 0,
-                            "default": 0
+                        # Get available schemas for intent classification (short-lived session)
+                        available_schemas = None
+                        try:
+                            with get_db_session() as db:
+                                from chat_service.chat_orchestrator import ChatOrchestrator
+                                temp_orchestrator = ChatOrchestrator(db)
+                                available_schemas = temp_orchestrator._get_available_schemas()
+                        except Exception:
+                            pass
+
+                        # Single unified LLM call for all preprocessing
+                        # Run in thread to avoid blocking async event loop
+                        with timing_metrics.measure("unified_preprocessing"):
+                            preprocessor = get_unified_preprocessor()
+
+                            def run_preprocessing():
+                                return preprocessor.preprocess(
+                                    message=message,
+                                    chat_history=history,
+                                    previous_response=prev_response,
+                                    available_schemas=available_schemas
+                                )
+
+                            unified_result = await asyncio.to_thread(run_preprocessing)
+
+                        # Record the internal processing time from preprocessor
+                        timing_metrics.record("unified_preprocessing_llm", unified_result.processing_time_ms)
+
+                        # Extract context analysis from unified result
+                        enhanced_message = unified_result.context.resolved_message or message
+                        context_info = {
+                            "entities": unified_result.context.entities,
+                            "topics": unified_result.context.topics,
+                            "has_pronouns": unified_result.context.has_pronouns,
+                            "detected_pronouns": unified_result.context.detected_pronouns
                         }
 
-                        def get_min_display_time(message: str) -> float:
-                            """Get minimum display time for a progress message."""
-                            # Check for exact match first
-                            if message in STAGE_MIN_DISPLAY_TIMES:
-                                return STAGE_MIN_DISPLAY_TIMES[message]
-                            # Check for prefix match (e.g., "Found 43 records...")
-                            for prefix, delay in STAGE_MIN_DISPLAY_TIMES.items():
-                                if message.startswith(prefix):
-                                    return delay
-                            return STAGE_MIN_DISPLAY_TIMES["default"]
+                        if unified_result.context.has_pronouns:
+                            logger.info(f"[UnifiedPreprocessing] Pronouns detected: {context_info['detected_pronouns']}")
+                            logger.info(f"[UnifiedPreprocessing] Original: '{message[:50]}...' → Enhanced: '{enhanced_message[:50]}...'")
+                        else:
+                            logger.info(f"[UnifiedPreprocessing] No pronouns detected in message")
 
-                        # Create progress callback for WebSocket updates
-                        async def progress_callback(message: str, percent: int = None):
-                            """Send progress updates to frontend via WebSocket with stage-specific delays."""
-                            try:
-                                # Get minimum display time for the PREVIOUS message
-                                if last_progress_time[0] > 0:
-                                    min_display = get_min_display_time(last_progress_message[0])
-                                    current_time = time.time()
-                                    elapsed = current_time - last_progress_time[0]
-                                    if elapsed < min_display:
-                                        await asyncio.sleep(min_display - elapsed)
+                        logger.info(f"[UnifiedPreprocessing] Extracted topics: {context_info['topics']}")
+                        logger.info(f"[UnifiedPreprocessing] Intent: {unified_result.intent.intent.value} (confidence: {unified_result.intent.confidence:.2f})")
+                        logger.info(f"[UnifiedPreprocessing] Cacheable: {unified_result.cache.is_cacheable}")
+                        logger.info(f"[UnifiedPreprocessing] Processing time: {unified_result.processing_time_ms:.2f}ms")
+                        logger.info("=" * 80)
 
-                                payload = {"type": "progress", "message": message}
-                                if percent is not None:
-                                    payload["percent"] = percent
-                                await websocket.send_json(payload)
-                                last_progress_time[0] = time.time()
-                                last_progress_message[0] = message
-                            except Exception as e:
-                                logger.error(f"Error sending progress update: {e}")
+                    except Exception as e:
+                        logger.error(f"[UnifiedPreprocessing] Error: {e}", exc_info=True)
+                        unified_result = None
+                        enhanced_message = message
 
-                        # Get accessible document IDs for the current user
-                        # This ensures chat only searches documents the user has access to
-                        accessible_doc_ids = None
-                        access_control_start = time.time()
-                        logger.info(f"[Access Control] Checking document access for user_id: {user_id}")
-                        if user_id:
-                            try:
+                elif CHAT_ENABLE_CONTEXT_ANALYSIS:
+                    # Fallback to individual context analysis if unified preprocessing disabled
+                    logger.info(f"[Context Analysis] Analyzing message: '{message[:100]}...' with {len(history)} history messages")
+                    try:
+                        analyzer = ContextAnalyzer()
+
+                        # Run in thread to avoid blocking async event loop
+                        def run_context_analysis():
+                            return analyzer.analyze_message(message, history)
+
+                        analysis = await asyncio.to_thread(run_context_analysis)
+
+                        # Use resolved message if pronouns were detected
+                        enhanced_message = analysis.get("resolved_message", message)
+
+                        # Store context info for metadata update
+                        context_info = {
+                            "entities": analysis.get("entities", {}),
+                            "topics": analysis.get("topics", []),
+                            "has_pronouns": analysis.get("has_pronouns", False),
+                            "detected_pronouns": analysis.get("detected_pronouns", [])
+                        }
+
+                        if analysis.get("has_pronouns"):
+                            logger.info(f"[Context Analysis] Pronouns detected: {context_info['detected_pronouns']}")
+                            logger.info(f"[Context Analysis] Original: '{message}' → Enhanced: '{enhanced_message}'")
+                        else:
+                            logger.info(f"[Context Analysis] No pronouns detected in message")
+
+                        logger.info(f"[Context Analysis] Extracted entities: {context_info['entities']}")
+                        logger.info(f"[Context Analysis] Extracted topics: {context_info['topics']}")
+
+                    except Exception as e:
+                        logger.error(f"[Context Analysis] Error analyzing context: {e}", exc_info=True)
+                        enhanced_message = message
+                else:
+                    logger.warning(f"[Context Analysis] Context analysis is DISABLED")
+
+                # Stream response and accumulate content
+                full_response = ""
+                streaming_error = None
+
+                try:
+                    # Track last progress message time for minimum delay
+                    import time
+                    last_progress_time = [0]  # Use list to allow modification in nested function
+                    last_progress_message = [""]  # Track last message for stage-specific delays
+
+                    # Stage-specific minimum display times (in seconds)
+                    # Set to 0 for maximum performance - no artificial delays
+                    STAGE_MIN_DISPLAY_TIMES = {
+                        # All delays disabled for performance
+                        "Understanding your question...": 0,
+                        "Analyzing key topics in your question...": 0,
+                        "Finding relevant documents...": 0,
+                        "Analyzing data structure...": 0,
+                        "Building database query...": 0,
+                        "Running database query...": 0,
+                        "Found": 0,
+                        "Writing your report...": 0,
+                        "default": 0
+                    }
+
+                    def get_min_display_time(message: str) -> float:
+                        """Get minimum display time for a progress message."""
+                        # Check for exact match first
+                        if message in STAGE_MIN_DISPLAY_TIMES:
+                            return STAGE_MIN_DISPLAY_TIMES[message]
+                        # Check for prefix match (e.g., "Found 43 records...")
+                        for prefix, delay in STAGE_MIN_DISPLAY_TIMES.items():
+                            if message.startswith(prefix):
+                                return delay
+                        return STAGE_MIN_DISPLAY_TIMES["default"]
+
+                    # Create progress callback for WebSocket updates
+                    async def progress_callback(message: str, percent: int = None):
+                        """Send progress updates to frontend via WebSocket with stage-specific delays."""
+                        try:
+                            # Get minimum display time for the PREVIOUS message
+                            if last_progress_time[0] > 0:
+                                min_display = get_min_display_time(last_progress_message[0])
+                                current_time = time.time()
+                                elapsed = current_time - last_progress_time[0]
+                                if elapsed < min_display:
+                                    await asyncio.sleep(min_display - elapsed)
+
+                            payload = {"type": "progress", "message": message}
+                            if percent is not None:
+                                payload["percent"] = percent
+                            await websocket.send_json(payload)
+                            last_progress_time[0] = time.time()
+                            last_progress_message[0] = message
+                        except Exception as e:
+                            logger.error(f"Error sending progress update: {e}")
+
+                    # Get accessible document IDs for the current user
+                    # This ensures chat only searches documents the user has access to
+                    # NOTE: Uses short-lived DB session to avoid holding connection during streaming
+                    accessible_doc_ids = None
+                    access_control_start = time.time()
+                    logger.info(f"[Access Control] Checking document access for user_id: {user_id}")
+                    if user_id:
+                        try:
+                            with get_db_session() as db:
                                 user_doc_repo = UserDocumentRepository(db)
 
                                 # OPTIMIZATION: When specific document_ids are provided by frontend,
@@ -527,219 +544,225 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 # This should block all document searches
                                 if accessible_doc_ids is not None and len(accessible_doc_ids) == 0:
                                     logger.warning(f"[Access Control] User {user_id} has NO accessible documents with current filter - chat will return no documents")
-                            except Exception as e:
-                                import traceback
-                                logger.warning(f"[Access Control] Failed to get accessible documents for user {user_id}: {e}")
-                                logger.warning(f"[Access Control] Exception traceback: {traceback.format_exc()}")
-                                # If we can't get access list, use empty set to block all access (secure by default)
-                                accessible_doc_ids = set()
-                        else:
-                            logger.warning(f"[Access Control] No user_id provided - cannot enforce access control")
-                        timing_metrics.record("access_control", (time.time() - access_control_start) * 1000)
+                        except Exception as e:
+                            import traceback
+                            logger.warning(f"[Access Control] Failed to get accessible documents for user {user_id}: {e}")
+                            logger.warning(f"[Access Control] Exception traceback: {traceback.format_exc()}")
+                            # If we can't get access list, use empty set to block all access (secure by default)
+                            accessible_doc_ids = set()
+                    else:
+                        logger.warning(f"[Access Control] No user_id provided - cannot enforce access control")
+                    timing_metrics.record("access_control", (time.time() - access_control_start) * 1000)
 
-                        # Use enhanced message with resolved pronouns and pass session context
-                        chunk_count = 0
-                        logger.info(f"[Streaming] Starting to stream response for message: '{enhanced_message[:100]}...' (is_retry={is_retry})")
+                    # Use enhanced message with resolved pronouns and pass session context
+                    chunk_count = 0
+                    logger.info(f"[Streaming] Starting to stream response for message: '{enhanced_message[:100]}...' (is_retry={is_retry})")
 
-                        # Convert accessible_doc_ids set to list for orchestrator
-                        accessible_doc_ids_list = list(accessible_doc_ids) if accessible_doc_ids else []
+                    # Convert accessible_doc_ids set to list for orchestrator
+                    accessible_doc_ids_list = list(accessible_doc_ids) if accessible_doc_ids else []
 
-                        # ====== QUERY CACHE INTEGRATION ======
-                        cache_hit = False
-                        cache_analysis = None
-                        cache_result = None
-                        cache_key_question = None
-                        source_document_ids_for_cache = []
+                    # ====== QUERY CACHE INTEGRATION ======
+                    cache_hit = False
+                    cache_analysis = None
+                    cache_result = None
+                    cache_key_question = None
+                    source_document_ids_for_cache = []
 
-                        if QUERY_CACHE_ENABLED and accessible_doc_ids_list:
-                            cache_start = time.time()
-                            try:
-                                logger.info("=" * 80)
-                                logger.info("[QueryCache] ========== QUERY CACHE PROCESS START ==========")
-                                logger.info("=" * 80)
-                                logger.info(f"[QueryCache] Query: {enhanced_message[:100]}...")
-                                logger.info(f"[QueryCache] Workspace IDs: {curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}")
-                                logger.info(f"[QueryCache] Accessible documents: {len(accessible_doc_ids_list)}")
+                    if QUERY_CACHE_ENABLED and accessible_doc_ids_list:
+                        cache_start = time.time()
+                        try:
+                            logger.info("=" * 80)
+                            logger.info("[QueryCache] ========== QUERY CACHE PROCESS START ==========")
+                            logger.info("=" * 80)
+                            logger.info(f"[QueryCache] Query: {enhanced_message[:100]}...")
+                            logger.info(f"[QueryCache] Workspace IDs: {curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}")
+                            logger.info(f"[QueryCache] Accessible documents: {len(accessible_doc_ids_list)}")
+                            logger.info("-" * 80)
+
+                            cache_service = get_query_cache_service()
+
+                            # Step 1: Get cache analysis
+                            # If unified preprocessing was done, use its result; otherwise do separate analysis
+                            if unified_result is not None:
+                                # Use pre-computed cache analysis from unified preprocessing (NO additional LLM call)
+                                logger.info("[QueryCache] STEP 1: Using cache analysis from unified preprocessing (NO additional LLM call)")
+                                cache_analyzer = get_query_cache_analyzer()
+                                cache_analysis = cache_analyzer.from_unified_result(unified_result)
+                            else:
+                                # Fallback: Run separate cache analysis (LLM call)
+                                logger.info("[QueryCache] STEP 1: Running separate pre-cache analysis (LLM call)...")
+                                await progress_callback("Analyzing your question...")
+                                cache_analysis = cache_service.analyze_for_cache(
+                                    question=enhanced_message,
+                                    chat_history=history[-10:] if history else None,
+                                    previous_response=history[-1].get("content") if history and history[-1].get("role") == "assistant" else None
+                                )
+
+                            logger.info("-" * 80)
+                            logger.info("[QueryCache] CACHE ANALYSIS RESULT:")
+                            logger.info(f"[QueryCache]   • Method: {cache_analysis.analysis_method}")
+                            logger.info(f"[QueryCache]   • Dissatisfied: {cache_analysis.dissatisfaction.is_dissatisfied} ({cache_analysis.dissatisfaction.type.value})")
+                            logger.info(f"[QueryCache]   • Bypass cache: {cache_analysis.dissatisfaction.should_bypass_cache}")
+                            logger.info(f"[QueryCache]   • Self-contained: {cache_analysis.question_analysis.is_self_contained}")
+                            logger.info(f"[QueryCache]   • Can enhance: {cache_analysis.question_analysis.can_be_enhanced}")
+                            logger.info(f"[QueryCache]   • Is cacheable: {cache_analysis.cache_decision.is_cacheable}")
+                            logger.info(f"[QueryCache]   • Cache key: {(cache_analysis.cache_decision.cache_key_question or 'None')[:80]}...")
+                            logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
+                            logger.info("-" * 80)
+
+                            # Determine cache workspace ID from current workspace selection
+                            # Use first workspace ID or "default" if none selected
+                            cache_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+                            logger.info(f"[QueryCache] Using workspace ID for cache: {cache_workspace_id}")
+
+                            # Step 2: Check for dissatisfaction (bypass cache if user is unhappy)
+                            if cache_analysis.dissatisfaction.should_bypass_cache:
+                                logger.info("[QueryCache] STEP 2: BYPASS CACHE (user dissatisfaction detected)")
+                                logger.info(f"[QueryCache]   • Dissatisfaction type: {cache_analysis.dissatisfaction.type.value}")
+                                logger.info(f"[QueryCache]   • Should invalidate previous: {cache_analysis.dissatisfaction.should_invalidate_previous_cache}")
+                                # Optionally invalidate previous cache entry
+                                if cache_analysis.dissatisfaction.should_invalidate_previous_cache and history:
+                                    # Find the previous question to invalidate
+                                    for msg in reversed(history):
+                                        if msg.get("role") == "user":
+                                            prev_question = msg.get("content", "")
+                                            if prev_question:
+                                                cache_service.invalidate_question(prev_question, cache_workspace_id)
+                                                logger.info(f"[QueryCache]   • Invalidated previous cache entry: {prev_question[:50]}...")
+                                            break
+                                logger.info("[QueryCache] → Proceeding to fresh query (cache bypassed)")
+                            elif cache_analysis.cache_decision.is_cacheable:
+                                # Step 3: Try cache lookup
+                                logger.info("[QueryCache] STEP 2: CACHE LOOKUP (question is cacheable)")
+                                cache_key_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
+
+                                logger.info(f"[QueryCache]   • Cache key question: {cache_key_question[:80]}...")
+                                logger.info(f"[QueryCache]   • User accessible docs: {len(accessible_doc_ids_str)}")
+
+                                cache_result = cache_service.lookup(
+                                    question=cache_key_question,
+                                    workspace_id=cache_workspace_id,
+                                    user_accessible_doc_ids=accessible_doc_ids_str
+                                )
+
                                 logger.info("-" * 80)
+                                logger.info("[QueryCache] CACHE LOOKUP RESULT:")
+                                logger.info(f"[QueryCache]   • Cache hit: {cache_result.cache_hit}")
+                                logger.info(f"[QueryCache]   • Similarity score: {cache_result.similarity_score:.3f}")
+                                logger.info(f"[QueryCache]   • Candidates checked: {cache_result.candidates_checked}")
+                                logger.info(f"[QueryCache]   • Search time: {cache_result.search_time_ms:.2f}ms")
+                                logger.info(f"[QueryCache]   • Permission granted: {cache_result.permission_granted}")
 
-                                cache_service = get_query_cache_service()
-
-                                # Step 1: Get cache analysis
-                                # If unified preprocessing was done, use its result; otherwise do separate analysis
-                                if unified_result is not None:
-                                    # Use pre-computed cache analysis from unified preprocessing (NO additional LLM call)
-                                    logger.info("[QueryCache] STEP 1: Using cache analysis from unified preprocessing (NO additional LLM call)")
-                                    cache_analyzer = get_query_cache_analyzer()
-                                    cache_analysis = cache_analyzer.from_unified_result(unified_result)
-                                else:
-                                    # Fallback: Run separate cache analysis (LLM call)
-                                    logger.info("[QueryCache] STEP 1: Running separate pre-cache analysis (LLM call)...")
-                                    await progress_callback("Analyzing your question...")
-                                    cache_analysis = cache_service.analyze_for_cache(
-                                        question=enhanced_message,
-                                        chat_history=history[-10:] if history else None,
-                                        previous_response=history[-1].get("content") if history and history[-1].get("role") == "assistant" else None
-                                    )
-
-                                logger.info("-" * 80)
-                                logger.info("[QueryCache] CACHE ANALYSIS RESULT:")
-                                logger.info(f"[QueryCache]   • Method: {cache_analysis.analysis_method}")
-                                logger.info(f"[QueryCache]   • Dissatisfied: {cache_analysis.dissatisfaction.is_dissatisfied} ({cache_analysis.dissatisfaction.type.value})")
-                                logger.info(f"[QueryCache]   • Bypass cache: {cache_analysis.dissatisfaction.should_bypass_cache}")
-                                logger.info(f"[QueryCache]   • Self-contained: {cache_analysis.question_analysis.is_self_contained}")
-                                logger.info(f"[QueryCache]   • Can enhance: {cache_analysis.question_analysis.can_be_enhanced}")
-                                logger.info(f"[QueryCache]   • Is cacheable: {cache_analysis.cache_decision.is_cacheable}")
-                                logger.info(f"[QueryCache]   • Cache key: {(cache_analysis.cache_decision.cache_key_question or 'None')[:80]}...")
-                                logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
-                                logger.info("-" * 80)
-
-                                # Determine cache workspace ID from current workspace selection
-                                # Use first workspace ID or "default" if none selected
-                                cache_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
-                                logger.info(f"[QueryCache] Using workspace ID for cache: {cache_workspace_id}")
-
-                                # Step 2: Check for dissatisfaction (bypass cache if user is unhappy)
-                                if cache_analysis.dissatisfaction.should_bypass_cache:
-                                    logger.info("[QueryCache] STEP 2: BYPASS CACHE (user dissatisfaction detected)")
-                                    logger.info(f"[QueryCache]   • Dissatisfaction type: {cache_analysis.dissatisfaction.type.value}")
-                                    logger.info(f"[QueryCache]   • Should invalidate previous: {cache_analysis.dissatisfaction.should_invalidate_previous_cache}")
-                                    # Optionally invalidate previous cache entry
-                                    if cache_analysis.dissatisfaction.should_invalidate_previous_cache and history:
-                                        # Find the previous question to invalidate
-                                        for msg in reversed(history):
-                                            if msg.get("role") == "user":
-                                                prev_question = msg.get("content", "")
-                                                if prev_question:
-                                                    cache_service.invalidate_question(prev_question, cache_workspace_id)
-                                                    logger.info(f"[QueryCache]   • Invalidated previous cache entry: {prev_question[:50]}...")
-                                                break
-                                    logger.info("[QueryCache] → Proceeding to fresh query (cache bypassed)")
-                                elif cache_analysis.cache_decision.is_cacheable:
-                                    # Step 3: Try cache lookup
-                                    logger.info("[QueryCache] STEP 2: CACHE LOOKUP (question is cacheable)")
-                                    cache_key_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
-                                    accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
-
-                                    logger.info(f"[QueryCache]   • Cache key question: {cache_key_question[:80]}...")
-                                    logger.info(f"[QueryCache]   • User accessible docs: {len(accessible_doc_ids_str)}")
-
-                                    cache_result = cache_service.lookup(
-                                        question=cache_key_question,
-                                        workspace_id=cache_workspace_id,
-                                        user_accessible_doc_ids=accessible_doc_ids_str
-                                    )
-
+                                if cache_result.cache_hit:
+                                    # CACHE HIT! Stream the cached answer
+                                    cache_hit = True
                                     logger.info("-" * 80)
-                                    logger.info("[QueryCache] CACHE LOOKUP RESULT:")
-                                    logger.info(f"[QueryCache]   • Cache hit: {cache_result.cache_hit}")
-                                    logger.info(f"[QueryCache]   • Similarity score: {cache_result.similarity_score:.3f}")
-                                    logger.info(f"[QueryCache]   • Candidates checked: {cache_result.candidates_checked}")
-                                    logger.info(f"[QueryCache]   • Search time: {cache_result.search_time_ms:.2f}ms")
-                                    logger.info(f"[QueryCache]   • Permission granted: {cache_result.permission_granted}")
+                                    logger.info("[QueryCache] ★★★ CACHE HIT! ★★★")
+                                    logger.info(f"[QueryCache]   • Entry ID: {cache_result.entry.id}")
+                                    logger.info(f"[QueryCache]   • Cached question: {cache_result.entry.question[:80]}...")
+                                    logger.info(f"[QueryCache]   • Answer length: {len(cache_result.entry.answer)} chars")
+                                    logger.info(f"[QueryCache]   • Source docs: {cache_result.entry.source_document_ids[:3]}...")
+                                    logger.info(f"[QueryCache]   • Confidence: {cache_result.entry.confidence_score:.2f}")
+                                    logger.info(f"[QueryCache]   • Hit count: {cache_result.entry.hit_count}")
+                                    logger.info("[QueryCache] → Streaming cached response to user...")
 
-                                    if cache_result.cache_hit:
-                                        # CACHE HIT! Stream the cached answer
-                                        cache_hit = True
-                                        logger.info("-" * 80)
-                                        logger.info("[QueryCache] ★★★ CACHE HIT! ★★★")
-                                        logger.info(f"[QueryCache]   • Entry ID: {cache_result.entry.id}")
-                                        logger.info(f"[QueryCache]   • Cached question: {cache_result.entry.question[:80]}...")
-                                        logger.info(f"[QueryCache]   • Answer length: {len(cache_result.entry.answer)} chars")
-                                        logger.info(f"[QueryCache]   • Source docs: {cache_result.entry.source_document_ids[:3]}...")
-                                        logger.info(f"[QueryCache]   • Confidence: {cache_result.entry.confidence_score:.2f}")
-                                        logger.info(f"[QueryCache]   • Hit count: {cache_result.entry.hit_count}")
-                                        logger.info("[QueryCache] → Streaming cached response to user...")
+                                    # Stream the cached response with realistic LLM-like typing effect
+                                    await progress_callback("Found a matching answer...")
+                                    cached_answer = cache_result.entry.answer
 
-                                        # Stream the cached response with realistic LLM-like typing effect
-                                        await progress_callback("Found a matching answer...")
-                                        cached_answer = cache_result.entry.answer
+                                    # Stream cached response in small chunks to simulate LLM streaming
+                                    # Use variable chunk sizes (2-8 chars) for more natural effect
+                                    pos = 0
+                                    answer_len = len(cached_answer)
 
-                                        # Stream cached response in small chunks to simulate LLM streaming
-                                        # Use variable chunk sizes (2-8 chars) for more natural effect
-                                        pos = 0
-                                        answer_len = len(cached_answer)
+                                    while pos < answer_len:
+                                        # Variable chunk size: 2-8 characters, but respect word boundaries when possible
+                                        base_chunk_size = random.randint(2, 8)
+                                        end_pos = min(pos + base_chunk_size, answer_len)
 
-                                        while pos < answer_len:
-                                            # Variable chunk size: 2-8 characters, but respect word boundaries when possible
-                                            base_chunk_size = random.randint(2, 8)
-                                            end_pos = min(pos + base_chunk_size, answer_len)
+                                        # Try to extend to word boundary if close
+                                        if end_pos < answer_len and cached_answer[end_pos] != ' ':
+                                            # Look for next space within 5 chars
+                                            for lookahead in range(1, 6):
+                                                if end_pos + lookahead < answer_len and cached_answer[end_pos + lookahead] == ' ':
+                                                    end_pos = end_pos + lookahead + 1
+                                                    break
 
-                                            # Try to extend to word boundary if close
-                                            if end_pos < answer_len and cached_answer[end_pos] != ' ':
-                                                # Look for next space within 5 chars
-                                                for lookahead in range(1, 6):
-                                                    if end_pos + lookahead < answer_len and cached_answer[end_pos + lookahead] == ' ':
-                                                        end_pos = end_pos + lookahead + 1
-                                                        break
+                                        chunk = cached_answer[pos:end_pos]
+                                        if chunk:
+                                            chunk_count += 1
+                                            full_response += chunk
+                                            await websocket.send_json({
+                                                "type": "token",
+                                                "content": chunk,
+                                            })
+                                            # Variable delay: 5-20ms for natural typing feel
+                                            await asyncio.sleep(random.uniform(0.005, 0.020))
 
-                                            chunk = cached_answer[pos:end_pos]
-                                            if chunk:
-                                                chunk_count += 1
-                                                full_response += chunk
-                                                await websocket.send_json({
-                                                    "type": "token",
-                                                    "content": chunk,
-                                                })
-                                                # Variable delay: 5-20ms for natural typing feel
-                                                await asyncio.sleep(random.uniform(0.005, 0.020))
+                                        pos = end_pos
 
-                                            pos = end_pos
+                                    # Add subtle cache indicator at the end
+                                    cache_indicator = "\n\n---\n_⚡ Retrieved from cache_"
+                                    full_response += cache_indicator
+                                    await websocket.send_json({
+                                        "type": "token",
+                                        "content": cache_indicator,
+                                    })
 
-                                        # Add subtle cache indicator at the end
-                                        cache_indicator = "\n\n---\n_⚡ Retrieved from cache_"
-                                        full_response += cache_indicator
-                                        await websocket.send_json({
-                                            "type": "token",
-                                            "content": cache_indicator,
-                                        })
-
-                                        logger.info(f"[QueryCache] Streamed cached response: {len(full_response)} chars, {chunk_count} chunks")
-                                    else:
-                                        logger.info("[QueryCache] CACHE MISS - no matching entry found")
-                                        logger.info("[QueryCache] → Proceeding to fresh query...")
+                                    logger.info(f"[QueryCache] Streamed cached response: {len(full_response)} chars, {chunk_count} chunks")
                                 else:
-                                    logger.info("[QueryCache] STEP 2: SKIP CACHE (question not cacheable)")
-                                    logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
-                                    logger.info("[QueryCache] → Proceeding to fresh query (no caching)...")
+                                    logger.info("[QueryCache] CACHE MISS - no matching entry found")
+                                    logger.info("[QueryCache] → Proceeding to fresh query...")
+                            else:
+                                logger.info("[QueryCache] STEP 2: SKIP CACHE (question not cacheable)")
+                                logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
+                                logger.info("[QueryCache] → Proceeding to fresh query (no caching)...")
 
-                                logger.info("=" * 80)
-                                logger.info(f"[QueryCache] ========== QUERY CACHE PROCESS END (hit={cache_hit}) ==========")
-                                logger.info("=" * 80)
+                            logger.info("=" * 80)
+                            logger.info(f"[QueryCache] ========== QUERY CACHE PROCESS END (hit={cache_hit}) ==========")
+                            logger.info("=" * 80)
 
-                            except Exception as cache_error:
-                                logger.error(f"[QueryCache] ========== CACHE ERROR ==========")
-                                logger.error(f"[QueryCache] Error during cache operations: {cache_error}", exc_info=True)
-                                logger.error(f"[QueryCache] → Continuing without cache...")
-                                # Continue without cache on error
-                            finally:
-                                timing_metrics.record("cache_lookup", (time.time() - cache_start) * 1000)
+                        except Exception as cache_error:
+                            logger.error(f"[QueryCache] ========== CACHE ERROR ==========")
+                            logger.error(f"[QueryCache] Error during cache operations: {cache_error}", exc_info=True)
+                            logger.error(f"[QueryCache] → Continuing without cache...")
+                            # Continue without cache on error
+                        finally:
+                            timing_metrics.record("cache_lookup", (time.time() - cache_start) * 1000)
 
-                        # Skip full pipeline if cache hit
-                        if cache_hit:
-                            timing_metrics.record("cache_hit_response", 0)  # Mark cache hit
-                            # Save cached response to conversation
-                            conv_manager.add_message(
-                                session_id=session_id,
-                                role="assistant",
-                                content=full_response,
-                                metadata={"source": "cache", "cache_entry_id": cache_result.entry.id if cache_result else None}
-                            )
-                            # Log timing summary for cache hit
-                            timing_metrics.log_summary()
-                            clear_current_metrics()
-                            # Send end message and continue to next message
-                            await websocket.send_json({"type": "end"})
-                            continue
+                    # Skip full pipeline if cache hit
+                    if cache_hit:
+                        timing_metrics.record("cache_hit_response", 0)  # Mark cache hit
+                        # Save cached response to conversation (short-lived session)
+                        try:
+                            with get_db_session() as db:
+                                conv_manager = ConversationManager(db)
+                                conv_manager.add_message(
+                                    session_id=session_id,
+                                    role="assistant",
+                                    content=full_response,
+                                    metadata={"source": "cache", "cache_entry_id": cache_result.entry.id if cache_result else None}
+                                )
+                        except Exception as e:
+                            logger.error(f"Error saving cache hit response: {e}")
+                        # Log timing summary for cache hit
+                        timing_metrics.log_summary()
+                        clear_current_metrics()
+                        # Send end message and continue to next message
+                        await websocket.send_json({"type": "end"})
+                        continue
 
-                        # ====== INTENT-BASED ROUTING ======
-                        use_analytics_path = False
-                        use_rag_path = True  # Default to RAG
-                        analytics_result = None
-                        classification = None
+                    # ====== INTENT-BASED ROUTING ======
+                    use_analytics_path = False
+                    use_rag_path = True  # Default to RAG
+                    analytics_result = None
+                    classification = None
 
-                        if CHAT_ENABLE_INTENT_ROUTING and ANALYTICS_ENABLED and accessible_doc_ids_list:
-                            try:
-                                # Initialize orchestrator
+                    if CHAT_ENABLE_INTENT_ROUTING and ANALYTICS_ENABLED and accessible_doc_ids_list:
+                        try:
+                            # Initialize orchestrator (short-lived session)
+                            with get_db_session() as db:
                                 orchestrator = ChatOrchestrator(db)
 
                                 # Get intent classification
@@ -871,151 +894,154 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         logger.info(f"[Intent Routing] Analytics returned no data, falling back to RAG for document search")
                                         use_rag_path = True
 
-                            except Exception as e:
-                                logger.error(f"[Intent Routing] Error during intent classification/analytics: {e}", exc_info=True)
-                                # Fall back to RAG on error
-                                use_rag_path = True
-                                use_analytics_path = False
+                        except Exception as e:
+                            logger.error(f"[Intent Routing] Error during intent classification/analytics: {e}", exc_info=True)
+                            # Fall back to RAG on error
+                            use_rag_path = True
+                            use_analytics_path = False
 
-                        # ====== RAG PATH (if needed) ======
-                        if use_rag_path:
-                            rag_start = time.time()
-                            # Prepare context injection for hybrid queries
-                            hybrid_context = None
-                            if use_analytics_path and analytics_result and classification:
-                                try:
+                    # ====== RAG PATH (if needed) ======
+                    if use_rag_path:
+                        rag_start = time.time()
+                        # Prepare context injection for hybrid queries
+                        hybrid_context = None
+                        if use_analytics_path and analytics_result and classification:
+                            try:
+                                with get_db_session() as db:
                                     orchestrator = ChatOrchestrator(db)
                                     hybrid_context = orchestrator._summarize_analytics_for_context(analytics_result)
-                                    logger.info(f"[Intent Routing] Injecting analytics context for hybrid query")
-                                except Exception as e:
-                                    logger.warning(f"[Intent Routing] Failed to prepare hybrid context: {e}")
+                                logger.info(f"[Intent Routing] Injecting analytics context for hybrid query")
+                            except Exception as e:
+                                logger.warning(f"[Intent Routing] Failed to prepare hybrid context: {e}")
 
-                            try:
-                                # Get preprocessing topics to pass to agent (Option 5: avoid redundant extraction)
-                                preprocessing_topics = context_info.get('topics', []) if context_info else []
+                        try:
+                            # Get preprocessing topics to pass to agent (Option 5: avoid redundant extraction)
+                            preprocessing_topics = context_info.get('topics', []) if context_info else []
 
-                                async for chunk in stream_agent_response(
-                                    enhanced_message,
-                                    history,
-                                    progress_callback=progress_callback,
-                                    session_context=session_context,
-                                    is_retry=is_retry,
-                                    accessible_doc_ids=accessible_doc_ids,
-                                    analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
-                                    document_context_changed=document_context_changed,  # Force new search if selection changed
-                                    preprocessing_topics=preprocessing_topics,  # Pass topics from unified preprocessing
-                                    iterative_reasoning_enabled=iterative_reasoning_enabled  # Pass UI checkbox toggle for iterative vs simple flow
-                                ):
-                                    chunk_count += 1
-                                    full_response += chunk
-                                    if chunk_count == 1:
-                                        logger.info(f"[Streaming] Received first chunk (length: {len(chunk)})")
+                            async for chunk in stream_agent_response(
+                                enhanced_message,
+                                history,
+                                progress_callback=progress_callback,
+                                session_context=session_context,
+                                is_retry=is_retry,
+                                accessible_doc_ids=accessible_doc_ids,
+                                analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
+                                document_context_changed=document_context_changed,  # Force new search if selection changed
+                                preprocessing_topics=preprocessing_topics,  # Pass topics from unified preprocessing
+                                iterative_reasoning_enabled=iterative_reasoning_enabled  # Pass UI checkbox toggle for iterative vs simple flow
+                            ):
+                                chunk_count += 1
+                                full_response += chunk
+                                if chunk_count == 1:
+                                    logger.info(f"[Streaming] Received first chunk (length: {len(chunk)})")
+                                await websocket.send_json({
+                                    "type": "token",
+                                    "content": chunk,
+                                })
+
+                            logger.info(f"[Streaming] Received {chunk_count} chunks, total response length: {len(full_response)} chars")
+
+                            # Check if we got any response
+                            if chunk_count == 0 or not full_response.strip():
+                                logger.warning("[Streaming] No chunks received from agent - sending friendly message")
+                                # Send a user-friendly message as a normal response (not error)
+                                friendly_message = "I couldn't find relevant information to answer your question. This could be because:\n\n• The documents in the selected workspace don't contain information related to your query\n• The question might need to be rephrased for better results\n• The data you're looking for hasn't been uploaded yet\n\nPlease try rephrasing your question or check if the relevant documents are available in your workspace."
+                                full_response = friendly_message
+                                # Stream the friendly message to the client
+                                for chunk in [friendly_message[i:i+50] for i in range(0, len(friendly_message), 50)]:
                                     await websocket.send_json({
                                         "type": "token",
                                         "content": chunk,
                                     })
+                                # Don't set streaming_error - this is a valid response
 
-                                logger.info(f"[Streaming] Received {chunk_count} chunks, total response length: {len(full_response)} chars")
-
-                                # Check if we got any response
-                                if chunk_count == 0 or not full_response.strip():
-                                    logger.warning("[Streaming] No chunks received from agent - sending friendly message")
-                                    # Send a user-friendly message as a normal response (not error)
-                                    friendly_message = "I couldn't find relevant information to answer your question. This could be because:\n\n• The documents in the selected workspace don't contain information related to your query\n• The question might need to be rephrased for better results\n• The data you're looking for hasn't been uploaded yet\n\nPlease try rephrasing your question or check if the relevant documents are available in your workspace."
-                                    full_response = friendly_message
-                                    # Stream the friendly message to the client
-                                    for chunk in [friendly_message[i:i+50] for i in range(0, len(friendly_message), 50)]:
+                        except WebSocketDisconnect as stream_error:
+                            # Client disconnected - expected behavior (user navigated away, network issue, etc.)
+                            streaming_error = stream_error
+                            logger.info(f"[Streaming] Client disconnected after {chunk_count} chunks - this is normal if user navigated away")
+                            # Don't raise - just stop streaming gracefully
+                        except Exception as stream_error:
+                            streaming_error = stream_error
+                            error_msg = str(stream_error) if str(stream_error) else f"{type(stream_error).__name__}"
+                            logger.error(f"Error during streaming: {error_msg}", exc_info=True)
+                            # Send a user-friendly error message as a normal response
+                            friendly_error = f"I encountered an issue while processing your request. Please try again, or rephrase your question.\n\nIf the problem persists, the system might be temporarily unavailable."
+                            if not full_response:  # Only set if no partial response was sent
+                                full_response = friendly_error
+                                try:
+                                    for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
                                         await websocket.send_json({
                                             "type": "token",
                                             "content": chunk,
                                         })
-                                    # Don't set streaming_error - this is a valid response
+                                except Exception:
+                                    pass  # WebSocket might be closed
 
-                            except WebSocketDisconnect as stream_error:
-                                # Client disconnected - expected behavior (user navigated away, network issue, etc.)
-                                streaming_error = stream_error
-                                logger.info(f"[Streaming] Client disconnected after {chunk_count} chunks - this is normal if user navigated away")
-                                # Don't raise - just stop streaming gracefully
-                            except Exception as stream_error:
-                                streaming_error = stream_error
-                                error_msg = str(stream_error) if str(stream_error) else f"{type(stream_error).__name__}"
-                                logger.error(f"Error during streaming: {error_msg}", exc_info=True)
-                                # Send a user-friendly error message as a normal response
-                                friendly_error = f"I encountered an issue while processing your request. Please try again, or rephrase your question.\n\nIf the problem persists, the system might be temporarily unavailable."
-                                if not full_response:  # Only set if no partial response was sent
-                                    full_response = friendly_error
-                                    try:
-                                        for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
-                                            await websocket.send_json({
-                                                "type": "token",
-                                                "content": chunk,
-                                            })
-                                    except Exception:
-                                        pass  # WebSocket might be closed
+                    # Record RAG pipeline time if RAG path was used
+                    if use_rag_path:
+                        timing_metrics.record("rag_pipeline_total", (time.time() - rag_start) * 1000)
 
-                        # Record RAG pipeline time if RAG path was used
-                        if use_rag_path:
-                            timing_metrics.record("rag_pipeline_total", (time.time() - rag_start) * 1000)
-
-                        # Save assistant response to database ONLY if no error occurred
-                        # Don't save error messages to chat history - let user retry
-                        if full_response and not streaming_error:
-                            try:
+                    # Save assistant response to database ONLY if no error occurred
+                    # Don't save error messages to chat history - let user retry
+                    if full_response and not streaming_error:
+                        try:
+                            with get_db_session() as db:
+                                conv_manager = ConversationManager(db)
                                 conv_manager.add_message(
                                     session_id=UUID(session_id),
                                     role="assistant",
                                     content=full_response
                                 )
-                                db.commit()
-                            except Exception as e:
-                                logger.error(f"Error saving assistant message: {e}")
-                                db.rollback()
+                        except Exception as e:
+                            logger.error(f"Error saving assistant message: {e}")
 
-                            # ====== BACKGROUND CACHE STORAGE ======
-                            # Store the response in cache for future similar questions
-                            # This is non-blocking (fire-and-forget)
-                            if (QUERY_CACHE_ENABLED and
-                                cache_analysis and
-                                cache_analysis.cache_decision.is_cacheable and
-                                not cache_hit and  # Don't re-cache cached responses
-                                accessible_doc_ids_list):
-                                try:
-                                    cache_service = get_query_cache_service()
-                                    cache_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
-                                    source_doc_ids = [str(doc_id) for doc_id in accessible_doc_ids_list]
+                        # ====== BACKGROUND CACHE STORAGE ======
+                        # Store the response in cache for future similar questions
+                        # This is non-blocking (fire-and-forget)
+                        if (QUERY_CACHE_ENABLED and
+                            cache_analysis and
+                            cache_analysis.cache_decision.is_cacheable and
+                            not cache_hit and  # Don't re-cache cached responses
+                            accessible_doc_ids_list):
+                            try:
+                                cache_service = get_query_cache_service()
+                                cache_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                source_doc_ids = [str(doc_id) for doc_id in accessible_doc_ids_list]
 
-                                    # Determine intent for TTL
-                                    cache_intent = "general"
-                                    if classification:
-                                        cache_intent = classification.intent.value
+                                # Determine intent for TTL
+                                cache_intent = "general"
+                                if classification:
+                                    cache_intent = classification.intent.value
 
-                                    # Determine cache workspace ID
-                                    store_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+                                # Determine cache workspace ID
+                                store_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
 
-                                    # Store in background (non-blocking)
-                                    cache_service.store_async(
-                                        question=cache_question,
-                                        answer=full_response,
-                                        workspace_id=store_workspace_id,
-                                        source_document_ids=source_doc_ids,
-                                        intent=cache_intent,
-                                        metadata={
-                                            "original_question": enhanced_message,
-                                            "session_id": session_id,
-                                            "analysis_method": cache_analysis.analysis_method
-                                        }
-                                    )
-                                    logger.info(f"[QueryCache] Background cache storage initiated for: {cache_question[:50]}...")
-                                except Exception as cache_store_error:
-                                    logger.warning(f"[QueryCache] Failed to store response in cache: {cache_store_error}")
-                                    # Non-critical, continue without caching
+                                # Store in background (non-blocking)
+                                cache_service.store_async(
+                                    question=cache_question,
+                                    answer=full_response,
+                                    workspace_id=store_workspace_id,
+                                    source_document_ids=source_doc_ids,
+                                    intent=cache_intent,
+                                    metadata={
+                                        "original_question": enhanced_message,
+                                        "session_id": session_id,
+                                        "analysis_method": cache_analysis.analysis_method
+                                    }
+                                )
+                                logger.info(f"[QueryCache] Background cache storage initiated for: {cache_question[:50]}...")
+                            except Exception as cache_store_error:
+                                logger.warning(f"[QueryCache] Failed to store response in cache: {cache_store_error}")
+                                # Non-critical, continue without caching
 
-                        elif streaming_error:
-                            logger.info(f"[WebSocket] Not saving assistant message due to streaming error - user can retry")
+                    elif streaming_error:
+                        logger.info(f"[WebSocket] Not saving assistant message due to streaming error - user can retry")
 
-                        # Update session metadata with context information
-                        # ALWAYS save document context (workspace/document selection) for change detection
-                        try:
+                    # Update session metadata with context information (short-lived session)
+                    # ALWAYS save document context (workspace/document selection) for change detection
+                    try:
+                        with get_db_session() as db:
+                            conv_manager = ConversationManager(db)
                             session = conv_manager.get_session(UUID(session_id))
                             if session:
                                 current_metadata = session.session_metadata or {}
@@ -1056,80 +1082,78 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                                 # Update metadata in database
                                 conv_manager.update_session_metadata(UUID(session_id), current_metadata)
-                                db.commit()
 
                                 if document_context_changed:
                                     logger.info(f"[Document Context] Selection changed - saved to session: workspaces={len(curr_workspace_ids)}, docs={len(curr_document_ids)}")
                                 logger.debug(f"Updated session metadata: {current_metadata}")
 
-                        except Exception as e:
-                            logger.error(f"Error updating session metadata: {e}")
-                            db.rollback()
-
-                        # Signal end of response (or error if streaming failed)
-                        logger.info(f"[WebSocket] Preparing to send end message (streaming_error={streaming_error is not None})")
-                        logger.info(f"[WebSocket] WebSocket state: client_state={websocket.client_state}, application_state={websocket.application_state}")
-
-                        try:
-                            # Check if WebSocket is still open
-                            from starlette.websockets import WebSocketState
-                            if websocket.client_state != WebSocketState.CONNECTED:
-                                logger.error(f"[WebSocket] Cannot send end message - WebSocket not connected (state={websocket.client_state})")
-                            else:
-                                if streaming_error:
-                                    error_msg = str(streaming_error) if str(streaming_error) else f"{type(streaming_error).__name__}"
-                                    logger.info(f"[WebSocket] Sending error message: {error_msg}")
-                                    await websocket.send_json({
-                                        "type": "error",
-                                        "message": f"Streaming error: {error_msg}",
-                                    })
-                                else:
-                                    logger.info(f"[WebSocket] Sending end message")
-                                    await websocket.send_json({"type": "end"})
-                                logger.info(f"[WebSocket] End/error message sent successfully")
-                        except Exception as ws_error:
-                            logger.error(f"[WebSocket] Error sending end/error message: {ws_error}", exc_info=True)
-
-                        # Log final timing summary
-                        timing_metrics.log_summary()
-                        clear_current_metrics()
-
                     except Exception as e:
-                        error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
-                        logger.error(f"Error in message processing: {error_msg}", exc_info=True)
-                        # Send a user-friendly response instead of raw error
-                        try:
-                            friendly_error = "I'm sorry, but I encountered an unexpected issue while processing your question. Please try again.\n\nIf you continue to experience problems, try:\n• Refreshing the page\n• Rephrasing your question\n• Selecting a different workspace"
-                            for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
-                                await websocket.send_json({
-                                    "type": "token",
-                                    "content": chunk,
-                                })
-                            await websocket.send_json({"type": "end"})
-                        except Exception as ws_error:
-                            logger.error(f"WebSocket error: {ws_error}")
+                        logger.error(f"Error updating session metadata: {e}")
 
-                except json.JSONDecodeError:
-                    # Send a user-friendly response for invalid input
+                    # Signal end of response (or error if streaming failed)
+                    logger.info(f"[WebSocket] Preparing to send end message (streaming_error={streaming_error is not None})")
+                    logger.info(f"[WebSocket] WebSocket state: client_state={websocket.client_state}, application_state={websocket.application_state}")
+
                     try:
-                        friendly_error = "I couldn't understand your message format. Please try sending your question again."
+                        # Check if WebSocket is still open
+                        from starlette.websockets import WebSocketState
+                        if websocket.client_state != WebSocketState.CONNECTED:
+                            logger.error(f"[WebSocket] Cannot send end message - WebSocket not connected (state={websocket.client_state})")
+                        else:
+                            if streaming_error:
+                                error_msg = str(streaming_error) if str(streaming_error) else f"{type(streaming_error).__name__}"
+                                logger.info(f"[WebSocket] Sending error message: {error_msg}")
+                                await websocket.send_json({
+                                    "type": "error",
+                                    "message": f"Streaming error: {error_msg}",
+                                })
+                            else:
+                                logger.info(f"[WebSocket] Sending end message")
+                                await websocket.send_json({"type": "end"})
+                            logger.info(f"[WebSocket] End/error message sent successfully")
+                    except Exception as ws_error:
+                        logger.error(f"[WebSocket] Error sending end/error message: {ws_error}", exc_info=True)
+
+                    # Log final timing summary
+                    timing_metrics.log_summary()
+                    clear_current_metrics()
+
+                except Exception as e:
+                    error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
+                    logger.error(f"Error in message processing: {error_msg}", exc_info=True)
+                    # Send a user-friendly response instead of raw error
+                    try:
+                        friendly_error = "I'm sorry, but I encountered an unexpected issue while processing your question. Please try again.\n\nIf you continue to experience problems, try:\n• Refreshing the page\n• Rephrasing your question\n• Selecting a different workspace"
                         for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
                             await websocket.send_json({
                                 "type": "token",
                                 "content": chunk,
                             })
                         await websocket.send_json({"type": "end"})
-                    except Exception:
-                        pass
+                    except Exception as ws_error:
+                        logger.error(f"WebSocket error: {ws_error}")
 
-        except WebSocketDisconnect:
-            logger.info(f"WebSocket disconnected for session: {session_id}")
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}")
-            try:
-                await websocket.close()
-            except Exception:
-                pass
+            except json.JSONDecodeError:
+                # Send a user-friendly response for invalid input
+                try:
+                    friendly_error = "I couldn't understand your message format. Please try sending your question again."
+                    for chunk in [friendly_error[i:i+50] for i in range(0, len(friendly_error), 50)]:
+                        await websocket.send_json({
+                            "type": "token",
+                            "content": chunk,
+                        })
+                    await websocket.send_json({"type": "end"})
+                except Exception:
+                    pass
+
+    except WebSocketDisconnect:
+        logger.info(f"WebSocket disconnected for session: {session_id}")
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        try:
+            await websocket.close()
+        except Exception:
+            pass
 
 
 @router.post("/reindex")

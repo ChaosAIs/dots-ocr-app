@@ -7,20 +7,18 @@ tracking each step in the retrieval and generation pipeline.
 
 import time
 import logging
+import contextvars
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from contextlib import contextmanager
-import threading
 
 logger = logging.getLogger(__name__)
 
-# Global timing metrics storage (shared across threads for async/tool execution)
-# Uses a dictionary keyed by a context ID to support multiple concurrent requests
-_global_metrics: Dict[str, "TimingMetrics"] = {}
-_global_metrics_lock = threading.Lock()
-
-# Current active metrics ID (set per-request)
-_current_metrics_id: Optional[str] = None
+# Context variable for request-scoped timing metrics (thread-safe)
+# This replaces the global dict + lock approach for better concurrency
+_current_metrics_var: contextvars.ContextVar[Optional["TimingMetrics"]] = contextvars.ContextVar(
+    'current_metrics', default=None
+)
 
 
 @dataclass
@@ -275,35 +273,23 @@ def get_current_metrics() -> Optional[TimingMetrics]:
     """
     Get the current timing metrics context.
 
-    Uses global storage to work across threads (for LangGraph tool execution).
+    Uses context variable for thread-safe access in concurrent requests.
     """
-    global _current_metrics_id, _global_metrics
-    if _current_metrics_id is None:
-        return None
-    with _global_metrics_lock:
-        return _global_metrics.get(_current_metrics_id)
+    return _current_metrics_var.get()
 
 
 def set_current_metrics(metrics: TimingMetrics):
     """
     Set the current timing metrics context.
 
-    Stores in global dictionary to allow cross-thread access.
+    Uses context variable for thread-safe storage.
     """
-    global _current_metrics_id, _global_metrics
-    _current_metrics_id = metrics.query_id
-    with _global_metrics_lock:
-        _global_metrics[metrics.query_id] = metrics
+    _current_metrics_var.set(metrics)
 
 
 def clear_current_metrics():
     """Clear the current timing metrics context."""
-    global _current_metrics_id, _global_metrics
-    if _current_metrics_id is not None:
-        with _global_metrics_lock:
-            if _current_metrics_id in _global_metrics:
-                del _global_metrics[_current_metrics_id]
-        _current_metrics_id = None
+    _current_metrics_var.set(None)
 
 
 @contextmanager

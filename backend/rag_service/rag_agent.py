@@ -8,6 +8,7 @@ import logging
 import json
 import time
 import asyncio
+import contextvars
 from typing import Annotated, TypedDict, List, Dict, Any, Optional
 
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, BaseMessage
@@ -63,22 +64,64 @@ logger.info(f"[RAG Agent INIT] Final status: GRAPHRAG_AVAILABLE={GRAPHRAG_AVAILA
 # Maximum input token limit for chat history (from .env)
 MAX_INPUT_TOKEN_LIMIT = int(os.getenv("MAX_INPUT_TOKEN_LIMIT", "4096"))
 
-# Global progress callback for tool functions
-_progress_callback = None
+# Context variables for request-scoped state (thread-safe)
+# These replace global variables to avoid race conditions in concurrent requests
+_progress_callback_var: contextvars.ContextVar = contextvars.ContextVar('progress_callback', default=None)
+_accessible_doc_ids_var: contextvars.ContextVar = contextvars.ContextVar('accessible_doc_ids', default=None)
+_analytics_context_var: contextvars.ContextVar = contextvars.ContextVar('analytics_context', default=None)
+_preprocessing_topics_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_topics', default=None)
+_iterative_reasoning_enabled_var: contextvars.ContextVar = contextvars.ContextVar('iterative_reasoning_enabled', default=None)
 
-# Global accessible document IDs for access control in tool functions
-_accessible_doc_ids = None
 
-# Global analytics context for hybrid queries (pre-computed SQL aggregation results)
-_analytics_context = None
+# Accessor functions for context variables
+def get_progress_callback():
+    """Get the progress callback for the current request context."""
+    return _progress_callback_var.get()
 
-# Global preprocessing topics (reused from unified preprocessing to avoid redundant LLM calls)
-_preprocessing_topics = None
 
-# Global iterative reasoning enabled flag (from UI toggle, overrides .env setting if set)
-# When True: use iterative reasoning workflow (with GRAPH_RAG_QUERY_ENABLED controlling graph queries inside)
-# When False: use simple vector search flow
-_iterative_reasoning_enabled = None
+def set_progress_callback(callback):
+    """Set the progress callback for the current request context."""
+    _progress_callback_var.set(callback)
+
+
+def get_accessible_doc_ids():
+    """Get accessible document IDs for the current request context."""
+    return _accessible_doc_ids_var.get()
+
+
+def set_accessible_doc_ids(doc_ids):
+    """Set accessible document IDs for the current request context."""
+    _accessible_doc_ids_var.set(doc_ids)
+
+
+def get_analytics_context():
+    """Get analytics context for the current request context."""
+    return _analytics_context_var.get()
+
+
+def set_analytics_context(context):
+    """Set analytics context for the current request context."""
+    _analytics_context_var.set(context)
+
+
+def get_preprocessing_topics():
+    """Get preprocessing topics for the current request context."""
+    return _preprocessing_topics_var.get()
+
+
+def set_preprocessing_topics(topics):
+    """Set preprocessing topics for the current request context."""
+    _preprocessing_topics_var.set(topics)
+
+
+def get_iterative_reasoning_enabled():
+    """Get iterative reasoning enabled flag for the current request context."""
+    return _iterative_reasoning_enabled_var.get()
+
+
+def set_iterative_reasoning_enabled(enabled):
+    """Set iterative reasoning enabled flag for the current request context."""
+    _iterative_reasoning_enabled_var.set(enabled)
 
 
 def _estimate_token_count(text: str) -> int:
@@ -167,17 +210,18 @@ def _send_progress(message: str, percent: int = None):
         message: Progress message to send
         percent: Optional progress percentage (0-100)
     """
-    if not _progress_callback:
+    progress_callback = get_progress_callback()
+    if not progress_callback:
         return
 
     import asyncio
     import inspect
 
     # Check if callback is async
-    if not inspect.iscoroutinefunction(_progress_callback):
+    if not inspect.iscoroutinefunction(progress_callback):
         # Synchronous callback - call directly
         try:
-            _progress_callback(message, percent)
+            progress_callback(message, percent)
         except Exception as e:
             logger.debug(f"Error in sync progress callback: {e}")
         return
@@ -187,7 +231,7 @@ def _send_progress(message: str, percent: int = None):
         # Try to get the running event loop
         loop = asyncio.get_running_loop()
         # Schedule the coroutine as a task in the running loop
-        asyncio.ensure_future(_progress_callback(message, percent), loop=loop)
+        asyncio.ensure_future(progress_callback(message, percent), loop=loop)
     except RuntimeError:
         # No running event loop - we're in a sync context
         # This can happen if the tool is called from a sync wrapper
@@ -1101,9 +1145,8 @@ def search_documents(query: str) -> str:
     timing_metrics = get_current_metrics()
 
     try:
-        # Get accessible document IDs from global context (set by stream_agent_response)
-        global _accessible_doc_ids
-        accessible_doc_ids = _accessible_doc_ids
+        # Get accessible document IDs from context (set by stream_agent_response)
+        accessible_doc_ids = get_accessible_doc_ids()
 
         # Log access control status
         # SECURITY: If accessible_doc_ids is empty set, user has NO document access - return early
@@ -1125,8 +1168,7 @@ def search_documents(query: str) -> str:
         _send_progress("Analyzing your question...")
 
         # Get preprocessing topics if available (Option 5: reuse from unified preprocessing)
-        global _preprocessing_topics
-        preprocessing_topics = _preprocessing_topics or []
+        preprocessing_topics = get_preprocessing_topics() or []
 
         # Option 4: Parallelize query complexity + query enhancement using ThreadPoolExecutor
         # Option 8: Use heuristics for simple queries to skip/reduce LLM calls
@@ -1244,8 +1286,9 @@ def search_documents(query: str) -> str:
         # - If UI toggle is set (not None), use that value
         # - Otherwise, fall back to ITERATIVE_REASONING_ENABLED .env setting
         env_iterative_enabled = os.getenv("ITERATIVE_REASONING_ENABLED", "true").lower() == "true"
-        effective_iterative_enabled = _iterative_reasoning_enabled if _iterative_reasoning_enabled is not None else env_iterative_enabled
-        logger.info(f"[Search] Iterative reasoning: {effective_iterative_enabled} (UI: {_iterative_reasoning_enabled}, .env: {env_iterative_enabled})")
+        ui_iterative_enabled = get_iterative_reasoning_enabled()
+        effective_iterative_enabled = ui_iterative_enabled if ui_iterative_enabled is not None else env_iterative_enabled
+        logger.info(f"[Search] Iterative reasoning: {effective_iterative_enabled} (UI: {ui_iterative_enabled}, .env: {env_iterative_enabled})")
 
         retrieval_start = time.time()
         if effective_iterative_enabled:
@@ -1317,9 +1360,8 @@ def _search_with_iterative_reasoning(
     logger.info(f"[Search]   - routed_document_ids count={len(routed_document_ids) if routed_document_ids else 'None'}")
     logger.info(f"[Search] Using Iterative Reasoning Engine (graphrag={graphrag_enabled}, max_steps={max_steps})")
 
-    # Get preprocessing topics from global context (Option 5: reuse from unified preprocessing)
-    global _preprocessing_topics
-    preprocessing_topics = _preprocessing_topics or []
+    # Get preprocessing topics from context (Option 5: reuse from unified preprocessing)
+    preprocessing_topics = get_preprocessing_topics() or []
 
     # Create reasoning engine with routed document IDs and preprocessing topics
     engine = IterativeReasoningEngine(
@@ -1739,9 +1781,9 @@ def call_model(state: AgentState) -> AgentState:
                 # Check if we have pre-computed analytics context
                 # For analytics-focused queries, skip document chunk retrieval entirely
                 # as chunks are just partial data that confuses the LLM
-                global _analytics_context
+                analytics_context = get_analytics_context()
 
-                if _analytics_context:
+                if analytics_context:
                     # ANALYTICS-FOCUSED HYBRID MODE:
                     # Skip document chunk search - use analytics data + document summary only
                     # IMPORTANT: Do NOT include conversation history for tabular SQL queries
@@ -1761,7 +1803,7 @@ def call_model(state: AgentState) -> AgentState:
 ║  📊 FRESH SQL QUERY RESULTS - USE THESE EXACT VALUES IN YOUR RESPONSE                               ║
 ╠══════════════════════════════════════════════════════════════════════════════════════════════════════╣
 
-{_analytics_context}
+{analytics_context}
 
 ╠══════════════════════════════════════════════════════════════════════════════════════════════════════╣
 ║  INSTRUCTIONS:                                                                                       ║
@@ -2012,13 +2054,13 @@ async def stream_agent_response(
     Yields:
         Chunks of the response text.
     """
-    # Store progress callback and accessible doc IDs in global variables so tools can access them
-    global _progress_callback, _accessible_doc_ids, _analytics_context, _preprocessing_topics, _iterative_reasoning_enabled
-    _progress_callback = progress_callback
-    _accessible_doc_ids = accessible_doc_ids
-    _analytics_context = analytics_context
-    _preprocessing_topics = preprocessing_topics
-    _iterative_reasoning_enabled = iterative_reasoning_enabled
+    # Store progress callback and accessible doc IDs in context variables so tools can access them
+    # Using contextvars ensures thread-safety for concurrent requests
+    set_progress_callback(progress_callback)
+    set_accessible_doc_ids(accessible_doc_ids)
+    set_analytics_context(analytics_context)
+    set_preprocessing_topics(preprocessing_topics)
+    set_iterative_reasoning_enabled(iterative_reasoning_enabled)
 
     # Get timing metrics for detailed RAG pipeline tracking
     timing_metrics = get_current_metrics()

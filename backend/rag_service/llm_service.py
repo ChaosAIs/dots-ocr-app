@@ -113,13 +113,58 @@ class OllamaLLMService(BaseLLMService):
         )
 
     def is_available(self) -> bool:
-        """Check if Ollama server is available."""
+        """
+        Check if Ollama server is available.
+
+        Uses a cached result with 30-second TTL to avoid blocking repeated checks.
+        """
         import requests
+        import time
+
+        # Check cache first (30 second TTL)
+        cache_ttl = 30
+        now = time.time()
+        if hasattr(self, '_availability_cache'):
+            cached_time, cached_result = self._availability_cache
+            if now - cached_time < cache_ttl:
+                return cached_result
+
         try:
             response = requests.get(f"{self.base_url}/api/tags", timeout=5)
-            return response.status_code == 200
+            result = response.status_code == 200
+            self._availability_cache = (now, result)
+            return result
         except Exception as e:
             logger.warning(f"Ollama not available: {e}")
+            self._availability_cache = (now, False)
+            return False
+
+    async def is_available_async(self) -> bool:
+        """
+        Async version of is_available() for use in async contexts.
+
+        Uses aiohttp for non-blocking HTTP requests.
+        """
+        import aiohttp
+        import time
+
+        # Check cache first (30 second TTL)
+        cache_ttl = 30
+        now = time.time()
+        if hasattr(self, '_availability_cache'):
+            cached_time, cached_result = self._availability_cache
+            if now - cached_time < cache_ttl:
+                return cached_result
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{self.base_url}/api/tags", timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    result = response.status == 200
+                    self._availability_cache = (now, result)
+                    return result
+        except Exception as e:
+            logger.warning(f"Ollama not available (async): {e}")
+            self._availability_cache = (now, False)
             return False
 
 

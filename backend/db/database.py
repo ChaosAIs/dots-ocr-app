@@ -42,9 +42,10 @@ def init_db():
     _engine = create_engine(
         DATABASE_URL,
         poolclass=QueuePool,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=10,  # Increased from 5 to handle concurrent chat sessions
+        max_overflow=20,  # Increased from 10 to handle burst traffic
         pool_pre_ping=True,
+        pool_recycle=3600,  # Recycle connections after 1 hour to prevent stale connections
         echo=False,
     )
     
