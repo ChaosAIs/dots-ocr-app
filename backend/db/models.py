@@ -165,9 +165,10 @@ class Workspace(Base):
     user_id = Column(PGUUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
 
     # Workspace identity
-    name = Column(String(100), nullable=False)  # Display name: "Project Alpha"
-    folder_name = Column(String(50), nullable=False)  # Physical folder name: "project_alpha"
-    folder_path = Column(String(200), nullable=False)  # Full relative path: "john_doe/project_alpha"
+    name = Column(String(100), nullable=False)  # Original name at creation (any language, immutable)
+    display_name = Column(String(100), nullable=True)  # User-editable display name (any language)
+    folder_name = Column(String(100), nullable=False)  # Normalized ASCII folder name with timestamp (immutable)
+    folder_path = Column(String(200), nullable=False)  # Full relative path: "john_doe/folder_name"
 
     # Metadata
     description = Column(Text, nullable=True)
@@ -192,12 +193,18 @@ class Workspace(Base):
     user = relationship("User", backref="workspaces")
     documents = relationship("Document", back_populates="workspace")
 
+    def get_effective_display_name(self) -> str:
+        """Return display_name if set, otherwise fall back to name."""
+        return self.display_name or self.name
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
             "id": str(self.id),
             "user_id": str(self.user_id),
             "name": self.name,
+            "display_name": self.display_name,
+            "effective_name": self.get_effective_display_name(),
             "folder_name": self.folder_name,
             "folder_path": self.folder_path,
             "description": self.description,

@@ -96,15 +96,15 @@ class WorkspaceService {
   }
 
   /**
-   * Rename a workspace (also renames physical folder)
+   * Rename a workspace (updates display_name only, folder unchanged)
    * @param {string} workspaceId - Workspace ID
-   * @param {string} newName - New name
+   * @param {string} newDisplayName - New display name (any language)
    * @returns {Promise} - Updated workspace
    */
-  async renameWorkspace(workspaceId, newName) {
+  async renameWorkspace(workspaceId, newDisplayName) {
     try {
       const response = await http.post(`${this.baseUrl}/${workspaceId}/rename`, {
-        name: newName
+        display_name: newDisplayName
       });
       return response.data;
     } catch (error) {

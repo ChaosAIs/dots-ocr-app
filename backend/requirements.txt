@@ -38,3 +38,6 @@ sqlalchemy[asyncio]
 
 # Graph database dependencies
 neo4j
+
+# Text processing
+unidecode  # For transliterating Unicode text to ASCII (workspace folder names)

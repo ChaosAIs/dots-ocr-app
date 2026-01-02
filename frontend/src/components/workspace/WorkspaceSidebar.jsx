@@ -130,7 +130,7 @@ export const WorkspaceSidebar = ({
 
     try {
       const updated = await ctxUpdateWorkspace(editingWorkspace.id, {
-        name: formData.name.trim(),
+        display_name: formData.name.trim(),
         description: formData.description.trim(),
         color: formData.color,
         icon: formData.icon
@@ -214,7 +214,7 @@ export const WorkspaceSidebar = ({
   const openEditDialog = (workspace) => {
     setEditingWorkspace(workspace);
     setFormData({
-      name: workspace.name,
+      name: workspace.effective_name || workspace.display_name || workspace.name,
       description: workspace.description || "",
       color: workspace.color,
       icon: workspace.icon
@@ -308,7 +308,7 @@ export const WorkspaceSidebar = ({
               overflow: 'hidden',
               textOverflow: 'ellipsis'
             }}>
-              {workspace.name}
+              {workspace.effective_name || workspace.display_name || workspace.name}
             </span>
             {workspace.is_default && !workspace.is_system && (
               <i
@@ -601,7 +601,7 @@ export const WorkspaceSidebar = ({
         <div>
           <div className="flex align-items-start gap-3 mb-4 p-3 bg-yellow-50 border-round border-1 border-yellow-200">
             <i className="pi pi-exclamation-triangle text-xl text-yellow-600" />
-            <span className="text-yellow-900">{t("Workspace.DeleteOptionsMessage", { name: workspaceToDelete?.name })}</span>
+            <span className="text-yellow-900">{t("Workspace.DeleteOptionsMessage", { name: workspaceToDelete?.effective_name || workspaceToDelete?.display_name || workspaceToDelete?.name })}</span>
           </div>
           <div className="flex flex-column gap-3">
             <Button

@@ -158,18 +158,73 @@ class WorkspaceService:
     def update_workspace(
         self,
         workspace_id: UUID,
-        name: Optional[str] = None,
+        display_name: Optional[str] = None,
         description: Optional[str] = None,
         color: Optional[str] = None,
-        icon: Optional[str] = None
+        icon: Optional[str] = None,
+        clear_display_name: bool = False
     ) -> Optional[Workspace]:
-        """Update workspace metadata (does not change folder name)."""
+        """
+        Update workspace metadata.
+
+        Args:
+            workspace_id: Workspace ID
+            display_name: New display name (any language). System workspaces cannot be renamed.
+            description: Optional description
+            color: Hex color code for UI
+            icon: Icon identifier
+            clear_display_name: If True, clear display_name (falls back to original name)
+
+        Returns:
+            Updated workspace or None if not found
+
+        Note:
+            - folder_name and folder_path are immutable after creation
+            - System workspaces cannot have their display_name changed
+        """
         return self.workspace_repo.update_workspace(
             workspace_id=workspace_id,
-            name=name,
+            display_name=display_name,
             description=description,
             color=color,
-            icon=icon
+            icon=icon,
+            clear_display_name=clear_display_name
+        )
+
+    def update_display_name(
+        self,
+        workspace_id: UUID,
+        new_display_name: Optional[str]
+    ) -> Optional[Workspace]:
+        """
+        Update workspace display name.
+
+        This operation only updates the display_name in the database.
+        The physical folder remains unchanged.
+
+        Args:
+            workspace_id: Workspace ID
+            new_display_name: New display name (any language) or None to clear
+
+        Returns:
+            Updated workspace or None if blocked (system workspace) or not found
+
+        Note:
+            - System workspaces cannot be renamed
+            - No file system operations are performed
+        """
+        workspace = self.workspace_repo.get_workspace_by_id(workspace_id)
+
+        if not workspace:
+            return None
+
+        if workspace.is_system:
+            logger.warning(f"Cannot rename system workspace: {workspace_id}")
+            return None
+
+        return self.workspace_repo.update_display_name(
+            workspace_id=workspace_id,
+            new_display_name=new_display_name
         )
 
     def rename_workspace(
@@ -179,79 +234,20 @@ class WorkspaceService:
         user: User
     ) -> Optional[Workspace]:
         """
-        Rename a workspace and its physical folder.
+        DEPRECATED: Use update_display_name() instead.
+
+        Rename a workspace (display name only, folder unchanged).
 
         Args:
             workspace_id: Workspace ID
             new_name: New display name
-            user: User object (for username)
+            user: User object (ignored, kept for backward compatibility)
 
         Returns:
             Updated workspace or None if failed
         """
-        workspace = self.workspace_repo.get_workspace_by_id(workspace_id)
-
-        if not workspace or workspace.is_system:
-            return None
-
-        old_folder_path = self.get_workspace_storage_path(workspace)
-
-        # Update database (this also updates folder_name and folder_path)
-        updated_workspace = self.workspace_repo.rename_workspace(
-            workspace_id=workspace_id,
-            new_name=new_name,
-            normalized_username=user.normalized_username
-        )
-
-        if not updated_workspace:
-            return None
-
-        # Rename physical folder if it changed
-        if workspace.folder_name != updated_workspace.folder_name:
-            new_folder_path = self.get_workspace_storage_path(updated_workspace)
-
-            try:
-                if old_folder_path.exists():
-                    old_folder_path.rename(new_folder_path)
-                    logger.info(f"Renamed folder from {old_folder_path} to {new_folder_path}")
-                else:
-                    # Create new folder if old one doesn't exist
-                    new_folder_path.mkdir(parents=True, exist_ok=True)
-            except OSError as e:
-                logger.error(f"Failed to rename folder: {e}")
-                # Rollback database change
-                self.workspace_repo.rename_workspace(
-                    workspace_id=workspace_id,
-                    new_name=workspace.name,
-                    normalized_username=user.normalized_username
-                )
-                return None
-
-            # Update document file paths
-            self._update_document_paths(
-                workspace_id=workspace_id,
-                old_folder_path=str(old_folder_path),
-                new_folder_path=str(new_folder_path)
-            )
-
-        return updated_workspace
-
-    def _update_document_paths(
-        self,
-        workspace_id: UUID,
-        old_folder_path: str,
-        new_folder_path: str
-    ) -> None:
-        """Update document file paths after folder rename."""
-        documents = self.workspace_repo.get_workspace_documents(
-            workspace_id=workspace_id,
-            limit=10000  # Get all documents
-        )
-
-        for doc in documents:
-            if doc.file_path and old_folder_path in doc.file_path:
-                doc.file_path = doc.file_path.replace(old_folder_path, new_folder_path)
-                self.db.commit()
+        logger.warning("rename_workspace() is deprecated. Use update_display_name() instead.")
+        return self.update_display_name(workspace_id, new_name)
 
     def delete_workspace(
         self,

@@ -31,15 +31,16 @@ class WorkspaceCreate(BaseModel):
 
 class WorkspaceUpdate(BaseModel):
     """Request model for updating a workspace."""
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    display_name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
     color: Optional[str] = Field(None, pattern=r'^#[0-9A-Fa-f]{6}$')
     icon: Optional[str] = Field(None, max_length=50)
+    clear_display_name: bool = Field(default=False, description="If True, clear display_name to fall back to original name")
 
 
 class WorkspaceRename(BaseModel):
-    """Request model for renaming a workspace."""
-    name: str = Field(..., min_length=1, max_length=100)
+    """Request model for renaming a workspace (updating display_name)."""
+    display_name: str = Field(..., min_length=1, max_length=100, description="New display name (any language)")
 
 
 class WorkspaceOrder(BaseModel):
@@ -57,9 +58,11 @@ class WorkspaceResponse(BaseModel):
     """Response model for a workspace."""
     id: UUID
     user_id: UUID
-    name: str
-    folder_name: str
-    folder_path: str
+    name: str  # Original name at creation (immutable)
+    display_name: Optional[str]  # User-editable display name (any language)
+    effective_name: str  # What should be shown in UI (display_name or name)
+    folder_name: str  # Normalized ASCII folder name (immutable)
+    folder_path: str  # Full relative path (immutable)
     description: Optional[str]
     color: str
     icon: str
@@ -117,6 +120,8 @@ def workspace_to_response(workspace: Workspace) -> WorkspaceResponse:
         id=workspace.id,
         user_id=workspace.user_id,
         name=workspace.name,
+        display_name=workspace.display_name,
+        effective_name=workspace.get_effective_display_name(),
         folder_name=workspace.folder_name,
         folder_path=workspace.folder_path,
         description=workspace.description,
@@ -278,7 +283,14 @@ def update_workspace(
     """
     Update workspace metadata.
 
-    Does not change the folder name. Use rename endpoint for that.
+    Args:
+        workspace_id: Workspace ID
+        request: Update request with display_name, description, color, icon
+
+    Note:
+        - folder_name and folder_path are immutable after creation
+        - System workspaces cannot have their display_name changed
+        - Set clear_display_name=True to reset to original name
     """
     service = WorkspaceService(db)
     workspace = service.get_workspace(workspace_id)
@@ -295,18 +307,21 @@ def update_workspace(
             detail="Access denied"
         )
 
-    if workspace.is_system:
+    # Allow updating color/icon/description for all workspaces
+    # But block display_name updates for system workspaces
+    if workspace.is_system and request.display_name is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Cannot modify system workspace"
+            detail="Cannot rename system workspace"
         )
 
     updated = service.update_workspace(
         workspace_id=workspace_id,
-        name=request.name,
+        display_name=request.display_name,
         description=request.description,
         color=request.color,
-        icon=request.icon
+        icon=request.icon,
+        clear_display_name=request.clear_display_name
     )
 
     return workspace_to_response(updated)
@@ -320,9 +335,19 @@ def rename_workspace(
     db: Session = Depends(get_db)
 ):
     """
-    Rename a workspace.
+    Rename a workspace (update display_name).
 
-    This also renames the physical folder and updates document paths.
+    This updates only the display_name field. The physical folder remains unchanged.
+    Display names support any language (Chinese, Japanese, Korean, etc.).
+
+    Args:
+        workspace_id: Workspace ID
+        request: Rename request with new display_name
+
+    Note:
+        - folder_name and folder_path are immutable
+        - No file system operations are performed
+        - System workspaces cannot be renamed
     """
     service = WorkspaceService(db)
     workspace = service.get_workspace(workspace_id)
@@ -345,10 +370,9 @@ def rename_workspace(
             detail="Cannot rename system workspace"
         )
 
-    updated = service.rename_workspace(
+    updated = service.update_display_name(
         workspace_id=workspace_id,
-        new_name=request.name,
-        user=current_user
+        new_display_name=request.display_name
     )
 
     if not updated:
@@ -357,7 +381,7 @@ def rename_workspace(
             detail="Failed to rename workspace"
         )
 
-    logger.info(f"Renamed workspace {workspace_id} to '{request.name}'")
+    logger.info(f"Renamed workspace {workspace_id} display_name to '{request.display_name}' (folder unchanged: {updated.folder_name})")
     return workspace_to_response(updated)
 
 
