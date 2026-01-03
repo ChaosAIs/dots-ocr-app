@@ -92,6 +92,13 @@ INSERT INTO data_schemas (
             "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Price", "price", "Unit Price", "Rate", "rate", "Cost", "cost", "单价"]},
             "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Amount", "amount", "Total", "total", "Line Total", "Subtotal", "subtotal", "Sum", "sum", "金额", "小计"]},
             "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["SKU", "sku", "Code", "code", "Item Code", "Product Code", "Part Number"]}
+        },
+        "summary_fields": {
+            "subtotal": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Subtotal", "Sub Total", "Sub-Total", "小计"]},
+            "tax_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Tax", "Tax Amount", "HST", "GST", "VAT", "Sales Tax", "税额"]},
+            "discount_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Discount", "Discount Amount", "折扣"]},
+            "shipping_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Shipping", "Freight", "Shipping Charges", "运费"]},
+            "total_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Total", "Grand Total", "Total Amount", "Amount Due", "Invoice Total", "总计", "合计"]}
         }
     }'::jsonb,
     'Extract structured data from this invoice document.
@@ -216,6 +223,12 @@ INSERT INTO data_schemas (
             "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Qty", "qty", "QTY", "Quantity", "Count", "count", "Units", "units", "数量"]},
             "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Price", "price", "Unit Price", "Rate", "rate", "Cost", "cost", "单价"]},
             "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Amount", "amount", "Total", "total", "Line Total", "Subtotal", "subtotal", "Sum", "sum", "金额", "小计"]}
+        },
+        "summary_fields": {
+            "subtotal": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Subtotal", "Sub Total", "Sub-Total", "小计"]},
+            "tax_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Tax", "Tax Amount", "HST", "GST", "VAT", "Sales Tax", "税额"]},
+            "tip_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Tip", "Gratuity", "Service Charge", "小费"]},
+            "total_amount": {"semantic_type": "amount", "data_type": "number", "source": "summary", "aggregation": "sum", "aliases": ["Total", "Grand Total", "Total Amount", "Amount Due", "总计", "合计"]}
         }
     }'::jsonb,
     'Extract structured data from this receipt.

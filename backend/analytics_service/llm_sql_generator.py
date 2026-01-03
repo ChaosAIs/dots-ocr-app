@@ -261,13 +261,21 @@ class ContentSizeEvaluator:
 
         if not item_columns:
             # Canonical item column names (after normalization)
+            # Line item fields
             canonical_item_columns = ['description', 'quantity', 'unit_price', 'amount',
                                       'product_name', 'sku', 'category', 'date']
+            # Summary fields (document-level totals from summary_data)
+            summary_columns = ['subtotal', 'tax_amount', 'tip_amount', 'total_amount']
+
             item_columns = [c for c in canonical_item_columns if c in all_columns]
 
             # If no canonical columns found, use all non-group columns
             if not item_columns:
-                item_columns = [c for c in all_columns if c not in group_by_columns]
+                item_columns = [c for c in all_columns if c not in group_by_columns and c not in summary_columns]
+
+        # Identify summary columns present in data (for document-level display)
+        summary_columns = ['subtotal', 'tax_amount', 'tip_amount', 'total_amount']
+        present_summary_columns = [c for c in summary_columns if c in all_columns]
 
         # Group the data
         from collections import defaultdict
@@ -349,8 +357,36 @@ class ContentSizeEvaluator:
             # Add item rows
             lines.extend(item_rows)
 
-            # Add subtotal if we have amount column
-            if group_subtotal > 0:
+            # Display document-level summary fields (from summary_data)
+            if present_summary_columns and items:
+                # Get summary values from first item (they're the same for all items in group)
+                first_item = items[0]
+                summary_parts = []
+                doc_total = None
+
+                for col in present_summary_columns:
+                    val = first_item.get(col)
+                    if val is not None and val != '' and val != 'None':
+                        try:
+                            num_val = float(val)
+                            if num_val > 0:
+                                label = col.replace('_', ' ').title()
+                                summary_parts.append(f"**{label}:** ${num_val:,.2f}")
+                                if col == 'total_amount':
+                                    doc_total = num_val
+                        except (ValueError, TypeError):
+                            pass
+
+                if summary_parts:
+                    lines.append("\n" + " | ".join(summary_parts))
+                    if doc_total:
+                        total_amount += doc_total
+                elif group_subtotal > 0:
+                    # Fallback to calculated subtotal if no summary fields
+                    lines.append(f"\n**Subtotal: ${group_subtotal:,.2f}**")
+                    total_amount += group_subtotal
+            elif group_subtotal > 0:
+                # Fallback to calculated subtotal if no summary fields
                 lines.append(f"\n**Subtotal: ${group_subtotal:,.2f}**")
                 total_amount += group_subtotal
 
@@ -1006,7 +1042,7 @@ Respond with JSON only:"""
 **If count_level="document"**: You are counting DOCUMENTS (receipts/meals/invoices), NOT line items!
 ```sql
 WITH expanded_items AS (
-    SELECT dd.document_id, dd.header_data, li.data as item  -- MUST include document_id
+    SELECT dd.document_id, dd.header_data, dd.summary_data, li.data as item  -- MUST include document_id and summary_data
     FROM documents_data dd
     JOIN documents_data_line_items li ON li.documents_data_id = dd.id
     WHERE dd.document_id IN (...)
@@ -1040,7 +1076,7 @@ WHERE (header_data->>'transaction_date')::date BETWEEN ...
 ### 4. SQL Structure:
 ```sql
 WITH expanded_items AS (
-    SELECT dd.document_id, dd.header_data, li.data as item  -- ALWAYS include document_id
+    SELECT dd.document_id, dd.header_data, dd.summary_data, li.data as item  -- ALWAYS include document_id and summary_data
     FROM documents_data dd
     JOIN documents_data_line_items li ON li.documents_data_id = dd.id
     JOIN documents d ON dd.document_id = d.id
@@ -1052,7 +1088,7 @@ FROM expanded_items
 WHERE -- filters here (cast only for comparisons)
 ORDER BY (item->>'NumericField')::numeric DESC  -- cast only in ORDER BY if needed
 ```
-NOTE: Always include `dd.document_id` in CTE - needed for count_level="document" queries.
+NOTE: Always include `dd.document_id` and `dd.summary_data` in CTE - needed for count and summary fields.
 
 ### 5. Report Type Behavior:
 - **detail**: SELECT all schema fields, return individual rows
@@ -1060,11 +1096,12 @@ NOTE: Always include `dd.document_id` in CTE - needed for count_level="document"
 - **count**: Return COUNT with optional grouping
 
 ### 5.5 FIELD ORDERING IN SELECT (CRITICAL for readability):
-Order fields in a LOGICAL HIERARCHY - document header fields first, then line item details:
+Order fields in a LOGICAL HIERARCHY - document header fields first, then summary, then line item details:
 
 **NOTE: Data is normalized to canonical field names. Use these standard names:**
 - Line items: `description`, `quantity`, `unit_price`, `amount`, `sku`, `category`
 - Headers: `store_name`, `transaction_date`, `receipt_number`, `invoice_number`, `vendor_name`, etc.
+- Summary: `subtotal`, `tax_amount`, `tip_amount`, `total_amount`, `discount_amount`, `shipping_amount`
 
 **Field Order Priority:**
 1. **HEADER/DOCUMENT FIELDS** (from header_data) - GROUP THESE TOGETHER FIRST:
@@ -1073,7 +1110,13 @@ Order fields in a LOGICAL HIERARCHY - document header fields first, then line it
    - Temporal: transaction_date, invoice_date
    - Context: payment_method, currency
 
-2. **LINE ITEM FIELDS** (from item) - AFTER header fields:
+2. **SUMMARY FIELDS** (from summary_data) - DOCUMENT TOTALS:
+   - subtotal (before tax/tip)
+   - tax_amount (tax)
+   - tip_amount (gratuity)
+   - total_amount (grand total)
+
+3. **LINE ITEM FIELDS** (from item) - AFTER header/summary fields:
    - description (WHAT was purchased - FIRST)
    - quantity (HOW MANY)
    - unit_price (PRICE PER UNIT)
@@ -1085,6 +1128,11 @@ SELECT
     -- HEADER FIELDS (document-level)
     header_data->>'store_name' AS store_name,
     header_data->>'transaction_date' AS transaction_date,
+    header_data->>'receipt_number' AS receipt_number,
+    -- SUMMARY FIELDS (document totals)
+    summary_data->>'subtotal' AS subtotal,
+    summary_data->>'tax_amount' AS tax_amount,
+    summary_data->>'total_amount' AS total_amount,
     -- LINE ITEM FIELDS (canonical names)
     item->>'description' AS description,      -- WHAT (first)
     item->>'quantity' AS quantity,            -- HOW MANY
@@ -1101,10 +1149,10 @@ ORDER BY transaction_date, description
 - **avg**: Use two-step aggregation for per-document averages, AVG((item->>'field')::numeric)
 - **count**: Two types based on count_level parameter - THIS IS CRITICAL:
   - **count_level="document"**: Count DISTINCT documents (receipts/invoices), NOT line items
-    IMPORTANT: Include document_id in the CTE to enable DISTINCT counting!
+    IMPORTANT: Include document_id and summary_data in the CTE!
     ```sql
     WITH expanded_items AS (
-        SELECT dd.document_id, dd.header_data, li.data as item  -- MUST include document_id
+        SELECT dd.document_id, dd.header_data, dd.summary_data, li.data as item  -- MUST include document_id and summary_data
         FROM documents_data dd
         JOIN documents_data_line_items li ON li.documents_data_id = dd.id
         WHERE ...
@@ -2696,11 +2744,14 @@ FROM expanded_items
         # Collect all fields by source
         header_fields = []
         line_item_fields = []
+        summary_fields = []
 
         for field_name, mapping in field_mappings.items():
             source = mapping.get('source', 'line_item')
             if source == 'header':
                 header_fields.append(field_name)
+            elif source == 'summary':
+                summary_fields.append(field_name)
             else:
                 line_item_fields.append(field_name)
 
@@ -2710,6 +2761,10 @@ FROM expanded_items
         # Add header fields
         for field in header_fields:
             select_parts.append(f"header_data->>'{field}' as {field.lower().replace(' ', '_')}")
+
+        # Add summary fields (from summary_data column)
+        for field in summary_fields:
+            select_parts.append(f"summary_data->>'{field}' as {field.lower().replace(' ', '_')}")
 
         # Add line item fields
         for field in line_item_fields:
@@ -2734,10 +2789,10 @@ FROM expanded_items
         if table_filter:
             where_clause = f"WHERE {table_filter}"
 
-        # Build SQL
+        # Build SQL - include summary_data for summary fields
         sql = f"""
 WITH expanded_items AS (
-    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
+    SELECT dd.header_data, dd.summary_data, jsonb_array_elements(dd.line_items) as item
     FROM documents_data dd
     JOIN documents d ON dd.document_id = d.id
     {where_clause}
@@ -2753,8 +2808,8 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
             logger.info("[SQL Heuristic] Converting detail SQL for external storage...")
             sql = self._convert_to_external_storage_sql(sql)
 
-        all_fields = header_fields + line_item_fields
-        logger.info(f"[SQL Heuristic] Detail SQL includes {len(all_fields)} fields: {all_fields}")
+        all_fields = header_fields + summary_fields + line_item_fields
+        logger.info(f"[SQL Heuristic] Detail SQL includes {len(all_fields)} fields: header={header_fields}, summary={summary_fields}, line_items={line_item_fields}")
 
         return SQLGenerationResult(
             sql_query=sql.strip(),
