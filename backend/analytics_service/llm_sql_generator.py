@@ -70,7 +70,7 @@ class ContentSizeEvaluator:
 
     # Configuration constants
     LLM_MAX_SAFE_TOKENS = 80000      # Safe threshold (leaves headroom for prompt)
-    LLM_MAX_SAFE_ROWS = 25           # Max rows for LLM formatting (output token limit)
+    LLM_MAX_SAFE_ROWS = 40           # Max rows for LLM formatting (output token limit) - increased to handle moderate datasets
     CHARS_PER_TOKEN = 4              # Approximate conversion ratio
     PROMPT_OVERHEAD_TOKENS = 3000    # Reserved for prompt/instructions
     SAMPLE_ROWS_FOR_LLM = 10         # Sample rows for LLM context
@@ -110,11 +110,12 @@ class ContentSizeEvaluator:
                 column_headers=[]
             )
 
-        # Get column headers from first row
-        columns = list(query_results[0].keys())
+        # Get column headers from first row and reorder them
+        raw_columns = list(query_results[0].keys())
+        ordered_columns = self._order_columns(raw_columns)
 
-        # Build the full markdown table
-        markdown_table = self._build_markdown_table(query_results, columns)
+        # Build the full markdown table with ordered columns
+        markdown_table = self._build_markdown_table(query_results, ordered_columns, reorder_columns=False)
 
         # Estimate token count
         total_chars = len(markdown_table)
@@ -140,16 +141,56 @@ class ContentSizeEvaluator:
         return ContentSizeEvaluation(
             exceeds_limit=exceeds_limit,
             row_count=len(query_results),
-            column_count=len(columns),
+            column_count=len(ordered_columns),
             estimated_tokens=estimated_tokens,
             markdown_table=markdown_table,
-            column_headers=columns
+            column_headers=ordered_columns  # Use ordered columns
         )
+
+    def _order_columns(self, columns: List[str]) -> List[str]:
+        """
+        Order columns by logical priority for better readability.
+
+        Priority:
+        1. Header/Document fields (store, receipt, dates, payment)
+        2. Item identifier fields (description, product_name)
+        3. Quantity fields
+        4. Price fields
+        5. Amount/Total fields (last)
+
+        NOTE: Data is normalized to canonical field names (snake_case).
+        """
+        # Define priority groups using canonical names (lower number = higher priority)
+        header_fields = {'store_name', 'store_address', 'receipt_number', 'invoice_number',
+                         'customer_name', 'vendor_name', 'payment_method', 'currency'}
+        date_fields = {'transaction_date', 'invoice_date', 'order_date', 'date', 'due_date'}
+        item_name_fields = {'description', 'product_name', 'sku', 'category'}
+        quantity_fields = {'quantity'}
+        price_fields = {'unit_price'}
+        amount_fields = {'amount', 'total_amount', 'subtotal', 'total_value'}
+
+        def get_priority(col: str) -> int:
+            if col in header_fields:
+                return 0
+            if col in date_fields:
+                return 1
+            if col in item_name_fields:
+                return 2
+            if col in quantity_fields:
+                return 3
+            if col in price_fields:
+                return 4
+            if col in amount_fields:
+                return 5
+            return 3  # Default to middle priority
+
+        return sorted(columns, key=get_priority)
 
     def _build_markdown_table(
         self,
         query_results: List[Dict[str, Any]],
-        columns: List[str]
+        columns: List[str],
+        reorder_columns: bool = True
     ) -> str:
         """
         Build a markdown table from query results with proper formatting.
@@ -157,12 +198,17 @@ class ContentSizeEvaluator:
         Args:
             query_results: List of result dictionaries
             columns: Column names (headers)
+            reorder_columns: Whether to reorder columns by priority (default True)
 
         Returns:
             Formatted markdown table string
         """
         if not query_results or not columns:
             return "No data available."
+
+        # Reorder columns for better readability
+        if reorder_columns:
+            columns = self._order_columns(columns)
 
         lines = []
 
@@ -182,6 +228,140 @@ class ContentSizeEvaluator:
                 formatted_val = self._format_cell_value(val, col)
                 values.append(formatted_val)
             lines.append("| " + " | ".join(values) + " |")
+
+        return "\n".join(lines)
+
+    def build_grouped_markdown(
+        self,
+        query_results: List[Dict[str, Any]],
+        group_by_columns: List[str] = None,
+        item_columns: List[str] = None
+    ) -> str:
+        """
+        Build grouped markdown output - documents grouped with nested line items.
+
+        Args:
+            query_results: List of result dictionaries
+            group_by_columns: Columns to group by (default: store_name, receipt_number, transaction_date)
+            item_columns: Columns to show in item table (default: description, quantity, unit_price, amount)
+
+        Returns:
+            Grouped markdown string
+        """
+        if not query_results:
+            return "No data available."
+
+        # Default grouping columns
+        if not group_by_columns:
+            group_by_columns = ['store_name', 'receipt_number', 'transaction_date']
+
+        # Default item columns - filter to only those that exist in data
+        # Data is now normalized to canonical field names (description, quantity, amount, etc.)
+        all_columns = list(query_results[0].keys())
+
+        if not item_columns:
+            # Canonical item column names (after normalization)
+            canonical_item_columns = ['description', 'quantity', 'unit_price', 'amount',
+                                      'product_name', 'sku', 'category', 'date']
+            item_columns = [c for c in canonical_item_columns if c in all_columns]
+
+            # If no canonical columns found, use all non-group columns
+            if not item_columns:
+                item_columns = [c for c in all_columns if c not in group_by_columns]
+
+        # Group the data
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for row in query_results:
+            # Build group key from available columns
+            key_parts = []
+            for col in group_by_columns:
+                val = row.get(col, '')
+                key_parts.append(str(val) if val else '')
+            group_key = tuple(key_parts)
+            groups[group_key].append(row)
+
+        # Build grouped markdown
+        lines = []
+        valid_group_count = 0
+        total_amount = 0.0
+        total_valid_items = 0
+
+        for group_key, items in groups.items():
+            # Build item rows first to check if group has valid data
+            display_cols = [c for c in item_columns if c in all_columns]
+            if not display_cols:
+                continue
+
+            # Collect valid item rows for this group
+            item_rows = []
+            group_subtotal = 0.0
+            for item in items:
+                # Check if this row has any meaningful data in item columns
+                has_data = False
+                for col in display_cols:
+                    val = item.get(col)
+                    if val is not None and str(val).strip() not in ['', '-', 'None', 'null']:
+                        has_data = True
+                        break
+
+                # Skip rows with all empty item values
+                if not has_data:
+                    continue
+
+                values = []
+                for col in display_cols:
+                    val = item.get(col, "")
+                    formatted_val = self._format_cell_value(val, col)
+                    values.append(formatted_val)
+                    # Track subtotal
+                    if col in ['amount', 'total', 'subtotal'] and isinstance(item.get(col), (int, float)):
+                        group_subtotal += float(item.get(col, 0))
+                item_rows.append("| " + " | ".join(values) + " |")
+
+            # Skip groups with no valid items
+            if not item_rows:
+                continue
+
+            valid_group_count += 1
+            total_valid_items += len(item_rows)
+
+            # Build header from group key
+            header_parts = []
+            for i, col in enumerate(group_by_columns):
+                val = group_key[i] if i < len(group_key) else ''
+                if val and col in ['store_name', 'customer_name']:
+                    header_parts.insert(0, val)  # Store/customer name first
+                elif val and col in ['receipt_number', 'invoice_number']:
+                    header_parts.append(f"#{val}")
+                elif val and 'date' in col.lower():
+                    header_parts.append(f"({val})")
+
+            header_text = " - ".join(header_parts) if header_parts else f"Group {valid_group_count}"
+            lines.append(f"\n### 📄 {header_text}\n")
+
+            # Add table header
+            header = "| " + " | ".join(display_cols) + " |"
+            lines.append(header)
+            separator = "| " + " | ".join(["---"] * len(display_cols)) + " |"
+            lines.append(separator)
+
+            # Add item rows
+            lines.extend(item_rows)
+
+            # Add subtotal if we have amount column
+            if group_subtotal > 0:
+                lines.append(f"\n**Subtotal: ${group_subtotal:,.2f}**")
+                total_amount += group_subtotal
+
+            lines.append("\n---")
+
+        # Add grand total
+        if total_amount > 0:
+            lines.append(f"\n**Grand Total: ${total_amount:,.2f}**")
+
+        # Use valid counts (excluding empty rows/groups)
+        lines.append(f"\n*{valid_group_count} documents, {total_valid_items} line items*")
 
         return "\n".join(lines)
 
@@ -816,6 +996,8 @@ Respond with JSON only:"""
 
 ### 1. Schema Adherence:
 - Use ONLY fields listed in "Available Data Fields" above
+- Data is normalized to canonical field names (description, quantity, amount, etc.)
+- Use the exact field names from the schema provided
 - For report_type="detail": Include ALL fields from the schema in SELECT
 - For min/max queries (finding record with min or max value): Include ALL fields from the schema in SELECT
 - Never invent or assume fields not in the schema
@@ -876,6 +1058,43 @@ NOTE: Always include `dd.document_id` in CTE - needed for count_level="document"
 - **detail**: SELECT all schema fields, return individual rows
 - **summary**: GROUP BY and aggregate (SUM, COUNT, AVG, MIN, MAX)
 - **count**: Return COUNT with optional grouping
+
+### 5.5 FIELD ORDERING IN SELECT (CRITICAL for readability):
+Order fields in a LOGICAL HIERARCHY - document header fields first, then line item details:
+
+**NOTE: Data is normalized to canonical field names. Use these standard names:**
+- Line items: `description`, `quantity`, `unit_price`, `amount`, `sku`, `category`
+- Headers: `store_name`, `transaction_date`, `receipt_number`, `invoice_number`, `vendor_name`, etc.
+
+**Field Order Priority:**
+1. **HEADER/DOCUMENT FIELDS** (from header_data) - GROUP THESE TOGETHER FIRST:
+   - Business identity: store_name, vendor_name, customer_name
+   - Document identifier: receipt_number, invoice_number
+   - Temporal: transaction_date, invoice_date
+   - Context: payment_method, currency
+
+2. **LINE ITEM FIELDS** (from item) - AFTER header fields:
+   - description (WHAT was purchased - FIRST)
+   - quantity (HOW MANY)
+   - unit_price (PRICE PER UNIT)
+   - amount (LINE TOTAL - LAST)
+
+**Example - Correct field order for detail report:**
+```sql
+SELECT
+    -- HEADER FIELDS (document-level)
+    header_data->>'store_name' AS store_name,
+    header_data->>'transaction_date' AS transaction_date,
+    -- LINE ITEM FIELDS (canonical names)
+    item->>'description' AS description,      -- WHAT (first)
+    item->>'quantity' AS quantity,            -- HOW MANY
+    item->>'unit_price' AS unit_price,        -- PRICE EACH
+    item->>'amount' AS amount                 -- LINE TOTAL (last)
+FROM expanded_items
+ORDER BY transaction_date, description
+```
+
+**CRITICAL RULE**: description field MUST come BEFORE amount/price fields!
 
 ### 6. Aggregation Patterns (ALWAYS cast to numeric for SUM/AVG):
 - **sum**: GROUP BY grouping fields, SUM((item->>'field')::numeric)
@@ -1238,7 +1457,8 @@ Respond with JSON only:"""
         if not self.llm_client:
             logger.warning("[SQL Generator] No LLM client available")
             logger.info("[SQL Generator] Using HEURISTIC SQL generation (fallback)...")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
+            report_type = self._detect_report_type_from_query(user_query)
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type, report_type)
 
         try:
             logger.info("[SQL Generator] LLM client available - using MULTI-ROUND analysis")
@@ -1249,7 +1469,8 @@ Respond with JSON only:"""
             logger.error(f"[SQL Generator] Multi-round LLM SQL generation failed: {e}")
             logger.info("[SQL Generator] Falling back to HEURISTIC generation...")
             # Fallback to heuristic
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
+            report_type = self._detect_report_type_from_query(user_query)
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type, report_type)
 
     def generate_min_max_separate_queries(
         self,
@@ -1418,7 +1639,8 @@ Respond with JSON only:"""
         if not query_analysis:
             logger.warning("[SQL Generator] Round 1 FAILED - could not parse LLM response")
             logger.info("[SQL Generator] Falling back to heuristic generation...")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
+            report_type = self._detect_report_type_from_query(user_query)
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type, report_type)
 
         # Extract aggregation type, entity field, and report type from Round 1
         aggregation_type = query_analysis.get('aggregation_type', 'sum')
@@ -1469,7 +1691,7 @@ Respond with JSON only:"""
         if not field_mapping_result or not field_mapping_result.get('success', True):
             logger.warning("[SQL Generator] Round 2 FAILED - field mapping unsuccessful")
             logger.info("[SQL Generator] Falling back to heuristic generation...")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter)
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type, report_type)
 
         logger.info("-" * 80)
         logger.info("[SQL Generator] ROUND 2 RESULT:")
@@ -1518,11 +1740,15 @@ Respond with JSON only:"""
         if date_field in field_mappings:
             date_field_source = field_mappings[date_field].get('source', 'header')
 
+        # Safely extract aggregation field (handle None values)
+        agg_field_mapping = field_mapping_result.get('aggregation_field') or {}
+        aggregation_field_actual = agg_field_mapping.get('actual_field', 'amount') if isinstance(agg_field_mapping, dict) else 'amount'
+
         logger.info(f"[SQL Generator] SQL Generation Parameters:")
         logger.info(f"[SQL Generator]   - Grouping Fields: {grouping_fields_desc}")
         logger.info(f"[SQL Generator]   - Time Grouping: {time_grouping_info}")
         logger.info(f"[SQL Generator]   - Time Filter Only: {time_filter_only}")
-        logger.info(f"[SQL Generator]   - Aggregation Field: {field_mapping_result.get('aggregation_field', {}).get('actual_field', 'amount')}")
+        logger.info(f"[SQL Generator]   - Aggregation Field: {aggregation_field_actual}")
         logger.info(f"[SQL Generator]   - Aggregation Type: {final_aggregation_type}")
         logger.info(f"[SQL Generator]   - Entity Field: {entity_field_actual or 'description'}")
         logger.info(f"[SQL Generator]   - Date Field: {date_field} (source: {date_field_source})")
@@ -1541,7 +1767,7 @@ Respond with JSON only:"""
             time_filter_only=time_filter_only,
             time_filter_year=time_filter_year or 'null',
             time_filter_period=time_filter_period or 'null',
-            aggregation_field=field_mapping_result.get('aggregation_field', {}).get('actual_field', 'amount'),
+            aggregation_field=aggregation_field_actual,
             aggregation_type=final_aggregation_type,
             entity_field=entity_field_actual or 'description',
             date_field=date_field,
@@ -1558,7 +1784,7 @@ Respond with JSON only:"""
         if not sql_result or not sql_result.get('sql'):
             logger.warning("[SQL Generator] Round 3 FAILED - could not generate valid SQL")
             logger.info("[SQL Generator] Falling back to heuristic generation...")
-            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type)
+            return self._generate_sql_heuristic(user_query, field_mappings, table_filter, storage_type, report_type)
 
         # Build result
         sql_query = sql_result.get('sql', '')
@@ -1610,7 +1836,7 @@ Respond with JSON only:"""
             sql_query=sql_query,
             explanation=sql_result.get('explanation', query_analysis.get('explanation', '')),
             grouping_fields=grouping_field_names,
-            aggregation_fields=[field_mapping_result.get('aggregation_field', {}).get('actual_field', '')],
+            aggregation_fields=[aggregation_field_actual] if aggregation_field_actual else [],
             time_granularity=query_analysis.get('time_granularity'),
             success=True
         )
@@ -2163,12 +2389,38 @@ Respond with JSON only:"""
 
         return sql
 
+    def _detect_report_type_from_query(self, user_query: str) -> str:
+        """
+        Detect report type from query keywords when LLM is not available.
+
+        Returns 'detail' for list/detail queries, 'summary' otherwise.
+        """
+        query_lower = user_query.lower()
+
+        # Keywords that indicate a detail/list report
+        detail_keywords = [
+            'list all', 'show all', 'get all',
+            'list details', 'show details', 'get details',
+            'all details', 'full details', 'all records',
+            'all items', 'every item', 'each item',
+            'all line items', 'every line item',
+            'list the', 'show the items', 'display all'
+        ]
+
+        for keyword in detail_keywords:
+            if keyword in query_lower:
+                logger.info(f"[SQL Generator] Detected report_type='detail' from keyword: '{keyword}'")
+                return 'detail'
+
+        return 'summary'
+
     def _generate_sql_heuristic(
         self,
         user_query: str,
         field_mappings: Dict[str, Dict[str, Any]],
         table_filter: Optional[str] = None,
-        storage_type: str = "external"
+        storage_type: str = "external",
+        report_type: str = "summary"
     ) -> SQLGenerationResult:
         """
         Generate SQL using heuristics when LLM is not available.
@@ -2176,8 +2428,15 @@ Respond with JSON only:"""
         This provides a fallback that handles common query patterns.
 
         NOTE: As of migration 022, always uses external storage (documents_data_line_items).
+
+        Args:
+            report_type: "summary" for aggregations, "detail" for all records with all columns
         """
         query_lower = user_query.lower()
+
+        # Handle detail report type - return all records with all columns
+        if report_type == "detail":
+            return self._generate_detail_sql_heuristic(field_mappings, table_filter, storage_type)
 
         # Find key fields and their sources
         date_field = None
@@ -2420,6 +2679,98 @@ FROM expanded_items
             time_granularity=time_granularity,
             success=True
         )
+
+    def _generate_detail_sql_heuristic(
+        self,
+        field_mappings: Dict[str, Dict[str, Any]],
+        table_filter: Optional[str] = None,
+        storage_type: str = "external"
+    ) -> SQLGenerationResult:
+        """
+        Generate SQL for detail report - return all records with all columns.
+
+        This is used when report_type='detail' to list all line items with all fields.
+        """
+        logger.info("[SQL Heuristic] Generating DETAIL SQL (all records, all columns)...")
+
+        # Collect all fields by source
+        header_fields = []
+        line_item_fields = []
+
+        for field_name, mapping in field_mappings.items():
+            source = mapping.get('source', 'line_item')
+            if source == 'header':
+                header_fields.append(field_name)
+            else:
+                line_item_fields.append(field_name)
+
+        # Build SELECT parts
+        select_parts = []
+
+        # Add header fields
+        for field in header_fields:
+            select_parts.append(f"header_data->>'{field}' as {field.lower().replace(' ', '_')}")
+
+        # Add line item fields
+        for field in line_item_fields:
+            select_parts.append(f"item->>'{field}' as {field.lower().replace(' ', '_')}")
+
+        # Add row_number if not already included
+        if 'row_number' not in line_item_fields:
+            select_parts.append("item->>'row_number' as row_number")
+
+        # If no fields defined, use generic approach
+        if not select_parts:
+            select_parts = [
+                "header_data->>'{date_field}' as date".format(date_field=self._find_date_field(field_mappings) or 'date'),
+                "item->>'description' as description",
+                "item->>'quantity' as quantity",
+                "item->>'amount' as amount",
+                "item->>'row_number' as row_number"
+            ]
+
+        # Build WHERE clause
+        where_clause = ""
+        if table_filter:
+            where_clause = f"WHERE {table_filter}"
+
+        # Build SQL
+        sql = f"""
+WITH expanded_items AS (
+    SELECT dd.header_data, jsonb_array_elements(dd.line_items) as item
+    FROM documents_data dd
+    JOIN documents d ON dd.document_id = d.id
+    {where_clause}
+)
+SELECT
+    {', '.join(select_parts)}
+FROM expanded_items
+ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
+"""
+
+        # Convert to external storage SQL if needed
+        if storage_type == 'external':
+            logger.info("[SQL Heuristic] Converting detail SQL for external storage...")
+            sql = self._convert_to_external_storage_sql(sql)
+
+        all_fields = header_fields + line_item_fields
+        logger.info(f"[SQL Heuristic] Detail SQL includes {len(all_fields)} fields: {all_fields}")
+
+        return SQLGenerationResult(
+            sql_query=sql.strip(),
+            explanation=f"Listing all line items with {len(all_fields)} fields",
+            grouping_fields=[],
+            aggregation_fields=[],
+            time_granularity=None,
+            success=True
+        )
+
+    def _find_date_field(self, field_mappings: Dict[str, Dict[str, Any]]) -> Optional[str]:
+        """Find the date field in field mappings."""
+        for field_name, mapping in field_mappings.items():
+            if mapping.get('semantic_type') == 'date':
+                return field_name
+        return None
 
     def generate_summary_report(
         self,
@@ -2899,40 +3250,14 @@ Write the {report_type} report in markdown format:"""
             yield f"## Query Results\n\n"
             yield f"Found **{evaluation.row_count:,}** records matching your query.\n\n"
 
-        # Step 5: Add separator between summary and data table
+        # Step 5: Add separator between summary and data
         yield "\n\n---\n\n"
         yield "## Complete Data Results\n\n"
 
-        # Step 6: Stream the raw markdown table directly (no LLM processing)
-        # Stream in chunks to avoid memory issues with very large tables
-        chunk_size = 100  # rows per chunk
-        total_rows = len(query_results)
-
-        for i in range(0, total_rows, chunk_size):
-            chunk_end = min(i + chunk_size, total_rows)
-            chunk_rows = query_results[i:chunk_end]
-
-            if i == 0:
-                # First chunk: include header
-                chunk_markdown = evaluator._build_markdown_table(chunk_rows, evaluation.column_headers)
-            else:
-                # Subsequent chunks: data rows only (no header)
-                lines = []
-                for row in chunk_rows:
-                    values = []
-                    for col in evaluation.column_headers:
-                        val = row.get(col, "")
-                        formatted_val = evaluator._format_cell_value(val, col)
-                        values.append(formatted_val)
-                    lines.append("| " + " | ".join(values) + " |")
-                chunk_markdown = "\n".join(lines)
-
-            yield chunk_markdown
-            if chunk_end < total_rows:
-                yield "\n"  # Add newline between chunks
-
-        # Step 7: Add footer with row count
-        yield f"\n\n*Showing all {evaluation.row_count:,} records*\n"
+        # Step 6: Stream grouped markdown output (documents grouped with nested line items)
+        # Use grouped format for better readability
+        grouped_markdown = evaluator.build_grouped_markdown(query_results)
+        yield grouped_markdown
 
     async def _stream_small_result_response(
         self,
@@ -2943,9 +3268,10 @@ Write the {report_type} report in markdown format:"""
         """
         Stream response for small result sets.
 
-        Strategy: LLM generates ONLY a brief title/description, then we directly
-        stream the raw markdown table to ensure ALL data rows are shown without
-        LLM truncation.
+        Strategy: LLM formats the ENTIRE result set with nice layout including:
+        - Summary/analysis of the data
+        - Well-formatted markdown table with ALL rows
+        - Key insights or highlights
 
         Args:
             user_query: Original user query
@@ -2959,58 +3285,101 @@ Write the {report_type} report in markdown format:"""
         actual_columns = list(query_results[0].keys()) if query_results else []
         columns_list = ", ".join(actual_columns)
 
-        # Step 1: LLM generates ONLY a brief title and description (NOT the data)
-        # We only show a few sample rows to help LLM understand the context
-        sample_size = min(3, len(query_results))
-        sample_rows = query_results[:sample_size]
-        sample_markdown = self._convert_results_to_markdown(sample_rows, actual_columns)
+        # Build the complete markdown table for LLM to include in response
+        full_markdown_table = self._convert_results_to_markdown(query_results, actual_columns)
 
-        prompt = f"""Based on the user's question, write ONLY a brief title and 1-2 sentence description.
-DO NOT include any data table or list - the data will be shown separately.
+        # Identify header vs line item columns for better formatting instructions
+        header_columns = [c for c in actual_columns if c in ['store_name', 'store_address', 'receipt_number', 'transaction_date', 'payment_method', 'currency', 'invoice_number', 'customer_name', 'order_date']]
+        item_columns = [c for c in actual_columns if c not in header_columns]
+
+        # Count unique documents for grouping info
+        unique_docs = set()
+        for row in query_results:
+            doc_key = (row.get('store_name', ''), row.get('receipt_number', ''), row.get('transaction_date', ''))
+            unique_docs.add(doc_key)
+        num_unique_docs = len(unique_docs)
+
+        prompt = f"""You are a data analyst. Format and present the complete query results in a clear, professional report with GROUPED layout.
 
 ## User's Question:
 "{user_query}"
 
-## Data Info:
-- Total rows: {len(query_results)}
-- Columns: {columns_list}
-- Sample of first {sample_size} rows:
-{sample_markdown}
+## Complete Data ({len(query_results)} line items across {num_unique_docs} documents):
+{full_markdown_table}
+
+## Column Categories:
+- **Header/Document columns** (group by these): {', '.join(header_columns) if header_columns else 'store_name, receipt_number, transaction_date'}
+- **Line Item columns** (show nested under each group): {', '.join(item_columns) if item_columns else 'description, quantity, unit_price, amount'}
 
 ## Instructions:
-1. Write a markdown title (## Title) that describes what the data shows
-2. Write 1-2 sentences describing the data (mention row count and what was queried)
-3. DO NOT include any table, list, or individual data items
-4. DO NOT try to list or summarize the actual data values
-5. Keep it brief - just title and description
+Create a GROUPED report - DO NOT show a flat table with repeated header info!
 
-Example output format:
-## Product Details with Price Between $30 and $50
+1. **Title**: A descriptive markdown title (## Title)
+2. **Summary**: Brief paragraph with:
+   - Total documents/receipts: {num_unique_docs}
+   - Total line items: {len(query_results)}
+   - Key statistics (total amount, date range, etc.)
+3. **GROUPED Data Display**: Group records by document (store + receipt + date), then show line items:
 
-Below is a list of all 20 products meeting the price criteria, showing all available columns.
+## CRITICAL - USE THIS GROUPED FORMAT:
 
-Write ONLY the title and description:"""
+### 📄 [Store Name] - Receipt #[number] ([date])
 
-        # Stream the LLM-generated title/description
+| Description | Qty | Unit Price | Amount |
+|-------------|-----|------------|--------|
+| Item 1      | 2   | $5.00      | $10.00 |
+| Item 2      | 1   | $8.30      | $8.30  |
+
+**Subtotal: $18.30**
+
+---
+
+### 📄 [Next Store] - Receipt #[number] ([date])
+... (next group of items)
+
+## Formatting Rules:
+- Group by: store_name + receipt_number + transaction_date (DO NOT repeat these in every row!)
+- Show each document as a separate section with ### header
+- Use a compact table for line items ONLY (description, quantity, unit_price, amount)
+- Format currency with $ symbol
+- Add subtotal for each document group
+- Add --- separator between document groups
+- Include ALL {len(query_results)} line items across all groups - do not skip any!
+
+## Example Output:
+## Meal Invoice Details from 2025
+
+Found {num_unique_docs} receipts with {len(query_results)} total items. Total amount: $XXX.XX across stores including [store names].
+
+### 📄 Crown Prince Fine Dining - Receipt #72 (2025-01-15)
+
+| Description | Qty | Unit Price | Amount |
+|-------------|-----|------------|--------|
+| Assorted Meat Congee | 1 | $18.00 | $18.00 |
+| Honeycomb cake | 1 | $8.30 | $8.30 |
+
+**Subtotal: $26.30**
+
+---
+
+### 📄 Mr. Congee Gai - Receipt #56 (2025-04-14)
+...
+
+Generate the GROUPED formatted report (include ALL items):"""
+
+        # Stream the LLM-generated full report (including formatted table)
         try:
             async for chunk in self.llm_client.astream(prompt):
                 if chunk:
                     yield chunk
         except Exception as e:
-            logger.error(f"[LLM Summary] Failed to generate title: {e}")
-            # Fallback: Generate a simple title
+            logger.error(f"[LLM Summary] Failed to generate formatted report: {e}")
+            # Fallback: Generate simple title + raw table
             yield f"## Query Results\n\n"
             yield f"Found **{len(query_results):,}** records matching your query.\n\n"
-
-        # Step 2: Add separator and stream the raw markdown table directly
-        yield "\n\n"
-
-        # Use the pre-built markdown table from evaluation (includes all rows)
-        results_markdown = evaluation.markdown_table
-        yield results_markdown
-
-        # Step 3: Add summary footer
-        yield f"\n\n*Showing all {len(query_results)} records*\n"
+            yield "### Complete Data Results\n\n"
+            yield evaluation.markdown_table
+            yield f"\n\n*Showing all {len(query_results)} records*\n"
 
     def _convert_results_to_markdown(
         self,

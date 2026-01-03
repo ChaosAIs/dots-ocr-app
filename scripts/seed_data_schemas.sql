@@ -79,19 +79,19 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "invoice_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "invoice_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "due_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "vendor_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "customer_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "currency": {"semantic_type": "currency", "data_type": "string", "source": "header", "aggregation": null}
+            "invoice_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Invoice No", "Invoice #", "Inv No", "Inv #", "Invoice Number"]},
+            "invoice_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Date", "Inv Date", "Invoice Date"]},
+            "due_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Due Date", "Payment Due", "Due"]},
+            "vendor_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Vendor", "Supplier", "From", "Seller"]},
+            "customer_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Customer", "Client", "Bill To", "Buyer"]},
+            "currency": {"semantic_type": "currency", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Currency", "Curr"]}
         },
         "line_item_fields": {
-            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null},
-            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by"}
+            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Item", "item", "Product", "product", "Name", "name", "Description", "Item Name", "Product Name", "item_name", "product_name", "品名", "商品", "品项"]},
+            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Qty", "qty", "QTY", "Quantity", "Count", "count", "Units", "units", "数量"]},
+            "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Price", "price", "Unit Price", "Rate", "rate", "Cost", "cost", "单价"]},
+            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Amount", "amount", "Total", "total", "Line Total", "Subtotal", "subtotal", "Sum", "sum", "金额", "小计"]},
+            "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["SKU", "sku", "Code", "code", "Item Code", "Product Code", "Part Number"]}
         }
     }'::jsonb,
     'Extract structured data from this invoice document.
@@ -205,17 +205,17 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "receipt_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "transaction_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "store_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "payment_method": {"semantic_type": "method", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "currency": {"semantic_type": "currency", "data_type": "string", "source": "header", "aggregation": null}
+            "receipt_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Receipt No", "Receipt #", "Trans No", "Transaction No", "Order No", "单号"]},
+            "transaction_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Date", "Trans Date", "Transaction Date", "日期"]},
+            "store_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Store", "Merchant", "Shop", "Restaurant", "Vendor", "店名", "商家"]},
+            "payment_method": {"semantic_type": "method", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Payment", "Pay Method", "Payment Type", "付款方式"]},
+            "currency": {"semantic_type": "currency", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Currency", "Curr"]}
         },
         "line_item_fields": {
-            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null},
-            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"}
+            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Item", "item", "Product", "product", "Name", "name", "Description", "Item Name", "Product Name", "item_name", "product_name", "品名", "商品", "品项", "菜名"]},
+            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Qty", "qty", "QTY", "Quantity", "Count", "count", "Units", "units", "数量"]},
+            "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Price", "price", "Unit Price", "Rate", "rate", "Cost", "cost", "单价"]},
+            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Amount", "amount", "Total", "total", "Line Total", "Subtotal", "subtotal", "Sum", "sum", "金额", "小计"]}
         }
     }'::jsonb,
     'Extract structured data from this receipt.
@@ -311,18 +311,18 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "account_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "account_holder": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "bank_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "statement_period_start": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "statement_period_end": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null}
+            "account_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Account No", "Account #", "Acct No", "Account"]},
+            "account_holder": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Account Holder", "Name", "Customer Name"]},
+            "bank_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Bank", "Institution", "Financial Institution"]},
+            "statement_period_start": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Start Date", "From", "Period Start"]},
+            "statement_period_end": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["End Date", "To", "Period End"]}
         },
         "line_item_fields": {
-            "date": {"semantic_type": "date", "data_type": "datetime", "source": "line_item", "aggregation": null},
-            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "debit": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "credit": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "balance": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null}
+            "date": {"semantic_type": "date", "data_type": "datetime", "source": "line_item", "aggregation": null, "aliases": ["Date", "Trans Date", "Transaction Date", "Posted Date"]},
+            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Description", "Transaction", "Details", "Memo", "Narrative"]},
+            "debit": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Debit", "Withdrawal", "DR", "Out"]},
+            "credit": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Credit", "Deposit", "CR", "In"]},
+            "balance": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Balance", "Running Balance", "Bal"]}
         }
     }'::jsonb,
     'Extract structured data from this bank statement.
@@ -413,17 +413,17 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "report_id": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "employee_name": {"semantic_type": "person", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "department": {"semantic_type": "category", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "submission_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null}
+            "report_id": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Report ID", "Report No", "Expense ID"]},
+            "employee_name": {"semantic_type": "person", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Employee", "Name", "Submitted By"]},
+            "department": {"semantic_type": "category", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Dept", "Division", "Team"]},
+            "submission_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Date", "Submit Date", "Submitted On"]}
         },
         "line_item_fields": {
-            "date": {"semantic_type": "date", "data_type": "datetime", "source": "line_item", "aggregation": null},
-            "category": {"semantic_type": "category", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": null},
-            "vendor": {"semantic_type": "entity", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"}
+            "date": {"semantic_type": "date", "data_type": "datetime", "source": "line_item", "aggregation": null, "aliases": ["Date", "Expense Date", "Transaction Date"]},
+            "category": {"semantic_type": "category", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Category", "Type", "Expense Type", "Expense Category"]},
+            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": null, "aliases": ["Description", "Details", "Purpose", "Item"]},
+            "vendor": {"semantic_type": "entity", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Vendor", "Merchant", "Payee", "Store"]},
+            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Amount", "amount", "Total", "Cost", "Expense Amount"]}
         }
     }'::jsonb,
     'Extract structured data from this expense report.
@@ -514,16 +514,16 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "po_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "po_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "vendor_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"}
+            "po_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["PO Number", "PO No", "PO #", "Order No", "Purchase Order"]},
+            "po_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Date", "Order Date", "PO Date"]},
+            "vendor_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Vendor", "Supplier", "Ship From"]}
         },
         "line_item_fields": {
-            "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": null},
-            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null},
-            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"}
+            "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["SKU", "sku", "Code", "Item Code", "Part No", "Product Code"]},
+            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": null, "aliases": ["Description", "Item", "Product", "Name", "Item Name"]},
+            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Qty", "qty", "QTY", "Quantity", "Order Qty"]},
+            "unit_price": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Price", "Unit Price", "Rate", "Cost"]},
+            "amount": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Amount", "amount", "Total", "Line Total", "Extended"]}
         }
     }'::jsonb,
     'Extract structured data from this purchase order.
@@ -615,16 +615,16 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "manifest_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "ship_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "shipper_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "consignee_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"},
-            "carrier_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"}
+            "manifest_number": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Manifest No", "Shipment No", "BOL", "Tracking No"]},
+            "ship_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Ship Date", "Date", "Shipped On"]},
+            "shipper_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Shipper", "From", "Ship From", "Sender"]},
+            "consignee_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Consignee", "To", "Ship To", "Recipient"]},
+            "carrier_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Carrier", "Courier", "Shipping Company"]}
         },
         "line_item_fields": {
-            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "weight": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum"}
+            "description": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Description", "Item", "Product", "Contents", "Goods"]},
+            "quantity": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Qty", "qty", "Quantity", "Pieces", "Units", "Cartons"]},
+            "weight": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Weight", "Wt", "Gross Weight", "Net Weight"]}
         }
     }'::jsonb,
     'Extract structured data from this shipping manifest/delivery note.
@@ -714,17 +714,17 @@ INSERT INTO data_schemas (
     }'::jsonb,
     '{
         "header_fields": {
-            "report_id": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null},
-            "report_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null},
-            "warehouse_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by"}
+            "report_id": {"semantic_type": "identifier", "data_type": "string", "source": "header", "aggregation": null, "aliases": ["Report ID", "Report No", "Inventory ID"]},
+            "report_date": {"semantic_type": "date", "data_type": "datetime", "source": "header", "aggregation": null, "aliases": ["Date", "Report Date", "As Of"]},
+            "warehouse_name": {"semantic_type": "entity", "data_type": "string", "source": "header", "aggregation": "group_by", "aliases": ["Warehouse", "Location", "Facility"]}
         },
         "line_item_fields": {
-            "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "product_name": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "category": {"semantic_type": "category", "data_type": "string", "source": "line_item", "aggregation": "group_by"},
-            "quantity_on_hand": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum"},
-            "unit_cost": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null},
-            "total_value": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum"}
+            "sku": {"semantic_type": "identifier", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["SKU", "sku", "Item Code", "Product Code", "Part No"]},
+            "product_name": {"semantic_type": "product", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Product", "Item", "Description", "Name"]},
+            "category": {"semantic_type": "category", "data_type": "string", "source": "line_item", "aggregation": "group_by", "aliases": ["Category", "Type", "Class"]},
+            "quantity_on_hand": {"semantic_type": "quantity", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Qty", "QOH", "On Hand", "Stock", "Quantity"]},
+            "unit_cost": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": null, "aliases": ["Cost", "Unit Cost", "Price"]},
+            "total_value": {"semantic_type": "amount", "data_type": "number", "source": "line_item", "aggregation": "sum", "aliases": ["Value", "Total Value", "Extended", "Amount"]}
         }
     }'::jsonb,
     'Extract structured data from this inventory report.

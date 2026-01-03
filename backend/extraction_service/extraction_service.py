@@ -26,6 +26,7 @@ from .extraction_config import (
     get_schema_for_document_type,
 )
 from .eligibility_checker import ExtractionEligibilityChecker
+from .field_normalizer import FieldNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +296,14 @@ IMPORTANT:
                     formal_schema=formal_schema
                 )
                 logger.info(f"[Extraction] Field mappings generated: {len(final_field_mappings)} categories")
+
+                # STEP 8.5: Normalize field names to canonical schema names
+                logger.info("-" * 80)
+                logger.info("[Extraction] STEP 8.5: Normalizing field names to canonical schema...")
+                result = self._normalize_extraction_result(
+                    result=result,
+                    field_mappings=final_field_mappings
+                )
 
                 # Add field_mappings to metadata for caching
                 enhanced_metadata = strategy_metadata.copy() if strategy_metadata else {}
@@ -1606,6 +1615,68 @@ Document section:
 
         # Return as string (dates will stay as strings in YYYY-MM-DD format)
         return value
+
+    def _normalize_extraction_result(
+        self,
+        result: Dict[str, Any],
+        field_mappings: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Normalize field names in extraction result to canonical schema names.
+
+        Uses the FieldNormalizer to transform field names like "Item", "Qty", "Amount"
+        to canonical names like "description", "quantity", "amount" based on schema aliases.
+
+        Args:
+            result: Extraction result with header_data, line_items, summary_data
+            field_mappings: Field mappings containing line_item_fields with aliases
+
+        Returns:
+            Result with normalized field names
+        """
+        if not field_mappings:
+            logger.debug("[Extraction] No field mappings available for normalization")
+            return result
+
+        line_items = result.get("line_items", [])
+        if not line_items:
+            logger.debug("[Extraction] No line items to normalize")
+            return result
+
+        # Get line_item_fields from field_mappings
+        line_item_fields = field_mappings.get("line_item_fields", {})
+        if not line_item_fields:
+            logger.debug("[Extraction] No line_item_fields in field_mappings")
+            return result
+
+        # Initialize normalizer with LLM client
+        normalizer = FieldNormalizer(llm_client=self.llm_client)
+
+        # Normalize line items
+        try:
+            normalized_items, mapping_used = normalizer.normalize_line_items(
+                line_items=line_items,
+                schema_field_mappings=line_item_fields,
+                use_llm=True
+            )
+
+            if mapping_used:
+                logger.info(f"[Extraction] Field normalization applied: {mapping_used}")
+                # Update result with normalized items
+                result["line_items"] = normalized_items
+
+                # Store the mapping used in result for reference
+                if "header_data" not in result:
+                    result["header_data"] = {}
+                result["header_data"]["_field_normalization"] = mapping_used
+            else:
+                logger.debug("[Extraction] No field normalization needed")
+
+        except Exception as e:
+            logger.error(f"[Extraction] Field normalization failed: {e}")
+            # Return original result on error
+
+        return result
 
     def _save_extraction_result(
         self,
