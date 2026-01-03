@@ -347,6 +347,16 @@ class DocumentRouter:
                         elif entity in embedding_text or entity_compact in embedding_text.replace(" ", ""):
                             boost = max(boost, ENTITY_MATCH_BOOST * 0.8)
                             match_reasons.append(f"entity '{entity}' in content")
+                        else:
+                            # Check metadata fields like vendor_name, customer_name, store_name
+                            entity_fields = ['vendor_name', 'customer_name', 'store_name', 'company_name', 'subject_name']
+                            for field in entity_fields:
+                                field_value = normalize_for_matching(str(payload.get(field, "")))
+                                field_compact = field_value.replace(" ", "")
+                                if field_value and (entity in field_value or entity_compact in field_compact):
+                                    boost = max(boost, ENTITY_MATCH_BOOST)
+                                    match_reasons.append(f"entity '{entity}' in {field}")
+                                    break
 
                     # Also check direct query terms against source name
                     for term in query_terms:
@@ -373,6 +383,39 @@ class DocumentRouter:
                 # Also track unboosted top score in case no boosting occurred
                 if max_boosted_score == 0.0 and results:
                     max_boosted_score = results[0].get("score", 0)
+
+                # ========== ENTITY NON-MATCH PENALTY ==========
+                # When query explicitly mentions entity names (like vendor/customer/company names),
+                # penalize documents that DON'T match these entities to improve filtering precision.
+                # This is more discriminating than just boosting matching documents.
+                if query_entities:
+                    # Penalty factor for documents that don't match any query entity
+                    ENTITY_NONMATCH_PENALTY = float(os.getenv("ENTITY_NONMATCH_PENALTY", "0.6"))
+
+                    # Count how many documents got boosted
+                    boosted_count = sum(1 for r in results if r.get("_boosted", False))
+
+                    # Only apply penalty if SOME documents got entity matches (not a general query)
+                    if boosted_count > 0 and boosted_count < len(results):
+                        logger.info(f"[Router Vector] ENTITY NON-MATCH PENALTY:")
+                        logger.info(f"[Router Vector]   • Boosted documents: {boosted_count}")
+                        logger.info(f"[Router Vector]   • Penalty factor: {ENTITY_NONMATCH_PENALTY}")
+
+                        for result in results:
+                            if not result.get("_boosted", False):
+                                original_score = result.get("score", 0)
+                                # Apply penalty - multiply score by penalty factor
+                                result["score"] = original_score * ENTITY_NONMATCH_PENALTY
+                                result["_entity_penalized"] = True
+                                source_name_raw = result.get("source_name", "")
+                                logger.info(
+                                    f"[Router Vector]   ↓ PENALIZED: {source_name_raw:40s} "
+                                    f"{original_score:.4f} → {result['score']:.4f} (×{ENTITY_NONMATCH_PENALTY}) "
+                                    f"[no entity match]"
+                                )
+
+                        # Re-sort after penalty
+                        results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
             # ========== TABULAR DATA BOOST ==========
             # Boost tabular documents (CSV/Excel) when query appears to be data analytics

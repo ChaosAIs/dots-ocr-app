@@ -1829,7 +1829,10 @@ class SQLQueryExecutor:
         try:
             doc_ids_str = ", ".join(f"'{str(doc_id)}'" for doc_id in accessible_doc_ids)
 
-            # Get document with line items (always external storage as of migration 022)
+            # Standard line item field names to prefer (normalized fields)
+            standard_fields = {'description', 'quantity', 'unit_price', 'amount', 'item', 'product', 'total', 'category', 'sku'}
+
+            # Get ALL documents with line items, then find the best one
             result = self.db.execute(text(f"""
                 SELECT
                     dd.id,
@@ -1839,34 +1842,64 @@ class SQLQueryExecutor:
                 FROM documents_data dd
                 WHERE dd.document_id IN ({doc_ids_str})
                 AND dd.line_items_count > 0
-                LIMIT 1
             """))
 
-            row = result.fetchone()
-            if not row:
+            rows = result.fetchall()
+            if not rows:
                 logger.warning("[Field Mappings] No documents with line items found")
                 return {}
 
-            documents_data_id = row[0]
-            schema_type = row[1]
-            header_data = row[2] or {}
-            line_items_count = row[3]
+            # Find the document with the best (most standard) field structure
+            best_doc = None
+            best_score = -1
 
-            # Fetch sample from external storage (documents_data_line_items table)
-            logger.info(f"[Field Mappings] Fetching sample from external storage ({line_items_count} items)...")
-            ext_result = self.db.execute(text(f"""
-                SELECT data FROM documents_data_line_items
-                WHERE documents_data_id = '{documents_data_id}'
-                ORDER BY line_number
-                LIMIT 1
-            """))
-            ext_row = ext_result.fetchone()
-            if ext_row:
-                sample_item = ext_row[0] or {}
-                logger.info(f"[Field Mappings] Retrieved sample from external storage: {list(sample_item.keys())}")
-            else:
-                logger.warning("[Field Mappings] No sample found in external line items table")
+            for row in rows:
+                documents_data_id = row[0]
+                schema_type = row[1]
+                header_data = row[2] or {}
+                line_items_count = row[3]
+
+                # Fetch a sample item to check field names
+                ext_result = self.db.execute(text(f"""
+                    SELECT data FROM documents_data_line_items
+                    WHERE documents_data_id = '{documents_data_id}'
+                    ORDER BY line_number
+                    LIMIT 1
+                """))
+                ext_row = ext_result.fetchone()
+                if not ext_row or not ext_row[0]:
+                    continue
+
+                sample_item = ext_row[0]
+                sample_fields = set(sample_item.keys()) - {'row_number'}
+
+                # Score: count how many standard fields this document has
+                standard_count = len(sample_fields.intersection(standard_fields))
+
+                logger.debug(f"[Field Mappings] Document {documents_data_id}: fields={list(sample_fields)}, standard_count={standard_count}")
+
+                if standard_count > best_score:
+                    best_score = standard_count
+                    best_doc = {
+                        'id': documents_data_id,
+                        'schema_type': schema_type,
+                        'header_data': header_data,
+                        'line_items_count': line_items_count,
+                        'sample_item': sample_item,
+                    }
+
+            if not best_doc:
+                logger.warning("[Field Mappings] No valid documents with line items found")
                 return {}
+
+            documents_data_id = best_doc['id']
+            schema_type = best_doc['schema_type']
+            header_data = best_doc['header_data']
+            line_items_count = best_doc['line_items_count']
+            sample_item = best_doc['sample_item']
+
+            logger.info(f"[Field Mappings] Selected document with {best_score} standard fields from {len(rows)} candidates")
+            logger.info(f"[Field Mappings] Sample fields: {list(sample_item.keys())}")
 
             # Build field mappings based on discovered fields
             field_mappings = {}
@@ -1898,6 +1931,7 @@ class SQLQueryExecutor:
                 return field_mappings
 
             # Map line item fields (for non-spreadsheet documents)
+            # Known field semantics for standard invoice/receipt fields
             line_item_semantics = {
                 'description': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
                 'item': {'semantic_type': 'product', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
@@ -1907,11 +1941,31 @@ class SQLQueryExecutor:
                 'unit_price': {'semantic_type': 'price', 'data_type': 'number', 'source': 'line_item'},
                 'quantity': {'semantic_type': 'quantity', 'data_type': 'number', 'source': 'line_item', 'aggregation': 'sum'},
                 'category': {'semantic_type': 'category', 'data_type': 'string', 'source': 'line_item', 'aggregation': 'group_by'},
+                'sku': {'semantic_type': 'identifier', 'data_type': 'string', 'source': 'line_item'},
+                'tax_rate': {'semantic_type': 'rate', 'data_type': 'number', 'source': 'line_item'},
             }
 
+            # Include ALL line item fields, not just known ones
+            # This ensures we capture all data even with unusual field names
             for field in sample_item.keys():
+                if field == 'row_number':
+                    continue  # Skip internal row number field
+
                 if field in line_item_semantics:
+                    # Use known semantics for standard fields
                     field_mappings[field] = line_item_semantics[field]
+                else:
+                    # For unknown fields, infer type from sample value and include them
+                    sample_value = sample_item.get(field)
+                    data_type = self._infer_data_type(sample_value)
+                    field_mappings[field] = {
+                        'semantic_type': 'unknown',
+                        'data_type': data_type,
+                        'source': 'line_item',
+                        'aggregation': 'sum' if data_type == 'number' else 'group_by',
+                        'original_field': field,
+                    }
+                    logger.info(f"[Field Mappings] Including unknown line item field: '{field}' (type={data_type})")
 
             logger.info(f"[Field Mappings] Inferred {len(field_mappings)} field mappings from {schema_type} data: {list(field_mappings.keys())}")
             return field_mappings
