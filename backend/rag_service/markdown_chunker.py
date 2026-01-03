@@ -84,6 +84,11 @@ MAX_CHUNK_SIZE_FOR_SPLIT = 1024  # Max size for recursive splitting
 BASE64_PATTERN = re.compile(r'data:image/[^;]+;base64,[A-Za-z0-9+/=]{100,}')
 # Pattern to detect long base64-like strings (without data: prefix)
 BASE64_LIKE_PATTERN = re.compile(r'[A-Za-z0-9+/=]{200,}')
+# Pattern to match full markdown image syntax with base64 data: ![alt](data:image/type;base64,...)
+MARKDOWN_IMAGE_BASE64_PATTERN = re.compile(
+    r'!\[[^\]]*\]\(data:image/[^)]+\)',
+    re.DOTALL
+)
 
 # Pattern to detect HTML tables
 HTML_TABLE_PATTERN = re.compile(r'<table>.*?</table>', re.DOTALL | re.IGNORECASE)
@@ -132,6 +137,85 @@ def clean_base64_from_content(content: str) -> str:
     # Replace base64 images with placeholder
     cleaned = BASE64_PATTERN.sub('[image]', content)
     return cleaned
+
+
+def clean_markdown_images(content: str) -> str:
+    """
+    Remove all embedded base64 images from markdown content.
+
+    This function handles multiple image formats:
+    - Full markdown syntax: ![alt](data:image/png;base64,...)
+    - Standalone data URIs: data:image/png;base64,...
+    - Long base64-like strings
+
+    Args:
+        content: Raw markdown content (may contain base64 images)
+
+    Returns:
+        Clean text content with images replaced by [image] placeholder
+    """
+    if not content:
+        return content
+
+    # Step 1: Remove full markdown image syntax with base64
+    # This handles: ![](data:image/png;base64,...) and ![alt text](data:image/...)
+    cleaned = MARKDOWN_IMAGE_BASE64_PATTERN.sub('[image]', content)
+
+    # Step 2: Remove any remaining standalone base64 data URIs
+    cleaned = BASE64_PATTERN.sub('[image]', cleaned)
+
+    # Step 3: Remove very long base64-like strings (safety net)
+    cleaned = BASE64_LIKE_PATTERN.sub('', cleaned)
+
+    # Step 4: Clean up multiple consecutive [image] placeholders
+    cleaned = re.sub(r'(\[image\]\s*)+', '[image]\n', cleaned)
+
+    # Step 5: Clean up excessive whitespace
+    cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)
+
+    return cleaned.strip()
+
+
+def get_text_content_for_classification(file_path: str, target_chars: int = 3000) -> str:
+    """
+    Extract text content from markdown file, skipping embedded base64 images.
+
+    This function reads enough raw content to get target_chars of actual text
+    after removing base64 image data. Useful for document classification where
+    we need actual text content, not image data.
+
+    Args:
+        file_path: Path to markdown file
+        target_chars: Target number of text characters to extract (default 3000)
+
+    Returns:
+        Clean text content suitable for LLM classification
+    """
+    collected_text = ""
+    chunk_size = 50000  # Read in 50KB chunks to handle large images
+    max_raw_bytes = 500000  # Safety limit: don't read more than 500KB
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            while len(collected_text) < target_chars:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+
+                # Remove base64 images from this chunk
+                clean_chunk = clean_markdown_images(chunk)
+                collected_text += clean_chunk
+
+                # Safety: don't read more than max_raw_bytes
+                if f.tell() > max_raw_bytes:
+                    break
+
+        # Trim to target size
+        return collected_text[:target_chars].strip()
+
+    except Exception as e:
+        logger.error(f"Error reading file for classification {file_path}: {e}")
+        return ""
 
 
 def extract_table_boundaries(content: str) -> List[Tuple[int, int, str]]:

@@ -62,7 +62,12 @@ from rag_service.indexer import trigger_embedding_for_document, reindex_document
 
 # Import GraphRAG for source-level deletion and Neo4j initialization
 try:
-    from rag_service.graph_rag import delete_graphrag_by_source_sync, GRAPH_RAG_INDEX_ENABLED, GRAPH_RAG_QUERY_ENABLED
+    from rag_service.graph_rag import (
+        delete_graphrag_by_source_sync,
+        delete_graphrag_by_document_id_sync,
+        GRAPH_RAG_INDEX_ENABLED,
+        GRAPH_RAG_QUERY_ENABLED
+    )
     GRAPHRAG_DELETE_AVAILABLE = True
 except ImportError:
     GRAPHRAG_DELETE_AVAILABLE = False
@@ -1514,9 +1519,13 @@ async def delete_document(
             except Exception as e:
                 errors.append(f"Failed to delete JSONL file: {str(e)}")
 
-        # Delete embeddings using document ID
+        # Delete embeddings using document ID and output path
         try:
-            indexing_service.delete_document_embeddings(filename, document_id)
+            indexing_service.delete_document_embeddings(
+                filename=filename,
+                doc_id=document_id,
+                output_path=output_folder_path if output_folder_path else None
+            )
             logger.info(f"Deleted embeddings for document: {document_id}")
         except Exception as e:
             errors.append(f"Failed to delete embeddings: {str(e)}")
@@ -1524,7 +1533,12 @@ async def delete_document(
         # Delete GraphRAG data if available
         if GRAPHRAG_DELETE_AVAILABLE:
             try:
-                # Use the source name (folder name) for GraphRAG deletion
+                # Strategy 1: Delete by document_id (most reliable)
+                deleted_count = delete_graphrag_by_document_id_sync(document_id)
+                if deleted_count > 0:
+                    logger.info(f"Deleted {deleted_count} GraphRAG entities by document_id: {document_id}")
+
+                # Strategy 2: Also try by source name as fallback (for legacy data)
                 source_name = file_name_without_ext
                 delete_graphrag_by_source_sync(source_name)
                 logger.info(f"Deleted GraphRAG data for source: {source_name}")

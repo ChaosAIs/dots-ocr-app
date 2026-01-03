@@ -1125,10 +1125,16 @@ class AdaptiveChunker:
         existing_metadata: Optional[Dict[str, Any]] = None
     ) -> List[Document]:
         """
-        Generate 1-3 summary chunks for tabular document discovery.
+        Generate a single comprehensive summary chunk for tabular document discovery.
 
-        Instead of creating 100+ row chunks, create strategic summary chunks
-        that enable document discovery via vector search.
+        Instead of creating 100+ row chunks, create ONE strategic summary chunk
+        that combines document overview, schema info, and sample data context
+        for efficient vector search without duplicate results.
+
+        Benefits:
+        - Single chunk = no duplicate search results
+        - All relevant info in one place for RAG
+        - Simpler architecture
         """
         chunks = []
 
@@ -1137,7 +1143,7 @@ class AdaptiveChunker:
         row_count = analysis.get("row_count_estimate", 0)
         table_ratio = analysis.get("table_content_ratio", 0)
 
-        # Common metadata for all chunks
+        # Metadata for the comprehensive chunk
         base_metadata = {
             "source": source_name,
             "file_path": file_path,
@@ -1158,14 +1164,16 @@ class AdaptiveChunker:
             "recommended_strategy": profile.recommended_strategy,
             "skip_score": analysis.get("skip_score", 0),
             "skip_reason": f"score:{analysis.get('skip_score', 0):.2f}",
+            "chunk_index": 0,
         }
 
         # Merge with existing metadata if provided
         if existing_metadata:
             base_metadata.update(existing_metadata)
 
-        # ===== CHUNK 1: Document Summary =====
-        summary_text = self._generate_document_summary_text(
+        # ===== SINGLE COMPREHENSIVE CHUNK =====
+        # Combines document summary, schema info, and sample data into one chunk
+        comprehensive_text = self._generate_comprehensive_summary_text(
             source_name=source_name,
             headers=headers,
             row_count=row_count,
@@ -1173,37 +1181,11 @@ class AdaptiveChunker:
             profile=profile
         )
 
-        chunk1_metadata = {**base_metadata, "chunk_type": "tabular_summary", "chunk_index": 0}
         chunks.append(Document(
-            page_content=summary_text,
-            metadata=chunk1_metadata
+            page_content=comprehensive_text,
+            metadata=base_metadata
         ))
-        logger.info(f"[Tabular] Generated summary chunk: {len(summary_text)} chars")
-
-        # ===== CHUNK 2: Schema Description =====
-        schema_text = self._generate_schema_description_text(
-            headers=headers,
-            row_count=row_count,
-            content=content
-        )
-
-        chunk2_metadata = {**base_metadata, "chunk_type": "tabular_schema", "chunk_index": 1}
-        chunks.append(Document(
-            page_content=schema_text,
-            metadata=chunk2_metadata
-        ))
-        logger.info(f"[Tabular] Generated schema chunk: {len(schema_text)} chars")
-
-        # ===== CHUNK 3: Sample Data Context (optional, if enough rows) =====
-        if row_count > 5:
-            sample_text = self._generate_sample_data_text(content, headers)
-            if sample_text and len(sample_text) > 50:
-                chunk3_metadata = {**base_metadata, "chunk_type": "tabular_sample", "chunk_index": 2}
-                chunks.append(Document(
-                    page_content=sample_text,
-                    metadata=chunk3_metadata
-                ))
-                logger.info(f"[Tabular] Generated sample data chunk: {len(sample_text)} chars")
+        logger.info(f"[Tabular] Generated comprehensive summary chunk: {len(comprehensive_text)} chars")
 
         return chunks
 
@@ -1348,6 +1330,76 @@ class AdaptiveChunker:
             sample_parts.append(row)
 
         return '\n'.join(sample_parts)
+
+    def _generate_comprehensive_summary_text(
+        self,
+        source_name: str,
+        headers: List[str],
+        row_count: int,
+        content: str,
+        profile: ChunkingProfile
+    ) -> str:
+        """
+        Generate a single comprehensive summary combining document overview,
+        schema info, and sample data context.
+
+        This replaces the previous multi-chunk approach with a single unified text
+        that captures all relevant information for vector search.
+        """
+        doc_type = profile.document_type or "tabular data"
+        parts = []
+
+        # ===== SECTION 1: Document Overview =====
+        parts.append(f"# {source_name}")
+        parts.append("")
+        parts.append(f"This is a {doc_type} document containing {row_count} data rows with {len(headers)} columns.")
+        parts.append("")
+
+        # Try to infer content type from headers/source name
+        source_lower = source_name.lower()
+        if any(kw in source_lower for kw in ["sales", "revenue", "transaction", "order"]):
+            parts.append("This appears to be sales/transaction data suitable for revenue analysis.")
+        elif any(kw in source_lower for kw in ["inventory", "stock", "product", "sku"]):
+            parts.append("This appears to be inventory/product data suitable for stock analysis.")
+        elif any(kw in source_lower for kw in ["employee", "hr", "payroll", "staff"]):
+            parts.append("This appears to be HR/employee data.")
+        elif any(kw in source_lower for kw in ["invoice", "receipt", "billing"]):
+            parts.append("This appears to be financial/billing data.")
+        parts.append("")
+
+        # ===== SECTION 2: Schema/Column Information =====
+        if headers:
+            parts.append(f"## Data Schema ({len(headers)} columns)")
+            parts.append("")
+            parts.append(f"Column names: {', '.join(headers[:15])}")
+            if len(headers) > 15:
+                parts.append(f"...and {len(headers) - 15} more columns.")
+            parts.append("")
+
+            # Try to identify field types from header names
+            amount_fields = [h for h in headers if any(kw in h.lower() for kw in
+                ["amount", "price", "cost", "total", "sum", "revenue", "value", "qty", "quantity"])]
+            date_fields = [h for h in headers if any(kw in h.lower() for kw in
+                ["date", "time", "created", "updated", "timestamp", "day", "month", "year"])]
+            category_fields = [h for h in headers if any(kw in h.lower() for kw in
+                ["category", "type", "status", "group", "class", "department", "region"])]
+
+            if amount_fields or date_fields or category_fields:
+                parts.append("### Field Types (inferred)")
+                if amount_fields:
+                    parts.append(f"- Numeric/Amount fields (for aggregation): {', '.join(amount_fields[:5])}")
+                if date_fields:
+                    parts.append(f"- Date fields (for time-based analysis): {', '.join(date_fields[:5])}")
+                if category_fields:
+                    parts.append(f"- Category fields (for grouping): {', '.join(category_fields[:5])}")
+                parts.append("")
+
+        # ===== SECTION 3: Sample Data Context =====
+        sample_text = self._generate_sample_data_text(content, headers)
+        if sample_text:
+            parts.append(sample_text)
+
+        return '\n'.join(parts)
 
 
 def chunk_document_adaptive(

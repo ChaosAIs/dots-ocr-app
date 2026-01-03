@@ -409,11 +409,22 @@ class TabularExtractionService:
         logger.debug("[Tabular] _generate_summary_chunks() called")
 
         chunks = []
-        headers = document_data.header_data.get("column_headers", [])
+        # Get column headers (for spreadsheets) - may be empty for invoices
+        column_headers = document_data.header_data.get("column_headers", [])
         row_count = document_data.line_items_count
         field_mappings = document_data.extraction_metadata.get("field_mappings", {}) if document_data.extraction_metadata else {}
 
-        logger.debug(f"[Tabular] Headers: {headers}")
+        # Extract invoice/document header data (vendor, customer, dates, amounts, etc.)
+        # These are the actual extracted values, not column names
+        extracted_header_data = {k: v for k, v in document_data.header_data.items()
+                                  if k not in ["column_headers", "_field_normalization"] and v is not None}
+
+        # Get summary data (subtotal, total_amount, tax, etc.)
+        summary_data = document_data.summary_data or {}
+
+        logger.debug(f"[Tabular] Column headers: {column_headers}")
+        logger.debug(f"[Tabular] Extracted header data: {extracted_header_data}")
+        logger.debug(f"[Tabular] Summary data: {summary_data}")
         logger.debug(f"[Tabular] Row count: {row_count}")
         logger.debug(f"[Tabular] Field mappings: {len(field_mappings)} fields")
 
@@ -421,6 +432,12 @@ class TabularExtractionService:
         doc = self.db.query(Document).filter(Document.id == document_id).first() if self.db else None
         workspace_id = str(doc.workspace_id) if doc and doc.workspace_id else None
         logger.debug(f"[Tabular] Workspace ID: {workspace_id}")
+
+        # Combine column headers with extracted field names for comprehensive column list
+        all_columns = list(column_headers) + list(extracted_header_data.keys()) + list(summary_data.keys())
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_columns = [x for x in all_columns if not (x in seen or seen.add(x))]
 
         # Common metadata for all chunks
         base_metadata = {
@@ -430,12 +447,34 @@ class TabularExtractionService:
             "is_tabular": True,
             "schema_type": document_data.schema_type,
             "row_count": row_count,
-            "column_count": len(headers),
-            "columns": headers,
+            "column_count": len(unique_columns),
+            "columns": unique_columns,
             "chunk_type": "tabular_summary",  # Mark as tabular for filtering
         }
         if workspace_id:
             base_metadata["workspace_id"] = workspace_id
+
+        # Add flattened header fields for structured filtering (e.g., filter by vendor_name)
+        if extracted_header_data.get("invoice_number"):
+            base_metadata["invoice_number"] = extracted_header_data["invoice_number"]
+        if extracted_header_data.get("vendor_name"):
+            base_metadata["vendor_name"] = extracted_header_data["vendor_name"]
+        if extracted_header_data.get("customer_name"):
+            base_metadata["customer_name"] = extracted_header_data["customer_name"]
+        if extracted_header_data.get("invoice_date"):
+            base_metadata["invoice_date"] = extracted_header_data["invoice_date"]
+        if extracted_header_data.get("due_date"):
+            base_metadata["due_date"] = extracted_header_data["due_date"]
+        if extracted_header_data.get("currency"):
+            base_metadata["currency"] = extracted_header_data["currency"]
+
+        # Add flattened summary fields for numeric filtering (e.g., filter by total_amount > 100)
+        if summary_data.get("total_amount"):
+            base_metadata["total_amount"] = summary_data["total_amount"]
+        if summary_data.get("subtotal"):
+            base_metadata["subtotal"] = summary_data["subtotal"]
+        if summary_data.get("tax_amount"):
+            base_metadata["tax_amount"] = summary_data["tax_amount"]
 
         # Extract field type information (safely handle both dict and string values)
         amount_fields = [k for k, v in field_mappings.items()
@@ -454,16 +493,20 @@ class TabularExtractionService:
         sample_rows = self._fetch_sample_line_items(document_data.id, limit=10)
         logger.debug(f"[Tabular] Sample rows for LLM: {len(sample_rows)}")
 
-        # ===== CHUNK 1: Document Summary =====
-        logger.info("[Tabular] Generating CHUNK 1: Document Summary...")
-        summary_text, summary_method = self._generate_document_summary(
+        # ===== SINGLE COMPREHENSIVE CHUNK =====
+        # Combines document summary, schema info, and business context into one chunk
+        # Benefits: 1 LLM call, no duplicate search results, simpler architecture
+        logger.info("[Tabular] Generating comprehensive summary chunk...")
+        summary_text, summary_method = self._generate_comprehensive_summary(
             filename=filename,
-            headers=headers,
+            headers=unique_columns,
             row_count=row_count,
             sample_rows=sample_rows,
-            field_mappings=field_mappings
+            field_mappings=field_mappings,
+            header_data=extracted_header_data,
+            summary_data=summary_data
         )
-        logger.info(f"[Tabular] CHUNK 1 generated using method: {summary_method}")
+        logger.info(f"[Tabular] Comprehensive summary generated using method: {summary_method}")
 
         chunks.append(LangchainDocument(
             page_content=summary_text,
@@ -471,62 +514,259 @@ class TabularExtractionService:
                 **base_metadata,
                 "chunk_type": "tabular_summary",
                 "chunk_id": f"{document_id}_summary",
-                "summary_method": summary_method
-            }
-        ))
-
-        # ===== CHUNK 2: Schema Description =====
-        logger.info("[Tabular] Generating CHUNK 2: Schema Description...")
-        schema_text, schema_method = self._generate_schema_description(
-            filename=filename,
-            headers=headers,
-            field_mappings=field_mappings,
-            row_count=row_count,
-            sample_rows=sample_rows
-        )
-        logger.info(f"[Tabular] CHUNK 2 generated using method: {schema_method}")
-
-        chunks.append(LangchainDocument(
-            page_content=schema_text,
-            metadata={
-                **base_metadata,
-                "chunk_type": "tabular_schema",
-                "chunk_id": f"{document_id}_schema",
+                "summary_method": summary_method,
                 "amount_fields": amount_fields,
                 "date_fields": date_fields,
                 "category_fields": category_fields,
-                "schema_method": schema_method
             }
         ))
 
-        # ===== CHUNK 3: Business Context (Optional) =====
-        if sample_rows:
-            logger.info("[Tabular] Generating CHUNK 3: Business Context...")
-            context_text, context_method = self._generate_business_context(
-                filename=filename,
-                headers=headers,
-                sample_rows=sample_rows,
-                field_mappings=field_mappings
-            )
-
-            if context_text and len(context_text.strip()) > 50:
-                logger.info(f"[Tabular] CHUNK 3 generated using method: {context_method}")
-                chunks.append(LangchainDocument(
-                    page_content=context_text,
-                    metadata={
-                        **base_metadata,
-                        "chunk_type": "tabular_context",
-                        "chunk_id": f"{document_id}_context",
-                        "context_method": context_method
-                    }
-                ))
-            else:
-                logger.info("[Tabular] CHUNK 3 skipped (insufficient content)")
-        else:
-            logger.info("[Tabular] CHUNK 3 skipped (no sample rows)")
-
         logger.info(f"[Tabular] Total summary chunks generated: {len(chunks)}")
         return chunks
+
+    def _generate_comprehensive_summary(
+        self,
+        filename: str,
+        headers: List[str],
+        row_count: int,
+        sample_rows: List[Dict],
+        field_mappings: Dict,
+        header_data: Dict = None,
+        summary_data: Dict = None
+    ) -> Tuple[str, str]:
+        """
+        Generate a single comprehensive summary combining document overview,
+        schema info, and business context.
+
+        This replaces the previous 3-chunk approach (summary, schema, context)
+        with a single LLM call that produces a search-optimized comprehensive chunk.
+
+        Benefits:
+        - Single LLM call (faster, cheaper)
+        - No duplicate search results
+        - Simpler architecture
+        - All relevant info in one place for RAG
+
+        Returns:
+            Tuple of (summary_text, generation_method)
+            generation_method is "llm" or "rule_based"
+        """
+        logger.debug("[Tabular] _generate_comprehensive_summary() called")
+        llm = self._get_llm()
+        header_data = header_data or {}
+        summary_data = summary_data or {}
+
+        # Build header info string for invoice-like documents
+        header_info = ""
+        if header_data:
+            header_parts = []
+            if header_data.get("invoice_number"):
+                header_parts.append(f"Invoice Number: {header_data['invoice_number']}")
+            if header_data.get("vendor_name"):
+                header_parts.append(f"Vendor: {header_data['vendor_name']}")
+            if header_data.get("customer_name"):
+                header_parts.append(f"Customer: {header_data['customer_name']}")
+            if header_data.get("invoice_date"):
+                header_parts.append(f"Invoice Date: {header_data['invoice_date']}")
+            if header_data.get("due_date"):
+                header_parts.append(f"Due Date: {header_data['due_date']}")
+            if header_data.get("currency"):
+                header_parts.append(f"Currency: {header_data['currency']}")
+            # Include any other header fields
+            for key, value in header_data.items():
+                if key not in ["invoice_number", "vendor_name", "customer_name", "invoice_date", "due_date", "currency"] and value:
+                    header_parts.append(f"{key}: {value}")
+            if header_parts:
+                header_info = "\n- " + "\n- ".join(header_parts)
+
+        # Build summary/totals info string
+        summary_info = ""
+        if summary_data:
+            summary_parts = []
+            if summary_data.get("total_amount"):
+                summary_parts.append(f"Total Amount: ${summary_data['total_amount']}")
+            if summary_data.get("subtotal"):
+                summary_parts.append(f"Subtotal: ${summary_data['subtotal']}")
+            if summary_data.get("tax_amount"):
+                summary_parts.append(f"Tax: ${summary_data['tax_amount']}")
+            # Include any other summary fields
+            for key, value in summary_data.items():
+                if key not in ["total_amount", "subtotal", "tax_amount"] and value:
+                    summary_parts.append(f"{key}: {value}")
+            if summary_parts:
+                summary_info = "\n- " + "\n- ".join(summary_parts)
+
+        # Extract field type information (safely handle both dict and string values)
+        amount_fields = [k for k, v in field_mappings.items()
+                        if isinstance(v, dict) and v.get("semantic_type") == "amount"]
+        date_fields = [k for k, v in field_mappings.items()
+                      if isinstance(v, dict) and v.get("semantic_type") == "date"]
+        category_fields = [k for k, v in field_mappings.items()
+                         if isinstance(v, dict) and v.get("aggregation") == "group_by"]
+
+        # PRIMARY: LLM-based comprehensive summary
+        if llm and (sample_rows or header_data):
+            try:
+                logger.info("[Tabular] Using LLM for comprehensive summary generation...")
+
+                # Get sample values per column for schema context
+                sample_values = {}
+                for header in headers[:10]:  # Limit to first 10 columns
+                    values = [str(row.get(header, "")) for row in sample_rows[:5] if row.get(header)]
+                    if values:
+                        sample_values[header] = values[:3]
+
+                # Extract unique values from categorical fields for context
+                category_values = {}
+                for field, mapping in field_mappings.items():
+                    if isinstance(mapping, dict) and mapping.get("aggregation") == "group_by":
+                        values = set()
+                        for row in sample_rows:
+                            if field in row and row[field]:
+                                values.add(str(row[field]))
+                        if values:
+                            category_values[field] = list(values)[:5]
+
+                prompt = f"""You are analyzing a tabular dataset to generate a comprehensive search-optimized summary.
+This summary will be embedded for vector search, so include ALL key identifying information.
+
+=== DOCUMENT INFORMATION ===
+Filename: {filename}
+Total Rows: {row_count}
+Columns ({len(headers)}): {', '.join(headers[:15])}{'...' if len(headers) > 15 else ''}
+{f"Document Header Information:{header_info}" if header_info else ""}
+{f"Financial Summary:{summary_info}" if summary_info else ""}
+
+=== SAMPLE DATA ===
+{json.dumps(sample_rows[:5], indent=2, default=str) if sample_rows else "No sample rows available"}
+
+=== FIELD ANALYSIS ===
+{f"Amount/Numeric Fields: {', '.join(amount_fields)}" if amount_fields else ""}
+{f"Date Fields: {', '.join(date_fields)}" if date_fields else ""}
+{f"Category/Grouping Fields: {', '.join(category_fields)}" if category_fields else ""}
+
+Generate a comprehensive summary (4-6 sentences) that includes:
+
+1. DOCUMENT IDENTITY: What type of document is this? Include specific identifiers like invoice numbers, vendor names, customer names.
+
+2. KEY VALUES: Include the actual amounts, dates, and totals from the document. Example: "Invoice #AXVGVB-00004 from Augment Code to yangzhenwu@gmail.com for $50.00"
+
+3. DATA STRUCTURE: What columns/fields does this contain? What can be analyzed or aggregated?
+
+4. BUSINESS CONTEXT: What business domain is this from? What questions could this data answer?
+
+CRITICAL REQUIREMENTS:
+- Include SPECIFIC values (invoice numbers, vendor names, amounts, dates) - these are essential for search
+- Write in natural language optimized for semantic search
+- A user searching for "Augment Code invoice" or "invoice $50" should find this document
+- Include both the document overview AND the key identifying details
+
+Summary:"""
+
+                logger.debug(f"[Tabular] LLM prompt length: {len(prompt)} chars")
+                chat_model = llm.get_chat_model(temperature=0.3, num_predict=500)
+                response = chat_model.invoke(prompt)
+                summary = response.content.strip() if hasattr(response, 'content') else str(response).strip()
+
+                logger.info(f"[Tabular] LLM comprehensive summary generated ({len(summary)} chars)")
+                logger.debug(f"[Tabular] Summary preview: {summary[:300]}...")
+                return summary, "llm"
+
+            except Exception as e:
+                logger.warning(f"[Tabular] LLM comprehensive summary generation failed: {e}")
+                logger.info("[Tabular] Falling back to rule-based summary...")
+
+        else:
+            if not llm:
+                logger.info("[Tabular] LLM not available, using rule-based summary")
+            if not sample_rows and not header_data:
+                logger.info("[Tabular] No data available, using rule-based summary")
+
+        # FALLBACK: Rule-based comprehensive summary
+        summary = self._generate_fallback_comprehensive_summary(
+            filename, headers, row_count, field_mappings, header_data, summary_data
+        )
+        logger.info(f"[Tabular] Rule-based comprehensive summary generated ({len(summary)} chars)")
+        return summary, "rule_based"
+
+    def _generate_fallback_comprehensive_summary(
+        self,
+        filename: str,
+        headers: List[str],
+        row_count: int,
+        field_mappings: Dict,
+        header_data: Dict = None,
+        summary_data: Dict = None
+    ) -> str:
+        """
+        Rule-based fallback for comprehensive summary when LLM is unavailable.
+        Combines document identity, key values, structure, and context.
+        """
+        logger.debug("[Tabular] _generate_fallback_comprehensive_summary() called")
+        header_data = header_data or {}
+        summary_data = summary_data or {}
+
+        parts = []
+
+        # 1. Document identity with specific values
+        identity_parts = []
+        if header_data.get("invoice_number"):
+            identity_parts.append(f"Invoice #{header_data['invoice_number']}")
+        if header_data.get("vendor_name"):
+            identity_parts.append(f"from {header_data['vendor_name']}")
+        if header_data.get("customer_name"):
+            identity_parts.append(f"to {header_data['customer_name']}")
+
+        if identity_parts:
+            parts.append(" ".join(identity_parts) + ".")
+        else:
+            # Detect document type from filename
+            doc_type = "tabular data"
+            filename_lower = filename.lower()
+            if any(kw in filename_lower for kw in ["invoice", "receipt", "billing"]):
+                doc_type = "invoice/billing document"
+            elif any(kw in filename_lower for kw in ["sales", "revenue", "transaction"]):
+                doc_type = "sales/transaction data"
+            elif any(kw in filename_lower for kw in ["inventory", "stock", "product"]):
+                doc_type = "inventory/product data"
+            parts.append(f"This is a {doc_type}.")
+
+        # 2. Key values (amounts, dates)
+        value_parts = []
+        if summary_data.get("total_amount"):
+            value_parts.append(f"Total: ${summary_data['total_amount']}")
+        if summary_data.get("subtotal"):
+            value_parts.append(f"Subtotal: ${summary_data['subtotal']}")
+        if header_data.get("invoice_date"):
+            value_parts.append(f"Date: {header_data['invoice_date']}")
+        if header_data.get("due_date"):
+            value_parts.append(f"Due: {header_data['due_date']}")
+
+        if value_parts:
+            parts.append(" | ".join(value_parts) + ".")
+
+        # 3. Data structure
+        parts.append(f"Contains {row_count} rows with {len(headers)} columns: {', '.join(headers[:8])}{'...' if len(headers) > 8 else ''}.")
+
+        # 4. Field type info (safely handle both dict and string values)
+        amount_fields = [k for k, v in field_mappings.items()
+                        if isinstance(v, dict) and v.get("semantic_type") == "amount"]
+        date_fields = [k for k, v in field_mappings.items()
+                      if isinstance(v, dict) and v.get("semantic_type") == "date"]
+        category_fields = [k for k, v in field_mappings.items()
+                         if isinstance(v, dict) and v.get("aggregation") == "group_by"]
+
+        if amount_fields:
+            parts.append(f"Numeric fields for analysis: {', '.join(amount_fields[:4])}.")
+        if date_fields:
+            parts.append(f"Date tracking: {', '.join(date_fields[:3])}.")
+        if category_fields:
+            parts.append(f"Grouping fields: {', '.join(category_fields[:3])}.")
+
+        # 5. Source reference
+        parts.append(f"Source: '{filename}'.")
+
+        return " ".join(parts)
 
     def _generate_document_summary(
         self,
@@ -534,7 +774,9 @@ class TabularExtractionService:
         headers: List[str],
         row_count: int,
         sample_rows: List[Dict],
-        field_mappings: Dict
+        field_mappings: Dict,
+        header_data: Dict = None,
+        summary_data: Dict = None
     ) -> Tuple[str, str]:
         """
         Generate a natural language summary of the document using LLM.
@@ -548,9 +790,41 @@ class TabularExtractionService:
         """
         logger.debug("[Tabular] _generate_document_summary() called")
         llm = self._get_llm()
+        header_data = header_data or {}
+        summary_data = summary_data or {}
+
+        # Build header info string for invoice-like documents
+        header_info = ""
+        if header_data:
+            header_parts = []
+            if header_data.get("invoice_number"):
+                header_parts.append(f"Invoice #: {header_data['invoice_number']}")
+            if header_data.get("vendor_name"):
+                header_parts.append(f"Vendor: {header_data['vendor_name']}")
+            if header_data.get("customer_name"):
+                header_parts.append(f"Customer: {header_data['customer_name']}")
+            if header_data.get("invoice_date"):
+                header_parts.append(f"Date: {header_data['invoice_date']}")
+            if header_data.get("due_date"):
+                header_parts.append(f"Due: {header_data['due_date']}")
+            if header_parts:
+                header_info = "\n- " + "\n- ".join(header_parts)
+
+        # Build summary info string
+        summary_info = ""
+        if summary_data:
+            summary_parts = []
+            if summary_data.get("total_amount"):
+                summary_parts.append(f"Total: ${summary_data['total_amount']}")
+            if summary_data.get("subtotal"):
+                summary_parts.append(f"Subtotal: ${summary_data['subtotal']}")
+            if summary_data.get("tax_amount"):
+                summary_parts.append(f"Tax: ${summary_data['tax_amount']}")
+            if summary_parts:
+                summary_info = "\n- " + "\n- ".join(summary_parts)
 
         # PRIMARY: LLM-based summary
-        if llm and sample_rows:
+        if llm and (sample_rows or header_data):
             try:
                 logger.info("[Tabular] Using LLM for document summary generation...")
                 prompt = f"""You are analyzing a tabular dataset to generate a search-optimized summary.
@@ -559,19 +833,22 @@ Dataset Information:
 - Filename: {filename}
 - Total Rows: {row_count}
 - Columns: {', '.join(headers)}
+{f"Document Header Information:{header_info}" if header_info else ""}
+{f"Financial Summary:{summary_info}" if summary_info else ""}
 
-Sample Data (first {len(sample_rows)} rows):
-{json.dumps(sample_rows[:5], indent=2, default=str)}
+Sample Data (first {min(len(sample_rows), 5)} rows):
+{json.dumps(sample_rows[:5], indent=2, default=str) if sample_rows else "No sample rows available"}
 
 Field Analysis:
-{json.dumps(field_mappings, indent=2)}
+{json.dumps(field_mappings, indent=2) if field_mappings else "No field mappings"}
 
 Generate a 2-4 sentence summary that captures:
-1. What type of data this is (sales, inventory, HR, financial, logistics, etc.)
-2. The time period covered (if date fields exist)
-3. Key entities or categories present (companies, products, regions, etc.)
+1. What type of data this is (invoice, receipt, sales, inventory, HR, financial, etc.)
+2. Key identifying information (invoice number, vendor, customer, dates)
+3. The amounts/totals involved
 4. The apparent business purpose
 
+IMPORTANT: Include specific values like invoice numbers, vendor names, and amounts in the summary.
 The summary should help users find this document when searching for related data.
 Write in natural language, optimized for semantic search.
 
@@ -597,7 +874,9 @@ Summary:"""
                 logger.info("[Tabular] No sample rows, using rule-based summary")
 
         # FALLBACK: Rule-based summary
-        summary = self._generate_fallback_summary(filename, headers, row_count, field_mappings)
+        summary = self._generate_fallback_summary(
+            filename, headers, row_count, field_mappings, header_data, summary_data
+        )
         logger.info(f"[Tabular] Rule-based summary generated ({len(summary)} chars)")
         return summary, "rule_based"
 
@@ -606,10 +885,14 @@ Summary:"""
         filename: str,
         headers: List[str],
         row_count: int,
-        field_mappings: Dict
+        field_mappings: Dict,
+        header_data: Dict = None,
+        summary_data: Dict = None
     ) -> str:
         """Rule-based fallback when LLM is unavailable."""
         logger.debug("[Tabular] _generate_fallback_summary() called")
+        header_data = header_data or {}
+        summary_data = summary_data or {}
 
         # Detect document type from filename
         doc_type = "tabular data"
@@ -638,8 +921,28 @@ Summary:"""
         category_fields = [k for k, v in field_mappings.items()
                          if isinstance(v, dict) and v.get("aggregation") == "group_by"]
 
-        # Build summary
-        summary = f"'{filename}' containing {row_count} rows of {doc_type}. "
+        # Build summary with header data (invoice details)
+        summary_parts = []
+
+        # Include key document identifiers
+        if header_data.get("invoice_number"):
+            summary_parts.append(f"Invoice #{header_data['invoice_number']}")
+        if header_data.get("vendor_name"):
+            summary_parts.append(f"from {header_data['vendor_name']}")
+        if header_data.get("customer_name"):
+            summary_parts.append(f"to {header_data['customer_name']}")
+
+        if summary_parts:
+            summary = " ".join(summary_parts) + ". "
+        else:
+            summary = ""
+
+        summary += f"'{filename}' containing {row_count} rows of {doc_type}. "
+
+        # Include financial totals
+        if summary_data.get("total_amount"):
+            summary += f"Total amount: ${summary_data['total_amount']}. "
+
         summary += f"Columns: {', '.join(headers[:6])}{'...' if len(headers) > 6 else ''}. "
 
         if amount_fields:
@@ -657,7 +960,9 @@ Summary:"""
         headers: List[str],
         field_mappings: Dict,
         row_count: int,
-        sample_rows: List[Dict]
+        sample_rows: List[Dict],
+        header_data: Dict = None,
+        summary_data: Dict = None
     ) -> Tuple[str, str]:
         """
         Generate a schema description using LLM for dynamic adaptation.
@@ -667,9 +972,31 @@ Summary:"""
         """
         logger.debug("[Tabular] _generate_schema_description() called")
         llm = self._get_llm()
+        header_data = header_data or {}
+        summary_data = summary_data or {}
+
+        # Build header info string for invoice-like documents
+        header_info = ""
+        if header_data:
+            header_parts = []
+            for key, value in header_data.items():
+                if value:
+                    header_parts.append(f"{key}: {value}")
+            if header_parts:
+                header_info = "\n- " + "\n- ".join(header_parts)
+
+        # Build summary info string
+        summary_info = ""
+        if summary_data:
+            summary_parts = []
+            for key, value in summary_data.items():
+                if value:
+                    summary_parts.append(f"{key}: {value}")
+            if summary_parts:
+                summary_info = "\n- " + "\n- ".join(summary_parts)
 
         # PRIMARY: LLM-based schema description
-        if llm and sample_rows:
+        if llm and (sample_rows or header_data):
             try:
                 logger.info("[Tabular] Using LLM for schema description generation...")
 
@@ -684,20 +1011,23 @@ Summary:"""
 Filename: {filename}
 Total Rows: {row_count}
 Columns: {', '.join(headers)}
+{f"Document Header Fields:{header_info}" if header_info else ""}
+{f"Summary/Totals Fields:{summary_info}" if summary_info else ""}
 
 Sample Values per Column:
-{json.dumps(sample_values, indent=2)}
+{json.dumps(sample_values, indent=2) if sample_values else "No sample values available"}
 
 Field Semantic Analysis (auto-detected types):
-{json.dumps(field_mappings, indent=2)}
+{json.dumps(field_mappings, indent=2) if field_mappings else "No field mappings"}
 
 Generate a concise schema description (2-3 paragraphs) that includes:
 1. Overview: Total columns and what the data represents
-2. Numeric fields: Which fields contain amounts/quantities that can be summed or averaged
-3. Categorical fields: Which fields are good for grouping/filtering
-4. Date fields: Which fields track time, and any date ranges you can infer
-5. Relationships: Any apparent relationships between fields
+2. Key document identifiers (invoice number, vendor, customer, dates if applicable)
+3. Numeric fields: Which fields contain amounts/quantities that can be summed or averaged
+4. Categorical fields: Which fields are good for grouping/filtering
+5. Date fields: Which fields track time, and any date ranges you can infer
 
+IMPORTANT: Include specific values like invoice numbers, vendor names, and amounts in the description.
 Format as natural language optimized for semantic search.
 
 Schema Description:"""
@@ -762,7 +1092,9 @@ Schema Description:"""
         filename: str,
         headers: List[str],
         sample_rows: List[Dict],
-        field_mappings: Dict
+        field_mappings: Dict,
+        header_data: Dict = None,
+        summary_data: Dict = None
     ) -> Tuple[str, str]:
         """
         Generate business context and insights using LLM.
@@ -774,9 +1106,31 @@ Schema Description:"""
         """
         logger.debug("[Tabular] _generate_business_context() called")
         llm = self._get_llm()
+        header_data = header_data or {}
+        summary_data = summary_data or {}
+
+        # Build header info string for invoice-like documents
+        header_info = ""
+        if header_data:
+            header_parts = []
+            for key, value in header_data.items():
+                if value:
+                    header_parts.append(f"{key}: {value}")
+            if header_parts:
+                header_info = "\n- " + "\n- ".join(header_parts)
+
+        # Build summary info string
+        summary_info = ""
+        if summary_data:
+            summary_parts = []
+            for key, value in summary_data.items():
+                if value:
+                    summary_parts.append(f"{key}: {value}")
+            if summary_parts:
+                summary_info = "\n- " + "\n- ".join(summary_parts)
 
         # PRIMARY: LLM-based business context
-        if llm and sample_rows:
+        if llm and (sample_rows or header_data):
             try:
                 logger.info("[Tabular] Using LLM for business context generation...")
 
@@ -797,19 +1151,22 @@ Schema Description:"""
 
 Filename: {filename}
 Columns: {', '.join(headers)}
+{f"Document Information:{header_info}" if header_info else ""}
+{f"Financial Totals:{summary_info}" if summary_info else ""}
 
-Sample Data (first {len(sample_rows)} rows):
-{json.dumps(sample_rows[:5], indent=2, default=str)}
+Sample Data (first {len(sample_rows) if sample_rows else 0} rows):
+{json.dumps(sample_rows[:5], indent=2, default=str) if sample_rows else "No sample rows available"}
 
 Unique Values in Key Fields:
-{json.dumps(category_values, indent=2)}
+{json.dumps(category_values, indent=2) if category_values else "No category values"}
 
 Identify and describe:
 1. Business Domain: What industry or function does this data serve? (retail, healthcare, finance, HR, logistics, manufacturing, etc.)
 2. Key Entities: What companies, products, people, or locations are mentioned?
-3. Data Patterns: What categories, types, or segments exist in the data?
+3. Transaction Details: Include specific invoice numbers, vendor/customer names, and amounts
 4. Use Cases: What business questions could this data answer?
 
+IMPORTANT: Include specific identifying information (invoice numbers, vendor names, amounts) in your description.
 Write 2-3 sentences capturing the business context, optimized for semantic search.
 
 Business Context:"""
@@ -871,6 +1228,9 @@ Business Context:"""
         """
         Index summary chunks to Qdrant vector store.
 
+        IMPORTANT: Deletes existing chunks for this document before adding new ones
+        to prevent duplicates when documents are re-uploaded or re-processed.
+
         Returns:
             List of chunk IDs that were indexed
         """
@@ -881,6 +1241,12 @@ Business Context:"""
             return []
 
         try:
+            # Delete existing chunks for this document to prevent duplicates
+            from rag_service.vectorstore import delete_documents_by_document_id
+            deleted_count = delete_documents_by_document_id(str(document_id))
+            if deleted_count > 0:
+                logger.info(f"[Tabular] Deleted {deleted_count} existing chunks for document {document_id}")
+
             logger.info(f"[Tabular] Getting Qdrant vectorstore...")
             vectorstore = get_vectorstore()
 

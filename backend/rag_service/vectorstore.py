@@ -792,33 +792,82 @@ def delete_documents_by_source(source_name: str) -> int:
     """
     Delete all documents with a specific source from the collection.
 
+    Uses multiple matching strategies to ensure all related vectors are deleted:
+    1. Exact match on source_name
+    2. Prefix match for sources with _page_N suffixes
+    3. Match with file extension variations
+
     Args:
-        source_name: The source name to delete (e.g., document folder name).
+        source_name: The source name to delete (e.g., document folder name without extension).
 
     Returns:
         Number of deleted documents.
     """
     client = get_qdrant_client()
+    total_deleted = 0
+
     try:
-        # Use scroll to find points with matching source metadata
-        # Qdrant filter by metadata
-        result = client.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="metadata.source",
-                            match=models.MatchValue(value=source_name),
-                        )
-                    ]
-                )
-            ),
-        )
-        logger.info(f"Deleted documents with source '{source_name}' from collection")
-        return result
+        # Strategy 1: Exact match on source_name
+        try:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="metadata.source",
+                                match=models.MatchValue(value=source_name),
+                            )
+                        ]
+                    )
+                ),
+            )
+            logger.info(f"[VectorDelete] Deleted vectors with exact source match: '{source_name}'")
+        except Exception as e:
+            logger.warning(f"[VectorDelete] Exact match deletion failed: {e}")
+
+        # Strategy 2: Scroll and delete vectors with source starting with source_name
+        # This catches sources like "filename_page_0", "filename.pdf_page_1", etc.
+        points_to_delete = []
+        offset = None
+
+        while True:
+            result = client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=100,
+                offset=offset,
+                with_payload=["metadata"],
+                with_vectors=False
+            )
+
+            points, offset = result
+            if not points:
+                break
+
+            for point in points:
+                source = point.payload.get("metadata", {}).get("source", "")
+                # Match if source starts with source_name (handles _page_N suffix)
+                # Also match if source starts with source_name + extension (handles .pdf_page_N, etc.)
+                if source == source_name or source.startswith(f"{source_name}_page_") or source.startswith(f"{source_name}."):
+                    points_to_delete.append(point.id)
+
+            if offset is None:
+                break
+
+        if points_to_delete:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.PointIdsList(points=points_to_delete)
+            )
+            total_deleted = len(points_to_delete)
+            logger.info(f"[VectorDelete] Deleted {total_deleted} vectors with source prefix: '{source_name}'")
+        else:
+            logger.info(f"[VectorDelete] No vectors found with source prefix: '{source_name}'")
+
+        return total_deleted
+
     except Exception as e:
-        logger.error(f"Error deleting documents by source '{source_name}': {e}")
+        logger.error(f"[VectorDelete] Error deleting documents by source '{source_name}': {e}")
         return 0
 
 
@@ -826,31 +875,139 @@ def delete_documents_by_file_path(file_path: str) -> int:
     """
     Delete all documents with a specific file_path from the collection.
 
+    Uses prefix matching to catch all related files in the same directory.
+
     Args:
-        file_path: The file path to delete.
+        file_path: The file path to delete (can be a directory path or file path).
 
     Returns:
         Number of deleted documents.
     """
     client = get_qdrant_client()
+    total_deleted = 0
+
     try:
-        result = client.delete(
-            collection_name=COLLECTION_NAME,
-            points_selector=models.FilterSelector(
-                filter=models.Filter(
+        # Strategy 1: Exact match
+        try:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.FilterSelector(
+                    filter=models.Filter(
+                        must=[
+                            models.FieldCondition(
+                                key="metadata.file_path",
+                                match=models.MatchValue(value=file_path),
+                            )
+                        ]
+                    )
+                ),
+            )
+            logger.info(f"[VectorDelete] Deleted vectors with exact file_path: '{file_path}'")
+        except Exception as e:
+            logger.warning(f"[VectorDelete] Exact file_path match failed: {e}")
+
+        # Strategy 2: Scroll and delete by file_path prefix (catches all files in directory)
+        points_to_delete = []
+        offset = None
+
+        while True:
+            result = client.scroll(
+                collection_name=COLLECTION_NAME,
+                limit=100,
+                offset=offset,
+                with_payload=["metadata"],
+                with_vectors=False
+            )
+
+            points, offset = result
+            if not points:
+                break
+
+            for point in points:
+                point_file_path = point.payload.get("metadata", {}).get("file_path", "")
+                # Match if file_path starts with the given path (directory matching)
+                if point_file_path and (point_file_path == file_path or point_file_path.startswith(f"{file_path}/")):
+                    points_to_delete.append(point.id)
+
+            if offset is None:
+                break
+
+        if points_to_delete:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.PointIdsList(points=points_to_delete)
+            )
+            total_deleted = len(points_to_delete)
+            logger.info(f"[VectorDelete] Deleted {total_deleted} vectors with file_path prefix: '{file_path}'")
+
+        return total_deleted
+
+    except Exception as e:
+        logger.error(f"[VectorDelete] Error deleting documents by file_path '{file_path}': {e}")
+        return 0
+
+
+def delete_documents_by_document_id(document_id: str) -> int:
+    """
+    Delete all documents with a specific document_id from the collection.
+
+    This is the most reliable deletion method since document_id is always
+    stored in the vector metadata during indexing.
+
+    Args:
+        document_id: The document UUID as string.
+
+    Returns:
+        Number of deleted documents.
+    """
+    client = get_qdrant_client()
+    total_deleted = 0
+
+    try:
+        # First scroll to find all points with this document_id
+        points_to_delete = []
+        offset = None
+
+        while True:
+            result = client.scroll(
+                collection_name=COLLECTION_NAME,
+                scroll_filter=models.Filter(
                     must=[
                         models.FieldCondition(
-                            key="metadata.file_path",
-                            match=models.MatchValue(value=file_path),
+                            key="metadata.document_id",
+                            match=models.MatchValue(value=document_id),
                         )
                     ]
-                )
-            ),
-        )
-        logger.info(f"Deleted documents with file_path '{file_path}' from collection")
-        return result
+                ),
+                limit=100,
+                offset=offset,
+                with_payload=False,
+                with_vectors=False
+            )
+
+            points, offset = result
+            if not points:
+                break
+
+            points_to_delete.extend([p.id for p in points])
+
+            if offset is None:
+                break
+
+        if points_to_delete:
+            client.delete(
+                collection_name=COLLECTION_NAME,
+                points_selector=models.PointIdsList(points=points_to_delete)
+            )
+            total_deleted = len(points_to_delete)
+            logger.info(f"[VectorDelete] Deleted {total_deleted} vectors by document_id: '{document_id}'")
+        else:
+            logger.info(f"[VectorDelete] No vectors found for document_id: '{document_id}'")
+
+        return total_deleted
+
     except Exception as e:
-        logger.error(f"Error deleting documents by file_path '{file_path}': {e}")
+        logger.error(f"[VectorDelete] Error deleting documents by document_id '{document_id}': {e}")
         return 0
 
 

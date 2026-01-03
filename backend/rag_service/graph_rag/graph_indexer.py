@@ -427,6 +427,33 @@ class GraphRAGIndexer:
         except Exception as e:
             logger.warning(f"[GraphRAG] Error deleting from Neo4j: {e}")
 
+    async def delete_by_document_id(self, document_id: str) -> int:
+        """
+        Delete all GraphRAG data for a document_id from Neo4j.
+
+        This is the most reliable deletion method as document_id is stored in entity metadata.
+
+        Args:
+            document_id: The document UUID as string
+
+        Returns:
+            Number of deleted entities
+        """
+        if not GRAPH_RAG_INDEX_ENABLED:
+            return 0
+
+        await self._init_storage()
+
+        logger.info(f"[GraphRAG] Deleting data by document_id: {document_id}")
+
+        try:
+            count = await self._graph_storage.delete_by_document_id(document_id)
+            logger.info(f"[GraphRAG] Deleted {count} entities from Neo4j by document_id: {document_id}")
+            return count
+        except Exception as e:
+            logger.warning(f"[GraphRAG] Error deleting from Neo4j by document_id: {e}")
+            return 0
+
     async def delete_workspace(self) -> None:
         """Delete all GraphRAG data for the current workspace."""
         if not GRAPH_RAG_INDEX_ENABLED:
@@ -513,4 +540,42 @@ def delete_graphrag_by_source_sync(
     except RuntimeError:
         # No running event loop - use asyncio.run directly
         asyncio.run(indexer.delete_by_source(source_name))
+
+
+def delete_graphrag_by_document_id_sync(
+    document_id: str,
+    workspace_id: str = "default",
+) -> int:
+    """
+    Synchronous wrapper for GraphRAG deletion by document_id.
+
+    This is the most reliable deletion method as document_id is stored in entity metadata.
+    Works correctly even when called from within an existing async event loop.
+
+    Args:
+        document_id: The document UUID as string
+        workspace_id: Workspace ID
+
+    Returns:
+        Number of deleted entities
+    """
+    if not GRAPH_RAG_INDEX_ENABLED:
+        return 0
+
+    indexer = GraphRAGIndexer(workspace_id=workspace_id)
+
+    # Check if we're already in an event loop
+    try:
+        _loop = asyncio.get_running_loop()  # noqa: F841 - only used to check if loop exists
+        # We're in an existing event loop - run in a new thread
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(
+                asyncio.run,
+                indexer.delete_by_document_id(document_id)
+            )
+            return future.result()  # Wait for completion
+    except RuntimeError:
+        # No running event loop - use asyncio.run directly
+        return asyncio.run(indexer.delete_by_document_id(document_id))
 

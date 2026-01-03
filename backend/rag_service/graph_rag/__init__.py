@@ -22,6 +22,7 @@ from .graph_indexer import (
     GraphRAGIndexer,
     index_chunks_sync,
     delete_graphrag_by_source_sync,
+    delete_graphrag_by_document_id_sync,
     GRAPH_RAG_INDEX_ENABLED,
 )
 from .query_mode_detector import QueryModeDetector
@@ -49,6 +50,7 @@ __all__ = [
     "GraphRAGIndexer",
     "index_chunks_sync",
     "delete_graphrag_by_source_sync",
+    "delete_graphrag_by_document_id_sync",
     "GRAPH_RAG_INDEX_ENABLED",    
     # Query processing
     "QueryModeDetector",

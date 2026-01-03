@@ -585,9 +585,11 @@ class TaskQueueService:
 
             if page_output_path and os.path.exists(page_output_path):
                 try:
-                    with open(page_output_path, 'r', encoding='utf-8') as f:
-                        content_preview = f.read(3000)  # First 3000 chars for classification
-                    logger.info(f"[Routing] Loaded content preview: {len(content_preview)} chars")
+                    # Use get_text_content_for_classification to skip embedded base64 images
+                    # This ensures LLM sees actual document text, not image data
+                    from rag_service.markdown_chunker import get_text_content_for_classification
+                    content_preview = get_text_content_for_classification(page_output_path, target_chars=3000)
+                    logger.info(f"[Routing] Loaded content preview (images cleaned): {len(content_preview)} chars")
                 except Exception as e:
                     logger.warning(f"[Routing] Could not read content preview: {e}")
 

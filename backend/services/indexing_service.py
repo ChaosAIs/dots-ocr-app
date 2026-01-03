@@ -64,29 +64,38 @@ class IndexingService:
             )
             from rag_service.vectorstore import (
                 delete_documents_by_source,
+                delete_documents_by_file_path,
+                delete_documents_by_document_id,
                 get_collection_info,
                 clear_collection,
                 is_document_indexed,
-                delete_document_metadata_embedding
+                delete_document_metadata_embedding,
+                delete_metadata_by_source_name
             )
             self._trigger_embedding = trigger_embedding_for_document
             self._reindex_document = reindex_document
             self._index_document_now = index_document_now
             self._delete_by_source = delete_documents_by_source
+            self._delete_by_file_path = delete_documents_by_file_path
+            self._delete_by_document_id = delete_documents_by_document_id
             self._get_collection_info = get_collection_info
             self._clear_collection = clear_collection
             self._is_document_indexed = is_document_indexed
             self._delete_metadata_embedding = delete_document_metadata_embedding
+            self._delete_metadata_by_source = delete_metadata_by_source_name
         except ImportError as e:
             logger.warning(f"RAG service not available: {e}")
             self._trigger_embedding = None
             self._reindex_document = None
             self._index_document_now = None
             self._delete_by_source = None
+            self._delete_by_file_path = None
+            self._delete_by_document_id = None
             self._get_collection_info = None
             self._clear_collection = None
             self._is_document_indexed = None
             self._delete_metadata_embedding = None
+            self._delete_metadata_by_source = None
 
         # Import GraphRAG functions
         try:
@@ -183,39 +192,86 @@ class IndexingService:
             broadcast_callback=broadcast_callback or self.broadcast_callback
         )
 
-    def delete_document_embeddings(self, filename: str, doc_id: Optional[str] = None):
+    def delete_document_embeddings(
+        self,
+        filename: str,
+        doc_id: Optional[str] = None,
+        output_path: Optional[str] = None
+    ):
         """
-        Delete all embeddings for a document.
+        Delete all embeddings for a document from Qdrant (vectors and metadata).
+
+        Uses multiple strategies to ensure complete cleanup:
+        1. Delete by document_id (most reliable - always present in metadata)
+        2. Delete by source name (handles _page_N suffixes)
+        3. Delete by file path (if output_path provided)
+        4. Delete metadata embedding by document ID
+        5. Delete metadata by source name (fallback)
 
         Args:
             filename: Document filename
             doc_id: Optional document ID for metadata deletion
+            output_path: Optional output directory path for file_path based deletion
         """
         file_name_without_ext = os.path.splitext(filename)[0]
+        total_deleted = 0
 
-        # Delete vector embeddings
+        # Strategy 1: Delete vector embeddings by document_id (MOST RELIABLE)
+        # document_id is always stored in metadata during indexing
+        if doc_id and self._delete_by_document_id:
+            try:
+                deleted = self._delete_by_document_id(doc_id)
+                total_deleted += deleted if isinstance(deleted, int) else 0
+                logger.info(f"[EmbeddingDelete] Deleted {deleted} vector embeddings by document_id: {doc_id}")
+            except Exception as e:
+                logger.error(f"[EmbeddingDelete] Failed to delete vector embeddings by document_id: {e}")
+
+        # Strategy 2: Delete vector embeddings by source name (fallback)
         if self._delete_by_source:
             try:
-                self._delete_by_source(file_name_without_ext)
-                logger.info(f"Deleted vector embeddings for: {file_name_without_ext}")
+                deleted = self._delete_by_source(file_name_without_ext)
+                total_deleted += deleted if isinstance(deleted, int) else 0
+                if deleted > 0:
+                    logger.info(f"[EmbeddingDelete] Deleted {deleted} vector embeddings by source: {file_name_without_ext}")
             except Exception as e:
-                logger.error(f"Failed to delete vector embeddings: {e}")
+                logger.error(f"[EmbeddingDelete] Failed to delete vector embeddings by source: {e}")
 
-        # Delete GraphRAG data
+        # Strategy 3: Delete vector embeddings by file path (if output_path provided)
+        if output_path and self._delete_by_file_path:
+            try:
+                deleted = self._delete_by_file_path(output_path)
+                total_deleted += deleted if isinstance(deleted, int) else 0
+                if deleted > 0:
+                    logger.info(f"[EmbeddingDelete] Deleted {deleted} vector embeddings by file_path: {output_path}")
+            except Exception as e:
+                logger.warning(f"[EmbeddingDelete] Failed to delete vector embeddings by file_path: {e}")
+
+        # Strategy 4: Delete GraphRAG data
         if self._delete_graphrag_by_source and self.graph_rag_index_enabled:
             try:
                 self._delete_graphrag_by_source(file_name_without_ext)
-                logger.info(f"Deleted GraphRAG data for: {file_name_without_ext}")
+                logger.info(f"[EmbeddingDelete] Deleted GraphRAG data for: {file_name_without_ext}")
             except Exception as e:
-                logger.warning(f"Failed to delete GraphRAG data: {e}")
+                logger.warning(f"[EmbeddingDelete] Failed to delete GraphRAG data: {e}")
 
-        # Delete metadata embedding
+        # Strategy 5: Delete metadata embedding by document ID
         if doc_id and self._delete_metadata_embedding:
             try:
                 self._delete_metadata_embedding(doc_id)
-                logger.info(f"Deleted document metadata embedding for: {filename}")
+                logger.info(f"[EmbeddingDelete] Deleted metadata embedding by doc_id: {doc_id}")
             except Exception as e:
-                logger.warning(f"Failed to delete metadata embedding: {e}")
+                logger.warning(f"[EmbeddingDelete] Failed to delete metadata embedding by doc_id: {e}")
+
+        # Strategy 6: Delete metadata by source name (fallback for orphaned records)
+        if self._delete_metadata_by_source:
+            try:
+                deleted = self._delete_metadata_by_source(file_name_without_ext)
+                if deleted > 0:
+                    logger.info(f"[EmbeddingDelete] Deleted {deleted} orphaned metadata entries by source: {file_name_without_ext}")
+            except Exception as e:
+                logger.warning(f"[EmbeddingDelete] Failed to delete metadata by source name: {e}")
+
+        logger.info(f"[EmbeddingDelete] Completed cleanup for '{filename}' (doc_id={doc_id}, total_deleted={total_deleted})")
 
     def is_document_indexed(self, source_name: str) -> bool:
         """

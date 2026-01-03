@@ -93,11 +93,11 @@ def fix_tabular_metadata():
             else:
                 logger.warning(f"  ⚠️ Failed to create metadata embedding")
 
-            # Also create summary chunks in the documents collection for RAG search
-            logger.info(f"  Creating summary chunks in documents collection...")
+            # Also create comprehensive summary chunk in the documents collection for RAG search
+            logger.info(f"  Creating comprehensive summary chunk in documents collection...")
             chunk_ids = _create_summary_chunks(doc, doc_data, source_name, columns, metadata['topics'])
             if chunk_ids:
-                logger.info(f"  ✅ Created {len(chunk_ids)} summary chunks")
+                logger.info(f"  ✅ Created comprehensive summary chunk")
                 # Update document with chunk IDs
                 doc.summary_chunk_ids = chunk_ids
                 db.commit()
@@ -109,13 +109,21 @@ def fix_tabular_metadata():
 
 
 def _create_summary_chunks(doc: Document, doc_data: DocumentData, source_name: str, columns: list, topics: list) -> list:
-    """Create summary chunks for a tabular document in the documents collection."""
+    """Create a single comprehensive summary chunk for a tabular document.
+
+    This generates ONE chunk that combines document overview, schema info,
+    and context - replacing the previous multi-chunk approach.
+
+    Benefits:
+    - Single chunk = no duplicate search results
+    - All relevant info in one place for RAG
+    - Simpler architecture
+    """
     try:
-        chunks = []
         document_id = str(doc.id)
         workspace_id = str(doc.workspace_id) if doc.workspace_id else None
 
-        # Base metadata for all chunks
+        # Metadata for the comprehensive chunk
         base_metadata = {
             "document_id": document_id,
             "source": source_name,
@@ -125,61 +133,52 @@ def _create_summary_chunks(doc: Document, doc_data: DocumentData, source_name: s
             "row_count": doc_data.line_items_count,
             "column_count": len(columns),
             "columns": columns,
+            "chunk_type": "tabular_summary",
+            "chunk_id": f"{document_id}_summary",
         }
         if workspace_id:
             base_metadata["workspace_id"] = workspace_id
 
-        # Chunk 1: Document Summary
-        summary_content = f"""Document: {source_name}
-Type: Tabular data ({doc_data.schema_type or 'spreadsheet'})
-Records: {doc_data.line_items_count} rows
-Columns: {', '.join(columns)}
+        # Single comprehensive chunk combining summary, schema, and context
+        comprehensive_content = f"""# {source_name}
+
+## Document Overview
+This is a tabular dataset ({doc_data.schema_type or 'spreadsheet'}) containing {doc_data.line_items_count} records with {len(columns)} columns.
+
+Topics: {', '.join(topics)}
+
+## Data Schema
+Column names: {', '.join(columns)}
 
 This dataset contains structured data with the following fields:
 {chr(10).join([f'- {col}' for col in columns])}
 
-Topics: {', '.join(topics)}"""
-
-        chunks.append(LangchainDocument(
-            page_content=summary_content,
-            metadata={
-                **base_metadata,
-                "chunk_type": "tabular_summary",
-                "chunk_id": f"{document_id}_summary",
-            }
-        ))
-
-        # Chunk 2: Schema Description
-        schema_content = f"""Schema for {source_name}:
-
-This is a tabular dataset with {len(columns)} columns and {doc_data.line_items_count} records.
-
-Column details:
-{chr(10).join([f'- {col}: data field' for col in columns])}
-
+## Query Capabilities
 Data can be queried for:
 - Finding maximum and minimum values
 - Filtering by category, brand, or other fields
 - Aggregating totals and counts
 - Searching for specific products or items"""
 
-        chunks.append(LangchainDocument(
-            page_content=schema_content,
-            metadata={
-                **base_metadata,
-                "chunk_type": "tabular_schema",
-                "chunk_id": f"{document_id}_schema",
-            }
-        ))
+        chunk = LangchainDocument(
+            page_content=comprehensive_content,
+            metadata=base_metadata
+        )
 
-        # Index chunks to Qdrant
+        # Delete existing chunks for this document to prevent duplicates
+        from rag_service.vectorstore import delete_documents_by_document_id
+        deleted_count = delete_documents_by_document_id(document_id)
+        if deleted_count > 0:
+            logger.info(f"  Deleted {deleted_count} existing chunks before re-indexing")
+
+        # Index chunk to Qdrant
         vectorstore = get_vectorstore()
-        vectorstore.add_documents(chunks)
+        vectorstore.add_documents([chunk])
 
-        return [chunk.metadata["chunk_id"] for chunk in chunks]
+        return [chunk.metadata["chunk_id"]]
 
     except Exception as e:
-        logger.error(f"Failed to create summary chunks: {e}", exc_info=True)
+        logger.error(f"Failed to create summary chunk: {e}", exc_info=True)
         return []
 
 

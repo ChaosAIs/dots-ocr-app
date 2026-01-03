@@ -254,12 +254,17 @@ class ContentSampler:
         Returns:
             Combined content from all specified pages
         """
+        # Import image cleanup utility
+        from ..markdown_chunker import clean_markdown_images
+
         contents = []
         for idx in indices:
             if 0 <= idx < len(files):
                 try:
                     with open(files[idx], 'r', encoding='utf-8') as f:
-                        page_content = f.read()
+                        raw_content = f.read()
+                        # Clean embedded base64 images before processing
+                        page_content = clean_markdown_images(raw_content)
                         # Add page marker for context
                         page_num = self._extract_page_number(files[idx])
                         if page_num:
@@ -298,9 +303,13 @@ class ContentSampler:
         Returns:
             SampledContent with character-based samples
         """
+        from ..markdown_chunker import clean_markdown_images
+
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
+                raw_content = f.read()
+            # Clean embedded base64 images before processing
+            content = clean_markdown_images(raw_content)
         except Exception as e:
             logger.error(f"Error reading file {filepath}: {e}")
             return SampledContent(

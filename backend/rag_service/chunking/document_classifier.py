@@ -494,11 +494,15 @@ class DocumentClassifier:
             }
 
             # Use centralized classifier
+            # Clean content from embedded base64 images before classification
+            from ..markdown_chunker import clean_markdown_images
+            clean_content = clean_markdown_images(content) if content else None
+
             classifier = self._get_centralized_classifier()
             result = classifier.classify(
                 filename=filename,
                 metadata=metadata,
-                content_preview=content[:2000] if content else None
+                content_preview=clean_content[:2000] if clean_content else None
             )
 
             if result and result.document_type:

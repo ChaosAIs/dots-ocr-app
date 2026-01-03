@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Callable
 from uuid import UUID
 
 from sqlalchemy.orm import Session
@@ -16,6 +16,27 @@ from db.workspace_repository import WorkspaceRepository
 from db.user_document_repository import UserDocumentRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _get_indexing_service():
+    """Lazy import of IndexingService to avoid circular imports."""
+    try:
+        from services.indexing_service import IndexingService
+        return IndexingService()
+    except ImportError as e:
+        logger.warning(f"IndexingService not available: {e}")
+        return None
+
+
+def _get_graphrag_delete_func():
+    """Lazy import of GraphRAG delete function."""
+    try:
+        from rag_service.graph_rag import delete_graphrag_by_source_sync, GRAPH_RAG_INDEX_ENABLED
+        if GRAPH_RAG_INDEX_ENABLED:
+            return delete_graphrag_by_source_sync
+        return None
+    except ImportError:
+        return None
 
 
 class WorkspaceService:
@@ -284,13 +305,56 @@ class WorkspaceService:
 
         if documents:
             if delete_documents:
+                # Get indexing service for Qdrant cleanup
+                indexing_service = _get_indexing_service()
+                graphrag_delete = _get_graphrag_delete_func()
+
                 # Delete documents and their files
                 for doc in documents:
+                    # 1. Delete physical files (input, output, JSONL)
                     self._delete_document_files(doc)
-                    # Delete permission records
+
+                    # 2. Delete Qdrant embeddings (vectors + metadata)
+                    if indexing_service:
+                        try:
+                            # Construct output_path for file_path based deletion
+                            output_path = None
+                            if doc.output_path:
+                                output_path = str(self.output_base_path / doc.output_path)
+                            elif doc.file_path:
+                                file_name_without_ext = Path(doc.filename).stem
+                                rel_dir = str(Path(doc.file_path).parent)
+                                if rel_dir and rel_dir != '.':
+                                    output_path = str(self.output_base_path / rel_dir / file_name_without_ext)
+                                else:
+                                    output_path = str(self.output_base_path / file_name_without_ext)
+
+                            indexing_service.delete_document_embeddings(
+                                filename=doc.filename,
+                                doc_id=str(doc.id),
+                                output_path=output_path
+                            )
+                            logger.info(f"[WorkspaceDelete] Deleted Qdrant embeddings for: {doc.filename}")
+                        except Exception as e:
+                            logger.error(f"[WorkspaceDelete] Failed to delete Qdrant embeddings for {doc.filename}: {e}")
+
+                    # 3. Delete GraphRAG data (if enabled)
+                    if graphrag_delete:
+                        try:
+                            file_name_without_ext = Path(doc.filename).stem
+                            graphrag_delete(file_name_without_ext)
+                            logger.info(f"[WorkspaceDelete] Deleted GraphRAG data for: {doc.filename}")
+                        except Exception as e:
+                            logger.warning(f"[WorkspaceDelete] Failed to delete GraphRAG data for {doc.filename}: {e}")
+
+                    # 4. Delete permission records
                     self.user_doc_repo.delete_all_permissions_for_document(doc.id)
+
+                    # 5. Delete document from PostgreSQL
                     self.db.delete(doc)
+
                 self.db.commit()
+                logger.info(f"[WorkspaceDelete] Deleted {len(documents)} documents from workspace {workspace_id}")
             elif move_to_default and user:
                 # Move documents to default workspace
                 default_workspace = self.get_or_create_default_workspace(user)

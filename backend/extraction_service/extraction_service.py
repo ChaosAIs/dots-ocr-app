@@ -428,6 +428,16 @@ IMPORTANT:
 
             logger.debug(f"Looking for markdown content in: {doc_output_dir}")
 
+            # Import image cleanup utility to remove base64 images before LLM processing
+            # This reduces token usage and improves extraction accuracy
+            from rag_service.markdown_chunker import clean_markdown_images
+
+            def read_and_clean_markdown(file_path: str) -> str:
+                """Read markdown file and clean embedded base64 images."""
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw_content = f.read()
+                return clean_markdown_images(raw_content)
+
             # Check if it's a directory (most common case)
             if os.path.isdir(doc_output_dir):
                 # Look for markdown files inside the directory
@@ -441,8 +451,7 @@ IMPORTANT:
                     md_path = os.path.join(doc_output_dir, pattern)
                     if os.path.exists(md_path):
                         logger.debug(f"Found markdown file: {md_path}")
-                        with open(md_path, 'r', encoding='utf-8') as f:
-                            return f.read()
+                        return read_and_clean_markdown(md_path)
 
                 # Try to find any page-based markdown files and combine them
                 import glob
@@ -450,8 +459,7 @@ IMPORTANT:
                 if page_files:
                     content_parts = []
                     for page_file in page_files:
-                        with open(page_file, 'r', encoding='utf-8') as f:
-                            content_parts.append(f.read())
+                        content_parts.append(read_and_clean_markdown(page_file))
                     if content_parts:
                         logger.debug(f"Combined {len(page_files)} page markdown files")
                         return "\n\n---\n\n".join(content_parts)
@@ -462,20 +470,16 @@ IMPORTANT:
                     # Prefer _nohf.md files
                     nohf_files = [f for f in md_files if '_nohf.md' in f]
                     if nohf_files:
-                        with open(nohf_files[0], 'r', encoding='utf-8') as f:
-                            return f.read()
-                    with open(md_files[0], 'r', encoding='utf-8') as f:
-                        return f.read()
+                        return read_and_clean_markdown(nohf_files[0])
+                    return read_and_clean_markdown(md_files[0])
 
             # If output_path points directly to a file
             elif os.path.isfile(doc_output_dir):
-                with open(doc_output_dir, 'r', encoding='utf-8') as f:
-                    return f.read()
+                return read_and_clean_markdown(doc_output_dir)
 
             # Try with .md extension
             if os.path.isfile(doc_output_dir + '.md'):
-                with open(doc_output_dir + '.md', 'r', encoding='utf-8') as f:
-                    return f.read()
+                return read_and_clean_markdown(doc_output_dir + '.md')
 
             logger.warning(f"No markdown content found for document {document.id} at {doc_output_dir}")
 

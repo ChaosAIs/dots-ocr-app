@@ -501,6 +501,37 @@ class Neo4jStorage(BaseGraphStorage):
                 logger.info(f"Deleted {count} entities from Neo4j for document: {source_doc}")
             return count
 
+    async def delete_by_document_id(self, document_id: str) -> int:
+        """
+        Delete all entities and relationships for a specific document_id.
+
+        This is the most reliable method as document_id is stored in entity metadata.
+
+        Args:
+            document_id: The document UUID as string
+
+        Returns:
+            Number of deleted nodes
+        """
+        driver = self._get_driver()
+        async with driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (e:Entity {workspace_id: $workspace_id})
+                WHERE e.document_id = $document_id
+                WITH e, count(e) as cnt
+                DETACH DELETE e
+                RETURN cnt
+                """,
+                workspace_id=self.workspace_id,
+                document_id=document_id,
+            )
+            record = await result.single()
+            count = record["cnt"] if record else 0
+            if count > 0:
+                logger.info(f"Deleted {count} entities from Neo4j by document_id: {document_id}")
+            return count
+
     async def get_node_edges(
         self,
         node_id: str,
