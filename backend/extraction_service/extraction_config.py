@@ -213,8 +213,8 @@ Return a JSON object with:
 {
     "header_data": {
         "receipt_number": "string or null",
-        "transaction_date": "YYYY-MM-DD or null",
-        "transaction_time": "HH:MM or null",
+        "transaction_date": "YYYY-MM-DD or null - THE DATE ONLY, NOT the time. Look for dates in various formats like MM/DD/YYYY, DD/MM/YYYY, YYYY-MM-DD, etc. The date may appear on a separate line from the time.",
+        "transaction_time": "HH:MM or null - THE TIME ONLY, extracted from 'Time:' labels or timestamp fields. Do NOT put date information here.",
         "store_name": "string or null",
         "store_address": "string or null",
         "payment_method": "string or null",
@@ -294,7 +294,33 @@ CRITICAL FIELD RULES:
    - "included": Item is part of a group, price shown on another item
    - "unknown": Cannot determine pricing structure
 
-8. GENERAL RULES:
+8. DATE AND TIME EXTRACTION (CRITICAL - common mistakes):
+   - transaction_date MUST be a DATE (YYYY-MM-DD format), NOT a time
+   - transaction_time MUST be a TIME (HH:MM format), NOT a date
+   - ALWAYS extract date and time SEPARATELY even if they appear together
+
+   EXAMPLE 1 - Date and time on SEPARATE lines:
+   Receipt shows:
+     "11/8/2025"
+     "Time: 13:23"
+   Extract as:
+     "transaction_date": "2025-11-08"   ← from "11/8/2025"
+     "transaction_time": "13:23"        ← from "Time: 13:23"
+
+   EXAMPLE 2 - Date and time COMBINED on one line:
+   Receipt shows:
+     "Time:2025-06-18 11:55:01 AM"
+   Extract as:
+     "transaction_date": "2025-06-18"   ← extract ONLY the date portion
+     "transaction_time": "11:55"        ← extract ONLY the time portion
+
+   EXAMPLE 3 - Various date formats to recognize:
+     "11/8/2025" → "2025-11-08"
+     "2025-06-18" → "2025-06-18"
+     "Jun 18, 2025" → "2025-06-18"
+     "18/06/2025" → "2025-06-18"
+
+9. GENERAL RULES:
    - Use null for any field where the value is NOT explicitly visible.
    - Do NOT assume or guess values. Only extract what is actually shown.
    - CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.""",

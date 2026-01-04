@@ -143,14 +143,30 @@ class DocumentRouter:
             return []
 
         try:
-            # Strategy 0: Hard entity filter (highest priority)
-            # When query has specific entity names, filter by exact match first
+            # Extract query metadata
             query_entities = query_metadata.get("entities", [])
+            query_topics = query_metadata.get("topics", [])
+            query_doc_types = query_metadata.get("document_type_hints", [])
+
+            logger.info(f"[Router] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+            logger.info(f"[Router] QUERY METADATA:")
+            logger.info(f"[Router]   • Entities (named): {query_entities}")
+            logger.info(f"[Router]   • Topics (categories): {query_topics}")
+            logger.info(f"[Router]   • Document types: {query_doc_types}")
+            logger.info(f"[Router] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+            # Track current candidate set - starts with all accessible documents
+            current_candidates = list(accessible_document_ids) if accessible_document_ids else []
+
+            # =================================================================
+            # Strategy 0: Hard entity filter (ONLY for proper named entities)
+            # =================================================================
+            # Only apply hard filter when we have actual named entities (not categories)
             if ENABLE_HARD_ENTITY_FILTER and query_entities:
                 hard_filtered_ids, hard_filtered_names = self._hard_filter_by_entity(
                     query_entities=query_entities,
                     original_query=original_query,
-                    accessible_document_ids=accessible_document_ids
+                    accessible_document_ids=current_candidates
                 )
 
                 if hard_filtered_ids:
@@ -159,18 +175,53 @@ class DocumentRouter:
                         f"matching entities {query_entities}"
                     )
                     logger.info(f"[Router] 🎯 Hard filtered documents: {hard_filtered_names}")
-                    return hard_filtered_ids
+                    # Narrow down candidates (don't return yet - apply topic filter too)
+                    current_candidates = hard_filtered_ids
                 else:
                     logger.info(
                         f"[Router] Hard entity filter found no matches for {query_entities}, "
-                        f"falling back to vector search"
+                        f"continuing with topic filter"
                     )
 
-            # Strategy 1: Try vector-based routing first (fastest)
-            if self.use_vector_routing:
+            # =================================================================
+            # Strategy 1: Topic-based pre-filter (for category terms)
+            # =================================================================
+            # Apply topic filter when we have topics OR document type hints
+            # This uses ILIKE %keyword% for fuzzy matching
+            if query_topics or query_doc_types:
+                topic_filtered_ids, topic_filtered_names = self._topic_based_prefilter(
+                    topics=query_topics,
+                    document_type_hints=query_doc_types,
+                    accessible_document_ids=current_candidates
+                )
+
+                if topic_filtered_ids:
+                    logger.info(
+                        f"[Router] 🏷️ TOPIC FILTER: Narrowed to {len(topic_filtered_ids)} document(s) "
+                        f"matching topics={query_topics}, types={query_doc_types}"
+                    )
+                    current_candidates = topic_filtered_ids
+                else:
+                    # Topic filter found nothing - this might mean no documents match
+                    # the category. Log but continue with vector search on original set.
+                    logger.info(
+                        f"[Router] Topic filter found no matches for topics={query_topics}, "
+                        f"types={query_doc_types}. Continuing with vector search on {len(current_candidates)} candidates."
+                    )
+
+            # =================================================================
+            # Strategy 2: Vector-based routing (semantic search)
+            # =================================================================
+            # If topic/entity filters narrowed candidates, use filtered set
+            # Otherwise fall back to all accessible documents
+            vector_search_candidates = current_candidates if current_candidates else accessible_document_ids
+
+            logger.info(f"[Router] Vector search will use {len(vector_search_candidates) if vector_search_candidates else 0} candidate documents")
+
+            if self.use_vector_routing and vector_search_candidates:
                 vector_results, doc_id_to_name = self._route_with_vector_search(
                     query_metadata, original_query,
-                    accessible_document_ids=accessible_document_ids
+                    accessible_document_ids=vector_search_candidates
                 )
 
                 if len(vector_results) >= self.vector_min_results:
@@ -193,22 +244,38 @@ class DocumentRouter:
                 else:
                     logger.info("[Router] Vector routing returned no results, falling back to LLM/rule-based")
 
-            # Strategy 2: Fallback to LLM or rule-based scoring
+            # =================================================================
+            # If topic filter found matches but vector search didn't help,
+            # return the topic-filtered candidates directly
+            # =================================================================
+            if current_candidates and len(current_candidates) < len(accessible_document_ids or []):
+                logger.info(
+                    f"[Router] 🏷️ Returning {len(current_candidates)} topic-filtered candidates "
+                    f"(vector search didn't narrow further)"
+                )
+                return current_candidates
+
+            # Strategy 3: Fallback to LLM or rule-based scoring
             documents = self._get_documents_with_metadata()
 
             if not documents:
-                logger.warning("[Router] No documents with metadata found, returning accessible documents")
+                logger.warning("[Router] No documents with metadata found, returning filtered candidates")
+                # Return topic-filtered candidates if available, otherwise all accessible
+                if current_candidates:
+                    return current_candidates
                 if accessible_document_ids is not None:
                     return list(accessible_document_ids)
                 return []
 
-            # Filter documents by access control if provided
-            if accessible_document_ids is not None:
-                accessible_ids_set = set(accessible_document_ids)
+            # Filter documents by current candidates (which may be topic-filtered)
+            # Use current_candidates if we have topic-filtered results, otherwise use accessible_document_ids
+            filter_ids = current_candidates if current_candidates else accessible_document_ids
+            if filter_ids is not None:
+                filter_ids_set = set(filter_ids)
                 original_count = len(documents)
-                documents = [doc for doc in documents if str(doc.get("id", "")) in accessible_ids_set]
+                documents = [doc for doc in documents if str(doc.get("id", "")) in filter_ids_set]
                 if len(documents) < original_count:
-                    logger.info(f"[Router] Access control filtered documents: {original_count} -> {len(documents)}")
+                    logger.info(f"[Router] Candidate filter applied: {original_count} -> {len(documents)}")
 
             if not documents:
                 logger.warning("[Router] No accessible documents with metadata found after access control filter")
@@ -231,9 +298,12 @@ class DocumentRouter:
                 )
                 return sources
             else:
-                logger.info("[Router] No documents met filtering criteria, searching all")
-                if accessible_source_names is not None:
-                    return list(accessible_source_names)
+                logger.info("[Router] No documents met filtering criteria, returning filtered candidates")
+                # Return topic-filtered candidates if available
+                if current_candidates:
+                    return current_candidates
+                if accessible_document_ids is not None:
+                    return list(accessible_document_ids)
                 return []
 
         except Exception as e:
@@ -614,6 +684,132 @@ class DocumentRouter:
 
         except Exception as e:
             logger.error(f"[Router] Hard entity filter fallback error: {e}", exc_info=True)
+
+        return matched_ids, matched_names
+
+    def _topic_based_prefilter(
+        self,
+        topics: List[str],
+        document_type_hints: List[str],
+        accessible_document_ids: Optional[List[str]] = None
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Pre-filter documents by topic/category matching using ILIKE %keyword%.
+
+        This handles queries like "meal receipts" where:
+        - "meal" is a topic/category term to match against document metadata
+        - "receipt" is a document type filter
+
+        Uses fuzzy ILIKE matching to catch variations:
+        - 'meal' matches 'meal', 'meals', 'meal expense', 'business meal'
+
+        Searches in multiple fields:
+        - document_metadata->>'topics' (array stored as JSON)
+        - header_data->>'vendor_name', 'store_name', 'description'
+        - summary_data content
+
+        Args:
+            topics: List of topic/category terms to match (e.g., ["meal", "food"])
+            document_type_hints: List of document types to filter (e.g., ["receipt"])
+            accessible_document_ids: List of accessible document IDs for access control
+
+        Returns:
+            Tuple of (matched_document_ids, matched_document_names)
+        """
+        if not topics and not document_type_hints:
+            return [], []
+
+        if not accessible_document_ids:
+            return [], []
+
+        logger.info(f"[Router] 🏷️ TOPIC PRE-FILTER: Searching for topics={topics}, doc_types={document_type_hints}")
+
+        matched_ids = []
+        matched_names = []
+
+        try:
+            with get_db_session() as db:
+                # Build dynamic SQL with ILIKE for fuzzy topic matching
+                # We need to check:
+                # 1. document_metadata->'topics' array (JSONB)
+                # 2. documents_data.header_data fields
+                # 3. documents_data.schema_type for document type
+
+                conditions = []
+                params = {}
+
+                # Convert list to PostgreSQL array format for document ID filter
+                doc_ids_array = '{' + ','.join(accessible_document_ids) + '}' if accessible_document_ids else '{}'
+                params["doc_ids"] = doc_ids_array
+
+                # Topic matching conditions (OR between topics, AND with doc type)
+                if topics:
+                    topic_conditions = []
+                    for i, topic in enumerate(topics):
+                        param_name = f"topic_{i}"
+                        params[param_name] = f"%{topic.lower()}%"
+                        # Check multiple fields for topic match
+                        topic_conditions.append(f"""
+                            (
+                                -- Match in document_metadata topics array (cast to text for ILIKE)
+                                LOWER(d.document_metadata::text) ILIKE :{param_name}
+                                -- Match in header_data fields
+                                OR LOWER(COALESCE(dd.header_data->>'vendor_name', '')) ILIKE :{param_name}
+                                OR LOWER(COALESCE(dd.header_data->>'store_name', '')) ILIKE :{param_name}
+                                OR LOWER(COALESCE(dd.header_data->>'description', '')) ILIKE :{param_name}
+                                OR LOWER(COALESCE(dd.header_data->>'category', '')) ILIKE :{param_name}
+                                -- Match in summary_data
+                                OR LOWER(COALESCE(dd.summary_data::text, '')) ILIKE :{param_name}
+                            )
+                        """)
+                    # Any topic match is OK (OR logic)
+                    conditions.append(f"({' OR '.join(topic_conditions)})")
+
+                # Document type filter (if specified) - exact match on schema_type
+                if document_type_hints:
+                    type_conditions = []
+                    for j, doc_type in enumerate(document_type_hints):
+                        param_name = f"doctype_{j}"
+                        params[param_name] = doc_type.lower()
+                        type_conditions.append(f"LOWER(dd.schema_type) = :{param_name}")
+                    # Any type match is OK (OR logic)
+                    conditions.append(f"({' OR '.join(type_conditions)})")
+
+                # Build final SQL
+                where_clause = " AND ".join(conditions) if conditions else "TRUE"
+
+                sql = f"""
+                    SELECT DISTINCT
+                        d.id::text as document_id,
+                        COALESCE(dd.header_data->>'vendor_name', dd.header_data->>'store_name', d.filename) as source_display
+                    FROM documents d
+                    LEFT JOIN documents_data dd ON dd.document_id = d.id
+                    WHERE d.id = ANY(CAST(:doc_ids AS uuid[]))
+                      AND d.deleted_at IS NULL
+                      AND {where_clause}
+                """
+
+                logger.debug(f"[Router] Topic pre-filter SQL params: {list(params.keys())}")
+
+                result = db.execute(text(sql), params)
+
+                for row in result.fetchall():
+                    doc_id = row[0]
+                    source_display = row[1] or "Unknown"
+                    matched_ids.append(doc_id)
+                    matched_names.append(source_display)
+
+                logger.info(
+                    f"[Router] 🏷️ TOPIC PRE-FILTER: Found {len(matched_ids)} document(s) "
+                    f"matching topics={topics}, doc_types={document_type_hints}"
+                )
+                if matched_names:
+                    logger.info(f"[Router] 🏷️ Topic filtered documents: {matched_names}")
+
+        except Exception as e:
+            logger.error(f"[Router] Topic pre-filter error: {e}", exc_info=True)
+            # On error, return empty - let vector search handle it
+            return [], []
 
         return matched_ids, matched_names
 

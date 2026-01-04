@@ -438,42 +438,60 @@ Return ONLY valid JSON in this exact format:
 - If query is about technical concepts, APIs, or system design → use "technical_doc" or "research_paper"
 - If query is about analysis, findings, or summaries → use "report"
 
-## Guidelines for entities (BE EXHAUSTIVE):
-- Extract EVERY SINGLE named entity from the query (names, dates, products, places)
-- Include ALL keywords that identify WHAT the user is looking for
-- Think about what exact terms would appear in the documents
-- For meal queries: include "meal", "receipt", year/date if mentioned
-- For resume queries: include person's name AND relevant skills/roles
-- For date ranges: include start date, end date, and all variations
-- For names: include full name, first name, last name separately
-- DO NOT include generic words like "group", "list", "all", "details", "show", "find"
-- DO NOT include document type words as entities: "invoice", "receipt", "report" go in document_type_hints, NOT entities
-- VERIFY: Go back to the original query and check if you missed any entity
+## ENTITIES vs TOPICS - STRICT DEFINITIONS (CRITICAL):
+
+### ENTITIES = PROPER NOUNS / NAMED ENTITIES ONLY
+Entities are specific names that identify WHO or WHAT - things you could look up by exact name:
+- **Company/Vendor names**: "Augment Code", "Amazon", "Best Buy", "Microsoft", "Walmart"
+- **Person names**: "John Smith", "Felix Yang", "Jane Doe"
+- **Product names**: "iPhone 15", "MacBook Pro", "Model S"
+- **Place names**: "California", "New York", "Palo Alto"
+- **Organization names**: "FDA", "NASA", "WHO"
+
+### ENTITIES - WHAT TO EXCLUDE (THESE GO IN TOPICS):
+- **Category/descriptive terms**: "meal", "travel", "office", "software", "equipment" → TOPICS
+- **Document types**: "receipt", "invoice", "report" → document_type_hints
+- **Generic words**: "list", "all", "details", "show", "find", "group"
+- **Time references**: "2025", "January", "last month" → Keep in enhanced_query only
+- **Adjectives**: "expensive", "recent", "large", "important"
+
+### TOPICS = CATEGORIES / SUBJECT AREAS / DESCRIPTIVE TERMS
+Topics describe WHAT CATEGORY the query is about - used for fuzzy matching on document content:
+- **Expense categories**: "meal", "food", "travel", "office supplies", "software", "equipment"
+- **Subject areas**: "finance", "technology", "healthcare", "legal"
+- **Related concepts**: For "meal" → also include "restaurant", "dining", "food", "catering"
+- **Industry terms**: Domain-specific vocabulary
 
 **CRITICAL - COMPOUND ENTITY NAMES (MUST FOLLOW):**
 - Keep multi-word company/vendor/person names as SINGLE entities, do NOT split them!
 - "Augment Code" → entity: "Augment Code" (NOT ["augment", "code"])
 - "Best Buy" → entity: "Best Buy" (NOT ["best", "buy"])
 - "John Smith" → entity: "John Smith" (NOT ["john", "smith"])
-- "Amazon Web Services" → entity: "Amazon Web Services" (NOT ["amazon", "web", "services"])
-- These compound names are FILTERS - splitting them loses their meaning!
 
-**Examples of CORRECT entity extraction:**
-- Query: "list augment code invoices" → entities: ["Augment Code"], document_type_hints: ["invoice"]
-- Query: "show Best Buy receipts from 2025" → entities: ["Best Buy", "2025"], document_type_hints: ["receipt"]
-- Query: "find John Smith resume" → entities: ["John Smith"], document_type_hints: ["resume"]
+## CORRECT EXAMPLES (FOLLOW THESE):
 
-**Examples of WRONG entity extraction (DO NOT DO THIS):**
-- Query: "list augment code invoices" → entities: ["augment", "code", "invoice"] ← WRONG! Split vendor name + included doc type
-- Query: "show Best Buy receipts" → entities: ["best", "buy", "receipt"] ← WRONG!
+| Query | entities | topics | document_type_hints |
+|-------|----------|--------|---------------------|
+| "list meal receipts" | [] | ["meal", "food", "restaurant", "dining"] | ["receipt"] |
+| "show Augment Code invoices" | ["Augment Code"] | ["software", "subscription"] | ["invoice"] |
+| "Best Buy meal receipts" | ["Best Buy"] | ["meal", "food", "restaurant"] | ["receipt"] |
+| "find John Smith resume" | ["John Smith"] | ["career", "employment", "skills"] | ["resume"] |
+| "travel expenses 2025" | [] | ["travel", "transportation", "business trip"] | ["expense_report", "receipt"] |
+| "Amazon office supplies" | ["Amazon"] | ["office", "supplies", "stationery"] | ["receipt", "invoice"] |
+
+## WRONG EXAMPLES (DO NOT DO THIS):
+- Query: "list meal receipts" → entities: ["meal", "receipt"] ← WRONG! "meal" is a category, not a named entity
+- Query: "travel expenses" → entities: ["travel", "expense"] ← WRONG! These are topics, not named entities
+- Query: "show invoices" → entities: ["invoice"] ← WRONG! "invoice" is a document type
 
 ## Guidelines for topics (COMPREHENSIVE COVERAGE):
 - Subject areas and domains relevant to the query
 - Think BROADLY about related topics that might be in documents
-- For meals: "restaurant", "dining", "expense", "food", "payment", "bill", "cost"
+- For meals: "meal", "restaurant", "dining", "food", "catering", "lunch", "dinner"
+- For travel: "travel", "transportation", "flight", "hotel", "business trip"
+- For office: "office", "supplies", "stationery", "equipment"
 - For resumes: "career", "employment", "skills", "experience", "education", "work history"
 - Include both specific and general topic terms
-- Add industry-specific terminology if applicable
 
 ## Guidelines for enhanced_query (DETAILED & COMPLETE):
 - Make it DETAILED and SPECIFIC - include ALL relevant context

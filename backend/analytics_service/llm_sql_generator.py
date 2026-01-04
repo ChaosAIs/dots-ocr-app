@@ -1198,7 +1198,26 @@ Check the 'source' and 'access_pattern' in the field schema!
    - For NUMERIC fields only: Use (item->>'FieldName')::numeric with NULLIF for safety
    - Check the schema's data_type field: "string" = no cast, "number" = can cast to numeric
    - Common STRING fields that should NOT be cast: ProductID, SKU, Code, ID, Number (identifiers)
-4. Date parsing errors: Use proper date format handling.
+4. **Date/Time parsing errors** (CRITICAL - common issue):
+   - **"invalid input syntax for type date"** or **"date/time field value out of range"**:
+   - Date fields may contain INCONSISTENT formats: full datetime, date-only, time-only, or invalid values
+   - **NEVER directly cast to ::date or ::timestamp** - always use safe extraction!
+   - **SOLUTION - Use SUBSTRING to extract year for filtering:**
+     ```sql
+     -- Safe year extraction (works with any date format containing 4-digit year):
+     WHERE SUBSTRING(header_data->>'transaction_date' FROM '[0-9]{{4}}') = '2025'
+     -- Or for year comparison:
+     WHERE COALESCE(SUBSTRING(header_data->>'transaction_date' FROM '^[0-9]{{4}}'), '0000') >= '2025'
+     ```
+   - **For ordering by date (handle mixed formats):**
+     ```sql
+     ORDER BY header_data->>'transaction_date' DESC  -- String ordering is usually sufficient
+     ```
+   - **DO NOT use**: (field)::date, TO_DATE(), TO_TIMESTAMP() directly on untrusted data
+   - **Time-only values** like "13:23" will cause errors if cast to date - skip them with:
+     ```sql
+     WHERE header_data->>'transaction_date' ~ '^[0-9]{{4}}-'  -- Only process if starts with year
+     ```
 5. Wrong field name: Check the schema for exact field names (e.g., 'Total Sales' not 'amount', 'Product' not 'description').
 
 ## Requirements:

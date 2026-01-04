@@ -95,7 +95,10 @@ DEFAULT_RECEIPT_MAPPINGS = {
     "header_mappings": [
         {"canonical": "store_name", "data_type": "string", "patterns": ["store", "merchant", "restaurant", "shop", "retailer", "magasin"], "exclude_patterns": ["/"]},
         {"canonical": "store_address", "data_type": "string", "patterns": ["address", "location", "store address"], "exclude_patterns": ["/"]},
-        {"canonical": "transaction_date", "data_type": "datetime", "patterns": ["date", "transaction date", "purchase date", "time"]},
+        # IMPORTANT: Do NOT include "time" pattern here - transaction_time is a separate field
+        # Including "time" causes transaction_time value to overwrite transaction_date
+        {"canonical": "transaction_date", "data_type": "datetime", "patterns": ["date", "transaction date", "purchase date", "transaction_date"], "exclude_patterns": ["time"]},
+        {"canonical": "transaction_time", "data_type": "string", "patterns": ["time", "transaction time", "transaction_time"], "exclude_patterns": ["date"]},
         {"canonical": "receipt_number", "data_type": "string", "patterns": ["receipt #", "transaction #", "order #", "ticket #", "check #"]},
         {"canonical": "payment_method", "data_type": "string", "patterns": ["payment", "paid by", "card", "cash", "credit", "debit"]},
         {"canonical": "cashier", "data_type": "string", "patterns": ["cashier", "server", "employee", "served by"]},
@@ -117,14 +120,16 @@ DEFAULT_RECEIPT_MAPPINGS = {
 DEFAULT_SPREADSHEET_MAPPINGS = {
     "header_mappings": [
         {"canonical": "title", "data_type": "string", "patterns": ["title", "name", "sheet name"]},
-        {"canonical": "date", "data_type": "datetime", "patterns": ["date", "created", "modified"]},
+        {"canonical": "date", "data_type": "datetime", "patterns": ["date", "created", "modified"], "exclude_patterns": ["time"]},
     ],
     "line_item_mappings": [
         # Spreadsheets have dynamic columns, so we use generic patterns
         {"canonical": "description", "data_type": "string", "patterns": ["description", "name", "item", "product", "title"], "exclude_patterns": ["/"]},
         {"canonical": "quantity", "data_type": "number", "patterns": ["qty", "quantity", "count", "units", "stock"], "exclude_patterns": ["/"]},
         {"canonical": "amount", "data_type": "number", "patterns": ["amount", "total", "value", "price", "cost", "sales"], "exclude_patterns": ["/", "subtotal"]},
-        {"canonical": "date", "data_type": "datetime", "patterns": ["date", "time", "created", "updated"]},
+        # IMPORTANT: Separate date and time patterns to avoid conflicts
+        {"canonical": "date", "data_type": "datetime", "patterns": ["date", "created", "updated"], "exclude_patterns": ["time"]},
+        {"canonical": "time", "data_type": "string", "patterns": ["time", "timestamp"], "exclude_patterns": ["date"]},
         {"canonical": "category", "data_type": "string", "patterns": ["category", "type", "group", "class"]},
         {"canonical": "status", "data_type": "string", "patterns": ["status", "state", "condition"]},
     ],
@@ -137,12 +142,13 @@ DEFAULT_BANK_STATEMENT_MAPPINGS = {
     "header_mappings": [
         {"canonical": "bank_name", "data_type": "string", "patterns": ["bank", "institution", "financial institution"]},
         {"canonical": "account_number", "data_type": "string", "patterns": ["account", "account #", "account number"]},
-        {"canonical": "statement_date", "data_type": "datetime", "patterns": ["statement date", "date", "period end"]},
-        {"canonical": "period_start", "data_type": "datetime", "patterns": ["period start", "from", "start date"]},
-        {"canonical": "period_end", "data_type": "datetime", "patterns": ["period end", "to", "end date"]},
+        # IMPORTANT: Use specific patterns and exclude period-related terms to avoid conflicts
+        {"canonical": "statement_date", "data_type": "datetime", "patterns": ["statement date", "statement_date"], "exclude_patterns": ["period", "start", "end"]},
+        {"canonical": "period_start", "data_type": "datetime", "patterns": ["period start", "start date", "from date"], "exclude_patterns": ["end"]},
+        {"canonical": "period_end", "data_type": "datetime", "patterns": ["period end", "end date", "to date", "through"], "exclude_patterns": ["start"]},
     ],
     "line_item_mappings": [
-        {"canonical": "transaction_date", "data_type": "datetime", "patterns": ["date", "transaction date", "post date"]},
+        {"canonical": "transaction_date", "data_type": "datetime", "patterns": ["date", "transaction date", "post date", "trans date"]},
         {"canonical": "description", "data_type": "string", "patterns": ["description", "transaction", "details", "memo"], "exclude_patterns": ["/"]},
         {"canonical": "debit", "data_type": "number", "patterns": ["debit", "withdrawal", "payment", "out"], "exclude_patterns": ["/"]},
         {"canonical": "credit", "data_type": "number", "patterns": ["credit", "deposit", "in"], "exclude_patterns": ["/"]},
