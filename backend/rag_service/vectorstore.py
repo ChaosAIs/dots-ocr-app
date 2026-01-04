@@ -1234,6 +1234,21 @@ def upsert_document_metadata_embedding(
         if metadata.get("invoice_date"):
             payload["invoice_date"] = metadata["invoice_date"]
 
+        # Add NER-extracted normalized entity fields for exact matching
+        # These come from the entity_extractor module and enable hard filtering
+        entities = metadata.get("entities", {})
+        if entities:
+            if entities.get("vendor_normalized"):
+                payload["vendor_normalized"] = entities["vendor_normalized"]
+            if entities.get("customer_normalized"):
+                payload["customer_normalized"] = entities["customer_normalized"]
+            if entities.get("organizations_normalized"):
+                payload["organizations_normalized"] = entities["organizations_normalized"]
+            if entities.get("persons_normalized"):
+                payload["persons_normalized"] = entities["persons_normalized"]
+            if entities.get("all_entities_normalized"):
+                payload["all_entities_normalized"] = entities["all_entities_normalized"]
+
         # Add key_entities for entity matching (from hierarchical metadata extraction)
         # Store as a simple list of entity names for easier matching
         key_entities = metadata.get("key_entities", [])

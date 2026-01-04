@@ -137,6 +137,16 @@ NATURAL_LANGUAGE_SUMMARY_PROMPT = """Generate a clear, natural language summary 
 - NEVER assume items without prices have the same price as nearby items
 - Items may be grouped where multiple items share ONE price - this is normal for set meals, combos, etc.
 - If price_type is "included" or amount is null, the item is part of a group and does NOT have its own price
+- If unit_price is NULL or missing, show "-" - NEVER invent a price like "$1.00"
+
+## CRITICAL - Non-Monetary Amounts (PRESERVE INPUT FORMATTING):
+- PRESERVE the value formatting from the input data:
+  - If the input shows a value WITH $ (e.g., "$50.00"), it is MONETARY - keep the $ sign
+  - If the input shows a value WITHOUT $ (e.g., "600"), it is NON-MONETARY (count/usage) - do NOT add $ sign
+  - Example: Input "600" → output "600" (NOT "$600.00")
+  - Example: Input "$50.00" → output "$50.00"
+- If an item description contains "User Message", "Messages", "Credits", "Tokens", "Usage" - the "amount" field is a COUNT, not money
+- Non-monetary amounts (message counts, usage units) should be plain numbers without $ prefix
 
 ## CRITICAL - Hierarchical/Tree Layout for Grouped Data:
 When presenting detailed items, use a TREE/HIERARCHICAL structure instead of flat tables with duplicate values:

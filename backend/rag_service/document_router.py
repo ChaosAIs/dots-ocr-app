@@ -14,11 +14,14 @@ Routing Strategy (in order of preference):
 import os
 import logging
 import json
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Set
+
+from sqlalchemy import text
 
 from db.document_repository import DocumentRepository
 from db.database import get_db_session
 from rag_service.chunking.document_types import types_match, expand_type_aliases
+from rag_service.entity_extractor import normalize_entity_name, entity_matches_query
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +48,11 @@ VECTOR_ROUTING_RELATIVE_THRESHOLD = float(os.getenv("METADATA_RELATIVE_THRESHOLD
 
 # Verbose logging for metadata embedding comparison
 METADATA_VERBOSE_LOGGING = os.getenv("METADATA_VERBOSE_LOGGING", "false").lower() == "true"
+
+# Hard entity filtering - when query has specific entities, filter documents by exact match first
+ENABLE_HARD_ENTITY_FILTER = os.getenv("ENABLE_HARD_ENTITY_FILTER", "true").lower() == "true"
+# Minimum fuzzy match threshold for entity matching (0-100)
+ENTITY_MATCH_THRESHOLD = int(os.getenv("ENTITY_MATCH_THRESHOLD", "80"))
 
 
 class DocumentRouter:
@@ -135,6 +143,29 @@ class DocumentRouter:
             return []
 
         try:
+            # Strategy 0: Hard entity filter (highest priority)
+            # When query has specific entity names, filter by exact match first
+            query_entities = query_metadata.get("entities", [])
+            if ENABLE_HARD_ENTITY_FILTER and query_entities:
+                hard_filtered_ids, hard_filtered_names = self._hard_filter_by_entity(
+                    query_entities=query_entities,
+                    original_query=original_query,
+                    accessible_document_ids=accessible_document_ids
+                )
+
+                if hard_filtered_ids:
+                    logger.info(
+                        f"[Router] 🎯 HARD ENTITY FILTER: Found {len(hard_filtered_ids)} document(s) "
+                        f"matching entities {query_entities}"
+                    )
+                    logger.info(f"[Router] 🎯 Hard filtered documents: {hard_filtered_names}")
+                    return hard_filtered_ids
+                else:
+                    logger.info(
+                        f"[Router] Hard entity filter found no matches for {query_entities}, "
+                        f"falling back to vector search"
+                    )
+
             # Strategy 1: Try vector-based routing first (fastest)
             if self.use_vector_routing:
                 vector_results, doc_id_to_name = self._route_with_vector_search(
@@ -211,6 +242,381 @@ class DocumentRouter:
                 return list(accessible_document_ids)
             return []  # Fallback to searching all documents
 
+    def _should_apply_hard_filter(
+        self,
+        query_entities: List[str],
+        original_query: str
+    ) -> bool:
+        """
+        Determine if hard entity filter should be applied.
+
+        Hard filtering is appropriate when:
+        - Query contains specific entity names (not generic terms)
+        - Query uses targeting language ("list X invoices", "show X documents")
+
+        Args:
+            query_entities: List of extracted entity names
+            original_query: Original query text
+
+        Returns:
+            True if hard filtering should be applied
+        """
+        if not query_entities:
+            return False
+
+        query_lower = original_query.lower()
+
+        # Keywords that indicate specific entity targeting
+        targeting_keywords = [
+            'list', 'show', 'get', 'find', 'all', 'from', 'by',
+            'vendor', 'supplier', 'company', 'customer', 'client',
+            'invoice', 'receipt', 'bill', 'statement', 'order'
+        ]
+
+        # Check if query specifically targets an entity
+        for entity in query_entities:
+            entity_lower = entity.lower()
+            # Entity must appear in query for hard filtering
+            if entity_lower in query_lower:
+                # Check if targeting language is used
+                if any(kw in query_lower for kw in targeting_keywords):
+                    logger.debug(
+                        f"[Router] Hard filter enabled: entity '{entity}' found with targeting keywords"
+                    )
+                    return True
+
+        return False
+
+    def _hard_filter_by_entity(
+        self,
+        query_entities: List[str],
+        original_query: str,
+        accessible_document_ids: Optional[List[str]] = None
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Filter documents by entity match using normalized entity fields with fuzzy matching.
+
+        This method provides precise filtering when users query for specific entities
+        (e.g., "list Augment Code invoices"). It uses a hybrid approach:
+        1. Fetch all accessible documents with their entity metadata from DB
+        2. Apply Python-side fuzzy matching using rapidfuzz for accurate matching
+        3. Use the same normalize_entity_name() function for consistency
+
+        Matching checks (in priority order):
+        1. vendor_normalized - exact match with normalized query
+        2. customer_normalized - exact match with normalized query
+        3. all_entities_normalized array - exact/fuzzy match
+        4. vendor_name, customer_name, store_name - fuzzy match with rapidfuzz
+
+        Args:
+            query_entities: List of entity names from query
+            original_query: Original query text
+            accessible_document_ids: List of accessible document IDs for access control
+
+        Returns:
+            Tuple of (matched_document_ids, matched_document_names)
+        """
+        if not query_entities:
+            return [], []
+
+        # Check if hard filtering is appropriate for this query
+        if not self._should_apply_hard_filter(query_entities, original_query):
+            logger.debug("[Router] Hard filter not applicable for this query")
+            return [], []
+
+        # Normalize query entities using the same function used during extraction
+        normalized_query_entities = [
+            normalize_entity_name(entity) for entity in query_entities
+        ]
+        normalized_query_entities = [e for e in normalized_query_entities if e]  # Remove empty
+
+        if not normalized_query_entities:
+            return [], []
+
+        logger.info(f"[Router] Hard filter: searching for entities {normalized_query_entities}")
+
+        matched_ids = []
+        matched_names = []
+
+        try:
+            # Import fuzzy matching function
+            try:
+                from rapidfuzz import fuzz
+                fuzzy_ratio = fuzz.ratio
+                logger.debug("[Router] Using rapidfuzz for entity matching")
+            except ImportError:
+                fuzzy_ratio = None
+                logger.debug("[Router] rapidfuzz not available, using exact/substring matching only")
+
+            with get_db_session() as db:
+                # Fetch all accessible documents with their entity metadata
+                # Cast text array to UUID array for proper comparison with d.id
+                sql = """
+                    SELECT
+                        d.id::text as document_id,
+                        COALESCE(dd.header_data->>'vendor_name', dd.header_data->>'store_name', d.filename) as source_display,
+                        dd.header_data->>'vendor_normalized' as vendor_normalized,
+                        dd.header_data->>'customer_normalized' as customer_normalized,
+                        dd.header_data->>'vendor_name' as vendor_name,
+                        dd.header_data->>'customer_name' as customer_name,
+                        dd.header_data->>'store_name' as store_name,
+                        dd.header_data->'all_entities_normalized' as all_entities_normalized
+                    FROM documents d
+                    LEFT JOIN documents_data dd ON dd.document_id = d.id
+                    WHERE d.id = ANY(CAST(:doc_ids AS uuid[]))
+                """
+
+                doc_ids = accessible_document_ids if accessible_document_ids else []
+                # Convert list to PostgreSQL array format
+                doc_ids_array = '{' + ','.join(doc_ids) + '}' if doc_ids else '{}'
+                result = db.execute(text(sql), {"doc_ids": doc_ids_array})
+
+                for row in result.fetchall():
+                    doc_id = row[0]
+                    source_display = row[1] or "Unknown"
+                    vendor_normalized = row[2] or ""
+                    customer_normalized = row[3] or ""
+                    vendor_name = row[4] or ""
+                    customer_name = row[5] or ""
+                    store_name = row[6] or ""
+                    all_entities_raw = row[7]
+
+                    # Parse all_entities_normalized JSON array
+                    all_entities = []
+                    if all_entities_raw:
+                        try:
+                            if isinstance(all_entities_raw, str):
+                                import json
+                                all_entities = json.loads(all_entities_raw)
+                            elif isinstance(all_entities_raw, list):
+                                all_entities = all_entities_raw
+                        except (json.JSONDecodeError, TypeError):
+                            all_entities = []
+
+                    # Check if document matches any query entity
+                    matched = False
+                    match_reason = ""
+
+                    for query_entity in normalized_query_entities:
+                        # 1. Exact match on vendor_normalized (already normalized in DB)
+                        if vendor_normalized and vendor_normalized.lower() == query_entity:
+                            matched = True
+                            match_reason = f"vendor_normalized exact: '{vendor_normalized}'"
+                            break
+
+                        # 2. Exact match on customer_normalized
+                        if customer_normalized and customer_normalized.lower() == query_entity:
+                            matched = True
+                            match_reason = f"customer_normalized exact: '{customer_normalized}'"
+                            break
+
+                        # 3. Check all_entities_normalized array (exact match)
+                        for entity in all_entities:
+                            if isinstance(entity, str) and entity.lower() == query_entity:
+                                matched = True
+                                match_reason = f"all_entities exact: '{entity}'"
+                                break
+                        if matched:
+                            break
+
+                        # 4. Fuzzy match on raw name fields using rapidfuzz
+                        name_fields = [
+                            ("vendor_name", vendor_name),
+                            ("customer_name", customer_name),
+                            ("store_name", store_name),
+                        ]
+
+                        for field_name, field_value in name_fields:
+                            if not field_value:
+                                continue
+
+                            # Normalize the field value the same way as query
+                            field_normalized = normalize_entity_name(field_value)
+
+                            # Exact match after normalization
+                            if field_normalized == query_entity:
+                                matched = True
+                                match_reason = f"{field_name} normalized exact: '{field_value}' -> '{field_normalized}'"
+                                break
+
+                            # Substring match
+                            if query_entity in field_normalized or field_normalized in query_entity:
+                                matched = True
+                                match_reason = f"{field_name} substring: '{query_entity}' in '{field_normalized}'"
+                                break
+
+                            # Fuzzy match with rapidfuzz
+                            if fuzzy_ratio:
+                                score = fuzzy_ratio(query_entity, field_normalized)
+                                if score >= ENTITY_MATCH_THRESHOLD:
+                                    matched = True
+                                    match_reason = f"{field_name} fuzzy ({score:.0f}%): '{query_entity}' ~ '{field_normalized}'"
+                                    break
+
+                        if matched:
+                            break
+
+                        # 5. Fuzzy match on all_entities_normalized array
+                        for entity in all_entities:
+                            if not isinstance(entity, str):
+                                continue
+                            entity_lower = entity.lower()
+
+                            # Substring match
+                            if query_entity in entity_lower or entity_lower in query_entity:
+                                matched = True
+                                match_reason = f"all_entities substring: '{query_entity}' in '{entity}'"
+                                break
+
+                            # Fuzzy match
+                            if fuzzy_ratio:
+                                score = fuzzy_ratio(query_entity, entity_lower)
+                                if score >= ENTITY_MATCH_THRESHOLD:
+                                    matched = True
+                                    match_reason = f"all_entities fuzzy ({score:.0f}%): '{query_entity}' ~ '{entity}'"
+                                    break
+
+                        if matched:
+                            break
+
+                    if matched:
+                        matched_ids.append(doc_id)
+                        matched_names.append(source_display)
+                        logger.debug(f"[Router] ✓ Matched doc '{source_display}': {match_reason}")
+
+                logger.info(
+                    f"[Router] Hard filter returned {len(matched_ids)} matches "
+                    f"for entities {normalized_query_entities}"
+                )
+
+        except Exception as e:
+            logger.error(f"[Router] Hard entity filter error: {e}", exc_info=True)
+            # Fall back to simpler in-memory filtering if main logic fails
+            return self._hard_filter_by_entity_fallback(
+                query_entities, accessible_document_ids
+            )
+
+        return matched_ids, matched_names
+
+    def _hard_filter_by_entity_fallback(
+        self,
+        query_entities: List[str],
+        accessible_document_ids: Optional[List[str]] = None
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Fallback method for hard entity filtering using in-memory matching.
+
+        Used when main filtering method fails. Uses the same normalize_entity_name()
+        function and rapidfuzz for consistent matching.
+        """
+        if not query_entities or not accessible_document_ids:
+            return [], []
+
+        # Normalize query entities using the same function used during extraction
+        normalized_query_entities = [
+            normalize_entity_name(entity) for entity in query_entities
+        ]
+        normalized_query_entities = [e for e in normalized_query_entities if e]
+
+        if not normalized_query_entities:
+            return [], []
+
+        # Try to import rapidfuzz for fuzzy matching
+        try:
+            from rapidfuzz import fuzz
+            fuzzy_ratio = fuzz.ratio
+        except ImportError:
+            fuzzy_ratio = None
+
+        matched_ids = []
+        matched_names = []
+
+        try:
+            with get_db_session() as db:
+                repo = DocumentRepository(db)
+
+                for doc_id in accessible_document_ids:
+                    try:
+                        # Get document with metadata from header_data
+                        doc_data = repo.get_document_data(doc_id)
+                        if not doc_data or not doc_data.header_data:
+                            continue
+
+                        header = doc_data.header_data
+
+                        # Get display name from header_data fields
+                        source_name = (
+                            header.get("vendor_name") or
+                            header.get("store_name") or
+                            header.get("customer_name") or
+                            "Unknown"
+                        )
+
+                        # Get normalized fields (already normalized in DB)
+                        vendor_norm = header.get("vendor_normalized", "").lower()
+                        customer_norm = header.get("customer_normalized", "").lower()
+                        all_entities = header.get("all_entities_normalized", [])
+
+                        # Get raw name fields for normalization
+                        vendor_name = header.get("vendor_name", "")
+                        customer_name = header.get("customer_name", "")
+                        store_name = header.get("store_name", "")
+
+                        matched = False
+
+                        for query_entity in normalized_query_entities:
+                            # 1. Exact match on pre-normalized fields
+                            if query_entity == vendor_norm or query_entity == customer_norm:
+                                matched = True
+                                break
+
+                            # 2. Check all_entities_normalized array
+                            for entity in all_entities:
+                                if isinstance(entity, str) and entity.lower() == query_entity:
+                                    matched = True
+                                    break
+                            if matched:
+                                break
+
+                            # 3. Normalize raw fields and compare
+                            for field_value in [vendor_name, customer_name, store_name]:
+                                if not field_value:
+                                    continue
+                                field_normalized = normalize_entity_name(field_value)
+
+                                # Exact match after normalization
+                                if field_normalized == query_entity:
+                                    matched = True
+                                    break
+
+                                # Substring match
+                                if query_entity in field_normalized or field_normalized in query_entity:
+                                    matched = True
+                                    break
+
+                                # Fuzzy match with rapidfuzz
+                                if fuzzy_ratio:
+                                    score = fuzzy_ratio(query_entity, field_normalized)
+                                    if score >= ENTITY_MATCH_THRESHOLD:
+                                        matched = True
+                                        break
+
+                            if matched:
+                                break
+
+                        if matched:
+                            matched_ids.append(doc_id)
+                            matched_names.append(source_name)
+
+                    except Exception as doc_error:
+                        logger.debug(f"[Router] Error checking document {doc_id}: {doc_error}")
+                        continue
+
+        except Exception as e:
+            logger.error(f"[Router] Hard entity filter fallback error: {e}", exc_info=True)
+
+        return matched_ids, matched_names
+
     def _route_with_vector_search(
         self,
         query_metadata: Dict[str, Any],
@@ -277,6 +683,7 @@ class DocumentRouter:
             # ========== ENTITY MATCHING BOOST ==========
             # Apply score boost when query entities match document entities/source names
             # This compensates for embedding model limitations with specific terms
+            # IMPORTANT: Only boost for actual entity matches, NOT generic query terms
             import re
 
             def normalize_for_matching(text: str) -> str:
@@ -287,14 +694,16 @@ class DocumentRouter:
                 return text
 
             query_entities = [normalize_for_matching(e) for e in query_metadata.get("entities", [])]
-            query_terms = [t for t in original_query.lower().split() if len(t) > 2]
 
             ENTITY_MATCH_BOOST = float(os.getenv("ENTITY_MATCH_BOOST", "0.3"))
 
             # Track the highest score after boosting (before penalties) for threshold calculation
             max_boosted_score = 0.0
 
-            if query_entities or query_terms:
+            # Track documents that got TRUE entity matches (not just generic term matches)
+            entity_matched_doc_ids = set()
+
+            if query_entities:
                 logger.info(f"[Router Vector] ENTITY MATCHING BOOST:")
                 logger.info(f"[Router Vector]   • Query entities (normalized): {query_entities}")
                 logger.info(f"[Router Vector]   • Boost factor: {ENTITY_MATCH_BOOST}")
@@ -308,10 +717,12 @@ class DocumentRouter:
                     # Get document entities from payload
                     payload = result.get("payload", {})
                     embedding_text = normalize_for_matching(payload.get("embedding_text", ""))
+                    doc_id = result.get("payload", {}).get("document_id") or result.get("document_id", "")
 
                     original_score = result.get("score", 0)
                     boost = 0.0
                     match_reasons = []
+                    is_entity_match = False  # True only if matched actual query entity
 
                     # Helper function to check if two strings share a significant prefix
                     def shares_prefix(s1: str, s2: str, min_len: int = 4) -> bool:
@@ -332,21 +743,26 @@ class DocumentRouter:
                         if entity in source_name or source_name in entity:
                             boost = max(boost, ENTITY_MATCH_BOOST)
                             match_reasons.append(f"entity '{entity}' in source")
+                            is_entity_match = True
                         elif entity_compact in source_name_compact or source_name_compact in entity_compact:
                             boost = max(boost, ENTITY_MATCH_BOOST)
                             match_reasons.append(f"entity '{entity}' ~matches source")
+                            is_entity_match = True
                         # Check if significant entity words appear in source (handles typos like "graphy" matching "graph")
                         elif any(w in source_name_compact or source_name_compact in w for w in entity_words if len(w) >= 4):
                             boost = max(boost, ENTITY_MATCH_BOOST * 0.9)
                             match_reasons.append(f"entity word from '{entity}' in source")
+                            is_entity_match = True
                         # Check prefix matching for entity words (handles "graphy" matching "graphr1" via "graph" prefix)
                         elif any(shares_prefix(w, source_name_compact) for w in entity_words if len(w) >= 4):
                             boost = max(boost, ENTITY_MATCH_BOOST * 0.85)
                             match_reasons.append(f"entity '{entity}' prefix-matches source")
+                            is_entity_match = True
                         # Check embedding text (contains entities, topics, summary)
                         elif entity in embedding_text or entity_compact in embedding_text.replace(" ", ""):
                             boost = max(boost, ENTITY_MATCH_BOOST * 0.8)
                             match_reasons.append(f"entity '{entity}' in content")
+                            is_entity_match = True
                         else:
                             # Check metadata fields like vendor_name, customer_name, store_name
                             entity_fields = ['vendor_name', 'customer_name', 'store_name', 'company_name', 'subject_name']
@@ -357,6 +773,7 @@ class DocumentRouter:
                                 if field_value and (entity in field_value or entity_compact in field_compact):
                                     boost = max(boost, ENTITY_MATCH_BOOST)
                                     match_reasons.append(f"entity '{entity}' in {field}")
+                                    is_entity_match = True
                                     field_matched = True
                                     break
 
@@ -370,19 +787,18 @@ class DocumentRouter:
                                         if entity in ke_normalized or entity_compact in ke_compact:
                                             boost = max(boost, ENTITY_MATCH_BOOST * 0.9)
                                             match_reasons.append(f"entity '{entity}' in key_entities")
+                                            is_entity_match = True
                                             break
 
-                    # Also check direct query terms against source name
-                    for term in query_terms:
-                        if len(term) > 3 and (term in source_name or term in source_name_compact):
-                            if boost == 0:  # Only apply term boost if no entity boost
-                                boost = max(boost, ENTITY_MATCH_BOOST * 0.5)
-                                match_reasons.append(f"term '{term}' in source")
+                    # NOTE: We no longer boost for generic query terms like "invoice"
+                    # When entities are specified, only entity matches matter
 
-                    if boost > 0:
+                    if boost > 0 and is_entity_match:
                         result["score"] = min(1.0, original_score + boost)
                         result["_boosted"] = True
+                        result["_entity_matched"] = True
                         result["_boost_amount"] = boost
+                        entity_matched_doc_ids.add(doc_id)
                         # Track max boosted score BEFORE penalties are applied
                         max_boosted_score = max(max_boosted_score, result["score"])
                         logger.info(
@@ -402,34 +818,36 @@ class DocumentRouter:
                 # When query explicitly mentions entity names (like vendor/customer/company names),
                 # penalize documents that DON'T match these entities to improve filtering precision.
                 # This is more discriminating than just boosting matching documents.
-                if query_entities:
-                    # Penalty factor for documents that don't match any query entity
-                    ENTITY_NONMATCH_PENALTY = float(os.getenv("ENTITY_NONMATCH_PENALTY", "0.6"))
+                # IMPORTANT: Documents that only match generic terms (not entities) are penalized!
 
-                    # Count how many documents got boosted
-                    boosted_count = sum(1 for r in results if r.get("_boosted", False))
+                # Penalty factor for documents that don't match any query entity
+                ENTITY_NONMATCH_PENALTY = float(os.getenv("ENTITY_NONMATCH_PENALTY", "0.4"))
 
-                    # Only apply penalty if SOME documents got entity matches (not a general query)
-                    if boosted_count > 0 and boosted_count < len(results):
-                        logger.info(f"[Router Vector] ENTITY NON-MATCH PENALTY:")
-                        logger.info(f"[Router Vector]   • Boosted documents: {boosted_count}")
-                        logger.info(f"[Router Vector]   • Penalty factor: {ENTITY_NONMATCH_PENALTY}")
+                # Count how many documents got TRUE entity matches
+                entity_matched_count = len(entity_matched_doc_ids)
 
-                        for result in results:
-                            if not result.get("_boosted", False):
-                                original_score = result.get("score", 0)
-                                # Apply penalty - multiply score by penalty factor
-                                result["score"] = original_score * ENTITY_NONMATCH_PENALTY
-                                result["_entity_penalized"] = True
-                                source_name_raw = result.get("source_name", "")
-                                logger.info(
-                                    f"[Router Vector]   ↓ PENALIZED: {source_name_raw:40s} "
-                                    f"{original_score:.4f} → {result['score']:.4f} (×{ENTITY_NONMATCH_PENALTY}) "
-                                    f"[no entity match]"
-                                )
+                # Only apply penalty if SOME documents got entity matches (not a general query)
+                if entity_matched_count > 0:
+                    logger.info(f"[Router Vector] ENTITY NON-MATCH PENALTY:")
+                    logger.info(f"[Router Vector]   • Entity-matched documents: {entity_matched_count}")
+                    logger.info(f"[Router Vector]   • Penalty factor: {ENTITY_NONMATCH_PENALTY}")
 
-                        # Re-sort after penalty
-                        results.sort(key=lambda x: x.get("score", 0), reverse=True)
+                    for result in results:
+                        # Penalize if document did NOT match any entity
+                        if not result.get("_entity_matched", False):
+                            original_score = result.get("score", 0)
+                            # Apply penalty - multiply score by penalty factor
+                            result["score"] = original_score * ENTITY_NONMATCH_PENALTY
+                            result["_entity_penalized"] = True
+                            source_name_raw = result.get("source_name", "")
+                            logger.info(
+                                f"[Router Vector]   ↓ PENALIZED: {source_name_raw:40s} "
+                                f"{original_score:.4f} → {result['score']:.4f} (×{ENTITY_NONMATCH_PENALTY}) "
+                                f"[no entity match]"
+                            )
+
+                    # Re-sort after penalty
+                    results.sort(key=lambda x: x.get("score", 0), reverse=True)
 
             # ========== TABULAR DATA BOOST ==========
             # Boost tabular documents (CSV/Excel) when query appears to be data analytics
@@ -649,9 +1067,18 @@ class DocumentRouter:
             doc_id_to_name = {}  # Track document_id -> source_name mapping for logging
             filtered_count = 0
             duplicate_count = 0
+            entity_filtered_count = 0
 
             # Build set of accessible document IDs for fast lookup
             accessible_ids_set = set(accessible_document_ids) if accessible_document_ids else None
+
+            # IMPORTANT: When entity matches exist, ONLY return entity-matched documents
+            # This prevents non-matching documents from being included via relative threshold
+            has_entity_matches = len(entity_matched_doc_ids) > 0
+            if has_entity_matches:
+                logger.info(f"[Router Vector] ENTITY-PRIORITY FILTERING MODE:")
+                logger.info(f"[Router Vector]   • Entity-matched documents found: {len(entity_matched_doc_ids)}")
+                logger.info(f"[Router Vector]   • Only entity-matched documents will be returned")
 
             logger.info(f"[Router Vector] FILTERING RESULTS:")
             for result in results:
@@ -659,6 +1086,7 @@ class DocumentRouter:
                 doc_id = result.get("payload", {}).get("document_id") or result.get("document_id")
                 source_name = result.get("source_name", "unknown")
                 score = result.get("score", 0)
+                is_entity_matched = result.get("_entity_matched", False)
 
                 if not doc_id:
                     logger.debug(f"[Router Vector]   ⊘ SKIP: {source_name} - no document_id")
@@ -671,7 +1099,16 @@ class DocumentRouter:
                     )
                     continue
 
-                # Skip if below relative threshold
+                # ENTITY PRIORITY: When entity matches exist, only accept entity-matched documents
+                if has_entity_matches and not is_entity_matched:
+                    entity_filtered_count += 1
+                    logger.info(
+                        f"[Router Vector]   ✗ NO ENTITY MATCH: {source_name:40s} "
+                        f"score={score:.4f} [entity-matched docs exist, skipping non-matched]"
+                    )
+                    continue
+
+                # Skip if below relative threshold (only applies when no entity matches exist)
                 if score < relative_threshold:
                     filtered_count += 1
                     logger.info(
@@ -691,9 +1128,10 @@ class DocumentRouter:
                 seen_doc_ids.add(doc_id)
                 document_ids.append(doc_id)
                 doc_id_to_name[doc_id] = source_name  # Store mapping for final log
+                entity_tag = " [ENTITY✓]" if is_entity_matched else ""
                 logger.info(
                     f"[Router Vector]   ✓ ACCEPTED: {source_name:40s} ({doc_id[:8]}...) "
-                    f"score={score:.4f} >= threshold={relative_threshold:.4f}"
+                    f"score={score:.4f}{entity_tag}"
                 )
 
             # Summary
@@ -701,10 +1139,14 @@ class DocumentRouter:
             logger.info(f"[Router Vector] FILTERING SUMMARY:")
             logger.info(f"[Router Vector]   • Total raw results:    {len(results)}")
             logger.info(f"[Router Vector]   • Accepted (unique):    {len(document_ids)}")
+            if entity_filtered_count > 0:
+                logger.info(f"[Router Vector]   • Filtered (no entity): {entity_filtered_count}")
             logger.info(f"[Router Vector]   • Filtered (low score): {filtered_count}")
             logger.info(f"[Router Vector]   • Skipped (duplicates): {duplicate_count}")
             if accessible_ids_set:
                 logger.info(f"[Router Vector]   • Access control:       {len(accessible_ids_set)} accessible IDs")
+            if has_entity_matches:
+                logger.info(f"[Router Vector]   • Entity-priority mode: YES (only entity-matched docs returned)")
             # Format final document list with names for easy tracking
             doc_names_list = [doc_id_to_name.get(doc_id, "unknown") for doc_id in document_ids]
             logger.info(f"[Router Vector]   • Final document_ids: {document_ids}")

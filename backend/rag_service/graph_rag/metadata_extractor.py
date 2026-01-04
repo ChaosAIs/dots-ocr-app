@@ -21,6 +21,11 @@ from ..utils.date_normalizer import (
     extract_primary_date,
     DateEntity,
 )
+from ..entity_extractor import (
+    extract_all_entities,
+    create_normalized_metadata,
+    EntityExtractionResult,
+)
 from .prompts import (
     METADATA_BATCH_SUMMARY_PROMPT,
     METADATA_META_SUMMARY_PROMPT,
@@ -98,6 +103,24 @@ class HierarchicalMetadataExtractor:
             all_text = "\n\n".join([c.get("page_content", "") for c in valid_chunks])
             normalized_dates = find_and_normalize_dates(all_text)
 
+            # Entity extraction: Use NER + regex to extract and normalize entities
+            if progress_callback:
+                progress_callback("Extracting entities...")
+
+            entity_result = extract_all_entities(
+                text=all_text,
+                header_data=None,  # Will be enhanced later if structured extraction runs
+                use_spacy=True,
+                use_regex=True,
+            )
+            normalized_entity_metadata = create_normalized_metadata(entity_result)
+
+            logger.info(
+                f"[Metadata] Entity extraction for {source_name}: "
+                f"{len(entity_result.organizations)} orgs, {len(entity_result.persons)} persons, "
+                f"vendor={normalized_entity_metadata.get('vendor_name')}"
+            )
+
             logger.info(f"[Metadata] Found {len(normalized_dates)} dates in {source_name}")
 
             # Enhance date entities in key_entities with normalized dates
@@ -136,15 +159,29 @@ class HierarchicalMetadataExtractor:
                 "count": len(normalized_dates),
             }
 
+            # Build entities section with normalized names for filtering
+            entities_section = {
+                "vendor_name": normalized_entity_metadata.get("vendor_name"),
+                "vendor_normalized": normalized_entity_metadata.get("vendor_normalized"),
+                "customer_name": normalized_entity_metadata.get("customer_name"),
+                "customer_normalized": normalized_entity_metadata.get("customer_normalized"),
+                "organizations": [e.to_dict() for e in entity_result.organizations],
+                "persons": [e.to_dict() for e in entity_result.persons],
+                "organizations_normalized": normalized_entity_metadata.get("organizations_normalized", []),
+                "persons_normalized": normalized_entity_metadata.get("persons_normalized", []),
+                "all_entities_normalized": normalized_entity_metadata.get("all_entities_normalized", []),
+            }
+
             # Build final metadata
             processing_time = (datetime.now() - start_time).total_seconds()
 
             metadata = {
-                "extraction_version": "2.0",  # Bumped version for date normalization
+                "extraction_version": "3.0",  # Bumped version for entity extraction
                 "extracted_at": datetime.now().isoformat(),
                 "extraction_method": "hierarchical_summarization",
                 **structured_metadata,
-                "dates": dates_section,  # NEW: Dedicated dates section
+                "dates": dates_section,
+                "entities": entities_section,  # NEW: NER-extracted entities with normalization
                 "hierarchical_summary": {
                     "level1_summaries": level1_summaries,
                     "meta_summary": meta_summary,
@@ -153,6 +190,7 @@ class HierarchicalMetadataExtractor:
                     "total_chunks": len(chunks),
                     "processed_chunks": len(valid_chunks),
                     "dates_found": len(normalized_dates),
+                    "entities_found": len(entity_result.organizations) + len(entity_result.persons),
                     "llm_calls": len(level1_summaries) + 2,  # batches + meta + structured
                     "processing_time_seconds": round(processing_time, 2),
                 },

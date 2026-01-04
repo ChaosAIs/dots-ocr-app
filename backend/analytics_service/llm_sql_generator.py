@@ -222,10 +222,13 @@ class ContentSizeEvaluator:
 
         # Data rows with proper formatting
         for row in query_results:
+            # Check if this row represents a non-monetary item (e.g., "User Messages")
+            is_non_monetary = self._is_non_monetary_item(row)
+
             values = []
             for col in columns:
                 val = row.get(col, "")
-                formatted_val = self._format_cell_value(val, col)
+                formatted_val = self._format_cell_value(val, col, is_non_monetary=is_non_monetary, item=row)
                 values.append(formatted_val)
             lines.append("| " + " | ".join(values) + " |")
 
@@ -235,15 +238,17 @@ class ContentSizeEvaluator:
         self,
         query_results: List[Dict[str, Any]],
         group_by_columns: List[str] = None,
-        item_columns: List[str] = None
+        item_columns: List[str] = None,
+        field_mappings: Dict[str, Dict[str, Any]] = None
     ) -> str:
         """
         Build grouped markdown output - documents grouped with nested line items.
 
         Args:
             query_results: List of result dictionaries
-            group_by_columns: Columns to group by (default: store_name, receipt_number, transaction_date)
+            group_by_columns: Columns to group by (auto-detected from field_mappings if not provided)
             item_columns: Columns to show in item table (default: description, quantity, unit_price, amount)
+            field_mappings: Field mappings from document metadata (used to detect document type)
 
         Returns:
             Grouped markdown string
@@ -251,9 +256,9 @@ class ContentSizeEvaluator:
         if not query_results:
             return "No data available."
 
-        # Default grouping columns
+        # Determine grouping columns from field_mappings or data structure
         if not group_by_columns:
-            group_by_columns = ['store_name', 'receipt_number', 'transaction_date']
+            group_by_columns = self._detect_grouping_columns(query_results, field_mappings)
 
         # Default item columns - filter to only those that exist in data
         # Data is now normalized to canonical field names (description, quantity, amount, etc.)
@@ -317,14 +322,20 @@ class ContentSizeEvaluator:
                 if not has_data:
                     continue
 
+                # Check if this item's amount is non-monetary (e.g., "User Messages")
+                is_non_monetary = self._is_non_monetary_item(item)
+
                 values = []
                 for col in display_cols:
                     val = item.get(col, "")
-                    formatted_val = self._format_cell_value(val, col)
+                    # Pass is_non_monetary flag for amount columns, and item for is_currency check
+                    formatted_val = self._format_cell_value(val, col, is_non_monetary=is_non_monetary, item=item)
                     values.append(formatted_val)
-                    # Track subtotal
+                    # Track subtotal - only for monetary amounts
                     if col in ['amount', 'total', 'subtotal'] and isinstance(item.get(col), (int, float)):
-                        group_subtotal += float(item.get(col, 0))
+                        # Don't include non-monetary amounts in the subtotal calculation
+                        if not is_non_monetary:
+                            group_subtotal += float(item.get(col, 0))
                 item_rows.append("| " + " | ".join(values) + " |")
 
             # Skip groups with no valid items
@@ -338,8 +349,8 @@ class ContentSizeEvaluator:
             header_parts = []
             for i, col in enumerate(group_by_columns):
                 val = group_key[i] if i < len(group_key) else ''
-                if val and col in ['store_name', 'customer_name']:
-                    header_parts.insert(0, val)  # Store/customer name first
+                if val and col in ['store_name', 'customer_name', 'vendor_name']:
+                    header_parts.insert(0, val)  # Entity name first
                 elif val and col in ['receipt_number', 'invoice_number']:
                     header_parts.append(f"#{val}")
                 elif val and 'date' in col.lower():
@@ -401,13 +412,24 @@ class ContentSizeEvaluator:
 
         return "\n".join(lines)
 
-    def _format_cell_value(self, value: Any, column_name: str) -> str:
+    # Patterns that indicate the amount is NOT monetary (e.g., message credits, usage counts)
+    # These are checked first, but only apply if amount == quantity (indicating a count)
+    NON_MONETARY_DESCRIPTION_PATTERNS = [
+        'user message', 'messages', 'credits', 'tokens', 'api call', 'request',
+        'usage', 'units', 'hours', 'minutes', 'seconds', 'days',
+        'points', 'miles'
+    ]
+
+    def _format_cell_value(self, value: Any, column_name: str, is_non_monetary: bool = False, item: Dict[str, Any] = None) -> str:
         """
         Format a cell value based on its type and column name.
 
         Args:
             value: The cell value
             column_name: Column name for type inference
+            is_non_monetary: If True, skip currency formatting for amount columns
+                           (used for items like "User Messages" where amount is count, not money)
+            item: The full row data, used to check is_currency field
 
         Returns:
             Formatted string value
@@ -417,25 +439,208 @@ class ContentSizeEvaluator:
 
         col_lower = column_name.lower()
 
+        # Try to convert string values to numbers for amount/price columns
+        # SQL returns JSONB values as strings (e.g., "600.0" instead of 600.0)
+        numeric_value = value
+        if isinstance(value, str) and value.strip():
+            try:
+                # Try to parse as number
+                cleaned = value.replace(',', '').replace('$', '').strip()
+                numeric_value = float(cleaned)
+            except (ValueError, AttributeError):
+                numeric_value = value
+
         # Format numeric values
-        if isinstance(value, (int, float)):
-            # Currency columns
+        if isinstance(numeric_value, (int, float)):
+            # Check for unit_price column specifically - use is_currency field
+            if 'unit_price' in col_lower or 'unit price' in col_lower:
+                if item is not None:
+                    # Check is_currency field (can be boolean or string from SQL)
+                    is_currency_val = item.get('is_currency')
+                    if is_currency_val is not None:
+                        # Handle string values from SQL (e.g., 'true', 'false')
+                        if isinstance(is_currency_val, str):
+                            is_currency_val = is_currency_val.lower() == 'true'
+                        if is_currency_val is False:
+                            # Explicitly marked as not currency
+                            if numeric_value == int(numeric_value):
+                                return f"{int(numeric_value):,}"
+                            return f"{numeric_value:,.2f}"
+                # Default: unit_price is typically monetary
+                return f"${numeric_value:,.2f}"
+
+            # Currency columns - skip currency formatting if marked as non-monetary
             if any(pattern in col_lower for pattern in self.CURRENCY_PATTERNS):
-                return f"${value:,.2f}"
+                if is_non_monetary:
+                    # Format as plain number for non-monetary amounts
+                    if numeric_value == int(numeric_value):
+                        return f"{int(numeric_value):,}"
+                    return f"{numeric_value:,.2f}"
+                return f"${numeric_value:,.2f}"
             # Count/quantity columns - show as integer
             elif any(pattern in col_lower for pattern in self.COUNT_PATTERNS):
-                return f"{int(value):,}" if value == int(value) else f"{value:,.2f}"
+                return f"{int(numeric_value):,}" if numeric_value == int(numeric_value) else f"{numeric_value:,.2f}"
             # Other numeric
             else:
-                if value == int(value):
-                    return str(int(value))
-                return f"{value:,.2f}"
+                if numeric_value == int(numeric_value):
+                    return str(int(numeric_value))
+                return f"{numeric_value:,.2f}"
 
         # String values
         str_val = str(value)
         # Escape pipe characters in markdown tables
         str_val = str_val.replace("|", "\\|")
         return str_val
+
+    def _is_non_monetary_item(self, item: Dict[str, Any]) -> bool:
+        """
+        Check if an item's amount should NOT be formatted as currency.
+
+        Checks the `is_currency` boolean field from extraction.
+        Falls back to heuristic detection if the field is missing.
+
+        Examples:
+        - "User Messages" with is_currency=false → non-monetary (465 messages)
+        - "Seats" with is_currency=true → monetary ($50 per seat)
+
+        Args:
+            item: The row data containing description and other fields
+
+        Returns:
+            True if the item's amount should NOT be formatted as currency
+        """
+        # Check is_currency field (new schema)
+        # Note: From SQL queries, this comes as string 'true'/'false'
+        # From direct JSONB extraction, it's a boolean True/False
+        is_currency = item.get('is_currency')
+        if is_currency is not None:
+            # Handle string values from SQL (e.g., 'true', 'false')
+            if isinstance(is_currency, str):
+                is_currency = is_currency.lower() == 'true'
+            # is_currency=true means monetary, is_currency=false means non-monetary
+            return not is_currency
+
+        # Fallback to heuristic detection for data without is_currency
+        unit_price = item.get('unit_price')
+        quantity = item.get('quantity')
+        amount = item.get('amount')
+
+        # If unit_price exists and is non-null, it's likely a monetary item
+        if unit_price is not None:
+            return False
+
+        # If amount equals quantity, it's likely a count (e.g., 465 messages)
+        if quantity is not None and amount is not None:
+            try:
+                qty_val = float(quantity)
+                amt_val = float(amount)
+                if qty_val == amt_val and qty_val > 1:
+                    return True
+                if amt_val == 0 and qty_val > 0:
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+        # Check description patterns for usage-based items
+        description = str(item.get('description', '')).lower()
+        for pattern in self.NON_MONETARY_DESCRIPTION_PATTERNS:
+            if pattern in description:
+                if unit_price is None:
+                    return True
+
+        return False
+
+    def _detect_grouping_columns(
+        self,
+        query_results: List[Dict[str, Any]],
+        field_mappings: Dict[str, Dict[str, Any]] = None
+    ) -> List[str]:
+        """
+        Detect appropriate grouping columns based on field_mappings and data structure.
+
+        Uses field_mappings metadata to determine document type (invoice vs receipt)
+        and selects appropriate grouping columns.
+
+        Args:
+            query_results: Query result data
+            field_mappings: Field mappings from document metadata
+
+        Returns:
+            List of column names to group by
+        """
+        if not query_results:
+            return ['store_name', 'receipt_number', 'transaction_date']
+
+        first_row_keys = set(query_results[0].keys())
+
+        # Check field_mappings for document type indicators
+        if field_mappings:
+            # Invoice indicators in field_mappings
+            invoice_fields = {'invoice_number', 'invoice_date', 'vendor_name', 'vendor_address', 'po_number', 'due_date'}
+            # Receipt indicators in field_mappings
+            receipt_fields = {'receipt_number', 'store_name', 'store_address', 'transaction_date', 'cashier'}
+
+            mapping_keys = set(field_mappings.keys())
+            invoice_matches = len(mapping_keys.intersection(invoice_fields))
+            receipt_matches = len(mapping_keys.intersection(receipt_fields))
+
+            if invoice_matches > receipt_matches:
+                # This is invoice data
+                return self._get_invoice_grouping_columns(first_row_keys)
+            elif receipt_matches > invoice_matches:
+                # This is receipt data
+                return self._get_receipt_grouping_columns(first_row_keys)
+
+        # Fallback: detect from actual data columns
+        if 'invoice_number' in first_row_keys:
+            return self._get_invoice_grouping_columns(first_row_keys)
+        elif 'receipt_number' in first_row_keys:
+            return self._get_receipt_grouping_columns(first_row_keys)
+
+        # Default to receipt grouping
+        return self._get_receipt_grouping_columns(first_row_keys)
+
+    def _get_invoice_grouping_columns(self, available_columns: set) -> List[str]:
+        """Get grouping columns for invoice documents."""
+        # Priority order for invoice grouping
+        invoice_group_priority = [
+            ('vendor_name', 'invoice_number', 'invoice_date'),
+            ('vendor_name', 'invoice_number'),
+            ('invoice_number', 'invoice_date'),
+            ('invoice_number',),
+        ]
+
+        for group_combo in invoice_group_priority:
+            if all(col in available_columns for col in group_combo):
+                return list(group_combo)
+
+        # Fallback: use whatever invoice-related columns exist
+        fallback = []
+        for col in ['vendor_name', 'invoice_number', 'invoice_date']:
+            if col in available_columns:
+                fallback.append(col)
+        return fallback if fallback else ['invoice_number']
+
+    def _get_receipt_grouping_columns(self, available_columns: set) -> List[str]:
+        """Get grouping columns for receipt documents."""
+        # Priority order for receipt grouping
+        receipt_group_priority = [
+            ('store_name', 'receipt_number', 'transaction_date'),
+            ('store_name', 'receipt_number'),
+            ('receipt_number', 'transaction_date'),
+            ('receipt_number',),
+        ]
+
+        for group_combo in receipt_group_priority:
+            if all(col in available_columns for col in group_combo):
+                return list(group_combo)
+
+        # Fallback: use whatever receipt-related columns exist
+        fallback = []
+        for col in ['store_name', 'receipt_number', 'transaction_date']:
+            if col in available_columns:
+                fallback.append(col)
+        return fallback if fallback else ['receipt_number']
 
     def get_sample_rows(
         self,
@@ -629,6 +834,10 @@ SELECT ... FROM items ...
 4. Use ROUND() for monetary values to 2 decimal places
 5. Always include COUNT(*) as item_count in aggregations
 6. Order results logically
+7. CRITICAL - When selecting line item amounts, ALWAYS include is_currency:
+   - Add: item->>'is_currency' AS is_currency
+   - This flag indicates if the amount is monetary (true) or a count/usage (false)
+   - Example: SELECT item->>'description' AS description, (item->>'amount')::numeric AS amount, item->>'is_currency' AS is_currency FROM ...
 
 ## Response Format:
 Return ONLY a JSON object with this exact structure:
@@ -727,7 +936,9 @@ CRITICAL RULES:
 - Do NOT list individual records - the full table will be shown after this summary
 - Do NOT try to reproduce the data table
 - Focus on providing context and key insights
-- Format currency values with $ and proper formatting (e.g., $1,234.56)
+- For currency values: PRESERVE the formatting from sample data
+  - Values with $ (e.g., "$50.00") are monetary - keep the $ sign
+  - Values without $ (e.g., "600") are non-monetary counts - do NOT add $ sign
 - Keep the summary concise and scannable
 - ONLY mention columns that appear in the "Columns" list above - NEVER assume or add fields that don't exist
 - If a field is not listed in Columns, it does NOT exist in this data
@@ -966,13 +1177,15 @@ You MUST use the EXACT field names from the Data Schema above!
 - USE the actual field names exactly as shown in the schema
 
 ## Data Structure:
-The documents_data table has TWO separate JSONB columns:
-- header_data (JSONB object): Document-level fields
-- line_items (JSONB array): Item-level fields
+The documents_data table has THREE separate JSONB columns:
+- header_data (JSONB object): Document-level fields (vendor_name, invoice_date, etc.)
+- summary_data (JSONB object): Aggregate totals (subtotal, tax_amount, total_amount, etc.)
+- line_items: Individual line items stored in documents_data_line_items table
 
 Check the 'source' and 'access_pattern' in the field schema!
 - source='header': Access via header_data->>'field_name'
-- source='line_item': Access via item->>'field_name' after jsonb_array_elements()
+- source='summary': Access via summary_data->>'field_name'
+- source='line_item': Access via item->>'field_name' after JOIN with documents_data_line_items
 
 ## Common Error Fixes:
 1. "column X does not exist" in CTE: The 'item' column is only available AFTER jsonb_array_elements() runs. You CANNOT use item->>'...' in WHERE clause inside the CTE (WITH ... AS block). Move such filters to the outer SELECT.
@@ -980,6 +1193,7 @@ Check the 'source' and 'access_pattern' in the field schema!
 3. **"invalid input syntax for type numeric"**:
    - CRITICAL: Check the data_type in the schema! The field being cast might be a STRING, not a number.
    - If error shows a value like "P000035", "SKU-001", etc., the field is a STRING - DO NOT cast to ::numeric
+   - **BILINGUAL FIELD NAMES**: Field names containing "/" (e.g., "Item subtotal /Sous-total del'article") are LABELS, not data fields - DO NOT cast them to ::numeric!
    - For STRING fields: Use item->>'FieldName' without any cast
    - For NUMERIC fields only: Use (item->>'FieldName')::numeric with NULLIF for safety
    - Check the schema's data_type field: "string" = no cast, "number" = can cast to numeric
@@ -1062,6 +1276,7 @@ WHERE (header_data->>'transaction_date')::date BETWEEN ...
   - CORRECT: AVG((item->>'amount')::numeric)
   - WRONG: SUM(item->>'quantity') -- ERROR: function sum(text) does not exist
 - **DO NOT cast in SELECT** for non-aggregated fields - return values as-is from JSONB
+- **BILINGUAL FIELD NAMES**: Field names containing "/" (e.g., "Item subtotal /Sous-total") are LABELS, NOT numeric data - NEVER cast them to ::numeric!
 
 ### 3. Filter Application:
 - Apply filters in OUTER WHERE clause (after CTE), not inside CTE
@@ -1091,9 +1306,11 @@ ORDER BY (item->>'NumericField')::numeric DESC  -- cast only in ORDER BY if need
 NOTE: Always include `dd.document_id` and `dd.summary_data` in CTE - needed for count and summary fields.
 
 ### 5. Report Type Behavior:
-- **detail**: SELECT all schema fields, return individual rows
+- **detail**: SELECT all schema fields, return individual rows. ALWAYS include document identifiers (invoice_number, receipt_number) so rows can be grouped by document in the UI.
 - **summary**: GROUP BY and aggregate (SUM, COUNT, AVG, MIN, MAX)
 - **count**: Return COUNT with optional grouping
+
+**CRITICAL for detail reports**: When listing line items from multiple documents, ALWAYS include the document identifier field (invoice_number or receipt_number) so users can tell which items belong to which document.
 
 ### 5.5 FIELD ORDERING IN SELECT (CRITICAL for readability):
 Order fields in a LOGICAL HIERARCHY - document header fields first, then summary, then line item details:
@@ -1426,16 +1643,81 @@ Respond with JSON only:"""
         """
         Classify a field for SQL generation purposes.
 
+        Recognizes canonical field names from the standardized schema and properly
+        classifies them. Also handles bilingual/label detection to prevent
+        misclassification of fields like "Item subtotal /Sous-total del'article".
+
         Args:
             field_name: Field name
-            source: 'header' or 'line_item'
+            source: 'header', 'line_item', or 'summary'
 
         Returns:
-            Field classification
+            Field classification with semantic_type, data_type, source, aggregation
         """
         field_lower = field_name.lower().replace('_', ' ')
 
-        # Semantic patterns
+        # Check for bilingual/descriptive field names that should NOT be classified as numeric
+        # These are labels or column headers, not actual data fields
+        # Examples: "Item subtotal /Sous-total del'article", "Description / Description"
+        is_bilingual_label = (
+            '/' in field_name or  # Contains language separator (e.g., "English / French")
+            len(field_name) > 50 or  # Very long field name (likely a description/label)
+            field_name.count(' ') > 4  # Too many words to be a field name
+        )
+
+        # If it's a bilingual label, treat as string/description regardless of keywords
+        if is_bilingual_label:
+            logger.debug(f"[SQL Generator] Field '{field_name}' detected as bilingual/label - treating as string")
+            return {
+                'semantic_type': 'description',
+                'data_type': 'string',
+                'source': source,
+                'aggregation': None
+            }
+
+        # CANONICAL FIELD RECOGNITION
+        # These are standardized field names from the grouped field mappings
+        canonical_fields = {
+            # Header canonical fields
+            'vendor_name': {'semantic_type': 'entity', 'data_type': 'string', 'aggregation': 'group_by'},
+            'customer_name': {'semantic_type': 'entity', 'data_type': 'string', 'aggregation': 'group_by'},
+            'store_name': {'semantic_type': 'entity', 'data_type': 'string', 'aggregation': 'group_by'},
+            'invoice_number': {'semantic_type': 'identifier', 'data_type': 'string', 'aggregation': None},
+            'receipt_number': {'semantic_type': 'identifier', 'data_type': 'string', 'aggregation': None},
+            'invoice_date': {'semantic_type': 'date', 'data_type': 'datetime', 'aggregation': None},
+            'transaction_date': {'semantic_type': 'date', 'data_type': 'datetime', 'aggregation': None},
+            'due_date': {'semantic_type': 'date', 'data_type': 'datetime', 'aggregation': None},
+            'payment_method': {'semantic_type': 'method', 'data_type': 'string', 'aggregation': 'group_by'},
+            'currency': {'semantic_type': 'identifier', 'data_type': 'string', 'aggregation': None},
+
+            # Line item canonical fields
+            'description': {'semantic_type': 'product', 'data_type': 'string', 'aggregation': 'group_by'},
+            'quantity': {'semantic_type': 'quantity', 'data_type': 'number', 'aggregation': 'sum'},
+            'unit_price': {'semantic_type': 'amount', 'data_type': 'number', 'aggregation': None},
+            'amount': {'semantic_type': 'amount', 'data_type': 'number', 'aggregation': 'sum'},
+            'sku': {'semantic_type': 'identifier', 'data_type': 'string', 'aggregation': None},
+            'category': {'semantic_type': 'category', 'data_type': 'string', 'aggregation': 'group_by'},
+
+            # Summary canonical fields
+            'subtotal': {'semantic_type': 'subtotal', 'data_type': 'number', 'aggregation': None},
+            'tax_amount': {'semantic_type': 'tax', 'data_type': 'number', 'aggregation': None},
+            'tip_amount': {'semantic_type': 'tip', 'data_type': 'number', 'aggregation': None},
+            'discount_amount': {'semantic_type': 'discount', 'data_type': 'number', 'aggregation': None},
+            'shipping_amount': {'semantic_type': 'amount', 'data_type': 'number', 'aggregation': None},
+            'total_amount': {'semantic_type': 'total', 'data_type': 'number', 'aggregation': None},
+        }
+
+        # Check if this is a canonical field name (exact match)
+        if field_name in canonical_fields:
+            field_info = canonical_fields[field_name]
+            return {
+                'semantic_type': field_info['semantic_type'],
+                'data_type': field_info['data_type'],
+                'source': source,
+                'aggregation': field_info['aggregation']
+            }
+
+        # Fallback to pattern-based classification for non-canonical fields
         patterns = [
             ('date', ['date', 'time', 'created', 'updated', 'timestamp'], 'datetime', None),
             ('amount', ['total', 'amount', 'price', 'cost', 'revenue', 'sales', 'subtotal', 'fee', 'tax'], 'number', 'sum'),
@@ -1849,6 +2131,10 @@ Respond with JSON only:"""
         if count_level == 'document' and final_aggregation_type == 'count':
             sql_query = self._fix_document_level_count(sql_query)
 
+        # Ensure summary_data fields (subtotal, total_amount) are included for detail reports
+        if report_type == 'detail':
+            sql_query = self._ensure_summary_data_fields(sql_query)
+
         # Add table filter if provided
         if table_filter:
             logger.info(f"[SQL Generator] Adding table filter: {table_filter[:50]}...")
@@ -1970,24 +2256,170 @@ Respond with JSON only:"""
     def _format_field_schema_json(self, field_mappings: Dict[str, Dict[str, Any]]) -> str:
         """Format field mappings as JSON for LLM prompts.
 
-        Includes source information (header vs line_item) which is CRITICAL
+        Includes source information (header vs line_item vs summary) which is CRITICAL
         for the LLM to generate correct SQL that accesses fields from the
         right JSONB column.
+
+        Supports two formats:
+        1. NEW GROUPED FORMAT (from data_schemas.field_mappings):
+           {
+               "header_mappings": [{"canonical": "vendor_name", "data_type": "string", ...}],
+               "line_item_mappings": [{"canonical": "amount", "data_type": "number", ...}],
+               "summary_mappings": [{"canonical": "total_amount", "data_type": "number", ...}]
+           }
+        2. LEGACY FLAT FORMAT:
+           {
+               "vendor_name": {"data_type": "string", "source": "header", ...},
+               "amount": {"data_type": "number", "source": "line_item", ...}
+           }
+        """
+        # Check if this is the new grouped format
+        is_grouped_format = any(
+            field_mappings.get(k) for k in ['header_mappings', 'line_item_mappings', 'summary_mappings']
+        )
+
+        if is_grouped_format:
+            return self._format_grouped_field_schema_json(field_mappings)
+        else:
+            return self._format_legacy_field_schema_json(field_mappings)
+
+    def _format_grouped_field_schema_json(self, grouped_mappings: Dict[str, List[Dict]]) -> str:
+        """Format grouped field mappings (new format) as JSON for LLM prompts.
+
+        Converts grouped format to a flat schema list with proper source annotations.
         """
         schema_list = []
+
+        # Process header mappings
+        for mapping in grouped_mappings.get('header_mappings', []):
+            canonical = mapping.get('canonical', '')
+            if not canonical:
+                continue
+            schema_list.append({
+                "field_name": canonical,
+                "data_type": mapping.get('data_type', 'string'),
+                "semantic_type": self._infer_semantic_type_from_canonical(canonical, 'header'),
+                "source": "header",
+                "access_pattern": f"header_data->>'{canonical}'",
+                "aggregation": "group_by" if mapping.get('data_type') == 'string' else None,
+                "patterns": mapping.get('patterns', []),
+                "description": f"Header field: {canonical}"
+            })
+
+        # Process line item mappings
+        for mapping in grouped_mappings.get('line_item_mappings', []):
+            canonical = mapping.get('canonical', '')
+            if not canonical:
+                continue
+            data_type = mapping.get('data_type', 'string')
+            schema_list.append({
+                "field_name": canonical,
+                "data_type": data_type,
+                "semantic_type": self._infer_semantic_type_from_canonical(canonical, 'line_item'),
+                "source": "line_item",
+                "access_pattern": f"item->>'{canonical}'",
+                "aggregation": "sum" if data_type == 'number' and canonical in ['amount', 'quantity', 'unit_price'] else ("group_by" if data_type == 'string' else None),
+                "patterns": mapping.get('patterns', []),
+                "description": f"Line item field: {canonical}"
+            })
+
+        # Process summary mappings
+        for mapping in grouped_mappings.get('summary_mappings', []):
+            canonical = mapping.get('canonical', '')
+            if not canonical:
+                continue
+            schema_list.append({
+                "field_name": canonical,
+                "data_type": mapping.get('data_type', 'number'),
+                "semantic_type": self._infer_semantic_type_from_canonical(canonical, 'summary'),
+                "source": "summary",
+                "access_pattern": f"summary_data->>'{canonical}'",
+                "aggregation": None,  # Summary fields are already aggregated
+                "patterns": mapping.get('patterns', []),
+                "description": f"Summary field: {canonical}"
+            })
+
+        logger.info(f"[SQL Generator] Formatted {len(schema_list)} fields from grouped mappings "
+                   f"(header={len(grouped_mappings.get('header_mappings', []))}, "
+                   f"line_item={len(grouped_mappings.get('line_item_mappings', []))}, "
+                   f"summary={len(grouped_mappings.get('summary_mappings', []))})")
+
+        return json.dumps(schema_list, indent=2)
+
+    def _format_legacy_field_schema_json(self, field_mappings: Dict[str, Dict[str, Any]]) -> str:
+        """Format legacy flat field mappings as JSON for LLM prompts."""
+        schema_list = []
         for field_name, mapping in field_mappings.items():
+            # Skip grouped format keys if they somehow get here
+            if field_name in ['header_mappings', 'line_item_mappings', 'summary_mappings']:
+                continue
+
             source = mapping.get('source', 'line_item')  # Default to line_item for backwards compatibility
             schema_list.append({
                 "field_name": field_name,
                 "data_type": mapping.get('data_type', 'string'),
                 "semantic_type": mapping.get('semantic_type', 'unknown'),
-                "source": source,  # CRITICAL: 'header' or 'line_item'
-                "access_pattern": f"header_data->>'{field_name}'" if source == 'header' else f"item->>'{field_name}'",
+                "source": source,
+                "access_pattern": self._get_access_pattern(field_name, source),
                 "aggregation": mapping.get('aggregation', 'none'),
                 "description": mapping.get('description', ''),
                 "aliases": mapping.get('aliases', [])
             })
         return json.dumps(schema_list, indent=2)
+
+    def _get_access_pattern(self, field_name: str, source: str) -> str:
+        """Get the SQL access pattern for a field based on its source."""
+        if source == 'header':
+            return f"header_data->>'{field_name}'"
+        elif source == 'summary':
+            return f"summary_data->>'{field_name}'"
+        else:
+            return f"item->>'{field_name}'"
+
+    def _infer_semantic_type_from_canonical(self, canonical: str, source: str) -> str:
+        """Infer semantic type from canonical field name and source."""
+        canonical_lower = canonical.lower()
+
+        # Header field patterns
+        if source == 'header':
+            if any(kw in canonical_lower for kw in ['vendor', 'customer', 'store', 'merchant']):
+                return 'entity'
+            if any(kw in canonical_lower for kw in ['date', 'time']):
+                return 'date'
+            if any(kw in canonical_lower for kw in ['number', 'id', '#']):
+                return 'identifier'
+            if 'address' in canonical_lower:
+                return 'address'
+            if 'payment' in canonical_lower or 'method' in canonical_lower:
+                return 'method'
+
+        # Line item patterns
+        if source == 'line_item':
+            if canonical_lower == 'description' or canonical_lower == 'name':
+                return 'product'
+            if canonical_lower == 'quantity':
+                return 'quantity'
+            if canonical_lower in ['amount', 'unit_price', 'price']:
+                return 'amount'
+            if canonical_lower == 'sku':
+                return 'identifier'
+            if canonical_lower == 'category':
+                return 'category'
+
+        # Summary patterns
+        if source == 'summary':
+            if 'total' in canonical_lower:
+                return 'total'
+            if 'tax' in canonical_lower:
+                return 'tax'
+            if 'subtotal' in canonical_lower:
+                return 'subtotal'
+            if 'discount' in canonical_lower:
+                return 'discount'
+            if 'tip' in canonical_lower:
+                return 'tip'
+
+        return 'unknown'
 
     def _parse_json_response(self, response: str) -> Optional[Dict[str, Any]]:
         """Parse JSON from LLM response, handling various formats."""
@@ -2357,6 +2789,102 @@ Respond with JSON only:"""
             logger.info("[SQL Fix] Document-level count SQL fixed:")
             logger.debug(f"[SQL Fix] Before: {original_sql[:200]}...")
             logger.debug(f"[SQL Fix] After: {sql[:200]}...")
+
+        return sql
+
+    def _ensure_summary_data_fields(self, sql: str) -> str:
+        """
+        Ensure summary_data fields (subtotal, total_amount) are included in SELECT for detail reports.
+
+        For detail/invoice reports, the UI formatter needs summary_data fields to display
+        document-level subtotals and totals instead of calculating from line items.
+
+        This method adds missing summary_data fields to both:
+        1. The CTE SELECT (to make them available)
+        2. The outer SELECT (to include them in results)
+
+        Args:
+            sql: SQL query that may be missing summary_data fields
+
+        Returns:
+            SQL query with summary_data fields included
+        """
+        import re
+
+        original_sql = sql
+        summary_fields = ['subtotal', 'tax_amount', 'total_amount']
+
+        # Check if this is a CTE-based query
+        cte_match = re.search(
+            r'WITH\s+(\w+)\s+AS\s*\(\s*SELECT\s+(.*?)\s+FROM\s+documents_data',
+            sql,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if not cte_match:
+            logger.debug("[SQL Fix] No CTE found, skipping summary_data field injection")
+            return sql
+
+        cte_name = cte_match.group(1)
+        cte_select = cte_match.group(2)
+
+        # Check which summary fields are already in CTE
+        missing_in_cte = []
+        for field in summary_fields:
+            # Check for patterns like: dd.summary_data->>'subtotal', summary_data->>'subtotal', dd.summary_data
+            if f"summary_data->>'{field}'" not in cte_select.lower() and 'summary_data' not in cte_select.lower():
+                missing_in_cte.append(field)
+
+        # If summary_data is already in CTE SELECT but individual fields aren't extracted, that's fine
+        # because the outer SELECT can access them via summary_data->>'field'
+        if 'summary_data' in cte_select.lower() or 'dd.summary_data' in cte_select.lower():
+            # summary_data column is included, now check outer SELECT
+            pass
+        elif missing_in_cte:
+            # Need to add dd.summary_data to CTE SELECT
+            logger.info("[SQL Fix] Adding dd.summary_data to CTE for detail report")
+            sql = re.sub(
+                r'(WITH\s+\w+\s+AS\s*\(\s*SELECT\s+)',
+                r'\1dd.summary_data, ',
+                sql,
+                flags=re.IGNORECASE
+            )
+
+        # Now check and fix the outer SELECT to include summary_data fields
+        # Find the outer SELECT after the CTE
+        outer_select_match = re.search(
+            rf'\)\s*SELECT\s+(.*?)\s+FROM\s+{cte_name}',
+            sql,
+            re.IGNORECASE | re.DOTALL
+        )
+
+        if outer_select_match:
+            outer_select = outer_select_match.group(1)
+
+            # Check which summary fields are missing from outer SELECT
+            fields_to_add = []
+            for field in summary_fields:
+                # Check for patterns like: summary_data->>'subtotal' AS subtotal, subtotal (as column alias)
+                field_pattern = rf"(summary_data\s*->>\s*'{field}'|{field}\s+AS\s+|AS\s+{field}|\b{field}\b)"
+                if not re.search(field_pattern, outer_select, re.IGNORECASE):
+                    fields_to_add.append(f"summary_data->>'{field}' AS {field}")
+
+            if fields_to_add:
+                logger.info(f"[SQL Fix] Adding summary fields to outer SELECT: {fields_to_add}")
+                # Add the fields at the end of the SELECT list
+                fields_str = ", " + ", ".join(fields_to_add)
+                # Insert before FROM in the outer SELECT
+                sql = re.sub(
+                    rf'(\)\s*SELECT\s+{re.escape(outer_select)})(\s+FROM\s+{cte_name})',
+                    rf'\1{fields_str}\2',
+                    sql,
+                    flags=re.IGNORECASE
+                )
+
+        if sql != original_sql:
+            logger.info("[SQL Fix] Summary data fields added to SQL for detail report")
+            logger.debug(f"[SQL Fix] Before: {original_sql[:300]}...")
+            logger.debug(f"[SQL Fix] After: {sql[:300]}...")
 
         return sql
 
@@ -3133,6 +3661,16 @@ IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the pri
 - Each unique receipt_number should appear EXACTLY ONCE in your output
 - If the data is aggregate/summary, just present the numbers - don't create fake detail rows
 
+## CRITICAL - HANDLE NULL VALUES AND NON-MONETARY AMOUNTS:
+- If unit_price is NULL or "-" or missing, show "-" or omit the column - NEVER invent a price like "$1.00"
+- PRESERVE the value formatting from the input table:
+  - If the input shows a value WITH $ (e.g., "$50.00"), it is MONETARY - keep the $ sign
+  - If the input shows a value WITHOUT $ (e.g., "600"), it is NON-MONETARY (count/usage) - do NOT add $ sign
+  - Example: Input "600" → output "600" (NOT "$600.00") - this is a count of items/messages
+  - Example: Input "$50.00" → output "$50.00" - this is monetary
+- If an item description contains "User Message", "Messages", "Credits", "Tokens", "Usage" - the "amount" field is a COUNT, not money
+- Non-monetary amounts (message counts, usage units) should be plain numbers without $ prefix
+
 ## CRITICAL - ONLY USE COLUMNS FROM THE QUERY RESULTS:
 - ONLY display fields/columns that actually exist in the SQL Query Results table above
 - NEVER assume or add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date" etc.
@@ -3226,7 +3764,8 @@ Write the {report_type} report in markdown format:"""
                 async for chunk in self._stream_small_result_response(
                     user_query=user_query,
                     query_results=query_results,
-                    evaluation=evaluation
+                    evaluation=evaluation,
+                    field_mappings=field_mappings
                 ):
                     yield chunk
 
@@ -3311,14 +3850,16 @@ Write the {report_type} report in markdown format:"""
 
         # Step 6: Stream grouped markdown output (documents grouped with nested line items)
         # Use grouped format for better readability
-        grouped_markdown = evaluator.build_grouped_markdown(query_results)
+        # Pass field_mappings to determine correct grouping columns based on document type
+        grouped_markdown = evaluator.build_grouped_markdown(query_results, field_mappings=field_mappings)
         yield grouped_markdown
 
     async def _stream_small_result_response(
         self,
         user_query: str,
         query_results: List[Dict[str, Any]],
-        evaluation: ContentSizeEvaluation
+        evaluation: ContentSizeEvaluation,
+        field_mappings: Dict[str, Dict[str, Any]] = None
     ):
         """
         Stream response for small result sets.
@@ -3332,6 +3873,7 @@ Write the {report_type} report in markdown format:"""
             user_query: Original user query
             query_results: Query results
             evaluation: Content size evaluation (contains pre-built markdown table)
+            field_mappings: Field mappings from document metadata (used to detect document type)
 
         Yields:
             Chunks of the formatted report
@@ -3343,16 +3885,27 @@ Write the {report_type} report in markdown format:"""
         # Build the complete markdown table for LLM to include in response
         full_markdown_table = self._convert_results_to_markdown(query_results, actual_columns)
 
-        # Identify header vs line item columns for better formatting instructions
-        header_columns = [c for c in actual_columns if c in ['store_name', 'store_address', 'receipt_number', 'transaction_date', 'payment_method', 'currency', 'invoice_number', 'customer_name', 'order_date']]
+        # Use ContentSizeEvaluator to detect grouping columns based on field_mappings
+        evaluator = ContentSizeEvaluator()
+        group_by_columns = evaluator._detect_grouping_columns(query_results, field_mappings)
+
+        # Identify header vs line item columns based on detected grouping
+        header_columns = group_by_columns
         item_columns = [c for c in actual_columns if c not in header_columns]
 
-        # Count unique documents for grouping info
+        # Count unique documents for grouping info using detected grouping columns
         unique_docs = set()
         for row in query_results:
-            doc_key = (row.get('store_name', ''), row.get('receipt_number', ''), row.get('transaction_date', ''))
+            doc_key = tuple(row.get(col, '') for col in group_by_columns)
             unique_docs.add(doc_key)
         num_unique_docs = len(unique_docs)
+
+        # Determine document type based on grouping columns for prompt context
+        is_invoice = 'invoice_number' in group_by_columns or 'vendor_name' in group_by_columns
+        doc_type = "invoices" if is_invoice else "receipts"
+        entity_field = "vendor_name" if is_invoice else "store_name"
+        id_field = "invoice_number" if is_invoice else "receipt_number"
+        date_field = "invoice_date" if is_invoice else "transaction_date"
 
         prompt = f"""You are a data analyst. Format and present the complete query results in a clear, professional report with GROUPED layout.
 
@@ -3363,7 +3916,7 @@ Write the {report_type} report in markdown format:"""
 {full_markdown_table}
 
 ## Column Categories:
-- **Header/Document columns** (group by these): {', '.join(header_columns) if header_columns else 'store_name, receipt_number, transaction_date'}
+- **Header/Document columns** (group by these): {', '.join(header_columns)}
 - **Line Item columns** (show nested under each group): {', '.join(item_columns) if item_columns else 'description, quantity, unit_price, amount'}
 
 ## Instructions:
@@ -3371,14 +3924,14 @@ Create a GROUPED report - DO NOT show a flat table with repeated header info!
 
 1. **Title**: A descriptive markdown title (## Title)
 2. **Summary**: Brief paragraph with:
-   - Total documents/receipts: {num_unique_docs}
+   - Total documents/{doc_type}: {num_unique_docs}
    - Total line items: {len(query_results)}
    - Key statistics (total amount, date range, etc.)
-3. **GROUPED Data Display**: Group records by document (store + receipt + date), then show line items:
+3. **GROUPED Data Display**: Group records by document ({' + '.join(group_by_columns)}), then show line items:
 
 ## CRITICAL - USE THIS GROUPED FORMAT:
 
-### 📄 [Store Name] - Receipt #[number] ([date])
+### 📄 [{entity_field}] - #{id_field} ([{date_field}])
 
 | Description | Qty | Unit Price | Amount |
 |-------------|-----|------------|--------|
@@ -3389,36 +3942,19 @@ Create a GROUPED report - DO NOT show a flat table with repeated header info!
 
 ---
 
-### 📄 [Next Store] - Receipt #[number] ([date])
+### 📄 [Next {entity_field}] - #{id_field} ([{date_field}])
 ... (next group of items)
 
 ## Formatting Rules:
-- Group by: store_name + receipt_number + transaction_date (DO NOT repeat these in every row!)
+- Group by: {' + '.join(group_by_columns)} (DO NOT repeat these in every row!)
 - Show each document as a separate section with ### header
-- Use a compact table for line items ONLY (description, quantity, unit_price, amount)
-- Format currency with $ symbol
-- Add subtotal for each document group
+- Use a compact table for line items ONLY (line item columns from above)
+- PRESERVE the value formatting from the input table - values with $ are monetary, values without $ are non-monetary (counts/usage)
+- Example: If the input shows "600" (no $), output "600" (NOT "$600.00") - this is a count, not money
+- Example: If the input shows "$50.00", output "$50.00" - this is monetary
+- Add subtotal for each document group (only for monetary amounts)
 - Add --- separator between document groups
 - Include ALL {len(query_results)} line items across all groups - do not skip any!
-
-## Example Output:
-## Meal Invoice Details from 2025
-
-Found {num_unique_docs} receipts with {len(query_results)} total items. Total amount: $XXX.XX across stores including [store names].
-
-### 📄 Crown Prince Fine Dining - Receipt #72 (2025-01-15)
-
-| Description | Qty | Unit Price | Amount |
-|-------------|-----|------------|--------|
-| Assorted Meat Congee | 1 | $18.00 | $18.00 |
-| Honeycomb cake | 1 | $8.30 | $8.30 |
-
-**Subtotal: $26.30**
-
----
-
-### 📄 Mr. Congee Gai - Receipt #56 (2025-04-14)
-...
 
 Generate the GROUPED formatted report (include ALL items):"""
 
@@ -3467,14 +4003,46 @@ Generate the GROUPED formatted report (include ALL items):"""
         # Data rows
         for row in query_results:
             values = []
+            # Check is_currency flag for this row (can be boolean or string)
+            is_currency = row.get('is_currency')
+            if isinstance(is_currency, str):
+                is_currency = is_currency.lower() == 'true'
+            # Default to True (show as currency) if not specified
+            if is_currency is None:
+                is_currency = True
+
             for col in columns:
                 val = row.get(col, "")
+                col_lower = col.lower()
+
+                # Try to convert string values to numbers (SQL returns JSONB as strings)
+                numeric_val = val
+                if isinstance(val, str) and val.strip():
+                    try:
+                        cleaned = val.replace(',', '').replace('$', '').strip()
+                        numeric_val = float(cleaned)
+                    except (ValueError, AttributeError):
+                        numeric_val = val
+
                 # Format numeric values
-                if isinstance(val, (int, float)):
-                    if 'amount' in col.lower() or 'total' in col.lower() or 'sales' in col.lower() or 'price' in col.lower():
-                        values.append(f"${val:,.2f}")
+                if isinstance(numeric_val, (int, float)):
+                    if 'amount' in col_lower or 'total' in col_lower or 'sales' in col_lower or 'price' in col_lower:
+                        if is_currency:
+                            values.append(f"${numeric_val:,.2f}")
+                        else:
+                            # Non-monetary amount - format without $ sign
+                            if numeric_val == int(numeric_val):
+                                values.append(f"{int(numeric_val):,}")
+                            else:
+                                values.append(f"{numeric_val:,.2f}")
+                    elif 'quantity' in col_lower or 'count' in col_lower:
+                        # Quantity/count columns - always show as integer
+                        if numeric_val == int(numeric_val):
+                            values.append(f"{int(numeric_val):,}")
+                        else:
+                            values.append(f"{numeric_val:,.2f}")
                     else:
-                        values.append(str(val))
+                        values.append(str(int(numeric_val)) if numeric_val == int(numeric_val) else f"{numeric_val:,.2f}")
                 else:
                     values.append(str(val) if val is not None else "")
             lines.append("| " + " | ".join(values) + " |")

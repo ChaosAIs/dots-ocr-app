@@ -139,20 +139,21 @@ Return a JSON object with the following structure:
         "invoice_number": "string or null",
         "invoice_date": "YYYY-MM-DD or null",
         "due_date": "YYYY-MM-DD or null",
-        "vendor_name": "string or null",
-        "vendor_address": "string or null",
-        "customer_name": "string or null",
-        "customer_address": "string or null",
+        "vendor_name": "string or null - The company/business NAME only, NOT the address (e.g., 'Augment Code', 'Acme Corp')",
+        "vendor_address": "string or null - The vendor's physical address ONLY, NOT the company name",
+        "customer_name": "string or null - The customer/buyer NAME only, NOT the address",
+        "customer_address": "string or null - The customer's address ONLY, NOT the customer name",
         "payment_terms": "string or null",
         "currency": "null (MUST be null unless a 3-letter currency code like CAD, USD, EUR is explicitly printed)"
     },
     "line_items": [
         {
-            "description": "string",
+            "description": "string - the item/service name",
             "quantity": number or null,
             "unit_price": number or null,
             "amount": number or null,
-            "price_type": "individual | group_total | included | unknown"
+            "price_type": "individual | group_total | included | unknown",
+            "is_currency": boolean - true if amount has $ € £ ¥ symbol, false if plain number without currency symbol
         }
     ],
     "summary_data": {
@@ -162,30 +163,48 @@ Return a JSON object with the following structure:
     }
 }
 
-CRITICAL RULES FOR PRICING:
-1. DO NOT ASSUME OR DUPLICATE PRICES:
+CRITICAL FIELD RULES:
+
+1. NUMERIC FIELDS - These MUST contain numbers:
+   - quantity: a number like 1, 5, 465, 600 (or null)
+   - unit_price: a number like 50.00, 10.00 (or null)
+   - amount: a number like 50.00, 465, 600.00 (or null)
+
+2. is_currency FIELD - This is a SEPARATE boolean field:
+   - Set is_currency: true if the amount in the source has $ € £ ¥ symbol (e.g., "$50.00")
+   - Set is_currency: false if the amount is a plain number without currency symbol (e.g., "465 User Messages")
+
+3. EXAMPLES - Pay attention to both amount (number) AND is_currency (boolean):
+
+   Example 1: Line shows "Seats 1 x $50.00 $50.00"
+   {
+       "description": "Seats",
+       "quantity": 1,
+       "unit_price": 50.00,
+       "amount": 50.00,
+       "is_currency": true
+   }
+
+   Example 2: Line shows "User Messages 600 x 1 User Messages 600 User Messages"
+   {
+       "description": "User Messages",
+       "quantity": 600,
+       "unit_price": null,
+       "amount": 600,
+       "is_currency": false
+   }
+
+4. DO NOT ASSUME OR DUPLICATE PRICES:
    - If an item does NOT have a price/amount directly associated with it, set amount to NULL.
    - NEVER copy or duplicate a price from one line item to another.
-   - NEVER assume items without prices cost the same as nearby items.
 
-2. GROUPED/BUNDLED PRICING:
-   - Multiple items may share ONE price (e.g., service bundles, package deals).
+5. GROUPED/BUNDLED PRICING:
    - For items WITHOUT their own price: set amount: null, price_type: "included"
    - For the item WITH the bundle/group total: set the amount and price_type: "group_total"
 
-3. PRICE TYPE VALUES:
-   - "individual": Item has its own specific price shown
-   - "group_total": This price covers multiple items (a bundle or package)
-   - "included": Item is part of a bundle, price shown on another line
-   - "unknown": Cannot determine pricing structure
-
-4. GENERAL RULES:
-   - Use null for any field where the value is NOT explicitly visible in the document.
-   - Do NOT assume or guess values. Only extract what is actually shown.
-   - CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.
-     * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
-     * Do NOT guess the currency based on location, vendor name, or context.
-   - Ensure numbers are actual numbers, not strings.
+6. GENERAL RULES:
+   - Use null for any field where the value is NOT explicitly visible.
+   - CURRENCY header field MUST BE NULL unless a 3-letter code (CAD, USD, EUR) is explicitly printed.
    - Dates should be in YYYY-MM-DD format.""",
 
     "receipt": """Extract structured data from this receipt.
@@ -208,7 +227,8 @@ Return a JSON object with:
             "unit_price": number or null,
             "amount": number or null,
             "is_complimentary": boolean,
-            "price_type": "individual | group_total | included | unknown"
+            "price_type": "individual | group_total | included | unknown",
+            "is_currency": boolean - true if amount has $ € £ ¥ symbol, false if plain number
         }
     ],
     "summary_data": {
@@ -218,39 +238,66 @@ Return a JSON object with:
     }
 }
 
-CRITICAL RULES FOR PRICING:
-1. DO NOT ASSUME OR DUPLICATE PRICES:
+CRITICAL FIELD RULES:
+
+1. NUMERIC FIELDS - These MUST contain numbers:
+   - quantity: a number like 1, 5, 465, 600 (or null)
+   - unit_price: a number like 50.00, 10.00 (or null)
+   - amount: a number like 50.00, 465, 600.00 (or null)
+
+2. is_currency FIELD - This is a SEPARATE boolean field:
+   - Set is_currency: true if the amount in the source has $ € £ ¥ symbol (e.g., "$5.00")
+   - Set is_currency: false if the amount is a plain number without currency symbol (e.g., "100 points")
+
+3. EXAMPLES - Pay attention to both amount (number) AND is_currency (boolean):
+
+   Example 1: Line shows "Coffee 1 x $5.00 $5.00"
+   {
+       "description": "Coffee",
+       "quantity": 1,
+       "unit_price": 5.00,
+       "amount": 5.00,
+       "is_currency": true
+   }
+
+   Example 2: Line shows "Loyalty Points 100 points"
+   {
+       "description": "Loyalty Points",
+       "quantity": 100,
+       "unit_price": null,
+       "amount": 100,
+       "is_currency": false
+   }
+
+4. DO NOT ASSUME OR DUPLICATE PRICES:
    - If an item does NOT have a price directly next to it on the SAME LINE, set amount to NULL.
    - NEVER copy or duplicate a price from an adjacent item to another item.
    - NEVER assume items without prices cost the same as nearby items.
 
-2. GROUPED PRICING (common in restaurant receipts):
+5. GROUPED PRICING (common in restaurant receipts):
    - Multiple items may share ONE price (e.g., set meals, combo dishes).
-   - Only the LAST item in a group typically shows the total price for all items in that group.
    - For items in a group WITHOUT their own price: set amount: null, price_type: "included"
    - For the item WITH the group total: set the amount and price_type: "group_total"
-   - Example: If "Fish", "Rice", "Soup" appear together and only "Soup" shows "$138", then:
+   - Example: "Fish", "Rice", "Soup" with only "Soup" showing "$138":
      * Fish: amount: null, price_type: "included"
      * Rice: amount: null, price_type: "included"
-     * Soup: amount: 138, price_type: "group_total"
+     * Soup: amount: 138, price_type: "group_total", is_currency: true
 
-3. COMPLIMENTARY/FREE ITEMS:
+6. COMPLIMENTARY/FREE ITEMS:
    - Items marked with "(送)", "free", "complimentary", "gift", or showing $0.00:
-     set is_complimentary: true, amount: 0, price_type: "individual"
+     set is_complimentary: true, amount: 0, price_type: "individual", is_currency: true
    - Chinese receipts: "(送)" means complimentary/gifted
 
-4. PRICE TYPE VALUES:
+7. PRICE TYPE VALUES:
    - "individual": Item has its own specific price
    - "group_total": This price covers multiple items above it
    - "included": Item is part of a group, price shown on another item
    - "unknown": Cannot determine pricing structure
 
-5. GENERAL RULES:
+8. GENERAL RULES:
    - Use null for any field where the value is NOT explicitly visible.
    - Do NOT assume or guess values. Only extract what is actually shown.
-   - CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.
-     * The "$" symbol DOES NOT indicate USD - it is used by CAD, AUD, NZD, and many other currencies.
-     * Do NOT guess the currency based on location, store name, or context.""",
+   - CURRENCY MUST BE NULL unless a 3-letter currency code (CAD, USD, EUR, GBP, etc.) is EXPLICITLY printed.""",
 
     "bank_statement": """Extract structured data from this bank statement.
 

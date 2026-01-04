@@ -582,7 +582,9 @@ class SQLQueryExecutor:
         result = {
             "document_id": str(doc_data.document_id),
             "schema_type": doc_data.schema_type,
-            "raw_item": item
+            "raw_item": item,
+            # Preserve is_currency flag for proper formatting (monetary vs count)
+            "is_currency": item.get("is_currency")
         }
 
         # Map semantic types to output fields
@@ -745,7 +747,9 @@ class SQLQueryExecutor:
             "quantity": quantity_value,
             "status": status_value,
             "region": region_value,
-            "raw_item": item  # Keep original for advanced queries
+            "raw_item": item,  # Keep original for advanced queries
+            # Preserve is_currency flag for proper formatting (monetary vs count)
+            "is_currency": item.get("is_currency")
         }
 
     def _parse_number(self, value) -> Optional[float]:
@@ -764,6 +768,139 @@ class SQLQueryExecutor:
             except ValueError:
                 return None
         return None
+
+    def _enrich_with_currency_flags(
+        self,
+        data: List[Dict[str, Any]],
+        sql_query: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Enrich query result data with is_currency flags from line items.
+
+        The SQL query returns rows with amount/unit_price values, but doesn't
+        include the is_currency boolean flag that indicates whether the value
+        should be formatted as currency or plain number.
+
+        This method looks up the original line item data and adds the is_currency
+        flag to each row.
+
+        Args:
+            data: Query result data (list of dicts)
+            sql_query: The SQL query that was executed
+
+        Returns:
+            Enriched data with is_currency field added
+        """
+        if not data:
+            return data
+
+        # Check if data already has is_currency field
+        if 'is_currency' in data[0]:
+            return data
+
+        # Try to extract line_number from data if available
+        # The SQL query typically includes line_number for line item queries
+        has_line_number = 'line_number' in data[0]
+        has_documents_data_id = 'documents_data_id' in data[0]
+
+        if not has_line_number or not has_documents_data_id:
+            # Can't look up line items without identifiers - use heuristic
+            return self._add_currency_flags_heuristic(data)
+
+        try:
+            from db.models import DocumentDataLineItem
+
+            # Build a lookup of (documents_data_id, line_number) -> is_currency
+            lookup = {}
+            for row in data:
+                dd_id = row.get('documents_data_id')
+                line_num = row.get('line_number')
+                if dd_id and line_num is not None:
+                    lookup[(str(dd_id), int(line_num))] = None
+
+            # Batch fetch the is_currency values
+            if lookup:
+                dd_ids = list(set(k[0] for k in lookup.keys()))
+                dd_ids_str = ", ".join(f"'{dd_id}'" for dd_id in dd_ids)
+                result = self.db.execute(text(f"""
+                    SELECT documents_data_id, line_number, data->>'is_currency' as is_currency
+                    FROM documents_data_line_items
+                    WHERE documents_data_id IN ({dd_ids_str})
+                """))
+                for row in result.fetchall():
+                    key = (str(row[0]), int(row[1]))
+                    is_currency_val = row[2]
+                    # Convert string 'true'/'false' to boolean
+                    if is_currency_val == 'true':
+                        lookup[key] = True
+                    elif is_currency_val == 'false':
+                        lookup[key] = False
+                    else:
+                        lookup[key] = None
+
+            # Enrich the data
+            enriched = []
+            for row in data:
+                row_copy = dict(row)
+                dd_id = row.get('documents_data_id')
+                line_num = row.get('line_number')
+                if dd_id and line_num is not None:
+                    key = (str(dd_id), int(line_num))
+                    row_copy['is_currency'] = lookup.get(key)
+                enriched.append(row_copy)
+
+            logger.debug(f"[Currency Flags] Enriched {len(enriched)} rows with is_currency flags")
+            return enriched
+
+        except Exception as e:
+            logger.warning(f"[Currency Flags] Failed to enrich with currency flags: {e}")
+            return self._add_currency_flags_heuristic(data)
+
+    def _add_currency_flags_heuristic(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Add is_currency flags using heuristic detection.
+
+        When we can't look up the original line item data, we use heuristics:
+        - If amount equals quantity and there's no unit_price, it's likely non-monetary
+        - If description contains usage-related keywords, it's likely non-monetary
+
+        Args:
+            data: Query result data
+
+        Returns:
+            Data with is_currency field added based on heuristics
+        """
+        NON_MONETARY_KEYWORDS = ['message', 'credit', 'unit', 'usage', 'hour', 'minute', 'call', 'request', 'point']
+
+        enriched = []
+        for row in data:
+            row_copy = dict(row)
+
+            # Default to currency (True)
+            is_currency = True
+
+            amount = row.get('amount')
+            quantity = row.get('quantity')
+            unit_price = row.get('unit_price')
+            description = str(row.get('description', '')).lower()
+
+            # Heuristic 1: amount equals quantity without unit_price
+            if amount is not None and quantity is not None and unit_price is None:
+                try:
+                    if float(amount) == float(quantity) and float(quantity) > 1:
+                        is_currency = False
+                except (ValueError, TypeError):
+                    pass
+
+            # Heuristic 2: description contains non-monetary keywords
+            if any(kw in description for kw in NON_MONETARY_KEYWORDS) and unit_price is None:
+                is_currency = False
+
+            row_copy['is_currency'] = is_currency
+            enriched.append(row_copy)
+
+        logger.debug(f"[Currency Flags] Added heuristic is_currency to {len(enriched)} rows")
+        return enriched
 
     def _group_data(
         self,
@@ -1287,6 +1424,9 @@ class SQLQueryExecutor:
 
                 logger.info(f"[Dynamic SQL] Query returned {len(data)} rows")
 
+                # Enrich data with is_currency field from original line items
+                data = self._enrich_with_currency_flags(data, current_sql)
+
                 # Generate summary report
                 summary_report = generator.generate_summary_report(query, data, field_mappings)
 
@@ -1645,6 +1785,9 @@ class SQLQueryExecutor:
 
                 logger.info(f"[Dynamic SQL] Query returned {len(data)} rows")
 
+                # Enrich data with is_currency field from original line items
+                data = self._enrich_with_currency_flags(data, current_sql)
+
                 # Step 4: Calculate basic stats (report will be streamed)
                 await send_progress(f"Found {len(data)} records, preparing results...")
 
@@ -1838,6 +1981,7 @@ class SQLQueryExecutor:
                     dd.id,
                     dd.schema_type,
                     dd.header_data,
+                    dd.summary_data,
                     dd.line_items_count
                 FROM documents_data dd
                 WHERE dd.document_id IN ({doc_ids_str})
@@ -1857,7 +2001,8 @@ class SQLQueryExecutor:
                 documents_data_id = row[0]
                 schema_type = row[1]
                 header_data = row[2] or {}
-                line_items_count = row[3]
+                summary_data = row[3] or {}
+                line_items_count = row[4]
 
                 # Fetch a sample item to check field names
                 ext_result = self.db.execute(text(f"""
@@ -1884,6 +2029,7 @@ class SQLQueryExecutor:
                         'id': documents_data_id,
                         'schema_type': schema_type,
                         'header_data': header_data,
+                        'summary_data': summary_data,
                         'line_items_count': line_items_count,
                         'sample_item': sample_item,
                     }
@@ -1895,6 +2041,7 @@ class SQLQueryExecutor:
             documents_data_id = best_doc['id']
             schema_type = best_doc['schema_type']
             header_data = best_doc['header_data']
+            summary_data = best_doc['summary_data']
             line_items_count = best_doc['line_items_count']
             sample_item = best_doc['sample_item']
 
@@ -1910,18 +2057,38 @@ class SQLQueryExecutor:
                 'invoice_date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
                 'receipt_date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
                 'date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
+                'due_date': {'semantic_type': 'date', 'data_type': 'datetime', 'source': 'header'},
                 'store_name': {'semantic_type': 'entity', 'data_type': 'string', 'source': 'header'},
                 'vendor_name': {'semantic_type': 'entity', 'data_type': 'string', 'source': 'header'},
                 'customer_name': {'semantic_type': 'entity', 'data_type': 'string', 'source': 'header'},
                 'store_address': {'semantic_type': 'location', 'data_type': 'string', 'source': 'header'},
+                'vendor_address': {'semantic_type': 'location', 'data_type': 'string', 'source': 'header'},
+                'customer_address': {'semantic_type': 'location', 'data_type': 'string', 'source': 'header'},
                 'payment_method': {'semantic_type': 'method', 'data_type': 'string', 'source': 'header'},
+                'payment_terms': {'semantic_type': 'method', 'data_type': 'string', 'source': 'header'},
                 'currency': {'semantic_type': 'currency', 'data_type': 'string', 'source': 'header'},
                 'receipt_number': {'semantic_type': 'identifier', 'data_type': 'string', 'source': 'header'},
+                'invoice_number': {'semantic_type': 'identifier', 'data_type': 'string', 'source': 'header'},
+                'po_number': {'semantic_type': 'identifier', 'data_type': 'string', 'source': 'header'},
             }
 
             for field in header_data.keys():
                 if field in header_field_semantics:
                     field_mappings[field] = header_field_semantics[field]
+
+            # Map summary fields (document-level totals)
+            summary_field_semantics = {
+                'subtotal': {'semantic_type': 'subtotal', 'data_type': 'number', 'source': 'summary', 'aggregation': 'sum'},
+                'tax_amount': {'semantic_type': 'tax', 'data_type': 'number', 'source': 'summary', 'aggregation': 'sum'},
+                'tip_amount': {'semantic_type': 'tip', 'data_type': 'number', 'source': 'summary', 'aggregation': 'sum'},
+                'discount_amount': {'semantic_type': 'discount', 'data_type': 'number', 'source': 'summary', 'aggregation': 'sum'},
+                'shipping_amount': {'semantic_type': 'shipping', 'data_type': 'number', 'source': 'summary', 'aggregation': 'sum'},
+                'total_amount': {'semantic_type': 'total', 'data_type': 'number', 'source': 'summary', 'aggregation': 'sum'},
+            }
+
+            for field in summary_data.keys():
+                if field in summary_field_semantics:
+                    field_mappings[field] = summary_field_semantics[field]
 
             # For spreadsheet data, create field mappings directly from column headers
             # Let the LLM understand the semantics from the column names

@@ -70,6 +70,7 @@ _progress_callback_var: contextvars.ContextVar = contextvars.ContextVar('progres
 _accessible_doc_ids_var: contextvars.ContextVar = contextvars.ContextVar('accessible_doc_ids', default=None)
 _analytics_context_var: contextvars.ContextVar = contextvars.ContextVar('analytics_context', default=None)
 _preprocessing_topics_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_topics', default=None)
+_preprocessing_entities_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_entities', default=None)
 _iterative_reasoning_enabled_var: contextvars.ContextVar = contextvars.ContextVar('iterative_reasoning_enabled', default=None)
 
 
@@ -112,6 +113,16 @@ def get_preprocessing_topics():
 def set_preprocessing_topics(topics):
     """Set preprocessing topics for the current request context."""
     _preprocessing_topics_var.set(topics)
+
+
+def get_preprocessing_entities():
+    """Get preprocessing entities for the current request context."""
+    return _preprocessing_entities_var.get()
+
+
+def set_preprocessing_entities(entities):
+    """Set preprocessing entities for the current request context."""
+    _preprocessing_entities_var.set(entities)
 
 
 def get_iterative_reasoning_enabled():
@@ -1199,13 +1210,27 @@ def search_documents(query: str) -> str:
             # Use heuristic max_steps for simple queries
             max_steps = 1
             enhanced_query = query
+
+            # Get preprocessing entities and flatten dict to list for document router
+            # Dict format: {'organizations': ['Augment Code'], 'products': [...]}
+            # List format: ['Augment Code', ...]
+            preprocessing_entities = get_preprocessing_entities() or {}
+            entity_list = []
+            if isinstance(preprocessing_entities, dict):
+                for values in preprocessing_entities.values():
+                    if isinstance(values, list):
+                        entity_list.extend(values)
+            elif isinstance(preprocessing_entities, list):
+                entity_list = preprocessing_entities
+
             query_metadata = {
-                "entities": [],
+                "entities": entity_list,
                 "topics": preprocessing_topics,
                 "document_type_hints": [],
                 "intent": "document_search",
             }
             logger.info(f"[Search] Using cached topics: {preprocessing_topics}")
+            logger.info(f"[Search] Using cached entities: {entity_list}")
         else:
             # Run complexity analysis and query enhancement in parallel
             from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
@@ -2031,6 +2056,7 @@ async def stream_agent_response(
     analytics_context: Optional[str] = None,
     document_context_changed: bool = False,
     preprocessing_topics: Optional[List[str]] = None,
+    preprocessing_entities: Optional[Dict[str, List[str]]] = None,
     iterative_reasoning_enabled: Optional[bool] = None
 ):
     """
@@ -2046,6 +2072,8 @@ async def stream_agent_response(
         analytics_context: Optional pre-computed analytics context for hybrid queries (from SQL aggregation).
         document_context_changed: If True, the document/workspace selection has changed - force new search.
         preprocessing_topics: Optional topics from unified preprocessing to avoid redundant LLM calls.
+        preprocessing_entities: Optional entities from unified preprocessing for document routing.
+                               Dict format: {'organizations': ['Augment Code'], 'products': [...]}
         iterative_reasoning_enabled: Optional boolean from UI checkbox to enable/disable iterative reasoning workflow.
                                      If None, uses ITERATIVE_REASONING_ENABLED from .env.
                                      When True: use iterative reasoning (GRAPH_RAG_QUERY_ENABLED controls graph queries inside).
@@ -2060,6 +2088,7 @@ async def stream_agent_response(
     set_accessible_doc_ids(accessible_doc_ids)
     set_analytics_context(analytics_context)
     set_preprocessing_topics(preprocessing_topics)
+    set_preprocessing_entities(preprocessing_entities)
     set_iterative_reasoning_enabled(iterative_reasoning_enabled)
 
     # Get timing metrics for detailed RAG pipeline tracking

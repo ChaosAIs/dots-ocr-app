@@ -27,6 +27,10 @@ from .extraction_config import (
 )
 from .eligibility_checker import ExtractionEligibilityChecker
 from .field_normalizer import FieldNormalizer
+from rag_service.entity_extractor import (
+    extract_all_entities,
+    create_normalized_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,8 +306,14 @@ IMPORTANT:
                 logger.info("[Extraction] STEP 8.5: Normalizing field names to canonical schema...")
                 result = self._normalize_extraction_result(
                     result=result,
-                    field_mappings=final_field_mappings
+                    field_mappings=final_field_mappings,
+                    schema_type=schema_type
                 )
+
+                # STEP 8.6: Enhance with NER-based entity extraction and normalization
+                logger.info("-" * 80)
+                logger.info("[Extraction] STEP 8.6: Enhancing with NER entity extraction...")
+                result = self._enhance_with_entity_extraction(result, content)
 
                 # Add field_mappings to metadata for caching
                 enhanced_metadata = strategy_metadata.copy() if strategy_metadata else {}
@@ -663,6 +673,10 @@ IMPORTANT:
                     if parsed_result and parsed_result.get("line_items"):
                         return parsed_result
 
+            # Post-process: ensure monetary flags are set for invoice/receipt types
+            if schema_type in ("invoice", "receipt"):
+                result = self._ensure_monetary_flags(result, content)
+
             return result
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}")
@@ -684,8 +698,9 @@ IMPORTANT:
 
         Strategy:
         1. For spreadsheets: Direct table parsing (no LLM for row data)
-        2. For other tabular documents: Parse tables first, use LLM for metadata
-        3. Fallback: LLM extraction for complex/unstructured content
+        2. For invoices/receipts: Use LLM extraction (tables often lack proper headers)
+        3. For other tabular documents: Parse tables first, use LLM for metadata
+        4. Fallback: LLM extraction for complex/unstructured content
 
         Args:
             content: Document content
@@ -713,37 +728,129 @@ IMPORTANT:
 
             logger.info("[DirectParsing] Direct parsing found no data, falling back to LLM")
 
-        # For non-spreadsheet documents with tables, try hybrid approach
+        # For invoice/receipt types, use LLM extraction directly
+        # These document types often have tables without proper column headers
+        # (e.g., label-value format where first column is description, not a header)
+        if schema_type in ("invoice", "receipt"):
+            logger.info(f"[DirectParsing] Using LLM extraction for {schema_type} (tables may lack proper headers)")
+            return self._extract_llm_direct(content, schema_type, extraction_prompt)
+
+        # For other non-spreadsheet documents with tables, try hybrid approach
         if '|' in content:
             # Content has tables, try to parse them
             parsed_result = self._parse_markdown_table(content)
             if parsed_result and parsed_result.get("line_items"):
-                # We have table data, now get metadata via LLM if available
-                if self.llm_client and extraction_prompt:
-                    try:
-                        # Extract only header/metadata from first section
-                        first_section = content[:10000]
-                        prompt = extraction_prompt or get_extraction_prompt(schema_type)
-                        metadata_prompt = f"""{prompt}
+                # Check if headers look valid (not just data values)
+                headers = parsed_result.get("header_data", {}).get("column_headers", [])
+                if self._has_valid_table_headers(headers):
+                    # We have valid table headers, get metadata via LLM if available
+                    if self.llm_client and extraction_prompt:
+                        try:
+                            # Extract only header/metadata from first section
+                            first_section = content[:10000]
+                            prompt = extraction_prompt or get_extraction_prompt(schema_type)
+                            metadata_prompt = f"""{prompt}
 
 IMPORTANT: Focus only on extracting the header_data (document metadata) and summary_data.
 The line_items have already been extracted separately.
 
 Document content:
 {first_section}"""
-                        response = self.llm_client.generate(metadata_prompt)
-                        llm_result = self._parse_llm_response(response)
-                        # Merge LLM metadata with parsed line items
-                        parsed_result["header_data"] = llm_result.get("header_data", {})
-                        parsed_result["summary_data"] = llm_result.get("summary_data", {})
-                        logger.info(f"[DirectParsing] Merged LLM metadata with {len(parsed_result['line_items'])} parsed rows")
-                    except Exception as e:
-                        logger.warning(f"[DirectParsing] LLM metadata extraction failed: {e}")
-                return parsed_result
+                            response = self.llm_client.generate(metadata_prompt)
+                            llm_result = self._parse_llm_response(response)
+                            # Merge LLM metadata with parsed line items
+                            parsed_result["header_data"] = llm_result.get("header_data", {})
+                            parsed_result["summary_data"] = llm_result.get("summary_data", {})
+                            logger.info(f"[DirectParsing] Merged LLM metadata with {len(parsed_result['line_items'])} parsed rows")
+                        except Exception as e:
+                            logger.warning(f"[DirectParsing] LLM metadata extraction failed: {e}")
+                    return parsed_result
+                else:
+                    logger.info(f"[DirectParsing] Table headers look like data values, falling back to LLM: {headers[:3]}")
 
         # Fallback: Use LLM extraction for complex/unstructured content
         # This is only for non-tabular documents where parsing doesn't work
         return self._extract_llm_direct(content, schema_type, extraction_prompt)
+
+    def _has_valid_table_headers(self, headers: List[str]) -> bool:
+        """
+        Check if table headers look like actual column names rather than data values.
+
+        Valid headers typically:
+        - Have descriptive names (Description, Qty, Amount, Date, etc.)
+        - Are relatively short
+        - Don't look like data values (numbers, prices, long sentences)
+
+        Args:
+            headers: List of potential header strings
+
+        Returns:
+            True if headers look valid, False if they look like data values
+        """
+        import re
+
+        if not headers:
+            return False
+
+        # Common valid header keywords (case-insensitive)
+        valid_header_keywords = [
+            'description', 'item', 'product', 'service', 'name',
+            'qty', 'quantity', 'units', 'count',
+            'price', 'rate', 'cost', 'amount', 'total', 'value',
+            'date', 'time', 'period',
+            'category', 'type', 'status', 'reference', 'code', 'sku',
+            'tax', 'subtotal', 'discount', 'fee',
+            'debit', 'credit', 'balance',
+        ]
+
+        valid_count = 0
+        for header in headers:
+            if not header or not header.strip():
+                # Empty header is suspicious
+                continue
+
+            header_lower = header.lower().strip()
+
+            # Check if header contains valid keywords
+            if any(keyword in header_lower for keyword in valid_header_keywords):
+                valid_count += 1
+                continue
+
+            # Check if header looks like a data value (numeric, price pattern, etc.)
+            # Patterns that indicate data rather than headers:
+            # - Pure numbers or numbers with units: "600", "465.00", "600 x 1"
+            # - Price patterns: "$50.00", "50.00 User Messages"
+            # - Very long strings (> 40 chars) are likely sentences/descriptions
+            if len(header) > 40:
+                # Long string - likely a description, not a header
+                continue
+
+            # Check for numeric patterns
+            if re.match(r'^[\d.,\s\-+$€£¥%x×]+$', header):
+                # Pure numeric/currency - definitely data
+                continue
+
+            if re.match(r'^\d+(\.\d+)?\s*(x|\×)\s*\d+', header_lower):
+                # Pattern like "600 x 1" - quantity pattern, likely data
+                continue
+
+            if re.match(r'^\d+(\.\d+)?\s+\w+', header_lower):
+                # Pattern like "600 User Messages" - data with unit
+                continue
+
+            # Short, non-numeric headers might be valid
+            if len(header) < 20 and not re.search(r'\d', header):
+                valid_count += 1
+
+        # Consider headers valid if at least 30% of non-empty headers look valid
+        non_empty_headers = [h for h in headers if h and h.strip()]
+        if not non_empty_headers:
+            return False
+
+        validity_ratio = valid_count / len(non_empty_headers)
+        logger.debug(f"[DirectParsing] Header validity: {valid_count}/{len(non_empty_headers)} = {validity_ratio:.2f}")
+
+        return validity_ratio >= 0.3
 
     def _extract_llm_chunked(
         self,
@@ -1333,9 +1440,23 @@ Document section:
                 row = {"row_number": row_number}
 
                 for header, value in zip(headers, values):
-                    # Try to convert numeric values
-                    parsed_value = self._parse_cell_value(value)
-                    row[header] = parsed_value
+                    header_lower = header.lower()
+                    # Detect if this is a monetary column (amount, price, total, cost, etc.)
+                    is_monetary_column = any(kw in header_lower for kw in [
+                        'amount', 'price', 'total', 'cost', 'subtotal', 'tax',
+                        'unit_price', 'unit price', 'rate', 'fee', 'charge'
+                    ])
+
+                    if is_monetary_column:
+                        # Parse with monetary flag detection
+                        parsed_value, is_monetary = self._parse_cell_value(value, return_monetary_flag=True)
+                        row[header] = parsed_value
+                        # Store the is_currency flag for the row
+                        row['is_currency'] = is_monetary
+                    else:
+                        # Regular parsing for non-monetary columns
+                        parsed_value = self._parse_cell_value(value)
+                        row[header] = parsed_value
 
                     # Collect samples for type inference (first 10 non-null values)
                     if len(sample_values[header]) < 10 and parsed_value is not None:
@@ -1590,40 +1711,170 @@ Document section:
             return "date"
         return "string"
 
-    def _parse_cell_value(self, value: str):
+    def _parse_cell_value(self, value: str, return_monetary_flag: bool = False):
         """
         Parse a cell value, converting to appropriate type.
 
         Args:
             value: Cell value as string
+            return_monetary_flag: If True, return tuple (value, is_monetary)
 
         Returns:
-            Parsed value (number, date string, or original string)
+            If return_monetary_flag is False: Parsed value (number, date string, or original string)
+            If return_monetary_flag is True: Tuple of (parsed_value, is_monetary)
         """
         import re
 
         if not value or value.lower() in ('null', 'none', 'n/a', '-'):
+            if return_monetary_flag:
+                return None, False
             return None
 
+        # Check if value contains currency symbols BEFORE stripping them
+        value_stripped = value.strip()
+        has_currency_symbol = bool(re.search(r'[$€£¥]', value_stripped))
+
         # Try to parse as number (handle currency symbols and commas)
-        cleaned = re.sub(r'[$€£¥,]', '', value.strip())
+        cleaned = re.sub(r'[$€£¥,]', '', value_stripped)
         try:
             # Try float first
             num = float(cleaned)
             # Return int if it's a whole number
             if num == int(num) and '.' not in cleaned:
-                return int(num)
-            return num
+                parsed = int(num)
+            else:
+                parsed = num
+
+            if return_monetary_flag:
+                return parsed, has_currency_symbol
+            return parsed
         except ValueError:
             pass
 
         # Return as string (dates will stay as strings in YYYY-MM-DD format)
+        if return_monetary_flag:
+            return value, False
         return value
+
+    def _ensure_monetary_flags(
+        self,
+        result: Dict[str, Any],
+        content: str
+    ) -> Dict[str, Any]:
+        """
+        Post-process extraction result to ensure is_currency boolean field
+        is set on line items. This is a lightweight fallback if the LLM
+        didn't generate it properly.
+
+        The primary fix is in the LLM prompt (extraction_config.py) which uses
+        the is_currency boolean field (completely separate name from amount/unit_price
+        to avoid LLM confusion).
+
+        Args:
+            result: Extraction result with line_items
+            content: Original document content for context lookup
+
+        Returns:
+            Result with is_currency field ensured on all line items
+        """
+        import re
+
+        line_items = result.get("line_items", [])
+        if not line_items:
+            return result
+
+        def has_currency_symbol(amount_value: float) -> bool:
+            """
+            Check if the amount value appears with a currency symbol in the content.
+            Returns True if has currency symbol, False otherwise.
+            """
+            if amount_value is None:
+                return True  # Default to currency for safety
+
+            # Format the amount value for searching
+            amount_str = str(amount_value)
+            if amount_value == int(amount_value):
+                amount_int_str = str(int(amount_value))
+            else:
+                amount_int_str = None
+
+            # Look for currency symbol immediately before the number
+            currency_patterns = [
+                rf'\$\s*{re.escape(amount_str)}',
+                rf'€\s*{re.escape(amount_str)}',
+                rf'£\s*{re.escape(amount_str)}',
+                rf'¥\s*{re.escape(amount_str)}',
+            ]
+            if amount_int_str:
+                currency_patterns.extend([
+                    rf'\$\s*{re.escape(amount_int_str)}(?:\.\d+)?',
+                    rf'€\s*{re.escape(amount_int_str)}(?:\.\d+)?',
+                    rf'£\s*{re.escape(amount_int_str)}(?:\.\d+)?',
+                    rf'¥\s*{re.escape(amount_int_str)}(?:\.\d+)?',
+                ])
+
+            for pattern in currency_patterns:
+                if re.search(pattern, content):
+                    return True
+
+            return False
+
+        # Process each line item
+        updated_items = []
+        for item in line_items:
+            amount = item.get('amount')
+            unit_price = item.get('unit_price')
+            description = item.get('description', '')
+
+            # Handle LLM confusion: if amount is a string like "money", fix it
+            if isinstance(amount, str) and amount in ('money', 'count'):
+                logger.warning(f"[Monetary] LLM put string '{amount}' in amount field for '{description}'")
+                item['is_currency'] = (amount == 'money')
+                # Try to recover amount from quantity
+                quantity = item.get('quantity')
+                if quantity is not None and isinstance(quantity, (int, float)):
+                    item['amount'] = float(quantity)
+                else:
+                    item['amount'] = None
+
+            # Handle LLM confusion: if amount is a boolean, fix it
+            if isinstance(amount, bool):
+                logger.warning(f"[Monetary] LLM put boolean in amount field for '{description}'")
+                item['is_currency'] = amount
+                quantity = item.get('quantity')
+                if quantity is not None and isinstance(quantity, (int, float)):
+                    item['amount'] = float(quantity)
+                else:
+                    item['amount'] = None
+
+            # Handle LLM confusion: if unit_price is a string like "money", fix it
+            if isinstance(unit_price, str) and unit_price in ('money', 'none'):
+                logger.warning(f"[Monetary] LLM put string '{unit_price}' in unit_price field for '{description}'")
+                item['unit_price'] = None
+
+            # Handle LLM confusion: if unit_price is a boolean, fix it
+            if isinstance(unit_price, bool):
+                logger.warning(f"[Monetary] LLM put boolean in unit_price field for '{description}'")
+                item['unit_price'] = None
+
+            # Refresh amount after potential fixes
+            amount = item.get('amount')
+
+            # Ensure is_currency exists
+            if 'is_currency' not in item and amount is not None:
+                item['is_currency'] = has_currency_symbol(amount)
+
+            updated_items.append(item)
+
+        result["line_items"] = updated_items
+        logger.debug(f"[Monetary] Processed {len(updated_items)} line items for is_currency field")
+        return result
 
     def _normalize_extraction_result(
         self,
         result: Dict[str, Any],
-        field_mappings: Dict[str, Any]
+        field_mappings: Dict[str, Any],
+        schema_type: str = "invoice"
     ) -> Dict[str, Any]:
         """
         Normalize field names in extraction result to canonical schema names.
@@ -1631,9 +1882,130 @@ Document section:
         Uses the FieldNormalizer to transform field names like "Item", "Qty", "Amount"
         to canonical names like "description", "quantity", "amount" based on schema aliases.
 
+        Supports two formats for field_mappings:
+        1. NEW GROUPED FORMAT (preferred):
+           {
+               "header_mappings": [...],
+               "line_item_mappings": [...],
+               "summary_mappings": [...]
+           }
+        2. LEGACY FLAT FORMAT (backwards compatible):
+           {
+               "line_item_fields": {...},
+               "header_fields": {...}
+           }
+
         Args:
             result: Extraction result with header_data, line_items, summary_data
-            field_mappings: Field mappings containing line_item_fields with aliases
+            field_mappings: Field mappings (grouped or legacy format)
+            schema_type: Schema type for default mappings fallback
+
+        Returns:
+            Result with normalized field names
+        """
+        # Initialize normalizer with LLM client
+        normalizer = FieldNormalizer(llm_client=self.llm_client)
+
+        # Determine if we have grouped mappings (new format) or legacy format
+        has_grouped_mappings = any(
+            field_mappings.get(k) for k in ['header_mappings', 'line_item_mappings', 'summary_mappings']
+        ) if field_mappings else False
+
+        if has_grouped_mappings:
+            # Use new grouped normalization
+            return self._normalize_with_grouped_mappings(
+                result, field_mappings, schema_type, normalizer
+            )
+        else:
+            # Fall back to legacy normalization for backwards compatibility
+            return self._normalize_with_legacy_mappings(
+                result, field_mappings, normalizer
+            )
+
+    def _normalize_with_grouped_mappings(
+        self,
+        result: Dict[str, Any],
+        grouped_mappings: Dict[str, Any],
+        schema_type: str,
+        normalizer: FieldNormalizer
+    ) -> Dict[str, Any]:
+        """
+        Normalize extraction result using new grouped field mappings.
+
+        Normalizes header_data, line_items, and summary_data separately using
+        their respective mapping rules. This provides better separation of concerns
+        and prevents bilingual labels from being misclassified.
+
+        Args:
+            result: Extraction result with header_data, line_items, summary_data
+            grouped_mappings: Dict with header_mappings, line_item_mappings, summary_mappings
+            schema_type: Schema type for default mappings fallback
+            normalizer: FieldNormalizer instance
+
+        Returns:
+            Result with normalized field names
+        """
+        try:
+            header_data = result.get("header_data", {})
+            line_items = result.get("line_items", [])
+            summary_data = result.get("summary_data", {})
+
+            logger.info(f"[Extraction] Using GROUPED normalization for schema: {schema_type}")
+            logger.info(f"[Extraction] Input: header={len(header_data)} fields, line_items={len(line_items)}, summary={len(summary_data)} fields")
+
+            # Use the new grouped normalization method
+            normalized_header, normalized_items, normalized_summary, all_mappings = normalizer.normalize_with_grouped_mappings(
+                header_data=header_data,
+                line_items=line_items,
+                summary_data=summary_data,
+                grouped_mappings=grouped_mappings,
+                schema_type=schema_type,
+                use_llm=True
+            )
+
+            # Update result with normalized data
+            result["header_data"] = normalized_header
+            result["line_items"] = normalized_items
+            result["summary_data"] = normalized_summary
+
+            # Store the mappings used for debugging
+            result["header_data"]["_field_normalization"] = {
+                "format": "grouped",
+                "mappings": all_mappings
+            }
+
+            # Log normalization summary
+            total_mappings = sum(len(m) for m in all_mappings.values())
+            if total_mappings > 0:
+                logger.info(f"[Extraction] Grouped normalization applied: {total_mappings} field mappings")
+                for group, mappings in all_mappings.items():
+                    if mappings:
+                        logger.info(f"[Extraction]   {group}: {mappings}")
+            else:
+                logger.debug("[Extraction] No grouped normalization needed")
+
+        except Exception as e:
+            logger.error(f"[Extraction] Grouped field normalization failed: {e}", exc_info=True)
+            # Return original result on error
+
+        return result
+
+    def _normalize_with_legacy_mappings(
+        self,
+        result: Dict[str, Any],
+        field_mappings: Dict[str, Any],
+        normalizer: FieldNormalizer
+    ) -> Dict[str, Any]:
+        """
+        Normalize extraction result using legacy flat field mappings.
+
+        This is the backwards-compatible normalization path for schemas that
+        haven't been migrated to the new grouped format.
+
+        Args:
+            result: Extraction result with header_data, line_items, summary_data
+            field_mappings: Legacy format with line_item_fields, header_fields
+            normalizer: FieldNormalizer instance
 
         Returns:
             Result with normalized field names
@@ -1653,10 +2025,9 @@ Document section:
             logger.debug("[Extraction] No line_item_fields in field_mappings")
             return result
 
-        # Initialize normalizer with LLM client
-        normalizer = FieldNormalizer(llm_client=self.llm_client)
+        logger.info("[Extraction] Using LEGACY normalization (consider migrating to grouped format)")
 
-        # Normalize line items
+        # Normalize line items using legacy method
         try:
             normalized_items, mapping_used = normalizer.normalize_line_items(
                 line_items=line_items,
@@ -1665,19 +2036,94 @@ Document section:
             )
 
             if mapping_used:
-                logger.info(f"[Extraction] Field normalization applied: {mapping_used}")
+                logger.info(f"[Extraction] Legacy field normalization applied: {mapping_used}")
                 # Update result with normalized items
                 result["line_items"] = normalized_items
 
                 # Store the mapping used in result for reference
                 if "header_data" not in result:
                     result["header_data"] = {}
-                result["header_data"]["_field_normalization"] = mapping_used
+                result["header_data"]["_field_normalization"] = {
+                    "format": "legacy",
+                    "line_item": mapping_used
+                }
             else:
-                logger.debug("[Extraction] No field normalization needed")
+                logger.debug("[Extraction] No legacy field normalization needed")
 
         except Exception as e:
-            logger.error(f"[Extraction] Field normalization failed: {e}")
+            logger.error(f"[Extraction] Legacy field normalization failed: {e}")
+            # Return original result on error
+
+        return result
+
+    def _enhance_with_entity_extraction(
+        self,
+        result: Dict[str, Any],
+        content: str
+    ) -> Dict[str, Any]:
+        """
+        Enhance extraction result with NER-based entity extraction and normalization.
+
+        This adds normalized entity fields to header_data for better filtering:
+        - vendor_normalized: Normalized vendor name for exact matching
+        - customer_normalized: Normalized customer name for exact matching
+        - all_entities_normalized: List of all normalized entity names
+
+        Args:
+            result: Extraction result with header_data, line_items, summary_data
+            content: Document text content for NER processing
+
+        Returns:
+            Result with enhanced entity fields in header_data
+        """
+        try:
+            header_data = result.get("header_data", {})
+
+            # Extract entities using all available methods
+            entity_result = extract_all_entities(
+                text=content,
+                header_data=header_data,  # Use structured data as highest priority
+                use_spacy=True,
+                use_regex=True,
+            )
+
+            # Create normalized metadata
+            normalized_metadata = create_normalized_metadata(entity_result)
+
+            # Add normalized fields to header_data
+            if normalized_metadata.get("vendor_normalized"):
+                header_data["vendor_normalized"] = normalized_metadata["vendor_normalized"]
+                # Also set vendor_name if not already present
+                if not header_data.get("vendor_name") and normalized_metadata.get("vendor_name"):
+                    header_data["vendor_name"] = normalized_metadata["vendor_name"]
+
+            if normalized_metadata.get("customer_normalized"):
+                header_data["customer_normalized"] = normalized_metadata["customer_normalized"]
+                # Also set customer_name if not already present
+                if not header_data.get("customer_name") and normalized_metadata.get("customer_name"):
+                    header_data["customer_name"] = normalized_metadata["customer_name"]
+
+            # Store all normalized entities for array-based filtering
+            if normalized_metadata.get("all_entities_normalized"):
+                header_data["all_entities_normalized"] = normalized_metadata["all_entities_normalized"]
+
+            # Store organization and person lists separately
+            if normalized_metadata.get("organizations_normalized"):
+                header_data["organizations_normalized"] = normalized_metadata["organizations_normalized"]
+            if normalized_metadata.get("persons_normalized"):
+                header_data["persons_normalized"] = normalized_metadata["persons_normalized"]
+
+            result["header_data"] = header_data
+
+            logger.info(
+                f"[Extraction] Entity enhancement: "
+                f"vendor={normalized_metadata.get('vendor_name')}, "
+                f"customer={normalized_metadata.get('customer_name')}, "
+                f"total_entities={len(normalized_metadata.get('all_entities_normalized', []))}"
+            )
+
+        except Exception as e:
+            logger.error(f"[Extraction] Entity extraction enhancement failed: {e}")
             # Return original result on error
 
         return result

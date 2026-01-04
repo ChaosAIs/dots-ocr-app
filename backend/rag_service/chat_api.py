@@ -930,8 +930,9 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 logger.warning(f"[Intent Routing] Failed to prepare hybrid context: {e}")
 
                         try:
-                            # Get preprocessing topics to pass to agent (Option 5: avoid redundant extraction)
+                            # Get preprocessing topics and entities to pass to agent (Option 5: avoid redundant extraction)
                             preprocessing_topics = context_info.get('topics', []) if context_info else []
+                            preprocessing_entities = context_info.get('entities', {}) if context_info else {}
 
                             async for chunk in stream_agent_response(
                                 enhanced_message,
@@ -943,6 +944,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
                                 document_context_changed=document_context_changed,  # Force new search if selection changed
                                 preprocessing_topics=preprocessing_topics,  # Pass topics from unified preprocessing
+                                preprocessing_entities=preprocessing_entities,  # Pass entities from unified preprocessing
                                 iterative_reasoning_enabled=iterative_reasoning_enabled  # Pass UI checkbox toggle for iterative vs simple flow
                             ):
                                 chunk_count += 1

@@ -41,3 +41,7 @@ neo4j
 
 # Text processing
 unidecode  # For transliterating Unicode text to ASCII (workspace folder names)
+
+# Entity extraction and NER
+spacy>=3.7.0  # NER for entity extraction (run: python -m spacy download en_core_web_sm)
+rapidfuzz>=3.0.0  # Fast fuzzy string matching for entity normalization
