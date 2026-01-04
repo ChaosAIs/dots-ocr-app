@@ -1122,7 +1122,19 @@ def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
     # 1. Source name FIRST (most distinctive)
     parts.append(source_name)
 
-    # 2. For tabular documents, include columns prominently for field-based search
+    # 2. For invoice/receipt documents, include vendor/customer names prominently
+    # These are critical for entity-based search ("Augment Code invoices", "Amazon receipts")
+    vendor_name = metadata.get("vendor_name")
+    customer_name = metadata.get("customer_name")
+    if vendor_name or customer_name:
+        entity_parts = []
+        if vendor_name:
+            entity_parts.append(f"Vendor: {vendor_name}")
+        if customer_name:
+            entity_parts.append(f"Customer: {customer_name}")
+        parts.append(". ".join(entity_parts))
+
+    # 3. For tabular documents, include columns prominently for field-based search
     if is_tabular and columns_str:
         parts.append(f"Data columns: {columns_str}")
         # Add row count for context
@@ -1130,19 +1142,19 @@ def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
         if row_count:
             parts.append(f"Contains {row_count} data records")
 
-    # 3. Entities (key identifiers)
+    # 4. Entities (key identifiers from hierarchical extraction)
     if entities_str:
         parts.append(f"Key entities: {entities_str}")
 
-    # 4. Document types (all applicable types) and subject - richer semantic signal
+    # 5. Document types (all applicable types) and subject - richer semantic signal
     types_str = ", ".join(document_types)
     parts.append(f"Document types: {types_str}. Subject: {subject_name}")
 
-    # 5. Topics
+    # 6. Topics
     if topics_str:
         parts.append(f"Topics: {topics_str}")
 
-    # 6. For tabular data, add summary snippet if available (brief context)
+    # 7. For tabular data, add summary snippet if available (brief context)
     if is_tabular:
         summary = metadata.get("summary", "")
         if summary:
@@ -1210,6 +1222,28 @@ def upsert_document_metadata_embedding(
             payload["columns"] = metadata.get("columns", [])
             payload["row_count"] = metadata.get("row_count", 0)
             payload["column_count"] = metadata.get("column_count", 0)
+
+        # Add extracted entity fields for document routing (vendor, customer, etc.)
+        # These are critical for entity-based filtering in document router
+        if metadata.get("vendor_name"):
+            payload["vendor_name"] = metadata["vendor_name"]
+        if metadata.get("customer_name"):
+            payload["customer_name"] = metadata["customer_name"]
+        if metadata.get("invoice_number"):
+            payload["invoice_number"] = metadata["invoice_number"]
+        if metadata.get("invoice_date"):
+            payload["invoice_date"] = metadata["invoice_date"]
+
+        # Add key_entities for entity matching (from hierarchical metadata extraction)
+        # Store as a simple list of entity names for easier matching
+        key_entities = metadata.get("key_entities", [])
+        if key_entities:
+            entity_names = [
+                e.get("name", "") for e in key_entities
+                if isinstance(e, dict) and e.get("name")
+            ]
+            if entity_names:
+                payload["key_entities"] = entity_names
 
         # Add date information if available
         dates = metadata.get("dates", {})

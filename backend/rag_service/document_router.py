@@ -350,13 +350,27 @@ class DocumentRouter:
                         else:
                             # Check metadata fields like vendor_name, customer_name, store_name
                             entity_fields = ['vendor_name', 'customer_name', 'store_name', 'company_name', 'subject_name']
+                            field_matched = False
                             for field in entity_fields:
                                 field_value = normalize_for_matching(str(payload.get(field, "")))
                                 field_compact = field_value.replace(" ", "")
                                 if field_value and (entity in field_value or entity_compact in field_compact):
                                     boost = max(boost, ENTITY_MATCH_BOOST)
                                     match_reasons.append(f"entity '{entity}' in {field}")
+                                    field_matched = True
                                     break
+
+                            # Also check key_entities list from metadata extraction
+                            if not field_matched:
+                                key_entities_list = payload.get("key_entities", [])
+                                if key_entities_list:
+                                    for ke in key_entities_list:
+                                        ke_normalized = normalize_for_matching(str(ke))
+                                        ke_compact = ke_normalized.replace(" ", "")
+                                        if entity in ke_normalized or entity_compact in ke_compact:
+                                            boost = max(boost, ENTITY_MATCH_BOOST * 0.9)
+                                            match_reasons.append(f"entity '{entity}' in key_entities")
+                                            break
 
                     # Also check direct query terms against source name
                     for term in query_terms:

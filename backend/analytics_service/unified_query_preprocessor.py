@@ -281,29 +281,43 @@ Tasks:
    - If previous query asked about "meals/invoices/receipts in 2025" -> resolved_message = "list all meals/invoices/receipts details from 2025"
    - If previous query asked about "products with inventory < 50" -> resolved_message = "list all product details where inventory < 50"
 
-   EXAMPLE 1:
+   **CRITICAL - PRESERVE ENTITY NAMES (MUST DO):**
+   - If user mentions a SPECIFIC vendor/company/store/person name, ALWAYS keep it in resolved_message!
+   - Company/vendor names examples: "Augment Code", "Amazon", "Best Buy", "Walmart", "Apple", "Microsoft"
+   - NEVER generalize or drop these names! They are filters, not optional context.
+
+   EXAMPLE - ENTITY PRESERVATION:
+   - Message: "list the augment code invoices details for me"
+   - resolved_message MUST BE: "list augment code invoice details" (KEEP "augment code"!)
+   - WRONG: "list all invoice details" (DROPPED the vendor name - THIS IS WRONG!)
+
+   - Message: "show Amazon receipts from 2025"
+   - resolved_message MUST BE: "show Amazon receipts from 2025" (KEEP "Amazon"!)
+   - WRONG: "show all receipts from 2025" (DROPPED the store name - THIS IS WRONG!)
+
+   - Message: "how many Best Buy purchases last month"
+   - resolved_message MUST BE: "how many Best Buy purchases last month" (KEEP "Best Buy"!)
+
+   EXAMPLE - PRONOUN RESOLUTION:
    - History: user: "how many meals invoices for 2025"
    - Current: "can you list all of their details?"
    - resolved_message MUST BE: "list all meals invoice details from 2025"
-   - INTENT MUST BE: DATA_ANALYTICS (because listing invoice/receipt details requires SQL query on extracted data)
+   - INTENT MUST BE: DATA_ANALYTICS
 
-   EXAMPLE 2:
+   EXAMPLE - CONDITION PRESERVATION:
    - History: user: "how many products with inventory lower than 50 but higher than 30?"
    - Current: "list all product details for above condition"
    - resolved_message MUST BE: "list all product details where inventory lower than 50 but higher than 30"
    - INTENT MUST BE: DATA_ANALYTICS
 
-   EXAMPLE 3:
-   - History: user: "count receipts from last month"
-   - Current: "show me their details"
-   - resolved_message MUST BE: "show all receipt details from last month"
-   - INTENT MUST BE: DATA_ANALYTICS
-
    CRITICAL - IGNORE RESULT COUNTS:
    - "document_count is 7", "the 7 invoices" = RESULT COUNTS, NOT database filters! IGNORE these numbers.
    - Use the ORIGINAL CONDITION (e.g., "from 2025") instead.
+
 2. DISSATISFIED: Is user unhappy with previous response OR requesting fresh/latest data? ("wrong", "check again", "refresh", "are you sure", "latest data", "latest", "fresh data", "current data", "up to date", "most recent")
+
 3. CACHEABLE: Worth caching? No for greetings/meta questions. Yes for factual queries. NO if user explicitly asks for "latest" or "fresh" data.
+
 4. INTENT:
    - DATA_ANALYTICS: counts, totals, averages, comparisons, OR listing/showing details of invoices/receipts/meals/products/transactions (requires SQL on extracted data)
    - DOCUMENT_SEARCH: find/read policy docs, how-to guides, manuals, documentation
@@ -311,8 +325,8 @@ Tasks:
    - GENERAL: greetings only
    NOTE: If resolved_message is about listing invoice/receipt/meal/product details, intent MUST be DATA_ANALYTICS!
 
-JSON only, no markdown. If message has pronouns referencing previous query about invoices/receipts/meals, resolve them and use DATA_ANALYTICS intent:
-{{"topics":["meals","invoice"],"resolved_message":"list all meals invoice details from 2025","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DATA_ANALYTICS"}}"""
+JSON only, no markdown:
+{{"topics":["invoice"],"resolved_message":"list augment code invoice details","is_dissatisfied":false,"bypass_cache":false,"invalidate_previous":false,"is_cacheable":true,"intent":"DATA_ANALYTICS"}}"""
 
     def _format_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> str:
         """Format chat history for the prompt.

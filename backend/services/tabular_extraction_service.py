@@ -281,6 +281,19 @@ class TabularExtractionService:
                 if summary_chunks:
                     metadata["summary"] = summary_chunks[0].page_content[:500]
 
+                # Add extracted header fields for entity matching in document router
+                # These fields are critical for filtering by vendor, customer, etc.
+                extracted_header_data = {k: v for k, v in document_data.header_data.items()
+                                         if k not in ["column_headers", "_field_normalization"] and v is not None}
+                if extracted_header_data.get("vendor_name"):
+                    metadata["vendor_name"] = extracted_header_data["vendor_name"]
+                if extracted_header_data.get("customer_name"):
+                    metadata["customer_name"] = extracted_header_data["customer_name"]
+                if extracted_header_data.get("invoice_number"):
+                    metadata["invoice_number"] = extracted_header_data["invoice_number"]
+                if extracted_header_data.get("invoice_date"):
+                    metadata["invoice_date"] = extracted_header_data["invoice_date"]
+
                 success = upsert_document_metadata_embedding(
                     document_id=str(document_id),
                     source_name=source_name,

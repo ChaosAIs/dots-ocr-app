@@ -281,12 +281,16 @@ Extract the following metadata and respond in valid JSON format:
    - **IMPORTANT**: Analyze BOTH the document name (provided above) AND the content to determine the most appropriate subject
    - The document name may contain useful patterns (dates, IDs, categories) that provide context
    - Extract the most semantically meaningful subject based on your analysis:
-     * For receipts/invoices: The business/vendor name, transaction date, transaction type and amount, or a combination that best represents the transaction
+     * For receipts/invoices: The business/vendor name (e.g., "Augment Code", "Best Buy", "Amazon")
      * For policies: The policy name or topic (e.g., "Return Policy", "Refund Guidelines")
-     * For resumes: The person's name, year, and role
+     * For resumes: The person's name, year, and role (e.g., "John Smith")
      * For manuals: The product/system name
      * For reports: The main topic or company
      * For technical docs: The technology/API name
+   - **CRITICAL**: Keep multi-word names as SINGLE values - do NOT split company/person names!
+     * "Augment Code" → subject_name: "Augment Code" (NOT "Augment" or "Code" separately)
+     * "Best Buy" → subject_name: "Best Buy"
+     * "John Smith" → subject_name: "John Smith"
    - Use your judgment to create a subject_name that is most useful for search and retrieval
    - Set to null if no clear subject
 
@@ -317,6 +321,19 @@ Extract the following metadata and respond in valid JSON format:
 8. **key_entities**: Array of 5-10 most important entities with scores
    Format: [{{{{"name": "Entity Name", "type": "person|organization|technology|location|date|financial|product|policy", "score": 0-100}}}}]
    Score based on importance/frequency in the document
+
+   **CRITICAL - COMPOUND ENTITY NAMES (MUST FOLLOW):**
+   - Keep multi-word company/vendor/person names as SINGLE entities, do NOT split them!
+   - "Augment Code" → entity name: "Augment Code" (NOT separate "Augment" and "Code")
+   - "Best Buy" → entity name: "Best Buy" (NOT separate "Best" and "Buy")
+   - "John Smith" → entity name: "John Smith" (NOT separate "John" and "Smith")
+   - "Amazon Web Services" → entity name: "Amazon Web Services" (NOT split)
+   - These compound names are critical for document filtering - splitting them loses meaning!
+
+   **DO NOT include generic words as entities:**
+   - DO NOT include: "invoice", "receipt", "report", "document", "list", "details", "total", "amount"
+   - These are document types or common terms, NOT searchable entities
+   - ONLY include specific names: vendor names, customer names, product names, person names, dates
 
 9. **confidence**: Your confidence in the extraction (0.0 to 1.0)
    - 0.9-1.0: Very clear document type and subject
@@ -429,8 +446,26 @@ Return ONLY valid JSON in this exact format:
 - For resume queries: include person's name AND relevant skills/roles
 - For date ranges: include start date, end date, and all variations
 - For names: include full name, first name, last name separately
-- DO NOT include generic words like "group", "list", "all"
+- DO NOT include generic words like "group", "list", "all", "details", "show", "find"
+- DO NOT include document type words as entities: "invoice", "receipt", "report" go in document_type_hints, NOT entities
 - VERIFY: Go back to the original query and check if you missed any entity
+
+**CRITICAL - COMPOUND ENTITY NAMES (MUST FOLLOW):**
+- Keep multi-word company/vendor/person names as SINGLE entities, do NOT split them!
+- "Augment Code" → entity: "Augment Code" (NOT ["augment", "code"])
+- "Best Buy" → entity: "Best Buy" (NOT ["best", "buy"])
+- "John Smith" → entity: "John Smith" (NOT ["john", "smith"])
+- "Amazon Web Services" → entity: "Amazon Web Services" (NOT ["amazon", "web", "services"])
+- These compound names are FILTERS - splitting them loses their meaning!
+
+**Examples of CORRECT entity extraction:**
+- Query: "list augment code invoices" → entities: ["Augment Code"], document_type_hints: ["invoice"]
+- Query: "show Best Buy receipts from 2025" → entities: ["Best Buy", "2025"], document_type_hints: ["receipt"]
+- Query: "find John Smith resume" → entities: ["John Smith"], document_type_hints: ["resume"]
+
+**Examples of WRONG entity extraction (DO NOT DO THIS):**
+- Query: "list augment code invoices" → entities: ["augment", "code", "invoice"] ← WRONG! Split vendor name + included doc type
+- Query: "show Best Buy receipts" → entities: ["best", "buy", "receipt"] ← WRONG!
 
 ## Guidelines for topics (COMPREHENSIVE COVERAGE):
 - Subject areas and domains relevant to the query
