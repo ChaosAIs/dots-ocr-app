@@ -33,6 +33,8 @@ export const WorkspaceSidebar = ({
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showDeleteOptionsDialog, setShowDeleteOptionsDialog] = useState(false);
+  const [showReindexConfirmDialog, setShowReindexConfirmDialog] = useState(false);
+  const [reindexLoading, setReindexLoading] = useState(false);
   const [workspaceToDelete, setWorkspaceToDelete] = useState(null);
   const [editingWorkspace, setEditingWorkspace] = useState(null);
   const [newSharesCount, setNewSharesCount] = useState(0);
@@ -199,6 +201,33 @@ export const WorkspaceSidebar = ({
     } catch (error) {
       console.error("Error setting default workspace:", error);
       messageService.errorToast(t("Workspace.SetDefaultError"));
+    }
+  };
+
+  // Handle global reindex for all documents (Admin: all workspaces, User: owned documents only)
+  const handleGlobalReindex = async () => {
+    setReindexLoading(true);
+    try {
+      const result = await documentService.reindexDocuments(null);
+      if (result.status === "success") {
+        messageService.successToast(
+          t("Workspace.ReindexSuccess", { count: result.documents_processed })
+        );
+        // Trigger workspace change to refresh document list
+        if (onWorkspaceChange) {
+          onWorkspaceChange("reindex", null);
+        }
+      } else {
+        messageService.warnToast(result.message || t("Workspace.ReindexNoDocuments"));
+      }
+    } catch (error) {
+      console.error("Error during global reindex:", error);
+      messageService.errorToast(
+        error.response?.data?.detail || t("Workspace.ReindexError")
+      );
+    } finally {
+      setReindexLoading(false);
+      setShowReindexConfirmDialog(false);
     }
   };
 
@@ -429,17 +458,28 @@ export const WorkspaceSidebar = ({
       {/* Header */}
       <div className="flex justify-content-between align-items-center border-bottom-1 surface-border" style={{ padding: '0.75rem 1rem' }}>
         <span style={{ fontSize: '0.9rem', fontWeight: '600', color: 'var(--text-color)' }}>{t("Workspace.Title")}</span>
-        <Button
-          icon="pi pi-plus"
-          text
-          rounded
-          onClick={() => {
-            resetForm();
-            setShowCreateDialog(true);
-          }}
-          tooltip={t("Workspace.Create")}
-          style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
-        />
+        <div className="flex align-items-center gap-1">
+          <Button
+            icon={reindexLoading ? "pi pi-spin pi-spinner" : "pi pi-refresh"}
+            text
+            rounded
+            onClick={() => setShowReindexConfirmDialog(true)}
+            tooltip={t("Workspace.ReindexAll")}
+            disabled={reindexLoading}
+            style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
+          />
+          <Button
+            icon="pi pi-plus"
+            text
+            rounded
+            onClick={() => {
+              resetForm();
+              setShowCreateDialog(true);
+            }}
+            tooltip={t("Workspace.Create")}
+            style={{ width: '1.75rem', height: '1.75rem', padding: 0 }}
+          />
+        </div>
       </div>
 
       {/* Workspace list */}
@@ -628,6 +668,42 @@ export const WorkspaceSidebar = ({
                 setWorkspaceToDelete(null);
               }}
             />
+          </div>
+        </div>
+      </Dialog>
+
+      {/* Global Reindex Confirmation Dialog */}
+      <Dialog
+        visible={showReindexConfirmDialog}
+        onHide={() => setShowReindexConfirmDialog(false)}
+        header={t("Workspace.ReindexConfirmTitle")}
+        style={{ width: "450px" }}
+        footer={
+          <div>
+            <Button
+              label={t("Workspace.Cancel")}
+              icon="pi pi-times"
+              onClick={() => setShowReindexConfirmDialog(false)}
+              className="p-button-text"
+              disabled={reindexLoading}
+            />
+            <Button
+              label={reindexLoading ? t("Workspace.ReindexInProgress") : t("Workspace.ReindexConfirm")}
+              icon={reindexLoading ? "pi pi-spin pi-spinner" : "pi pi-refresh"}
+              onClick={handleGlobalReindex}
+              disabled={reindexLoading}
+              severity="warning"
+            />
+          </div>
+        }
+      >
+        <div className="flex align-items-start gap-3">
+          <i className="pi pi-exclamation-triangle text-xl text-yellow-600" style={{ marginTop: '2px' }} />
+          <div>
+            <p className="m-0 mb-2">{t("Workspace.ReindexConfirmMessage")}</p>
+            <p className="m-0 text-sm" style={{ color: 'var(--text-color-secondary)' }}>
+              {t("Workspace.ReindexConfirmNote")}
+            </p>
           </div>
         </div>
       </Dialog>

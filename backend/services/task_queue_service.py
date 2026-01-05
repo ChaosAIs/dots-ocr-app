@@ -13,7 +13,7 @@ from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from db.models import Document, ConvertStatus, IndexStatus, TaskStatus
+from db.models import Document, ConvertStatus, IndexStatus, TaskStatus, DocumentData, DocumentDataLineItem
 from db.document_repository import DocumentRepository
 from db.database import get_db_session
 from datetime import timezone
@@ -1329,3 +1329,419 @@ class TaskQueueService:
 
         except Exception as e:
             logger.error(f"Error in resume_incomplete_indexing: {e}")
+
+    def process_reindex_task(self, reindex_task) -> bool:
+        """
+        Process a reindex task for a single document.
+
+        This method performs the full reindex workflow for a document:
+        1. Delete existing extracted data (documents_data, documents_data_line_items)
+        2. Clear Qdrant vectors and Neo4j GraphRAG data
+        3. Based on processing_path:
+           - TABULAR: Re-run TabularExtractionService (structured extraction + summary embeddings)
+           - STANDARD: Recreate chunks and trigger vector/graphrag indexing via worker pool
+        4. Update document status
+
+        Args:
+            reindex_task: ReindexTaskData with document_id, filename, output_path, etc.
+
+        Returns:
+            bool: True if reindex preparation succeeded
+        """
+        from rag_service.markdown_chunker import chunk_markdown_with_summaries
+        from queue_service import TaskQueuePage, TaskQueueChunk, TaskQueueDocument
+        from db.models import DocumentData, DocumentDataLineItem, IndexStatus
+        import hashlib
+
+        try:
+            logger.info("=" * 80)
+            logger.info(f"[Reindex Task] ========== START REINDEX ==========")
+            logger.info("=" * 80)
+            logger.info(f"[Reindex Task] Document ID: {reindex_task.document_id}")
+            logger.info(f"[Reindex Task] Filename: {reindex_task.filename}")
+            logger.info(f"[Reindex Task] Output path: {reindex_task.output_path}")
+
+            with get_db_session() as db:
+                doc_id = reindex_task.document_id
+                filename = reindex_task.filename
+
+                # Get the document record
+                doc = db.query(Document).filter(Document.id == doc_id).first()
+                if not doc:
+                    raise ValueError(f"Document not found: {doc_id}")
+
+                # Check processing_path to determine reindex strategy
+                processing_path = doc.processing_path or 'standard'
+                is_tabular = doc.is_tabular_data or processing_path == 'tabular'
+                logger.info(f"[Reindex Task] Processing path: {processing_path}, is_tabular: {is_tabular}")
+
+                # Route to appropriate reindex logic
+                if is_tabular:
+                    return self._process_reindex_tabular(reindex_task, doc, db)
+                else:
+                    return self._process_reindex_standard(reindex_task, doc, db)
+
+        except Exception as e:
+            logger.error("=" * 80)
+            logger.error(f"[Reindex Task] ========== REINDEX FAILED ==========")
+            logger.error("=" * 80)
+            logger.error(f"[Reindex Task] ❌ Error: {e}", exc_info=True)
+            raise
+
+    def _process_reindex_tabular(self, reindex_task, doc: Document, db) -> bool:
+        """
+        Process reindex for tabular documents (invoices, receipts, spreadsheets).
+
+        Tabular documents use a different processing path:
+        1. Delete existing DocumentData and line items
+        2. Clear Qdrant summary embeddings
+        3. Re-run TabularExtractionService which:
+           - Re-extracts structured data to PostgreSQL
+           - Re-generates LLM summary chunks
+           - Re-indexes summary chunks to Qdrant (1-3 chunks)
+           - Updates document status to INDEXED
+
+        No TaskQueueChunk records are created - tabular docs use direct indexing.
+
+        Args:
+            reindex_task: ReindexTaskData with document_id, filename, output_path
+            doc: Document record
+            db: Database session
+
+        Returns:
+            bool: True if reindex succeeded
+        """
+        from queue_service import TaskQueueDocument
+        from db.models import DocumentData, DocumentDataLineItem, IndexStatus
+        from services.tabular_extraction_service import TabularExtractionService
+
+        doc_id = reindex_task.document_id
+        filename = reindex_task.filename
+
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] TABULAR PATH - Processing tabular document")
+        logger.info("-" * 80)
+
+        # ================================================================
+        # STEP 1: Delete existing DocumentData and line items
+        # ================================================================
+        logger.info(f"[Reindex Task] STEP 1: Clearing extracted data...")
+
+        doc_data = db.query(DocumentData).filter(
+            DocumentData.document_id == doc_id
+        ).first()
+
+        if doc_data:
+            # Delete line items first
+            deleted_line_items = db.query(DocumentDataLineItem).filter(
+                DocumentDataLineItem.documents_data_id == doc_data.id
+            ).delete(synchronize_session=False)
+
+            # Delete DocumentData
+            db.delete(doc_data)
+            logger.info(f"[Reindex Task] Deleted DocumentData and {deleted_line_items} line items")
+        else:
+            logger.info(f"[Reindex Task] No DocumentData to delete")
+
+        # ================================================================
+        # STEP 2: Clear Qdrant vectors (summary embeddings)
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 2: Clearing Qdrant embeddings...")
+
+        try:
+            from rag_service.vectorstore import delete_documents_by_document_id
+            deleted_count = delete_documents_by_document_id(str(doc_id))
+            logger.info(f"[Reindex Task] Deleted {deleted_count} vectors from Qdrant")
+        except Exception as e:
+            logger.warning(f"[Reindex Task] Error clearing Qdrant vectors: {e}")
+
+        # ================================================================
+        # STEP 3: Reset TaskQueueDocument extraction_status
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 3: Resetting TaskQueueDocument...")
+
+        db.query(TaskQueueDocument).filter(
+            TaskQueueDocument.document_id == doc_id
+        ).update({
+            "extraction_status": TaskStatus.PENDING,
+            "extraction_error": None,
+            "extraction_retry_count": 0,
+            "extraction_worker_id": None,
+            "extraction_started_at": None,
+            "extraction_completed_at": None,
+            "extraction_last_heartbeat": None
+        }, synchronize_session=False)
+        logger.info(f"[Reindex Task] Reset extraction_status to PENDING")
+
+        # ================================================================
+        # STEP 4: Update document status to INDEXING
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 4: Updating document status...")
+
+        doc.index_status = IndexStatus.INDEXING
+        doc.extraction_status = "pending"
+        doc.indexing_details = {
+            "tabular_processing": {"status": "pending"},
+            "reindex": {"status": "processing", "path": "tabular"}
+        }
+
+        db.commit()
+
+        # ================================================================
+        # STEP 5: Re-run TabularExtractionService (synchronous)
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 5: Running TabularExtractionService...")
+
+        # Get output directory from output_path
+        output_dir = reindex_task.output_path
+        source_name = Path(filename).stem
+
+        # Create new db session for TabularExtractionService
+        # (the service manages its own session lifecycle)
+        tabular_service = TabularExtractionService(db)
+        success, message = tabular_service.process_tabular_document(
+            document_id=doc_id,
+            source_name=source_name,
+            output_dir=output_dir,
+            filename=filename,
+            conversion_id=None,  # No WebSocket notifications during reindex
+            broadcast_callback=None
+        )
+
+        if success:
+            logger.info("=" * 80)
+            logger.info(f"[Reindex Task] ========== TABULAR REINDEX COMPLETE ==========")
+            logger.info("=" * 80)
+            logger.info(f"[Reindex Task] ✅ Tabular document {filename} reindexed successfully")
+            logger.info(f"[Reindex Task] Message: {message}")
+            return True
+        else:
+            raise ValueError(f"Tabular extraction failed: {message}")
+
+    def _process_reindex_standard(self, reindex_task, doc: Document, db) -> bool:
+        """
+        Process reindex for standard documents (articles, reports, contracts).
+
+        Standard documents use the queue-based processing path:
+        1. Delete existing extracted data
+        2. Clear Qdrant vectors and Neo4j GraphRAG data
+        3. Delete existing TaskQueueChunk records
+        4. Recreate chunks from markdown files
+        5. Reset TaskQueuePage statuses to PENDING
+        6. Worker pool picks up and processes vector/graphrag indexing
+
+        Args:
+            reindex_task: ReindexTaskData with document_id, filename, output_path
+            doc: Document record
+            db: Database session
+
+        Returns:
+            bool: True if reindex preparation succeeded
+        """
+        from rag_service.markdown_chunker import chunk_markdown_with_summaries
+        from queue_service import TaskQueuePage, TaskQueueChunk, TaskQueueDocument
+        from db.models import DocumentData, DocumentDataLineItem, IndexStatus
+        import hashlib
+
+        doc_id = reindex_task.document_id
+        filename = reindex_task.filename
+
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STANDARD PATH - Processing standard document")
+        logger.info("-" * 80)
+
+        # ================================================================
+        # STEP 1: Delete DocumentData and DocumentDataLineItem records
+        # ================================================================
+        logger.info(f"[Reindex Task] STEP 1: Clearing extracted data...")
+
+        doc_data = db.query(DocumentData).filter(
+            DocumentData.document_id == doc_id
+        ).first()
+
+        if doc_data:
+            # Delete line items first
+            deleted_line_items = db.query(DocumentDataLineItem).filter(
+                DocumentDataLineItem.documents_data_id == doc_data.id
+            ).delete(synchronize_session=False)
+
+            # Delete DocumentData
+            db.delete(doc_data)
+            logger.info(f"[Reindex Task] Deleted DocumentData and {deleted_line_items} line items")
+        else:
+            logger.info(f"[Reindex Task] No DocumentData to delete")
+
+        # ================================================================
+        # STEP 2: Clear Qdrant vectors and Neo4j GraphRAG data
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 2: Clearing embeddings...")
+
+        try:
+            from services.indexing_service import IndexingService
+            indexing_service = IndexingService()
+            indexing_service.delete_document_embeddings(
+                filename=filename,
+                doc_id=str(doc_id),
+                output_path=reindex_task.output_path
+            )
+            logger.info(f"[Reindex Task] Cleared Qdrant/Neo4j embeddings")
+        except Exception as e:
+            logger.warning(f"[Reindex Task] Error clearing embeddings: {e}")
+
+        # ================================================================
+        # STEP 3: Reset TaskQueueDocument extraction_status
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 3: Resetting TaskQueueDocument...")
+
+        db.query(TaskQueueDocument).filter(
+            TaskQueueDocument.document_id == doc_id
+        ).update({
+            "extraction_status": TaskStatus.PENDING,
+            "extraction_error": None,
+            "extraction_retry_count": 0,
+            "extraction_worker_id": None,
+            "extraction_started_at": None,
+            "extraction_completed_at": None,
+            "extraction_last_heartbeat": None
+        }, synchronize_session=False)
+        logger.info(f"[Reindex Task] Reset extraction_status to PENDING")
+
+        # ================================================================
+        # STEP 4: Reset TaskQueuePage statuses (keep OCR as-is)
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 4: Resetting TaskQueuePage statuses...")
+
+        db.query(TaskQueuePage).filter(
+            TaskQueuePage.document_id == doc_id
+        ).update({
+            "vector_status": TaskStatus.PENDING,
+            "vector_error": None,
+            "vector_retry_count": 0,
+            "vector_worker_id": None,
+            "vector_started_at": None,
+            "vector_completed_at": None,
+            "vector_last_heartbeat": None,
+            "graphrag_status": TaskStatus.PENDING,
+            "graphrag_error": None,
+            "graphrag_retry_count": 0,
+            "graphrag_worker_id": None,
+            "graphrag_started_at": None,
+            "graphrag_completed_at": None,
+            "graphrag_last_heartbeat": None
+        }, synchronize_session=False)
+        logger.info(f"[Reindex Task] Reset page vector/graphrag statuses to PENDING")
+
+        # ================================================================
+        # STEP 5: Delete existing chunks
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 5: Deleting existing chunks...")
+
+        deleted_chunks = db.query(TaskQueueChunk).filter(
+            TaskQueueChunk.document_id == doc_id
+        ).delete(synchronize_session=False)
+        logger.info(f"[Reindex Task] Deleted {deleted_chunks} chunks")
+
+        # ================================================================
+        # STEP 6: Recreate chunks from markdown files
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 6: Recreating chunks from markdown...")
+
+        pages = db.query(TaskQueuePage).filter(
+            TaskQueuePage.document_id == doc_id
+        ).all()
+
+        total_chunks_created = 0
+
+        if not pages:
+            raise ValueError(f"No task_queue_page records found for document {doc_id}. Document may need to be re-uploaded.")
+
+        logger.info(f"[Reindex Task] Found {len(pages)} pages in task_queue_page")
+        for page in pages:
+            if page.page_file_path and os.path.exists(page.page_file_path):
+                try:
+                    # Chunk the markdown file (same logic as OCR completion)
+                    result = chunk_markdown_with_summaries(
+                        page.page_file_path,
+                        source_name=f"{filename}_page_{page.page_number}"
+                    )
+                    chunks = result.chunks
+
+                    if chunks:
+                        for idx, chunk in enumerate(chunks):
+                            content_hash = hashlib.md5(chunk.page_content.encode()).hexdigest()[:16]
+                            chunk_id = f"{doc_id}_{page.page_number}_{idx}_{content_hash}"
+                            chunk_content = chunk.page_content
+                            chunk_metadata = chunk.metadata.copy() if chunk.metadata else {}
+                            chunk_metadata["source_page"] = page.page_number
+                            chunk_metadata["chunk_index"] = idx
+                            chunk_metadata["total_chunks"] = len(chunks)
+
+                            # Create new chunk record with proper page_id
+                            new_chunk = TaskQueueChunk(
+                                page_id=page.id,
+                                document_id=doc_id,
+                                chunk_id=chunk_id,
+                                chunk_index=idx,
+                                chunk_content_hash=content_hash,
+                                chunk_content=chunk_content,
+                                chunk_metadata=chunk_metadata,
+                                vector_status=TaskStatus.PENDING,
+                                graphrag_status=TaskStatus.PENDING,
+                                max_retries=3
+                            )
+                            db.add(new_chunk)
+                            total_chunks_created += 1
+
+                        # Update page chunk count
+                        page.chunk_count = len(chunks)
+                        logger.info(f"[Reindex Task] Page {page.page_number}: {len(chunks)} chunks created")
+
+                except Exception as chunk_error:
+                    logger.warning(f"[Reindex Task] Error chunking page {page.page_number}: {chunk_error}")
+            else:
+                logger.warning(f"[Reindex Task] Page file not found: {page.page_file_path}")
+
+        logger.info(f"[Reindex Task] Total chunks created: {total_chunks_created}")
+
+        # ================================================================
+        # STEP 7: Update document statuses
+        # ================================================================
+        logger.info("-" * 80)
+        logger.info(f"[Reindex Task] STEP 7: Updating document statuses...")
+
+        doc.index_status = IndexStatus.INDEXING
+        doc.vector_status = TaskStatus.PENDING
+        doc.graphrag_status = TaskStatus.PENDING
+        doc.indexed_chunks = 0
+
+        # Reset indexing_details to show pending state
+        doc.indexing_details = {
+            "vector_indexing": {"status": "pending"},
+            "metadata_extraction": {"status": "pending"},
+            "graphrag_indexing": {"status": "pending"},
+            "reindex": {"status": "processing", "chunks_created": total_chunks_created}
+        }
+
+        db.commit()
+
+        logger.info("=" * 80)
+        logger.info(f"[Reindex Task] ========== STANDARD REINDEX COMPLETE ==========")
+        logger.info("=" * 80)
+        logger.info(f"[Reindex Task] ✅ Document {filename} ready for re-indexing")
+        logger.info(f"[Reindex Task] Created {total_chunks_created} chunks with PENDING status")
+        logger.info(f"[Reindex Task] Worker pool will process vector/graphrag indexing")
+
+        # Notify workers about new pending tasks
+        if self.task_queue_manager:
+            self.task_queue_manager.new_task_event.set()
+
+        return True

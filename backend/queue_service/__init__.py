@@ -24,6 +24,7 @@ from .hierarchical_task_manager import (
     HierarchicalTaskQueueManager,
     PageTaskData,
     ChunkTaskData,
+    ReindexTaskData,
 )
 
 from .hierarchical_worker_pool import (
@@ -41,6 +42,7 @@ __all__ = [
     "HierarchicalTaskQueueManager",
     "PageTaskData",
     "ChunkTaskData",
+    "ReindexTaskData",
     "HierarchicalWorkerPool",
     "HierarchicalWorker",
     "TaskScheduler",

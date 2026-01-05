@@ -596,6 +596,40 @@ class DocumentService {
   }
 
   /**
+   * Reindex documents - triggers re-extraction and re-indexing
+   * Clears extracted data (documents_data) and embeddings (Qdrant/Neo4j),
+   * then resets task queue to reprocess documents.
+   * Preserves OCR results (ocr_status, chunk_content).
+   *
+   * Access Control:
+   * - Admin users can reindex ALL documents (workspaceId=null) or specific workspace
+   * - Regular users can only reindex documents they own
+   *
+   * @param {string|null} workspaceId - Optional workspace ID. If null, reindex all accessible documents.
+   * @returns {Promise} - Reindex result with counts
+   */
+  async reindexDocuments(workspaceId = null) {
+    try {
+      const formData = new FormData();
+      if (workspaceId) {
+        formData.append("workspace_id", workspaceId);
+        console.log(`🔄 Initiating reindex for workspace: ${workspaceId}`);
+      } else {
+        console.log(`🔄 Initiating reindex for all accessible documents`);
+      }
+
+      const response = await http.post(
+        `${this.apiDomain}/documents/reindex`,
+        formData
+      );
+      return response.data;
+    } catch (error) {
+      console.error("Error reindexing documents:", error);
+      throw error;
+    }
+  }
+
+  /**
    * Format date for display
    * @param {string} isoString - ISO date string
    * @returns {string} - Formatted date

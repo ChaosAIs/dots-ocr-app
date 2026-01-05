@@ -1021,32 +1021,59 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             not cache_hit and  # Don't re-cache cached responses
                             accessible_doc_ids_list):
                             try:
-                                cache_service = get_query_cache_service()
-                                cache_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
-                                source_doc_ids = [str(doc_id) for doc_id in accessible_doc_ids_list]
+                                # Check if response indicates "not found" or failure - DON'T cache these
+                                response_lower = full_response.lower()
+                                NOT_FOUND_INDICATORS = [
+                                    "couldn't find",
+                                    "could not find",
+                                    "no documents found",
+                                    "no results found",
+                                    "unable to find",
+                                    "i couldn't find any",
+                                    "i could not find any",
+                                    "none are specifically related",
+                                    "no matching documents",
+                                    "no relevant documents",
+                                    "don't have any information",
+                                    "do not have any information",
+                                    "no information available",
+                                    "no data found",
+                                    "i don't have access to",
+                                    "i do not have access to",
+                                ]
 
-                                # Determine intent for TTL
-                                cache_intent = "general"
-                                if classification:
-                                    cache_intent = classification.intent.value
+                                is_not_found_response = any(indicator in response_lower for indicator in NOT_FOUND_INDICATORS)
 
-                                # Determine cache workspace ID
-                                store_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+                                if is_not_found_response:
+                                    logger.info(f"[QueryCache] SKIP CACHE STORAGE: Response indicates 'not found' - should not be cached")
+                                    logger.info(f"[QueryCache]   • Response preview: {full_response[:100]}...")
+                                else:
+                                    cache_service = get_query_cache_service()
+                                    cache_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                    source_doc_ids = [str(doc_id) for doc_id in accessible_doc_ids_list]
 
-                                # Store in background (non-blocking)
-                                cache_service.store_async(
-                                    question=cache_question,
-                                    answer=full_response,
-                                    workspace_id=store_workspace_id,
-                                    source_document_ids=source_doc_ids,
-                                    intent=cache_intent,
-                                    metadata={
-                                        "original_question": enhanced_message,
-                                        "session_id": session_id,
-                                        "analysis_method": cache_analysis.analysis_method
-                                    }
-                                )
-                                logger.info(f"[QueryCache] Background cache storage initiated for: {cache_question[:50]}...")
+                                    # Determine intent for TTL
+                                    cache_intent = "general"
+                                    if classification:
+                                        cache_intent = classification.intent.value
+
+                                    # Determine cache workspace ID
+                                    store_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+
+                                    # Store in background (non-blocking)
+                                    cache_service.store_async(
+                                        question=cache_question,
+                                        answer=full_response,
+                                        workspace_id=store_workspace_id,
+                                        source_document_ids=source_doc_ids,
+                                        intent=cache_intent,
+                                        metadata={
+                                            "original_question": enhanced_message,
+                                            "session_id": session_id,
+                                            "analysis_method": cache_analysis.analysis_method
+                                        }
+                                    )
+                                    logger.info(f"[QueryCache] Background cache storage initiated for: {cache_question[:50]}...")
                             except Exception as cache_store_error:
                                 logger.warning(f"[QueryCache] Failed to store response in cache: {cache_store_error}")
                                 # Non-critical, continue without caching

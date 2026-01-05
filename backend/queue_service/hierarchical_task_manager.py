@@ -30,7 +30,7 @@ from sqlalchemy.orm.attributes import flag_modified
 
 from db.database import get_db_session, create_db_session
 from db.models import Document, DONE_STATUSES
-from .models import TaskQueuePage, TaskQueueChunk, TaskStatus
+from .models import TaskQueuePage, TaskQueueChunk, TaskQueueDocument, TaskStatus
 from rag_service.graphrag_skip_config import (
     should_skip_graphrag_for_file,
     should_skip_graphrag_for_document_type,
@@ -65,6 +65,15 @@ class ChunkTaskData(NamedTuple):
     chunk_id: str
     chunk_index: int
     phase: PhaseType
+    retry_count: int
+
+
+class ReindexTaskData(NamedTuple):
+    """Data for a document-level reindex task"""
+    id: UUID
+    document_id: UUID
+    filename: str
+    output_path: Optional[str]
     retry_count: int
 
 
@@ -970,8 +979,11 @@ class HierarchicalTaskQueueManager:
 
             db.commit()
 
-            # Update parent page and document status, sync to indexing_details
-            self.update_page_status(page_id, "vector", db)
+            # Update parent page status (skip for legacy chunks without page_id)
+            if page_id is not None:
+                self.update_page_status(page_id, "vector", db)
+
+            # Update document status and sync to indexing_details
             self.update_document_status(document_id, "vector", db)
             self.sync_document_indexing_details(document_id, db)
 
@@ -1018,15 +1030,19 @@ class HierarchicalTaskQueueManager:
                 chunk.vector_worker_id = None
                 chunk.vector_last_heartbeat = None
 
-            # Store page_id before commit
+            # Store page_id and document_id before commit
             page_id = chunk.page_id
+            document_id = chunk.document_id
 
             db.commit()
 
-            # Update parent page and document status, sync to indexing_details
-            self.update_page_status(page_id, "vector", db)
-            self.update_document_status(chunk.document_id, "vector", db)
-            self.sync_document_indexing_details(chunk.document_id, db)
+            # Update parent page status (skip for legacy chunks without page_id)
+            if page_id is not None:
+                self.update_page_status(page_id, "vector", db)
+
+            # Update document status and sync to indexing_details
+            self.update_document_status(document_id, "vector", db)
+            self.sync_document_indexing_details(document_id, db)
 
             return True
 
@@ -1111,15 +1127,19 @@ class HierarchicalTaskQueueManager:
                     chunk.graphrag_skip_reason = skip_reason
                     chunk.graphrag_completed_at = datetime.now(timezone.utc)
 
-                    # Store document_id before commit
+                    # Store page_id and document_id before commit
+                    page_id = chunk.page_id
                     document_id = chunk.document_id
 
                     db.commit()
 
                     logger.info(f"⏭️ Skipped GraphRAG for chunk {chunk.chunk_id}: {skip_reason}")
 
-                    # Update parent statuses (skipped counts as done)
-                    self.update_page_status(chunk.page_id, "graphrag", db)
+                    # Update parent page status (skip for legacy chunks without page_id)
+                    if page_id is not None:
+                        self.update_page_status(page_id, "graphrag", db)
+
+                    # Update document status and sync to indexing_details
                     self.update_document_status(document_id, "graphrag", db)
                     self.sync_document_indexing_details(document_id, db)
 
@@ -1232,8 +1252,11 @@ class HierarchicalTaskQueueManager:
 
             db.commit()
 
-            # Update parent page and document status, sync to indexing_details
-            self.update_page_status(page_id, "graphrag", db)
+            # Update parent page status (skip for legacy chunks without page_id)
+            if page_id is not None:
+                self.update_page_status(page_id, "graphrag", db)
+
+            # Update document status and sync to indexing_details
             self.update_document_status(document_id, "graphrag", db)
             self.sync_document_indexing_details(document_id, db)
 
@@ -1280,15 +1303,19 @@ class HierarchicalTaskQueueManager:
                 chunk.graphrag_worker_id = None
                 chunk.graphrag_last_heartbeat = None
 
-            # Store page_id before commit
+            # Store page_id and document_id before commit
             page_id = chunk.page_id
+            document_id = chunk.document_id
 
             db.commit()
 
-            # Update parent page and document status, sync to indexing_details
-            self.update_page_status(page_id, "graphrag", db)
-            self.update_document_status(chunk.document_id, "graphrag", db)
-            self.sync_document_indexing_details(chunk.document_id, db)
+            # Update parent page status (skip for legacy chunks without page_id)
+            if page_id is not None:
+                self.update_page_status(page_id, "graphrag", db)
+
+            # Update document status and sync to indexing_details
+            self.update_document_status(document_id, "graphrag", db)
+            self.sync_document_indexing_details(document_id, db)
 
             return True
 
@@ -1802,6 +1829,255 @@ class HierarchicalTaskQueueManager:
 
         except Exception as e:
             logger.error(f"Error checking cleanup status for document {document_id}: {e}")
+        finally:
+            if should_close_db:
+                db.close()
+
+    # =========================================================================
+    # Reindex Task Operations
+    # =========================================================================
+
+    def create_reindex_task(
+        self,
+        document_id: UUID,
+        db: Optional[Session] = None
+    ) -> bool:
+        """
+        Create a reindex task for a document.
+
+        This marks a document for reindexing in the queue. The actual reindex
+        processing will be done by a background worker, not synchronously.
+
+        Args:
+            document_id: Document UUID
+            db: Database session
+
+        Returns:
+            True if task created/updated successfully
+        """
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        try:
+            # Find or create TaskQueueDocument
+            tq_doc = db.query(TaskQueueDocument).filter(
+                TaskQueueDocument.document_id == document_id
+            ).first()
+
+            if not tq_doc:
+                tq_doc = TaskQueueDocument(
+                    document_id=document_id,
+                    reindex_status=TaskStatus.PENDING,
+                    reindex_retry_count=0,
+                    reindex_error=None
+                )
+                db.add(tq_doc)
+            else:
+                # Reset reindex status
+                tq_doc.reindex_status = TaskStatus.PENDING
+                tq_doc.reindex_retry_count = 0
+                tq_doc.reindex_error = None
+                tq_doc.reindex_worker_id = None
+                tq_doc.reindex_started_at = None
+                tq_doc.reindex_completed_at = None
+                tq_doc.reindex_last_heartbeat = None
+
+            db.commit()
+            logger.info(f"Created reindex task for document {document_id}")
+
+            # Notify workers
+            self.new_task_event.set()
+            return True
+
+        except Exception as e:
+            logger.error(f"Error creating reindex task: {e}")
+            db.rollback()
+            return False
+        finally:
+            if should_close_db:
+                db.close()
+
+    def claim_reindex_task(
+        self,
+        worker_id: str,
+        db: Optional[Session] = None
+    ) -> Optional[ReindexTaskData]:
+        """
+        Claim the next available reindex task.
+
+        Priority: Failed first (retry), then Pending.
+
+        Args:
+            worker_id: Worker identifier
+            db: Database session
+
+        Returns:
+            ReindexTaskData if task claimed, None otherwise
+        """
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        try:
+            # Find next reindex task (failed first, then pending)
+            tq_doc = db.query(TaskQueueDocument).filter(
+                TaskQueueDocument.reindex_status.in_([TaskStatus.PENDING, TaskStatus.FAILED]),
+                TaskQueueDocument.reindex_retry_count < TaskQueueDocument.max_retries
+            ).order_by(
+                # Failed first (to retry), then pending
+                TaskQueueDocument.reindex_status.desc(),
+                TaskQueueDocument.reindex_retry_count.asc(),
+                TaskQueueDocument.created_at.asc()
+            ).with_for_update(skip_locked=True).first()
+
+            if not tq_doc:
+                return None
+
+            # Get the document to retrieve filename and output_path
+            doc = db.query(Document).filter(Document.id == tq_doc.document_id).first()
+            if not doc:
+                logger.error(f"Document not found for reindex task: {tq_doc.document_id}")
+                return None
+
+            # Claim the task
+            now = datetime.now(timezone.utc)
+            tq_doc.reindex_status = TaskStatus.PROCESSING
+            tq_doc.reindex_worker_id = worker_id
+            tq_doc.reindex_started_at = now
+            tq_doc.reindex_last_heartbeat = now
+
+            db.commit()
+
+            logger.info(f"Worker {worker_id} claimed reindex task: doc={tq_doc.document_id}, file={doc.filename}")
+
+            return ReindexTaskData(
+                id=tq_doc.id,
+                document_id=tq_doc.document_id,
+                filename=doc.filename,
+                output_path=doc.output_path,
+                retry_count=tq_doc.reindex_retry_count
+            )
+
+        except Exception as e:
+            logger.error(f"Error claiming reindex task: {e}")
+            db.rollback()
+            return None
+        finally:
+            if should_close_db:
+                db.close()
+
+    def complete_reindex_task(
+        self,
+        task_id: UUID,
+        db: Optional[Session] = None
+    ) -> bool:
+        """
+        Mark reindex task as completed.
+
+        Args:
+            task_id: TaskQueueDocument UUID
+            db: Database session
+
+        Returns:
+            True if successful
+        """
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        try:
+            tq_doc = db.query(TaskQueueDocument).filter(TaskQueueDocument.id == task_id).first()
+            if not tq_doc:
+                return False
+
+            tq_doc.reindex_status = TaskStatus.COMPLETED
+            tq_doc.reindex_completed_at = datetime.now(timezone.utc)
+            tq_doc.reindex_error = None
+
+            db.commit()
+
+            logger.info(f"Completed reindex task: doc={tq_doc.document_id}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error completing reindex task: {e}")
+            db.rollback()
+            return False
+        finally:
+            if should_close_db:
+                db.close()
+
+    def fail_reindex_task(
+        self,
+        task_id: UUID,
+        error_message: str,
+        db: Optional[Session] = None
+    ) -> bool:
+        """
+        Mark reindex task as failed.
+
+        Args:
+            task_id: TaskQueueDocument UUID
+            error_message: Error description
+            db: Database session
+
+        Returns:
+            True if successful
+        """
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        try:
+            tq_doc = db.query(TaskQueueDocument).filter(TaskQueueDocument.id == task_id).first()
+            if not tq_doc:
+                return False
+
+            tq_doc.reindex_retry_count += 1
+            tq_doc.reindex_error = error_message
+
+            if tq_doc.reindex_retry_count >= tq_doc.max_retries:
+                tq_doc.reindex_status = TaskStatus.FAILED
+                logger.error(f"Reindex task permanently failed: doc={tq_doc.document_id}, error={error_message}")
+            else:
+                tq_doc.reindex_status = TaskStatus.PENDING  # Will be retried
+                tq_doc.reindex_worker_id = None
+                tq_doc.reindex_last_heartbeat = None
+                logger.warning(f"Reindex task failed, will retry: doc={tq_doc.document_id}, retry={tq_doc.reindex_retry_count}")
+
+            db.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"Error failing reindex task: {e}")
+            db.rollback()
+            return False
+        finally:
+            if should_close_db:
+                db.close()
+
+    def update_reindex_heartbeat(
+        self,
+        task_id: UUID,
+        db: Optional[Session] = None
+    ) -> bool:
+        """Update heartbeat for reindex task."""
+        should_close_db = db is None
+        if db is None:
+            db = create_db_session()
+
+        try:
+            tq_doc = db.query(TaskQueueDocument).filter(TaskQueueDocument.id == task_id).first()
+            if tq_doc:
+                tq_doc.reindex_last_heartbeat = datetime.now(timezone.utc)
+                db.commit()
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error updating reindex heartbeat: {e}")
+            db.rollback()
+            return False
         finally:
             if should_close_db:
                 db.close()

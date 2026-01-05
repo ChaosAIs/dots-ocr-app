@@ -29,6 +29,8 @@ export const DocumentList = forwardRef((props, ref) => {
   const [showMoveDialog, setShowMoveDialog] = useState(false); // move document dialog
   const [documentToMove, setDocumentToMove] = useState(null); // document to move
   const [tableKey, setTableKey] = useState(0); // Force DataTable re-render
+  const [showReindexConfirmDialog, setShowReindexConfirmDialog] = useState(false); // reindex confirmation dialog
+  const [reindexLoading, setReindexLoading] = useState(false); // reindex loading state
   // Ref to store the latest loadDocuments function for WebSocket handler
   const loadDocumentsRef = useRef(null);
   // Ref to store WebSocket instance for reconnection
@@ -519,7 +521,35 @@ export const DocumentList = forwardRef((props, ref) => {
     setShowUploadDialog(false);
   }, [subscribeToDocuments, loadDocuments, loadWorkspaces]);
 
+  // Handle reindex for current workspace
+  const handleWorkspaceReindex = useCallback(async () => {
+    if (!currentWorkspaceId) {
+      messageService.warnToast(t("DocumentList.SelectWorkspaceFirst"));
+      return;
+    }
 
+    setReindexLoading(true);
+    try {
+      const result = await documentService.reindexDocuments(currentWorkspaceId);
+      if (result.status === "success") {
+        messageService.successToast(
+          t("DocumentList.ReindexSuccess", { count: result.documents_processed })
+        );
+        // Refresh the document list to show updated statuses
+        loadDocuments();
+      } else {
+        messageService.warnToast(result.message || t("DocumentList.ReindexNoDocuments"));
+      }
+    } catch (error) {
+      console.error("Error during workspace reindex:", error);
+      messageService.errorToast(
+        error.response?.data?.detail || t("DocumentList.ReindexError")
+      );
+    } finally {
+      setReindexLoading(false);
+      setShowReindexConfirmDialog(false);
+    }
+  }, [currentWorkspaceId, loadDocuments, t]);
 
 
 
@@ -882,6 +912,16 @@ export const DocumentList = forwardRef((props, ref) => {
             tooltipOptions={{ position: "top" }}
           />
           <Button
+            icon={reindexLoading ? "pi pi-spin pi-spinner" : "pi pi-sync"}
+            label={t("DocumentList.Reindex")}
+            outlined
+            severity="warning"
+            onClick={() => setShowReindexConfirmDialog(true)}
+            disabled={!currentWorkspaceId || reindexLoading}
+            tooltip={!currentWorkspaceId ? t("DocumentList.SelectWorkspaceFirst") : t("DocumentList.ReindexTooltip")}
+            tooltipOptions={{ position: "top" }}
+          />
+          <Button
             icon="pi pi-refresh"
             rounded
             text
@@ -1000,6 +1040,42 @@ export const DocumentList = forwardRef((props, ref) => {
         }}
         onMoveSuccess={handleMoveSuccess}
       />
+
+      {/* Workspace Reindex Confirmation Dialog */}
+      <Dialog
+        visible={showReindexConfirmDialog}
+        onHide={() => setShowReindexConfirmDialog(false)}
+        header={t("DocumentList.ReindexConfirmTitle")}
+        style={{ width: "450px" }}
+        footer={
+          <div>
+            <Button
+              label={t("DocumentList.Cancel")}
+              icon="pi pi-times"
+              onClick={() => setShowReindexConfirmDialog(false)}
+              className="p-button-text"
+              disabled={reindexLoading}
+            />
+            <Button
+              label={reindexLoading ? t("DocumentList.ReindexInProgress") : t("DocumentList.ReindexConfirm")}
+              icon={reindexLoading ? "pi pi-spin pi-spinner" : "pi pi-sync"}
+              onClick={handleWorkspaceReindex}
+              disabled={reindexLoading}
+              severity="warning"
+            />
+          </div>
+        }
+      >
+        <div className="flex align-items-start gap-3">
+          <i className="pi pi-exclamation-triangle text-xl text-yellow-600" style={{ marginTop: '2px' }} />
+          <div>
+            <p className="m-0 mb-2">{t("DocumentList.ReindexConfirmMessage", { workspace: currentWorkspace?.name || "" })}</p>
+            <p className="m-0 text-sm" style={{ color: 'var(--text-color-secondary)' }}>
+              {t("DocumentList.ReindexConfirmNote")}
+            </p>
+          </div>
+        </div>
+      </Dialog>
     </div>
   );
 });

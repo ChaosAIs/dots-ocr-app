@@ -15,6 +15,7 @@ from .hierarchical_task_manager import (
     HierarchicalTaskQueueManager,
     PageTaskData,
     ChunkTaskData,
+    ReindexTaskData,
     PhaseType
 )
 
@@ -47,6 +48,7 @@ class HierarchicalWorker(threading.Thread):
         ocr_processor: Callable[[PageTaskData], str],  # Returns page_file_path
         vector_processor: Callable[[ChunkTaskData], bool],  # Returns success
         graphrag_processor: Callable[[ChunkTaskData], tuple],  # Returns (entities, relationships)
+        reindex_processor: Optional[Callable[[ReindexTaskData], bool]] = None,  # Returns success
         poll_interval: int = WORKER_POLL_INTERVAL,
         heartbeat_interval: int = HEARTBEAT_INTERVAL,
         status_broadcast_callback: Optional[Callable[[dict], None]] = None
@@ -60,6 +62,7 @@ class HierarchicalWorker(threading.Thread):
             ocr_processor: Function to process OCR tasks (page_data) -> page_file_path
             vector_processor: Function to process Vector tasks (chunk_data) -> success
             graphrag_processor: Function to process GraphRAG tasks (chunk_data) -> (entities, relationships)
+            reindex_processor: Function to process Reindex tasks (reindex_data) -> success
             poll_interval: Seconds to wait between queue polls
             heartbeat_interval: Seconds between heartbeat updates
             status_broadcast_callback: Callback to broadcast status updates to frontend via WebSocket
@@ -70,11 +73,12 @@ class HierarchicalWorker(threading.Thread):
         self.ocr_processor = ocr_processor
         self.vector_processor = vector_processor
         self.graphrag_processor = graphrag_processor
+        self.reindex_processor = reindex_processor
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.status_broadcast_callback = status_broadcast_callback
         self.running = True
-        self.current_task: Optional[Union[PageTaskData, ChunkTaskData]] = None
+        self.current_task: Optional[Union[PageTaskData, ChunkTaskData, ReindexTaskData]] = None
         self.current_phase: Optional[PhaseType] = None
 
         # Generate unique worker identifier
@@ -88,6 +92,19 @@ class HierarchicalWorker(threading.Thread):
         while self.running:
             try:
                 task_found = False
+
+                # Priority 0: Try to claim Reindex task (document-level, prepares chunks for re-indexing)
+                # Reindex tasks must be processed BEFORE other tasks to prepare new chunks
+                if self.reindex_processor:
+                    reindex_task = self.task_manager.claim_reindex_task(self.worker_identifier)
+                    if reindex_task:
+                        task_found = True
+                        self.current_task = reindex_task
+                        self.current_phase = "reindex"
+                        self._process_reindex(reindex_task)
+                        self.current_task = None
+                        self.current_phase = None
+                        continue
 
                 # Priority 1: Try to claim GraphRAG chunk task (most granular, depends on Vector)
                 chunk_task = self.task_manager.claim_graphrag_chunk_task(self.worker_identifier)
@@ -280,6 +297,36 @@ class HierarchicalWorker(threading.Thread):
             self.task_manager.fail_graphrag_chunk_task(task.id, str(e))
             self._broadcast_document_status(task.document_id, "graphrag", "failed")
 
+    def _process_reindex(self, task: ReindexTaskData):
+        """Process a Reindex task with heartbeat updates."""
+        try:
+            logger.info(f"Worker {self.worker_identifier} processing Reindex: doc={task.document_id}, file={task.filename}")
+
+            # Start heartbeat thread
+            heartbeat_thread = threading.Thread(
+                target=self._heartbeat_loop,
+                args=(task.id, "reindex"),
+                daemon=True
+            )
+            heartbeat_thread.start()
+
+            # Process Reindex
+            success = self.reindex_processor(task)
+
+            if success:
+                self.task_manager.complete_reindex_task(task.id)
+                logger.info(f"Worker {self.worker_identifier} completed Reindex: doc={task.document_id}")
+                # Broadcast status update to frontend
+                self._broadcast_document_status(task.document_id, "reindex", "completed")
+            else:
+                self.task_manager.fail_reindex_task(task.id, "Reindex processing returned failure")
+                self._broadcast_document_status(task.document_id, "reindex", "failed")
+
+        except Exception as e:
+            logger.error(f"Worker {self.worker_identifier} failed Reindex: doc={task.document_id}: {e}", exc_info=True)
+            self.task_manager.fail_reindex_task(task.id, str(e))
+            self._broadcast_document_status(task.document_id, "reindex", "failed")
+
     def _heartbeat_loop(self, task_id, phase: PhaseType):
         """
         Heartbeat loop to update task heartbeat.
@@ -296,6 +343,8 @@ class HierarchicalWorker(threading.Thread):
                     self.task_manager.update_vector_heartbeat(task_id)
                 elif phase == "graphrag":
                     self.task_manager.update_graphrag_heartbeat(task_id)
+                elif phase == "reindex":
+                    self.task_manager.update_reindex_heartbeat(task_id)
 
                 time.sleep(self.heartbeat_interval)
             except Exception as e:
@@ -321,6 +370,7 @@ class HierarchicalWorkerPool:
         ocr_processor: Callable,
         vector_processor: Callable,
         graphrag_processor: Callable,
+        reindex_processor: Optional[Callable] = None,
         poll_interval: int = WORKER_POLL_INTERVAL,
         heartbeat_interval: int = HEARTBEAT_INTERVAL,
         status_broadcast_callback: Optional[Callable[[dict], None]] = None
@@ -334,6 +384,7 @@ class HierarchicalWorkerPool:
             ocr_processor: Function to process OCR tasks
             vector_processor: Function to process Vector tasks
             graphrag_processor: Function to process GraphRAG tasks
+            reindex_processor: Function to process Reindex tasks
             poll_interval: Seconds to wait between queue polls
             heartbeat_interval: Seconds between heartbeat updates
             status_broadcast_callback: Callback to broadcast status updates to frontend via WebSocket
@@ -343,6 +394,7 @@ class HierarchicalWorkerPool:
         self.ocr_processor = ocr_processor
         self.vector_processor = vector_processor
         self.graphrag_processor = graphrag_processor
+        self.reindex_processor = reindex_processor
         self.poll_interval = poll_interval
         self.heartbeat_interval = heartbeat_interval
         self.status_broadcast_callback = status_broadcast_callback
@@ -359,6 +411,7 @@ class HierarchicalWorkerPool:
                 ocr_processor=self.ocr_processor,
                 vector_processor=self.vector_processor,
                 graphrag_processor=self.graphrag_processor,
+                reindex_processor=self.reindex_processor,
                 poll_interval=self.poll_interval,
                 heartbeat_interval=self.heartbeat_interval,
                 status_broadcast_callback=self.status_broadcast_callback

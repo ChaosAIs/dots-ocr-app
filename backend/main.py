@@ -36,7 +36,7 @@ import tempfile
 import threading
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
@@ -78,7 +78,7 @@ except ImportError:
 from db.database import init_db, get_db_session, get_db
 from db.document_repository import DocumentRepository
 from db.workspace_repository import WorkspaceRepository
-from db.models import Document, UploadStatus, ConvertStatus, IndexStatus, User
+from db.models import Document, UploadStatus, ConvertStatus, IndexStatus, User, UserRole, DocumentData, DocumentDataLineItem
 
 # Import authentication
 from auth.auth_api import router as auth_router
@@ -108,6 +108,7 @@ from queue_service import (
     TaskStatus,
     TaskQueuePage,
     TaskQueueChunk,
+    TaskQueueDocument,
 )
 
 # Import services
@@ -480,6 +481,7 @@ async def lifespan(app: FastAPI):
             ocr_processor=task_queue_service.process_ocr_page_task,
             vector_processor=task_queue_service.process_vector_chunk_task,
             graphrag_processor=task_queue_service.process_graphrag_chunk_task,
+            reindex_processor=task_queue_service.process_reindex_task,
             poll_interval=WORKER_POLL_INTERVAL,
             heartbeat_interval=HEARTBEAT_INTERVAL,
             status_broadcast_callback=document_status_manager.broadcast_from_thread
@@ -2152,6 +2154,132 @@ async def reconvert_page(filename: str = Form(...), page_no: int = Form(...)):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error re-converting page: {str(e)}")
+
+
+@app.post("/documents/reindex")
+async def reindex_documents(
+    workspace_id: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Queue reindex tasks for documents (non-blocking, async processing).
+
+    This endpoint creates reindex tasks in the queue for background processing.
+    The actual reindex work (clearing data, recreating chunks, re-indexing) is done
+    by background workers, so this endpoint returns immediately without blocking the UI.
+
+    Reindex Process (done by background worker per document):
+    - Clears documents_data and documents_data_line_items tables
+    - Clears Qdrant vectors and Neo4j GraphRAG data
+    - Recreates chunks from existing markdown files
+    - Resets task queue statuses to trigger re-indexing
+    - Preserves OCR results (uses existing markdown files)
+
+    Access Control:
+    - Admin users can reindex ALL documents (workspace_id=null) or specific workspace
+    - Regular users can only reindex documents they own in the specified workspace
+
+    Args:
+        workspace_id: Optional workspace ID. If null, reindex all accessible documents.
+
+    Returns:
+        JSON with queued task counts (documents will be processed in background)
+    """
+    try:
+        # Parse workspace_id if provided
+        ws_uuid = None
+        if workspace_id and workspace_id.lower() not in ('null', 'none', ''):
+            try:
+                ws_uuid = UUID(workspace_id)
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid workspace ID format")
+
+        is_admin = current_user.role == UserRole.ADMIN
+
+        # Build query for fully indexed documents
+        # A document is fully indexed if:
+        # - convert_status = CONVERTED
+        # - index_status = INDEXED
+        query = db.query(Document).filter(
+            Document.deleted_at.is_(None),
+            Document.convert_status == ConvertStatus.CONVERTED,
+            Document.index_status == IndexStatus.INDEXED
+        )
+
+        # Apply workspace filter if provided
+        if ws_uuid:
+            query = query.filter(Document.workspace_id == ws_uuid)
+
+        # Apply ownership filter for non-admin users
+        if not is_admin:
+            query = query.filter(Document.owner_id == current_user.id)
+
+        documents = query.all()
+
+        if not documents:
+            return JSONResponse(content={
+                "status": "success",
+                "message": "No documents found to reindex",
+                "workspace_id": workspace_id,
+                "documents_processed": 0,
+                "is_admin": is_admin
+            })
+
+        # Create reindex tasks for each document (fast, non-blocking)
+        queued_count = 0
+        errors = []
+
+        for doc in documents:
+            try:
+                doc_id = doc.id
+                filename = doc.filename
+
+                logger.info(f"[Reindex] Creating reindex task for: {filename} (ID: {doc_id})")
+
+                # Create reindex task in the queue
+                # The actual reindex work will be done by a background worker
+                if task_queue_manager:
+                    success = task_queue_manager.create_reindex_task(doc_id, db)
+                    if success:
+                        # Update document status to show reindex is pending
+                        doc.index_status = IndexStatus.INDEXING
+                        doc.indexing_details = doc.indexing_details or {}
+                        doc.indexing_details["reindex"] = {
+                            "status": "queued",
+                            "queued_at": datetime.now(timezone.utc).isoformat()
+                        }
+                        queued_count += 1
+                        logger.info(f"[Reindex] Queued reindex task for: {filename}")
+                    else:
+                        errors.append(f"Failed to queue reindex for: {filename}")
+                else:
+                    errors.append("Task queue manager not initialized")
+
+            except Exception as e:
+                error_msg = f"Error queuing document {doc.filename}: {str(e)}"
+                logger.error(f"[Reindex] {error_msg}")
+                errors.append(error_msg)
+
+        # Commit document status changes
+        db.commit()
+
+        return JSONResponse(content={
+            "status": "success",
+            "message": f"Reindex queued for {queued_count} documents (processing in background)",
+            "workspace_id": workspace_id,
+            "documents_processed": queued_count,
+            "total_documents": len(documents),
+            "errors": errors if errors else None,
+            "is_admin": is_admin
+        })
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[Reindex] Error in reindex endpoint: {str(e)}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error initiating reindex: {str(e)}")
 
 
 if __name__ == "__main__":

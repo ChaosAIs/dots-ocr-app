@@ -170,7 +170,17 @@
         "RecoverIndexing": "Retry failed indexing",
         "RecoverSuccess": "Successfully recovered {{count}} failed tasks",
         "RecoverFailed": "Failed to recover indexing tasks",
-        "NoFailedTasks": "No failed tasks to recover"
+        "NoFailedTasks": "No failed tasks to recover",
+        "Reindex": "Reindex",
+        "ReindexTooltip": "Re-extract and re-index all documents in this workspace",
+        "ReindexConfirmTitle": "Confirm Reindex",
+        "ReindexConfirmMessage": "Are you sure you want to reindex all documents in workspace \"{{workspace}}\"? This will re-extract data and rebuild search indexes for all fully indexed documents.",
+        "ReindexConfirmNote": "Note: OCR results will be preserved. Only data extraction and indexing will be redone.",
+        "ReindexSuccess": "Successfully initiated reindex for {{count}} documents",
+        "ReindexNoDocuments": "No fully indexed documents found to reindex",
+        "ReindexError": "Failed to initiate reindex",
+        "ReindexConfirm": "Reindex",
+        "ReindexInProgress": "Reindexing..."
     },
     "MarkdownViewer": {
         "DownloadMarkdown": "Download Markdown",
@@ -335,7 +345,16 @@
         "CannotDeleteDefault": "Cannot delete the default workspace",
         "DeleteOptionsMessage": "You are about to delete workspace \"{{name}}\". What would you like to do with the documents inside?",
         "DeleteAndRemoveFiles": "Delete workspace and all files",
-        "DeleteAndMoveFiles": "Move files to My Documents"
+        "DeleteAndMoveFiles": "Move files to My Documents",
+        "ReindexAll": "Reindex All Documents",
+        "ReindexConfirmTitle": "Confirm Global Reindex",
+        "ReindexConfirmMessage": "Are you sure you want to reindex all documents? This will re-extract data and rebuild search indexes for all fully indexed documents you have access to.",
+        "ReindexConfirmNote": "Note: Admin users will reindex all documents. Regular users will only reindex documents they own. OCR results will be preserved.",
+        "ReindexSuccess": "Successfully initiated reindex for {{count}} documents",
+        "ReindexNoDocuments": "No fully indexed documents found to reindex",
+        "ReindexError": "Failed to initiate reindex",
+        "ReindexConfirm": "Reindex All",
+        "ReindexInProgress": "Reindexing..."
     },
     "Share": {
         "Title": "Share Document",

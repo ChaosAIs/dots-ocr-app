@@ -274,6 +274,21 @@ class TaskQueueDocument(Base):
     extraction_retry_count = Column(Integer, default=0)
     extraction_last_heartbeat = Column(TIMESTAMP(timezone=True), nullable=True)
 
+    # === Phase 4: Reindex (Re-extraction and Re-indexing) ===
+    # This phase is triggered by the user when they want to re-run extraction and indexing
+    # It preserves OCR results but re-creates chunks and re-indexes them
+    reindex_status = Column(
+        SQLEnum(TaskStatus, name="task_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=True,  # NULL means never requested reindex
+        default=None
+    )
+    reindex_worker_id = Column(String(100), nullable=True)
+    reindex_started_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    reindex_completed_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    reindex_error = Column(Text, nullable=True)
+    reindex_retry_count = Column(Integer, default=0)
+    reindex_last_heartbeat = Column(TIMESTAMP(timezone=True), nullable=True)
+
     # Routing decision after classification
     processing_path = Column(String(20), default='standard')  # 'standard' or 'tabular'
 
@@ -308,6 +323,13 @@ class TaskQueueDocument(Base):
             "extraction_completed_at": self.extraction_completed_at.isoformat() if self.extraction_completed_at else None,
             "extraction_error": self.extraction_error,
             "extraction_retry_count": self.extraction_retry_count,
+            # Reindex phase
+            "reindex_status": self.reindex_status.value if self.reindex_status else None,
+            "reindex_worker_id": self.reindex_worker_id,
+            "reindex_started_at": self.reindex_started_at.isoformat() if self.reindex_started_at else None,
+            "reindex_completed_at": self.reindex_completed_at.isoformat() if self.reindex_completed_at else None,
+            "reindex_error": self.reindex_error,
+            "reindex_retry_count": self.reindex_retry_count,
             # Routing
             "processing_path": self.processing_path,
             # Metadata
