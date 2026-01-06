@@ -10,7 +10,7 @@ load_dotenv('/home/fy/MyWorkPlace/dots-ocr-app/backend/.env')
 
 from db.database import get_db_session
 from db.models import Document, DocumentData
-from rag_service.vectorstore import upsert_document_metadata_embedding, format_metadata_for_embedding, get_vectorstore
+from rag_service.vectorstore import get_vectorstore
 from langchain_core.documents import Document as LangchainDocument
 import logging
 
@@ -75,25 +75,9 @@ def fix_tabular_metadata():
             logger.info(f"  Row count: {doc_data.line_items_count}")
             logger.info(f"  Topics: {metadata['topics']}")
 
-            # Show what the embedding text will look like
-            embedding_text = format_metadata_for_embedding(metadata, source_name)
-            logger.info(f"  Embedding text: {embedding_text}")
-
-            logger.info(f"  Creating metadata embedding...")
-
-            success = upsert_document_metadata_embedding(
-                document_id=str(doc.id),
-                source_name=source_name,
-                filename=doc.original_filename,
-                metadata=metadata
-            )
-
-            if success:
-                logger.info(f"  ✅ Metadata embedding created successfully")
-            else:
-                logger.warning(f"  ⚠️ Failed to create metadata embedding")
-
-            # Also create comprehensive summary chunk in the documents collection for RAG search
+            # Create comprehensive summary chunk in the documents collection for RAG search
+            # NOTE: Separate 'metadatas' collection removed - document routing now uses
+            # summary chunks in 'documents' collection directly.
             logger.info(f"  Creating comprehensive summary chunk in documents collection...")
             chunk_ids = _create_summary_chunks(doc, doc_data, source_name, columns, metadata['topics'])
             if chunk_ids:

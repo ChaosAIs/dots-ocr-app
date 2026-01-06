@@ -71,6 +71,8 @@ _accessible_doc_ids_var: contextvars.ContextVar = contextvars.ContextVar('access
 _analytics_context_var: contextvars.ContextVar = contextvars.ContextVar('analytics_context', default=None)
 _preprocessing_topics_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_topics', default=None)
 _preprocessing_entities_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_entities', default=None)
+_preprocessing_doc_types_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_doc_types', default=None)
+_preprocessing_enhanced_query_var: contextvars.ContextVar = contextvars.ContextVar('preprocessing_enhanced_query', default=None)
 _iterative_reasoning_enabled_var: contextvars.ContextVar = contextvars.ContextVar('iterative_reasoning_enabled', default=None)
 
 
@@ -123,6 +125,26 @@ def get_preprocessing_entities():
 def set_preprocessing_entities(entities):
     """Set preprocessing entities for the current request context."""
     _preprocessing_entities_var.set(entities)
+
+
+def get_preprocessing_doc_types():
+    """Get preprocessing document type hints for the current request context."""
+    return _preprocessing_doc_types_var.get()
+
+
+def set_preprocessing_doc_types(doc_types):
+    """Set preprocessing document type hints for the current request context."""
+    _preprocessing_doc_types_var.set(doc_types)
+
+
+def get_preprocessing_enhanced_query():
+    """Get preprocessing enhanced query for the current request context."""
+    return _preprocessing_enhanced_query_var.get()
+
+
+def set_preprocessing_enhanced_query(enhanced_query):
+    """Set preprocessing enhanced query for the current request context."""
+    _preprocessing_enhanced_query_var.set(enhanced_query)
 
 
 def get_iterative_reasoning_enabled():
@@ -1178,61 +1200,45 @@ def search_documents(query: str) -> str:
         # Send progress update: Analyzing query
         _send_progress("Analyzing your question...")
 
-        # Get preprocessing topics if available (Option 5: reuse from unified preprocessing)
+        # Get ALL preprocessing data from unified query analysis (avoids redundant LLM call)
         preprocessing_topics = get_preprocessing_topics() or []
+        preprocessing_entities = get_preprocessing_entities() or []
+        preprocessing_doc_types = get_preprocessing_doc_types() or []
+        preprocessing_enhanced_query = get_preprocessing_enhanced_query() or ""
 
-        # Option 4: Parallelize query complexity + query enhancement using ThreadPoolExecutor
-        # Option 8: Use heuristics for simple queries to skip/reduce LLM calls
-        import concurrent.futures
+        # Check if we have complete preprocessing data from unified query analysis
+        # If so, we can skip the entire redundant _analyze_query_with_llm call
+        has_unified_analysis = bool(preprocessing_topics or preprocessing_entities or preprocessing_doc_types)
 
-        # Heuristic check for simple queries (Option 8)
-        # Expanded patterns to catch more common simple question forms
-        query_lower = query.lower().strip()
-        simple_query_prefixes = (
-            "what is", "what's", "what are",
-            "define", "explain", "describe",
-            "tell me what", "tell me about",
-            "can you explain", "can you describe", "can you tell me",
-            "how does", "how do", "how is",
-            "who is", "who are",
-            "where is", "where are",
-            "when is", "when was",
-        )
-        is_simple_query = (
-            query_lower.startswith(simple_query_prefixes) or
-            len(query.split()) <= 10  # Increased from 8 to 10 words
-        )
-
-        # If we have preprocessing topics and simple query, skip full analysis
         query_analysis_start = time.time()
-        if preprocessing_topics and is_simple_query:
-            logger.info(f"[Search] OPTIMIZATION: Using preprocessing topics, skipping redundant analysis")
-            # Use heuristic max_steps for simple queries
-            max_steps = 1
-            enhanced_query = query
+        if has_unified_analysis:
+            # Use data from unified query analysis - NO additional LLM call needed!
+            logger.info(f"[Search] OPTIMIZATION: Using unified query analysis, skipping redundant LLM call")
 
-            # Get preprocessing entities and flatten dict to list for document router
-            # Dict format: {'organizations': ['Augment Code'], 'products': [...]}
-            # List format: ['Augment Code', ...]
-            preprocessing_entities = get_preprocessing_entities() or {}
-            entity_list = []
-            if isinstance(preprocessing_entities, dict):
-                for values in preprocessing_entities.values():
-                    if isinstance(values, list):
-                        entity_list.extend(values)
-            elif isinstance(preprocessing_entities, list):
-                entity_list = preprocessing_entities
+            # Use preprocessing enhanced query if available, otherwise use original query
+            enhanced_query = preprocessing_enhanced_query if preprocessing_enhanced_query else query
+
+            # Entities are now a list of proper nouns from unified analysis
+            entity_list = preprocessing_entities if isinstance(preprocessing_entities, list) else []
 
             query_metadata = {
                 "entities": entity_list,
                 "topics": preprocessing_topics,
-                "document_type_hints": [],
+                "document_type_hints": preprocessing_doc_types,
                 "intent": "document_search",
             }
-            logger.info(f"[Search] Using cached topics: {preprocessing_topics}")
-            logger.info(f"[Search] Using cached entities: {entity_list}")
+
+            # Use simple max_steps since unified analysis handles complexity
+            max_steps = 1
+
+            logger.info(f"[Search] Using unified topics: {preprocessing_topics}")
+            logger.info(f"[Search] Using unified entities: {entity_list}")
+            logger.info(f"[Search] Using unified doc_types: {preprocessing_doc_types}")
+            logger.info(f"[Search] Enhanced query: {enhanced_query[:100]}...")
         else:
-            # Run complexity analysis and query enhancement in parallel
+            # Fallback: Run query enhancement LLM call (only when unified analysis unavailable)
+            logger.info(f"[Search] No unified analysis available, running LLM query enhancement")
+            import concurrent.futures
             from chat_service.query_analyzer import analyze_query_with_llm as analyze_complexity
 
             def run_complexity_analysis():
@@ -1247,16 +1253,11 @@ def search_documents(query: str) -> str:
 
                 # Wait for both to complete
                 complexity_analysis = complexity_future.result()
-                query_analysis = enhancement_future.result()
+                query_analysis_result = enhancement_future.result()
 
             llm_max_steps = complexity_analysis.max_steps
-            enhanced_query = query_analysis["enhanced_query"]
-            query_metadata = query_analysis["metadata"]
-
-            # Option 8: Reduce max_steps for simple "what is X" queries
-            if is_simple_query and llm_max_steps > 1:
-                logger.info(f"[Search] OPTIMIZATION: Simple query detected, reducing max_steps from {llm_max_steps} to 1")
-                llm_max_steps = 1
+            enhanced_query = query_analysis_result["enhanced_query"]
+            query_metadata = query_analysis_result["metadata"]
 
             # Cap max_steps to configured maximum
             config_max_steps = int(os.getenv("GRAPH_RAG_MAX_STEPS", "5"))
@@ -2012,11 +2013,6 @@ assume they are referring to the context from the conversation history above.
     # Add session-level context
     context_parts = []
 
-    # Add main topic if available
-    main_topic = session_context.get("main_topic")
-    if main_topic:
-        context_parts.append(f"Main Topic: {main_topic}")
-
     # Add document context
     documents = session_context.get("documents", [])
     if documents:
@@ -2056,7 +2052,9 @@ async def stream_agent_response(
     analytics_context: Optional[str] = None,
     document_context_changed: bool = False,
     preprocessing_topics: Optional[List[str]] = None,
-    preprocessing_entities: Optional[Dict[str, List[str]]] = None,
+    preprocessing_entities: Optional[List[str]] = None,
+    preprocessing_doc_types: Optional[List[str]] = None,
+    preprocessing_enhanced_query: Optional[str] = None,
     iterative_reasoning_enabled: Optional[bool] = None
 ):
     """
@@ -2071,9 +2069,10 @@ async def stream_agent_response(
         accessible_doc_ids: Optional set of document IDs the user has access to (for access control filtering).
         analytics_context: Optional pre-computed analytics context for hybrid queries (from SQL aggregation).
         document_context_changed: If True, the document/workspace selection has changed - force new search.
-        preprocessing_topics: Optional topics from unified preprocessing to avoid redundant LLM calls.
-        preprocessing_entities: Optional entities from unified preprocessing for document routing.
-                               Dict format: {'organizations': ['Augment Code'], 'products': [...]}
+        preprocessing_topics: Optional topics from unified query analysis to avoid redundant LLM calls.
+        preprocessing_entities: Optional entities (list of proper nouns) from unified query analysis.
+        preprocessing_doc_types: Optional document type hints from unified query analysis.
+        preprocessing_enhanced_query: Optional enhanced query from unified query analysis.
         iterative_reasoning_enabled: Optional boolean from UI checkbox to enable/disable iterative reasoning workflow.
                                      If None, uses ITERATIVE_REASONING_ENABLED from .env.
                                      When True: use iterative reasoning (GRAPH_RAG_QUERY_ENABLED controls graph queries inside).
@@ -2089,6 +2088,8 @@ async def stream_agent_response(
     set_analytics_context(analytics_context)
     set_preprocessing_topics(preprocessing_topics)
     set_preprocessing_entities(preprocessing_entities)
+    set_preprocessing_doc_types(preprocessing_doc_types)
+    set_preprocessing_enhanced_query(preprocessing_enhanced_query)
     set_iterative_reasoning_enabled(iterative_reasoning_enabled)
 
     # Get timing metrics for detailed RAG pipeline tracking

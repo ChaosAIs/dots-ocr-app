@@ -32,15 +32,15 @@ from analytics_service.intent_classifier import QueryIntent
 from analytics_service.query_cache_service import (
     get_query_cache_service,
     QueryCacheService,
-    UnifiedCacheAnalysis,
     CacheSearchResult
 )
-from analytics_service.unified_query_preprocessor import (
-    get_unified_preprocessor,
-    UnifiedPreprocessResult
+from analytics_service.unified_query_analyzer import (
+    get_unified_query_analyzer,
+    QueryAnalysisResult,
+    QueryIntent,
+    DissatisfactionType
 )
-from analytics_service.query_cache_analyzer import get_query_cache_analyzer
-from analytics_service.intent_classifier import IntentClassifier
+from analytics_service.intent_classifier import IntentClassifier, IntentClassification
 from db.user_document_repository import UserDocumentRepository
 from db.document_repository import DocumentRepository
 
@@ -292,20 +292,16 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 except Exception as e:
                     logger.error(f"Error loading conversation history: {e}")
 
-                # ====== UNIFIED PREPROCESSING (SINGLE LLM CALL) ======
-                # This replaces THREE separate LLM calls with ONE:
-                # 1. Context Analysis (pronouns, entities, topics)
-                # 2. Cache Analysis (dissatisfaction, self-contained, cacheable)
+                # ====== UNIFIED QUERY ANALYSIS (SINGLE LLM CALL) ======
+                # This performs ALL query analysis in ONE LLM call:
+                # 1. Context Resolution (pronouns, references)
+                # 2. Cache Analysis (dissatisfaction, bypass, cacheable)
                 # 3. Intent Classification (routing decision)
+                # 4. Query Enhancement (entities, topics, document types for routing)
                 # NOTE: Run in thread to avoid blocking async event loop
-                unified_result = None
+                query_analysis: Optional[QueryAnalysisResult] = None
 
                 if UNIFIED_PREPROCESSING_ENABLED and CHAT_ENABLE_CONTEXT_ANALYSIS:
-                    logger.info("=" * 80)
-                    logger.info("[UnifiedPreprocessing] ========== UNIFIED PREPROCESSING START ==========")
-                    logger.info("=" * 80)
-                    logger.info(f"[UnifiedPreprocessing] Message: '{message[:100]}...'")
-                    logger.info(f"[UnifiedPreprocessing] History messages: {len(history)}")
                     try:
                         # Get previous response for dissatisfaction detection
                         prev_response = None
@@ -325,48 +321,48 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         except Exception:
                             pass
 
-                        # Single unified LLM call for all preprocessing
+                        # Single unified LLM call for ALL analysis
                         # Run in thread to avoid blocking async event loop
-                        with timing_metrics.measure("unified_preprocessing"):
-                            preprocessor = get_unified_preprocessor()
+                        with timing_metrics.measure("unified_query_analysis"):
+                            analyzer = get_unified_query_analyzer()
 
-                            def run_preprocessing():
-                                return preprocessor.preprocess(
+                            def run_analysis():
+                                return analyzer.analyze(
                                     message=message,
                                     chat_history=history,
                                     previous_response=prev_response,
                                     available_schemas=available_schemas
                                 )
 
-                            unified_result = await asyncio.to_thread(run_preprocessing)
+                            query_analysis = await asyncio.to_thread(run_analysis)
 
-                        # Record the internal processing time from preprocessor
-                        timing_metrics.record("unified_preprocessing_llm", unified_result.processing_time_ms)
+                        # Record the internal processing time
+                        timing_metrics.record("unified_query_analysis_llm", query_analysis.processing_time_ms)
 
-                        # Extract context analysis from unified result
-                        enhanced_message = unified_result.context.resolved_message or message
+                        # Extract results from unified analysis
+                        enhanced_message = query_analysis.resolved_message or message
                         context_info = {
-                            "entities": unified_result.context.entities,
-                            "topics": unified_result.context.topics,
-                            "has_pronouns": unified_result.context.has_pronouns,
-                            "detected_pronouns": unified_result.context.detected_pronouns
+                            "entities": query_analysis.entities,
+                            "topics": query_analysis.topics,
+                            "document_type_hints": query_analysis.document_type_hints,
+                            "enhanced_query": query_analysis.enhanced_query,
+                            "has_pronouns": enhanced_message != message,
                         }
 
-                        if unified_result.context.has_pronouns:
-                            logger.info(f"[UnifiedPreprocessing] Pronouns detected: {context_info['detected_pronouns']}")
-                            logger.info(f"[UnifiedPreprocessing] Original: '{message[:50]}...' → Enhanced: '{enhanced_message[:50]}...'")
-                        else:
-                            logger.info(f"[UnifiedPreprocessing] No pronouns detected in message")
-
-                        logger.info(f"[UnifiedPreprocessing] Extracted topics: {context_info['topics']}")
-                        logger.info(f"[UnifiedPreprocessing] Intent: {unified_result.intent.intent.value} (confidence: {unified_result.intent.confidence:.2f})")
-                        logger.info(f"[UnifiedPreprocessing] Cacheable: {unified_result.cache.is_cacheable}")
-                        logger.info(f"[UnifiedPreprocessing] Processing time: {unified_result.processing_time_ms:.2f}ms")
-                        logger.info("=" * 80)
+                        # Log summary
+                        logger.info(f"[UnifiedQueryAnalysis] Message: '{message[:60]}...'")
+                        logger.info(f"[UnifiedQueryAnalysis] Resolved: '{enhanced_message[:60]}...'")
+                        logger.info(f"[UnifiedQueryAnalysis] Cache key: '{query_analysis.cache_key[:60]}...'")
+                        logger.info(f"[UnifiedQueryAnalysis] Intent: {query_analysis.intent.value} (confidence: {query_analysis.intent_confidence:.2f})")
+                        logger.info(f"[UnifiedQueryAnalysis] Cacheable: {query_analysis.is_cacheable}, Bypass: {query_analysis.bypass_cache}")
+                        logger.info(f"[UnifiedQueryAnalysis] Topics: {query_analysis.topics}")
+                        logger.info(f"[UnifiedQueryAnalysis] Entities: {query_analysis.entities}")
+                        logger.info(f"[UnifiedQueryAnalysis] Doc types: {query_analysis.document_type_hints}")
+                        logger.info(f"[UnifiedQueryAnalysis] Processing time: {query_analysis.processing_time_ms:.2f}ms")
 
                     except Exception as e:
-                        logger.error(f"[UnifiedPreprocessing] Error: {e}", exc_info=True)
-                        unified_result = None
+                        logger.error(f"[UnifiedQueryAnalysis] Error: {e}", exc_info=True)
+                        query_analysis = None
                         enhanced_message = message
 
                 elif CHAT_ENABLE_CONTEXT_ANALYSIS:
@@ -563,10 +559,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                     # ====== QUERY CACHE INTEGRATION ======
                     cache_hit = False
-                    cache_analysis = None
                     cache_result = None
                     cache_key_question = None
                     source_document_ids_for_cache = []
+                    # Cache variables from unified query analysis (set defaults for scope)
+                    cache_bypass = query_analysis.bypass_cache if query_analysis else False
+                    cache_is_cacheable = query_analysis.is_cacheable if query_analysis else True
+                    cache_key = query_analysis.cache_key if query_analysis else ""
+                    cache_analysis_method = query_analysis.analysis_method if query_analysis else "none"
 
                     if QUERY_CACHE_ENABLED and accessible_doc_ids_list:
                         cache_start = time.time()
@@ -581,33 +581,38 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                             cache_service = get_query_cache_service()
 
-                            # Step 1: Get cache analysis
-                            # If unified preprocessing was done, use its result; otherwise do separate analysis
-                            if unified_result is not None:
-                                # Use pre-computed cache analysis from unified preprocessing (NO additional LLM call)
-                                logger.info("[QueryCache] STEP 1: Using cache analysis from unified preprocessing (NO additional LLM call)")
-                                cache_analyzer = get_query_cache_analyzer()
-                                cache_analysis = cache_analyzer.from_unified_result(unified_result)
+                            # Use cache analysis from unified query analysis (NO additional LLM call needed)
+                            # The new QueryAnalysisResult contains all cache-related fields directly
+                            if query_analysis is not None:
+                                logger.info("[QueryCache] STEP 1: Using cache analysis from unified query analysis (NO additional LLM call)")
+                                cache_bypass = query_analysis.bypass_cache
+                                cache_is_cacheable = query_analysis.is_cacheable
+                                cache_key = query_analysis.cache_key
+                                cache_is_dissatisfied = query_analysis.is_dissatisfied
+                                cache_dissatisfaction_type = query_analysis.dissatisfaction_type
+                                cache_invalidate_previous = query_analysis.invalidate_previous
+                                cache_analysis_method = query_analysis.analysis_method
                             else:
-                                # Fallback: Run separate cache analysis (LLM call)
-                                logger.info("[QueryCache] STEP 1: Running separate pre-cache analysis (LLM call)...")
+                                # Fallback: Run separate cache analysis (LLM call) - rarely needed
+                                logger.info("[QueryCache] STEP 1: Running separate cache analysis (LLM call)...")
                                 await progress_callback("Analyzing your question...")
-                                cache_analysis = cache_service.analyze_for_cache(
-                                    question=enhanced_message,
-                                    chat_history=history[-10:] if history else None,
-                                    previous_response=history[-1].get("content") if history and history[-1].get("role") == "assistant" else None
-                                )
+                                # Use heuristic fallback since we don't have unified analysis
+                                from analytics_service.unified_query_analyzer import strip_cache_control_words
+                                cache_bypass = False
+                                cache_is_cacheable = True
+                                cache_key = strip_cache_control_words(enhanced_message)
+                                cache_is_dissatisfied = False
+                                cache_dissatisfaction_type = DissatisfactionType.NONE
+                                cache_invalidate_previous = False
+                                cache_analysis_method = "fallback"
 
                             logger.info("-" * 80)
                             logger.info("[QueryCache] CACHE ANALYSIS RESULT:")
-                            logger.info(f"[QueryCache]   • Method: {cache_analysis.analysis_method}")
-                            logger.info(f"[QueryCache]   • Dissatisfied: {cache_analysis.dissatisfaction.is_dissatisfied} ({cache_analysis.dissatisfaction.type.value})")
-                            logger.info(f"[QueryCache]   • Bypass cache: {cache_analysis.dissatisfaction.should_bypass_cache}")
-                            logger.info(f"[QueryCache]   • Self-contained: {cache_analysis.question_analysis.is_self_contained}")
-                            logger.info(f"[QueryCache]   • Can enhance: {cache_analysis.question_analysis.can_be_enhanced}")
-                            logger.info(f"[QueryCache]   • Is cacheable: {cache_analysis.cache_decision.is_cacheable}")
-                            logger.info(f"[QueryCache]   • Cache key: {(cache_analysis.cache_decision.cache_key_question or 'None')[:80]}...")
-                            logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
+                            logger.info(f"[QueryCache]   • Method: {cache_analysis_method}")
+                            logger.info(f"[QueryCache]   • Dissatisfied: {cache_is_dissatisfied} ({cache_dissatisfaction_type.value})")
+                            logger.info(f"[QueryCache]   • Bypass cache: {cache_bypass}")
+                            logger.info(f"[QueryCache]   • Is cacheable: {cache_is_cacheable}")
+                            logger.info(f"[QueryCache]   • Cache key: {cache_key[:80]}...")
                             logger.info("-" * 80)
 
                             # Determine cache workspace ID from current workspace selection
@@ -615,13 +620,13 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                             cache_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
                             logger.info(f"[QueryCache] Using workspace ID for cache: {cache_workspace_id}")
 
-                            # Step 2: Check for dissatisfaction (bypass cache if user is unhappy)
-                            if cache_analysis.dissatisfaction.should_bypass_cache:
-                                logger.info("[QueryCache] STEP 2: BYPASS CACHE (user dissatisfaction detected)")
-                                logger.info(f"[QueryCache]   • Dissatisfaction type: {cache_analysis.dissatisfaction.type.value}")
-                                logger.info(f"[QueryCache]   • Should invalidate previous: {cache_analysis.dissatisfaction.should_invalidate_previous_cache}")
+                            # Step 2: Check for bypass (user dissatisfaction or cache control words)
+                            if cache_bypass:
+                                logger.info("[QueryCache] STEP 2: BYPASS CACHE (user request or dissatisfaction)")
+                                logger.info(f"[QueryCache]   • Dissatisfaction type: {cache_dissatisfaction_type.value}")
+                                logger.info(f"[QueryCache]   • Should invalidate previous: {cache_invalidate_previous}")
                                 # Optionally invalidate previous cache entry
-                                if cache_analysis.dissatisfaction.should_invalidate_previous_cache and history:
+                                if cache_invalidate_previous and history:
                                     # Find the previous question to invalidate
                                     for msg in reversed(history):
                                         if msg.get("role") == "user":
@@ -631,10 +636,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                                 logger.info(f"[QueryCache]   • Invalidated previous cache entry: {prev_question[:50]}...")
                                             break
                                 logger.info("[QueryCache] → Proceeding to fresh query (cache bypassed)")
-                            elif cache_analysis.cache_decision.is_cacheable:
+                            elif cache_is_cacheable:
                                 # Step 3: Try cache lookup
                                 logger.info("[QueryCache] STEP 2: CACHE LOOKUP (question is cacheable)")
-                                cache_key_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                cache_key_question = cache_key or enhanced_message
                                 accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
 
                                 logger.info(f"[QueryCache]   • Cache key question: {cache_key_question[:80]}...")
@@ -716,7 +721,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     logger.info("[QueryCache] → Proceeding to fresh query...")
                             else:
                                 logger.info("[QueryCache] STEP 2: SKIP CACHE (question not cacheable)")
-                                logger.info(f"[QueryCache]   • Reason: {cache_analysis.cache_decision.reason}")
                                 logger.info("[QueryCache] → Proceeding to fresh query (no caching)...")
 
                             logger.info("=" * 80)
@@ -766,12 +770,21 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 orchestrator = ChatOrchestrator(db)
 
                                 # Get intent classification
-                                # If unified preprocessing was done, use its result; otherwise do separate classification
-                                if unified_result is not None:
-                                    # Use pre-computed intent from unified preprocessing (NO additional LLM call)
-                                    logger.info("[Intent Routing] Using intent from unified preprocessing (NO additional LLM call)")
-                                    intent_classifier = IntentClassifier()
-                                    classification = intent_classifier.from_unified_result(unified_result)
+                                # If unified query analysis was done, use its result; otherwise do separate classification
+                                if query_analysis is not None:
+                                    # Use pre-computed intent from unified query analysis (NO additional LLM call)
+                                    logger.info("[Intent Routing] Using intent from unified query analysis (NO additional LLM call)")
+                                    # Create IntentClassification from QueryAnalysisResult
+                                    classification = IntentClassification(
+                                        intent=query_analysis.intent,
+                                        confidence=query_analysis.intent_confidence,
+                                        reasoning="",
+                                        requires_extracted_data=query_analysis.requires_extracted_data,
+                                        suggested_schemas=[],
+                                        detected_entities=query_analysis.entities,
+                                        detected_metrics=[],
+                                        detected_time_range=query_analysis.time_range
+                                    )
                                 else:
                                     # Fallback: Run separate intent classification (LLM call)
                                     await progress_callback("Understanding your question...")
@@ -798,12 +811,24 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     # to relevant documents before querying structured data
                                     from .document_router import DocumentRouter
                                     from .llm_service import get_llm_service
-                                    from .rag_agent import _analyze_query_with_llm
 
                                     # Get query metadata for document routing
-                                    await progress_callback("Analyzing key topics in your question...")
-                                    query_analysis = _analyze_query_with_llm(enhanced_message)
-                                    query_metadata = query_analysis.get("metadata", {})
+                                    # Use data from unified query analysis if available (NO additional LLM call)
+                                    if query_analysis is not None:
+                                        await progress_callback("Using pre-analyzed topics...")
+                                        query_metadata = {
+                                            "entities": query_analysis.entities,
+                                            "topics": query_analysis.topics,
+                                            "document_type_hints": query_analysis.document_type_hints,
+                                            "intent": query_analysis.intent.value,
+                                        }
+                                        logger.info(f"[Intent Routing] Using unified query analysis for document routing (NO additional LLM call)")
+                                    else:
+                                        # Fallback: run separate query analysis
+                                        from .rag_agent import _analyze_query_with_llm
+                                        await progress_callback("Analyzing key topics in your question...")
+                                        fallback_analysis = _analyze_query_with_llm(enhanced_message)
+                                        query_metadata = fallback_analysis.get("metadata", {})
 
                                     # Convert UUIDs to strings for the router (router expects List[str])
                                     accessible_doc_ids_str = [str(doc_id) for doc_id in accessible_doc_ids_list]
@@ -930,9 +955,12 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 logger.warning(f"[Intent Routing] Failed to prepare hybrid context: {e}")
 
                         try:
-                            # Get preprocessing topics and entities to pass to agent (Option 5: avoid redundant extraction)
+                            # Get preprocessing data to pass to agent (avoid redundant LLM call in rag_agent)
+                            # These come from the unified query analysis which already did entity/topic extraction
                             preprocessing_topics = context_info.get('topics', []) if context_info else []
-                            preprocessing_entities = context_info.get('entities', {}) if context_info else {}
+                            preprocessing_entities = context_info.get('entities', []) if context_info else []
+                            preprocessing_doc_types = context_info.get('document_type_hints', []) if context_info else []
+                            preprocessing_enhanced_query = context_info.get('enhanced_query', '') if context_info else ''
 
                             async for chunk in stream_agent_response(
                                 enhanced_message,
@@ -943,8 +971,10 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                 accessible_doc_ids=accessible_doc_ids,
                                 analytics_context=hybrid_context,  # Pass analytics context for hybrid queries
                                 document_context_changed=document_context_changed,  # Force new search if selection changed
-                                preprocessing_topics=preprocessing_topics,  # Pass topics from unified preprocessing
-                                preprocessing_entities=preprocessing_entities,  # Pass entities from unified preprocessing
+                                preprocessing_topics=preprocessing_topics,  # Pass topics from unified query analysis
+                                preprocessing_entities=preprocessing_entities,  # Pass entities from unified query analysis
+                                preprocessing_doc_types=preprocessing_doc_types,  # Pass document type hints
+                                preprocessing_enhanced_query=preprocessing_enhanced_query,  # Pass enhanced query
                                 iterative_reasoning_enabled=iterative_reasoning_enabled  # Pass UI checkbox toggle for iterative vs simple flow
                             ):
                                 chunk_count += 1
@@ -1015,11 +1045,14 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # ====== BACKGROUND CACHE STORAGE ======
                         # Store the response in cache for future similar questions
                         # This is non-blocking (fire-and-forget)
-                        if (QUERY_CACHE_ENABLED and
-                            cache_analysis and
-                            cache_analysis.cache_decision.is_cacheable and
+                        # Use variables from unified query analysis (cache_is_cacheable, cache_key)
+                        should_cache = (
+                            QUERY_CACHE_ENABLED and
+                            cache_is_cacheable and
                             not cache_hit and  # Don't re-cache cached responses
-                            accessible_doc_ids_list):
+                            accessible_doc_ids_list
+                        )
+                        if should_cache:
                             try:
                                 # Check if response indicates "not found" or failure - DON'T cache these
                                 response_lower = full_response.lower()
@@ -1049,7 +1082,8 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     logger.info(f"[QueryCache]   • Response preview: {full_response[:100]}...")
                                 else:
                                     cache_service = get_query_cache_service()
-                                    cache_question = cache_analysis.cache_decision.cache_key_question or enhanced_message
+                                    # Use cache_key from unified query analysis (already cleaned)
+                                    cache_question = cache_key if cache_key else enhanced_message
                                     source_doc_ids = [str(doc_id) for doc_id in accessible_doc_ids_list]
 
                                     # Determine intent for TTL
@@ -1070,7 +1104,7 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                         metadata={
                                             "original_question": enhanced_message,
                                             "session_id": session_id,
-                                            "analysis_method": cache_analysis.analysis_method
+                                            "analysis_method": cache_analysis_method if query_analysis else "fallback"
                                         }
                                     )
                                     logger.info(f"[QueryCache] Background cache storage initiated for: {cache_question[:50]}...")
@@ -1092,14 +1126,13 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
 
                                 # Context tracking (entities, topics) - only if enabled
                                 if CHAT_ENABLE_METADATA_TRACKING and context_info:
-                                    # Merge entities (keep last N of each type)
-                                    for entity_type, values in context_info.get("entities", {}).items():
-                                        if values:  # Only process if there are values
-                                            if entity_type not in current_metadata:
-                                                current_metadata[entity_type] = []
-                                            current_metadata[entity_type].extend(values)
-                                            # Deduplicate and keep last N
-                                            current_metadata[entity_type] = list(set(current_metadata[entity_type]))[-CHAT_MAX_ENTITIES_PER_TYPE:]
+                                    # Merge entities (list of proper nouns from unified analyzer)
+                                    entities = context_info.get("entities", [])
+                                    if entities:
+                                        if "entities" not in current_metadata:
+                                            current_metadata["entities"] = []
+                                        current_metadata["entities"].extend(entities)
+                                        current_metadata["entities"] = list(set(current_metadata["entities"]))[-CHAT_MAX_ENTITIES_PER_TYPE:]
 
                                     # Update topics (keep last N)
                                     current_topics = current_metadata.get("topics", [])
@@ -1107,11 +1140,6 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                                     if new_topics:
                                         current_topics.extend(new_topics)
                                         current_metadata["topics"] = list(set(current_topics))[-CHAT_MAX_TOPICS:]
-
-                                    # Determine main topic from the most frequent topic
-                                    if current_metadata.get("topics"):
-                                        # Use the first topic as main topic (most recent/relevant)
-                                        current_metadata["main_topic"] = current_metadata["topics"][0]
 
                                     # Update last message info for quick context display
                                     current_metadata["last_message_preview"] = message[:100]

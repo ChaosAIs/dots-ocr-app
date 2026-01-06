@@ -38,12 +38,6 @@ class UnifiedSearchResult:
 
 # Collection names for document embeddings
 COLLECTION_NAME = "documents"
-METADATA_COLLECTION_NAME = "metadatas"
-
-# Configuration for metadata vector search
-METADATA_SEARCH_TOP_K = int(os.getenv("METADATA_SEARCH_TOP_K", "15"))
-METADATA_SCORE_THRESHOLD = float(os.getenv("METADATA_SCORE_THRESHOLD", "0.4"))  # Lower threshold for better recall
-METADATA_FALLBACK_MIN_RESULTS = int(os.getenv("METADATA_FALLBACK_MIN_RESULTS", "3"))
 
 # Singleton instances
 _vectorstore: Optional[QdrantVectorStore] = None
@@ -1044,420 +1038,12 @@ def is_document_indexed(source_name: str) -> bool:
 
 
 # =============================================================================
-# Document Metadata Vector Collection Functions
+# Document Metadata Search (via documents collection summary chunks)
 # =============================================================================
 
-def ensure_metadata_collection_exists(client: QdrantClient = None, embedding_dim: int = 2560):
-    """
-    Ensure the document metadata collection exists, create if not.
-
-    Args:
-        client: The Qdrant client. If None, will get the singleton.
-        embedding_dim: Dimension of the embedding vectors.
-    """
-    if client is None:
-        client = get_qdrant_client()
-
-    collections = client.get_collections().collections
-    collection_names = [c.name for c in collections]
-
-    if METADATA_COLLECTION_NAME not in collection_names:
-        logger.info(f"Creating metadata collection: {METADATA_COLLECTION_NAME}")
-        client.create_collection(
-            collection_name=METADATA_COLLECTION_NAME,
-            vectors_config=models.VectorParams(
-                size=embedding_dim,
-                distance=models.Distance.COSINE,
-            ),
-        )
-        logger.info(f"Metadata collection {METADATA_COLLECTION_NAME} created successfully")
-    else:
-        logger.debug(f"Metadata collection {METADATA_COLLECTION_NAME} already exists")
-
-
-def format_metadata_for_embedding(metadata: dict, source_name: str) -> str:
-    """
-    Format document metadata into a text string suitable for embedding.
-
-    IMPORTANT: Keep it SHORT and FOCUSED for better vector search accuracy!
-    - Source name and document type are the most distinctive identifiers
-    - Key entities provide specific names/terms for matching
-    - Topics categorize the document type
-    - For tabular data: include column headers for field-based search
-    - Summary is EXCLUDED to avoid diluting the semantic signal with generic words
-
-    Args:
-        metadata: Document metadata dictionary
-        source_name: Document source name
-
-    Returns:
-        Formatted text string for embedding (concise, ~200-400 chars)
-    """
-    # Use document_types list (multi-type classification)
-    document_types = metadata.get("document_types", ["document"])
-
-    subject_name = metadata.get("subject_name", source_name)
-    is_tabular = metadata.get("is_tabular", False)
-
-    # Join key entities - limit to top 8 for conciseness
-    key_entities = metadata.get("key_entities", [])
-    entities_str = ", ".join([
-        e.get("name", "") for e in key_entities[:8]
-        if isinstance(e, dict) and e.get("name")
-    ]) if key_entities else ""
-
-    # Join topics - limit to top 5
-    topics = metadata.get("topics", [])
-    topics_str = ", ".join(topics[:5]) if topics else ""
-
-    # Get column headers for tabular documents
-    columns = metadata.get("columns", [])
-    columns_str = ", ".join(columns[:15]) if columns else ""  # Limit to 15 columns
-
-    # Format the embedding text - CONCISE for better semantic matching
-    # Format: "source_name. Key entities: ... document_types: subject. Topics: ..."
-    # NO SUMMARY - summaries contain generic words that dilute entity matching
-    parts = []
-
-    # 1. Source name FIRST (most distinctive)
-    parts.append(source_name)
-
-    # 2. For invoice/receipt documents, include vendor/customer names prominently
-    # These are critical for entity-based search ("Augment Code invoices", "Amazon receipts")
-    vendor_name = metadata.get("vendor_name")
-    customer_name = metadata.get("customer_name")
-    if vendor_name or customer_name:
-        entity_parts = []
-        if vendor_name:
-            entity_parts.append(f"Vendor: {vendor_name}")
-        if customer_name:
-            entity_parts.append(f"Customer: {customer_name}")
-        parts.append(". ".join(entity_parts))
-
-    # 3. For tabular documents, include columns prominently for field-based search
-    if is_tabular and columns_str:
-        parts.append(f"Data columns: {columns_str}")
-        # Add row count for context
-        row_count = metadata.get("row_count", 0)
-        if row_count:
-            parts.append(f"Contains {row_count} data records")
-
-    # 4. Entities (key identifiers from hierarchical extraction)
-    if entities_str:
-        parts.append(f"Key entities: {entities_str}")
-
-    # 5. Document types (all applicable types) and subject - richer semantic signal
-    types_str = ", ".join(document_types)
-    parts.append(f"Document types: {types_str}. Subject: {subject_name}")
-
-    # 6. Topics
-    if topics_str:
-        parts.append(f"Topics: {topics_str}")
-
-    # 7. For tabular data, add summary snippet if available (brief context)
-    if is_tabular:
-        summary = metadata.get("summary", "")
-        if summary:
-            # Take first 150 chars of summary for context
-            summary_snippet = summary[:150].strip()
-            if summary_snippet:
-                parts.append(f"Summary: {summary_snippet}")
-
-    # NOTE: Full summary is intentionally excluded for non-tabular docs
-    # Long summaries introduce generic words that confuse vector similarity
-
-    return ". ".join(parts)
-
-
-def upsert_document_metadata_embedding(
-    document_id: str,
-    source_name: str,
-    filename: str,
-    metadata: dict
-) -> bool:
-    """
-    Embed document metadata and upsert to the metadata collection.
-
-    Args:
-        document_id: Document UUID as string
-        source_name: Document source name (filename without extension)
-        filename: Original filename with extension
-        metadata: Document metadata dictionary
-
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        client = get_qdrant_client()
-        embeddings = get_embeddings()
-
-        # Ensure collection exists
-        ensure_metadata_collection_exists(client)
-
-        # Format metadata for embedding
-        embedding_text = format_metadata_for_embedding(metadata, source_name)
-        logger.debug(f"[MetadataVector] Embedding text for {source_name}: {embedding_text[:200]}...")
-
-        # Generate embedding
-        embedding_vector = embeddings.embed_query(embedding_text)
-
-        # Prepare payload with document_types list
-        document_types = metadata.get("document_types", ["unknown"])
-
-        payload = {
-            "document_id": document_id,
-            "source_name": source_name,
-            "filename": filename,
-            "document_types": document_types,
-            "subject_name": metadata.get("subject_name", source_name),
-            "confidence": metadata.get("confidence", 0.0),
-            "topics": metadata.get("topics", []),
-            "embedding_text": embedding_text,  # Store for debugging
-        }
-
-        # Add tabular-specific fields for better filtering and display
-        if metadata.get("is_tabular"):
-            payload["is_tabular"] = True
-            payload["schema_type"] = metadata.get("schema_type", "spreadsheet")
-            payload["columns"] = metadata.get("columns", [])
-            payload["row_count"] = metadata.get("row_count", 0)
-            payload["column_count"] = metadata.get("column_count", 0)
-
-        # Add extracted entity fields for document routing (vendor, customer, etc.)
-        # These are critical for entity-based filtering in document router
-        if metadata.get("vendor_name"):
-            payload["vendor_name"] = metadata["vendor_name"]
-        if metadata.get("customer_name"):
-            payload["customer_name"] = metadata["customer_name"]
-        if metadata.get("invoice_number"):
-            payload["invoice_number"] = metadata["invoice_number"]
-        if metadata.get("invoice_date"):
-            payload["invoice_date"] = metadata["invoice_date"]
-
-        # Add NER-extracted normalized entity fields for exact matching
-        # These come from the entity_extractor module and enable hard filtering
-        entities = metadata.get("entities", {})
-        if entities:
-            if entities.get("vendor_normalized"):
-                payload["vendor_normalized"] = entities["vendor_normalized"]
-            if entities.get("customer_normalized"):
-                payload["customer_normalized"] = entities["customer_normalized"]
-            if entities.get("organizations_normalized"):
-                payload["organizations_normalized"] = entities["organizations_normalized"]
-            if entities.get("persons_normalized"):
-                payload["persons_normalized"] = entities["persons_normalized"]
-            if entities.get("all_entities_normalized"):
-                payload["all_entities_normalized"] = entities["all_entities_normalized"]
-
-        # Add key_entities for entity matching (from hierarchical metadata extraction)
-        # Store as a simple list of entity names for easier matching
-        key_entities = metadata.get("key_entities", [])
-        if key_entities:
-            entity_names = [
-                e.get("name", "") for e in key_entities
-                if isinstance(e, dict) and e.get("name")
-            ]
-            if entity_names:
-                payload["key_entities"] = entity_names
-
-        # Add date information if available
-        dates = metadata.get("dates", {})
-        if dates:
-            primary_date = dates.get("primary_date", {})
-            if primary_date:
-                payload["primary_date"] = primary_date.get("normalized")
-                payload["date_year"] = primary_date.get("year")
-                payload["date_month"] = primary_date.get("month")
-
-        # Upsert to collection (use document_id as point ID for idempotent updates)
-        client.upsert(
-            collection_name=METADATA_COLLECTION_NAME,
-            points=[
-                models.PointStruct(
-                    id=document_id,
-                    vector=embedding_vector,
-                    payload=payload
-                )
-            ]
-        )
-
-        logger.info(
-            f"[MetadataVector] Upserted metadata embedding for {source_name} "
-            f"(types={document_types}, confidence={metadata.get('confidence', 0):.2f})"
-        )
-        return True
-
-    except Exception as e:
-        logger.error(f"[MetadataVector] Error upserting metadata for {source_name}: {e}", exc_info=True)
-        return False
-
-
-def delete_document_metadata_embedding(document_id: str) -> bool:
-    """
-    Delete document metadata embedding from the collection.
-
-    Args:
-        document_id: Document UUID as string
-
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        client = get_qdrant_client()
-
-        client.delete(
-            collection_name=METADATA_COLLECTION_NAME,
-            points_selector=models.PointIdsList(
-                points=[document_id]
-            )
-        )
-
-        logger.info(f"[MetadataVector] Deleted metadata embedding for document {document_id}")
-        return True
-
-    except Exception as e:
-        logger.error(f"[MetadataVector] Error deleting metadata for {document_id}: {e}")
-        return False
-
-
-def delete_metadata_by_source_name(source_name: str) -> int:
-    """
-    Delete all document metadata entries with a specific source_name from the collection.
-
-    This is useful for cleaning up orphaned metadata records that weren't properly
-    deleted when the document was removed.
-
-    Args:
-        source_name: The source name to delete (e.g., document name without extension)
-
-    Returns:
-        Number of records deleted
-    """
-    try:
-        client = get_qdrant_client()
-
-        # First, scroll to find all points with this source_name
-        points_to_delete = []
-        offset = None
-
-        while True:
-            result = client.scroll(
-                collection_name=METADATA_COLLECTION_NAME,
-                scroll_filter=models.Filter(
-                    must=[
-                        models.FieldCondition(
-                            key="source_name",
-                            match=models.MatchValue(value=source_name)
-                        )
-                    ]
-                ),
-                limit=100,
-                offset=offset,
-                with_payload=False,
-                with_vectors=False
-            )
-
-            points, offset = result
-            if not points:
-                break
-
-            points_to_delete.extend([p.id for p in points])
-
-            if offset is None:
-                break
-
-        if not points_to_delete:
-            logger.info(f"[MetadataVector] No metadata found for source_name: {source_name}")
-            return 0
-
-        # Delete all found points
-        client.delete(
-            collection_name=METADATA_COLLECTION_NAME,
-            points_selector=models.PointIdsList(points=points_to_delete)
-        )
-
-        logger.info(f"[MetadataVector] Deleted {len(points_to_delete)} metadata entries for source_name: {source_name}")
-        return len(points_to_delete)
-
-    except Exception as e:
-        logger.error(f"[MetadataVector] Error deleting metadata by source_name '{source_name}': {e}")
-        return 0
-
-
-def cleanup_orphaned_metadata(valid_document_ids: List[str]) -> dict:
-    """
-    Remove metadata records that don't have corresponding documents in the database.
-
-    Args:
-        valid_document_ids: List of valid document IDs from the database
-
-    Returns:
-        Dictionary with cleanup statistics
-    """
-    try:
-        client = get_qdrant_client()
-
-        # Get all metadata points
-        all_points = []
-        offset = None
-
-        while True:
-            result = client.scroll(
-                collection_name=METADATA_COLLECTION_NAME,
-                limit=100,
-                offset=offset,
-                with_payload=True,
-                with_vectors=False
-            )
-
-            points, offset = result
-            if not points:
-                break
-
-            all_points.extend(points)
-
-            if offset is None:
-                break
-
-        # Find orphaned points (those not in valid_document_ids)
-        valid_ids_set = set(valid_document_ids)
-        orphaned_points = []
-
-        for point in all_points:
-            # Point ID is the document_id
-            point_id = str(point.id) if not isinstance(point.id, str) else point.id
-            if point_id not in valid_ids_set:
-                source_name = point.payload.get("source_name", "unknown") if point.payload else "unknown"
-                orphaned_points.append({
-                    "id": point_id,
-                    "source_name": source_name
-                })
-
-        if not orphaned_points:
-            logger.info("[MetadataVector] No orphaned metadata records found")
-            return {"total": len(all_points), "orphaned": 0, "deleted": 0}
-
-        # Delete orphaned points
-        orphaned_ids = [p["id"] for p in orphaned_points]
-        client.delete(
-            collection_name=METADATA_COLLECTION_NAME,
-            points_selector=models.PointIdsList(points=orphaned_ids)
-        )
-
-        logger.info(f"[MetadataVector] Cleaned up {len(orphaned_points)} orphaned metadata records")
-        for p in orphaned_points[:10]:  # Log first 10
-            logger.debug(f"[MetadataVector]   - Deleted orphaned: {p['source_name']} (id={p['id']})")
-
-        return {
-            "total": len(all_points),
-            "orphaned": len(orphaned_points),
-            "deleted": len(orphaned_points),
-            "orphaned_sources": list(set(p["source_name"] for p in orphaned_points))
-        }
-
-    except Exception as e:
-        logger.error(f"[MetadataVector] Error cleaning up orphaned metadata: {e}")
-        return {"error": str(e)}
+# Configuration for document routing search
+METADATA_SEARCH_TOP_K = int(os.getenv("METADATA_SEARCH_TOP_K", "15"))
+METADATA_SCORE_THRESHOLD = float(os.getenv("METADATA_SCORE_THRESHOLD", "0.4"))
 
 
 def search_document_metadata(
@@ -1467,7 +1053,10 @@ def search_document_metadata(
     accessible_document_ids: List[str] = None
 ) -> List[dict]:
     """
-    Search for relevant documents by querying the metadata vector collection.
+    Search for relevant documents by querying summary chunks in the documents collection.
+
+    This function searches the main documents collection for tabular_summary chunks
+    which contain rich metadata about each document (vendor, customer, totals, etc.).
 
     Args:
         query_text: Query text to search for (will be embedded)
@@ -1489,41 +1078,42 @@ def search_document_metadata(
 
     # Access control: empty list means no access
     if accessible_document_ids is not None and len(accessible_document_ids) == 0:
-        logger.warning("[MetadataVector] Access control: no accessible documents - returning empty")
+        logger.warning("[DocumentMetadataSearch] Access control: no accessible documents - returning empty")
         return []
 
     try:
         client = get_qdrant_client()
         embeddings = get_embeddings()
 
-        # Ensure collection exists
-        ensure_metadata_collection_exists(client)
-
-        # Check if collection has any points
-        collection_info = client.get_collection(METADATA_COLLECTION_NAME)
-        if collection_info.points_count == 0:
-            logger.warning("[MetadataVector] Metadata collection is empty")
-            return []
-
         # Embed the query
         query_vector = embeddings.embed_query(query_text)
 
-        # Build filter for access control
-        query_filter = None
-        if accessible_document_ids is not None and len(accessible_document_ids) > 0:
-            # Filter by document_id (the point ID in metadata collection is the document UUID)
-            query_filter = models.Filter(
-                must=[
-                    models.HasIdCondition(
-                        has_id=accessible_document_ids
-                    )
-                ]
-            )
-            logger.info(f"[MetadataVector] Access control: filtering to {len(accessible_document_ids)} document IDs")
+        # Build filter conditions
+        must_conditions = []
 
-        # Search using query_points (qdrant-client >= 1.7.0)
+        # Filter for summary chunks which contain document metadata
+        must_conditions.append(
+            models.FieldCondition(
+                key="metadata.chunk_type",
+                match=models.MatchValue(value="tabular_summary")
+            )
+        )
+
+        # Add access control filter by document_id
+        if accessible_document_ids is not None and len(accessible_document_ids) > 0:
+            must_conditions.append(
+                models.FieldCondition(
+                    key="metadata.document_id",
+                    match=models.MatchAny(any=accessible_document_ids)
+                )
+            )
+            logger.debug(f"[DocumentMetadataSearch] Access control: filtering to {len(accessible_document_ids)} document IDs")
+
+        query_filter = models.Filter(must=must_conditions) if must_conditions else None
+
+        # Search using query_points
         results = client.query_points(
-            collection_name=METADATA_COLLECTION_NAME,
+            collection_name=COLLECTION_NAME,
             query=query_vector,
             query_filter=query_filter,
             limit=top_k,
@@ -1531,38 +1121,61 @@ def search_document_metadata(
             with_payload=True
         )
 
-        # Format results
+        # Format results - extract metadata from the chunk's metadata field
         formatted_results = []
-        for point in results.points:
-            doc_types = point.payload.get("document_types", ["unknown"])
+        seen_doc_ids = set()  # Deduplicate by document_id
 
+        for point in results.points:
+            payload = point.payload or {}
+            metadata = payload.get("metadata", {})
+
+            doc_id = metadata.get("document_id", "")
+            if doc_id in seen_doc_ids:
+                continue
+            seen_doc_ids.add(doc_id)
+
+            # Extract document info from chunk metadata
             result = {
-                "document_id": str(point.id),
-                "source_name": point.payload.get("source_name"),
-                "filename": point.payload.get("filename"),
+                "document_id": doc_id,
+                "source_name": metadata.get("source", ""),
+                "filename": metadata.get("filename", ""),
                 "score": point.score,
-                "document_types": doc_types,
-                "subject_name": point.payload.get("subject_name"),
-                "confidence": point.payload.get("confidence", 0),
-                "payload": point.payload
+                "document_types": [metadata.get("schema_type", "document")],
+                "subject_name": metadata.get("source", ""),
+                "confidence": 0.95,  # Summary chunks have high confidence
+                "payload": {
+                    # Include key metadata fields for entity matching
+                    "embedding_text": payload.get("page_content", ""),
+                    "vendor_name": metadata.get("vendor_name"),
+                    "customer_name": metadata.get("customer_name"),
+                    "invoice_number": metadata.get("invoice_number"),
+                    "invoice_date": metadata.get("invoice_date"),
+                    "total_amount": metadata.get("total_amount"),
+                    "schema_type": metadata.get("schema_type"),
+                    "is_tabular": metadata.get("is_tabular", False),
+                    "row_count": metadata.get("row_count", 0),
+                    "columns": metadata.get("columns", []),
+                }
             }
+
             # Include tabular-specific fields at top level for easier access
-            if point.payload.get("is_tabular"):
+            if metadata.get("is_tabular"):
                 result["is_tabular"] = True
-                result["columns"] = point.payload.get("columns", [])
-                result["row_count"] = point.payload.get("row_count", 0)
-                result["schema_type"] = point.payload.get("schema_type")
+                result["columns"] = metadata.get("columns", [])
+                result["row_count"] = metadata.get("row_count", 0)
+                result["schema_type"] = metadata.get("schema_type")
+
             formatted_results.append(result)
 
         logger.info(
-            f"[MetadataVector] Search returned {len(formatted_results)} results "
+            f"[DocumentMetadataSearch] Search returned {len(formatted_results)} results "
             f"(query: '{query_text[:50]}...', threshold: {score_threshold})"
         )
 
         return formatted_results
 
     except Exception as e:
-        logger.error(f"[MetadataVector] Error searching metadata: {e}", exc_info=True)
+        logger.error(f"[DocumentMetadataSearch] Error searching: {e}", exc_info=True)
         return []
 
 
@@ -1573,7 +1186,7 @@ def format_query_for_metadata_search(
     document_type_hints: List[str] = None
 ) -> str:
     """
-    Format a user query into text suitable for metadata vector search.
+    Format a user query into text suitable for document metadata search.
 
     Args:
         query_text: Original user query
@@ -1602,21 +1215,6 @@ def format_query_for_metadata_search(
         parts.append(f"Entities: {', '.join(entities[:5])}")
 
     return ". ".join(parts)
-
-
-def get_metadata_collection_info() -> dict:
-    """Get information about the metadata collection."""
-    client = get_qdrant_client()
-    try:
-        info = client.get_collection(METADATA_COLLECTION_NAME)
-        return {
-            "name": METADATA_COLLECTION_NAME,
-            "points_count": info.points_count,
-            "status": info.status.value,
-        }
-    except Exception as e:
-        logger.error(f"Error getting metadata collection info: {e}")
-        return {"name": METADATA_COLLECTION_NAME, "error": str(e)}
 
 
 # =============================================================================

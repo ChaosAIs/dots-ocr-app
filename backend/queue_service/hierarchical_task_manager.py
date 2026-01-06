@@ -1641,14 +1641,8 @@ class HierarchicalTaskQueueManager:
                 db.commit()
                 logger.info(f"[Metadata] Set skip_graphrag=True for {source_name}: {skip_reason}")
 
-            # Embed metadata to vector collection for fast document routing
-            from rag_service.vectorstore import upsert_document_metadata_embedding
-            upsert_document_metadata_embedding(
-                document_id=str(document_id),
-                source_name=source_name,
-                filename=filename,
-                metadata=metadata
-            )
+            # NOTE: Separate 'metadatas' collection removed - document routing now uses
+            # summary chunks in 'documents' collection directly.
 
             logger.info(
                 f"[Metadata] ✅ Saved for {source_name}: "

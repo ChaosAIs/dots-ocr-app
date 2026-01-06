@@ -407,14 +407,8 @@ def reextract_failed_metadata(
                 repo.update_document_metadata(doc_updated, metadata)
                 repo.update_metadata_extraction_status(doc_updated, "completed")
 
-                # Also update the metadata vector collection
-                from .vectorstore import upsert_document_metadata_embedding
-                upsert_document_metadata_embedding(
-                    document_id=str(doc_updated.id),
-                    source_name=source_name,
-                    filename=doc_updated.filename,
-                    metadata=metadata
-                )
+                # NOTE: Separate 'metadatas' collection removed - document routing now uses
+                # summary chunks in 'documents' collection directly.
 
         document_types = metadata.get('document_types', ['unknown'])
         logger.info(

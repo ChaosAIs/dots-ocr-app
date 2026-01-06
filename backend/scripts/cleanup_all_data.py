@@ -148,12 +148,10 @@ def cleanup_qdrant(dry_run: bool = False) -> dict:
     Clean up Qdrant vector database collections.
 
     Clears:
-    - documents collection (document chunks)
-    - metadatas collection (metadata embeddings)
+    - documents collection (document chunks and metadata)
     """
     results = {
-        'documents': {'status': 'pending'},
-        'metadatas': {'status': 'pending'}
+        'documents': {'status': 'pending'}
     }
 
     try:
@@ -161,8 +159,7 @@ def cleanup_qdrant(dry_run: bool = False) -> dict:
 
         from rag_service.vectorstore import (
             clear_collection,
-            get_collection_info,
-            METADATA_COLLECTION_NAME
+            get_collection_info
         )
 
         # Get collection info before cleanup
@@ -188,32 +185,6 @@ def cleanup_qdrant(dry_run: bool = False) -> dict:
             results['documents']['status'] = 'error'
             results['documents']['error'] = str(e)
             logger.error(f"  Failed to clear documents: {e}")
-
-        # Clear metadata collection
-        logger.info("Clearing metadatas collection...")
-        try:
-            from qdrant_client import QdrantClient
-            from rag_service.vectorstore import QDRANT_HOST, QDRANT_PORT
-
-            client = QdrantClient(host=QDRANT_HOST, port=QDRANT_PORT)
-
-            # Check if metadata collection exists
-            collections = client.get_collections().collections
-            collection_names = [c.name for c in collections]
-
-            if METADATA_COLLECTION_NAME in collection_names:
-                # Delete and recreate the collection
-                client.delete_collection(METADATA_COLLECTION_NAME)
-                logger.info(f"  {METADATA_COLLECTION_NAME} deleted")
-                results['metadatas']['status'] = 'cleared'
-            else:
-                logger.info(f"  {METADATA_COLLECTION_NAME} does not exist")
-                results['metadatas']['status'] = 'not_found'
-
-        except Exception as e:
-            results['metadatas']['status'] = 'error'
-            results['metadatas']['error'] = str(e)
-            logger.error(f"  Failed to clear metadatas: {e}")
 
         logger.info("Qdrant cleanup completed")
 

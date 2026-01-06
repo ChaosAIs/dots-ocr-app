@@ -1,6 +1,19 @@
 """
 Unified Query Preprocessor - Single LLM Call for All Pre-Processing
 
+DEPRECATED: This module is being phased out in favor of unified_query_analyzer.py
+which provides an improved single LLM call for ALL query analysis including:
+- Context resolution (pronouns, references)
+- Cache analysis (dissatisfaction, bypass, cacheable)
+- Intent classification (routing decision)
+- Query enhancement (entities, topics, document types for routing)
+
+The new unified_query_analyzer.py also eliminates the need for the redundant
+_analyze_query_with_llm() call in rag_agent.py.
+
+Please use analytics_service.unified_query_analyzer.UnifiedQueryAnalyzer instead.
+
+Legacy documentation:
 This module consolidates THREE separate LLM calls into ONE:
 1. Context Analysis (pronouns, entities, topics)
 2. Cache Analysis (dissatisfaction, self-contained check, cacheability)
@@ -27,6 +40,51 @@ logger = logging.getLogger(__name__)
 
 # Environment variable to enable/disable unified preprocessing
 UNIFIED_PREPROCESSING_ENABLED = os.getenv("UNIFIED_PREPROCESSING_ENABLED", "true").lower() == "true"
+
+# Cache control words/phrases that should be stripped from cache keys
+CACHE_CONTROL_PATTERNS = [
+    r'\bwithout\s+cache\b',
+    r'\bno\s+cache\b',
+    r'\bskip\s+cache\b',
+    r'\bbypass\s+cache\b',
+    r'\bcache\s*off\b',
+    r'\bdisable\s+cache\b',
+    r'\bdon\'?t\s+use\s+cache\b',
+    r'\bdo\s+not\s+use\s+cache\b',
+    r'\bignore\s+cache\b',
+    r'\bfresh\s+data\b',
+    r'\blatest\s+data\b',
+    r'\bcurrent\s+data\b',
+    r'\bmost\s+recent\s+data\b',
+    r'\bup\s+to\s+date\s+data\b',
+]
+
+
+def strip_cache_control_words(query: str) -> str:
+    """
+    Strip cache control words/phrases from a query string.
+
+    This is used to generate clean cache keys by removing phrases like
+    "without cache", "no cache", "skip cache", etc.
+
+    Args:
+        query: The original query string
+
+    Returns:
+        Query string with cache control words removed
+    """
+    result = query
+    for pattern in CACHE_CONTROL_PATTERNS:
+        result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+
+    # Clean up extra whitespace and punctuation left behind
+    result = re.sub(r'\s+', ' ', result)  # Multiple spaces to single
+    result = re.sub(r'\s*[,\.]+\s*$', '', result)  # Trailing punctuation
+    result = re.sub(r'^\s*[,\.]+\s*', '', result)  # Leading punctuation
+    result = re.sub(r'\s+[,\.]+\s+', ' ', result)  # Dangling punctuation
+    result = result.strip()
+
+    return result
 
 
 class QueryIntent(str, Enum):
@@ -276,6 +334,24 @@ Tasks:
    STEP 1: Check if the current message contains ANY of these references: "their", "them", "they", "it", "this", "that", "those", "these", "above", "same", "previous"
    STEP 2: If YES, look at the MOST RECENT USER message in History to find what entity/subject it refers to
    STEP 3: REPLACE the pronoun/reference with the actual subject + any conditions from history
+   STEP 4: REMOVE cache control phrases from resolved_message! These are instructions, NOT part of the query.
+
+   **CRITICAL - STRIP CACHE CONTROL WORDS FROM resolved_message:**
+   The following phrases are cache control instructions and MUST BE REMOVED from resolved_message:
+   - "without cache", "no cache", "skip cache", "bypass cache"
+   - "don't use cache", "do not use cache", "ignore cache", "cache off", "disable cache"
+   - "fresh data", "latest data", "current data", "most recent data", "up to date data"
+
+   EXAMPLE - CACHE CONTROL WORD REMOVAL:
+   - Message: "list all meal receipts without cache"
+   - resolved_message MUST BE: "list all meal receipts" (REMOVE "without cache"!)
+   - WRONG: "list all meal receipts without cache" (KEPT cache control words - THIS IS WRONG!)
+
+   - Message: "show invoices from 2025 no cache please"
+   - resolved_message MUST BE: "show invoices from 2025" (REMOVE "no cache please"!)
+
+   - Message: "get fresh data for all products"
+   - resolved_message MUST BE: "get all products" (REMOVE "fresh data for"!)
 
    CRITICAL RULE: "their details", "list them", "show their info" = user wants details of items from PREVIOUS query!
    - If previous query asked about "meals/invoices/receipts in 2025" -> resolved_message = "list all meals/invoices/receipts details from 2025"
@@ -405,6 +481,9 @@ JSON only, no markdown:
 
             # Parse cache fields from flat structure
             is_dissatisfied = result.get("is_dissatisfied", False)
+            # Apply strip_cache_control_words as safety fallback in case LLM didn't fully strip them
+            raw_cache_key = context.resolved_message or original_message
+            clean_cache_key = strip_cache_control_words(raw_cache_key)
             cache = CacheAnalysisResult(
                 is_dissatisfied=is_dissatisfied,
                 dissatisfaction_type=DissatisfactionType.REFRESH_REQUEST if is_dissatisfied else DissatisfactionType.NONE,
@@ -414,7 +493,7 @@ JSON only, no markdown:
                 has_unresolved_references=False,  # Not used downstream
                 is_cacheable=result.get("is_cacheable", True),
                 cache_reason="",  # Not used downstream
-                cache_key_question=context.resolved_message or original_message
+                cache_key_question=clean_cache_key
             )
 
             # Parse intent from flat structure
@@ -450,6 +529,9 @@ JSON only, no markdown:
             )
 
             cache_data = result.get("cache", {})
+            # Apply strip_cache_control_words as safety fallback in case LLM didn't fully strip them
+            raw_cache_key = context.resolved_message or original_message
+            clean_cache_key = strip_cache_control_words(raw_cache_key)
             cache = CacheAnalysisResult(
                 is_dissatisfied=cache_data.get("is_dissatisfied", False),
                 dissatisfaction_type=DissatisfactionType(cache_data.get("dissatisfaction_type", "none").lower()),
@@ -459,7 +541,7 @@ JSON only, no markdown:
                 has_unresolved_references=cache_data.get("has_unresolved_references", False),
                 is_cacheable=cache_data.get("is_cacheable", True),
                 cache_reason=cache_data.get("cache_reason", ""),
-                cache_key_question=context.resolved_message or original_message
+                cache_key_question=clean_cache_key
             )
 
             intent_data = result.get("intent", {})
@@ -516,6 +598,8 @@ JSON only, no markdown:
         )
 
         # Cache analysis (simple)
+        # Strip cache control words from cache key to ensure clean caching
+        clean_cache_key = strip_cache_control_words(resolved_message)
         cache = CacheAnalysisResult(
             is_dissatisfied=self._detect_dissatisfaction_heuristic(message_lower),
             dissatisfaction_type=DissatisfactionType.NONE,
@@ -525,7 +609,7 @@ JSON only, no markdown:
             has_unresolved_references=context.has_pronouns,
             is_cacheable=not self._is_greeting_heuristic(message_lower),
             cache_reason="Heuristic analysis",
-            cache_key_question=message
+            cache_key_question=clean_cache_key
         )
 
         if cache.is_dissatisfied:

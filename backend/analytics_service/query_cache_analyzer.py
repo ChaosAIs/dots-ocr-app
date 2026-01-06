@@ -1,15 +1,31 @@
 """
 Query Cache Analyzer - Unified Pre-Cache Analysis Service
 
+DEPRECATED: This module is deprecated in favor of unified_query_analyzer.py
+which provides a single LLM call for ALL query analysis including:
+- Context resolution (pronouns, references)
+- Cache analysis (dissatisfaction, bypass, cacheable)
+- Intent classification (routing decision)
+- Query enhancement (entities, topics, document types)
+
+Please use analytics_service.unified_query_analyzer.UnifiedQueryAnalyzer instead.
+
+This module is kept for backward compatibility but will be removed in a future version.
+
+Legacy documentation:
 This module implements a single LLM call that performs ALL pre-cache analysis:
 - Dissatisfaction detection
 - Question analysis (self-contained vs context-dependent)
 - Question enhancement (if needed)
 - Cache worthiness determination
-
-This optimized approach reduces latency from 3 LLM calls to 1, saving 400-800ms
-and 66% token cost.
 """
+
+import warnings
+warnings.warn(
+    "query_cache_analyzer is deprecated. Use unified_query_analyzer instead.",
+    DeprecationWarning,
+    stacklevel=2
+)
 
 import json
 import logging

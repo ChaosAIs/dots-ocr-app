@@ -268,52 +268,58 @@ class TestQdrantIndexing:
             logger.error(f"Error checking Qdrant: {e}")
             return []
 
-    def test_check_metadata_collection(self):
-        """Check document_metadatas collection in Qdrant."""
+    def test_check_summary_chunks(self):
+        """Check tabular_summary chunks in documents collection (used for document routing)."""
         try:
             import requests
 
-            # Collection name is 'metadatas'
+            # Search for summary chunks in documents collection
             response = requests.post(
-                "http://localhost:6333/collections/metadatas/points/scroll",
+                "http://localhost:6333/collections/documents/points/scroll",
                 json={
                     "limit": 100,
                     "with_payload": True,
-                    "with_vector": False
+                    "with_vector": False,
+                    "filter": {
+                        "must": [
+                            {"key": "metadata.chunk_type", "match": {"value": "tabular_summary"}}
+                        ]
+                    }
                 },
                 headers={"Content-Type": "application/json"}
             )
 
             if response.status_code != 200:
-                logger.error(f"Qdrant metadata query failed: {response.status_code}")
-                return
+                logger.error(f"Qdrant summary chunks query failed: {response.status_code}")
+                return []
 
             data = response.json()
             points = data.get("result", {}).get("points", [])
 
-            # Find Augment-related metadata
-            augment_metadata = []
+            # Find Augment-related summary chunks
+            augment_summaries = []
             for point in points:
                 payload = point.get("payload", {})
-                source = payload.get("source", "")
+                metadata = payload.get("metadata", {})
+                source = metadata.get("source", "")
                 if "Augment" in source or "augment" in source.lower():
-                    augment_metadata.append({
-                        "document_id": payload.get("document_id"),
+                    augment_summaries.append({
+                        "document_id": metadata.get("document_id"),
                         "source": source,
-                        "document_type": payload.get("document_type"),
-                        "document_types": payload.get("document_types", [])
+                        "schema_type": metadata.get("schema_type"),
+                        "vendor_name": metadata.get("vendor_name")
                     })
 
-            logger.info(f"Total points in document_metadatas collection: {len(points)}")
-            logger.info(f"Augment metadata entries found: {len(augment_metadata)}")
+            logger.info(f"Total summary chunks in documents collection: {len(points)}")
+            logger.info(f"Augment summary chunks found: {len(augment_summaries)}")
 
-            for meta in augment_metadata:
-                logger.info(f"  - {meta['source']}: {meta['document_types']}")
+            for summary in augment_summaries:
+                logger.info(f"  - {summary['source']}: {summary['schema_type']}")
 
-            return augment_metadata
+            return augment_summaries
 
         except Exception as e:
-            logger.error(f"Error checking metadata collection: {e}")
+            logger.error(f"Error checking summary chunks: {e}")
             return []
 
 
@@ -441,10 +447,10 @@ class TestEndToEndFlow:
             test = TestQdrantIndexing()
             test.test_qdrant_connection()
             chunks = test.test_check_existing_chunks()
-            metadata = test.test_check_metadata_collection()
+            summaries = test.test_check_summary_chunks()
 
-            if len(chunks) > 0 or len(metadata) > 0:
-                results["qdrant_indexing"] = f"PASS ({len(chunks)} chunks, {len(metadata)} metadata)"
+            if len(chunks) > 0 or len(summaries) > 0:
+                results["qdrant_indexing"] = f"PASS ({len(chunks)} chunks, {len(summaries)} summary chunks)"
             else:
                 results["qdrant_indexing"] = "WARNING: No chunks found in Qdrant (may need reindexing)"
         except Exception as e:

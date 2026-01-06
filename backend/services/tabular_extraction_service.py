@@ -28,7 +28,7 @@ from db.database import get_db_session
 from db.models import Document, DocumentData, IndexStatus
 from extraction_service.extraction_service import ExtractionService
 from common.document_type_classifier import TabularDataDetector, DocumentTypeClassifier
-from rag_service.vectorstore import get_vectorstore, get_embeddings, upsert_document_metadata_embedding
+from rag_service.vectorstore import get_vectorstore, get_embeddings
 from rag_service.llm_service import get_llm_service
 
 from langchain_core.documents import Document as LangchainDocument
@@ -226,89 +226,8 @@ class TabularExtractionService:
                 logger.info(f"[Tabular]   - {chunk_id}")
             logger.info("-" * 80)
 
-            # ========== STEP 4.5: Create Metadata Embedding for Document Routing ==========
-            logger.info("[Tabular] ========== STEP 4.5: METADATA EMBEDDING ==========")
-            logger.info("[Tabular] Creating metadata embedding for document routing...")
-
-            try:
-                columns = document_data.header_data.get("column_headers", [])
-
-                # Get workspace_id from document
-                doc = self.db.query(Document).filter(Document.id == document_id).first() if self.db else None
-                workspace_id = str(doc.workspace_id) if doc and doc.workspace_id else None
-
-                # Use LLM-based multi-type classification to determine all applicable document types
-                llm_service = get_llm_service()
-                classifier = DocumentTypeClassifier(llm_client=llm_service)
-
-                # Get sample data for classification context (from external storage)
-                sample_rows = self._fetch_sample_line_items(document_data.id, limit=3)
-                data_preview = ""
-                if sample_rows:
-                    data_preview = "\n".join([str(row) for row in sample_rows])
-
-                multi_type_result = classifier.classify_multi_type(
-                    filename=filename,
-                    columns=columns,
-                    row_count=document_data.line_items_count,
-                    data_preview=data_preview,
-                    is_tabular=True
-                )
-
-                logger.info(f"[Tabular] Multi-type classification result:")
-                logger.info(f"[Tabular]   - document_types: {multi_type_result.document_types}")
-                logger.info(f"[Tabular]   - primary_type: {multi_type_result.primary_type}")
-                logger.info(f"[Tabular]   - confidence: {multi_type_result.confidence}")
-                logger.info(f"[Tabular]   - reasoning: {multi_type_result.reasoning}")
-
-                # Build metadata for embedding with document_types list
-                metadata = {
-                    "document_types": multi_type_result.document_types,
-                    "subject_name": source_name,
-                    "schema_type": document_data.schema_type,
-                    "is_tabular": True,
-                    "row_count": document_data.line_items_count,
-                    "column_count": len(columns),
-                    "columns": columns,
-                    "confidence": multi_type_result.confidence,
-                }
-
-                # Add workspace_id if available
-                if workspace_id:
-                    metadata["workspace_id"] = workspace_id
-
-                # Use the first summary chunk content as the base for embedding
-                if summary_chunks:
-                    metadata["summary"] = summary_chunks[0].page_content[:500]
-
-                # Add extracted header fields for entity matching in document router
-                # These fields are critical for filtering by vendor, customer, etc.
-                extracted_header_data = {k: v for k, v in document_data.header_data.items()
-                                         if k not in ["column_headers", "_field_normalization"] and v is not None}
-                if extracted_header_data.get("vendor_name"):
-                    metadata["vendor_name"] = extracted_header_data["vendor_name"]
-                if extracted_header_data.get("customer_name"):
-                    metadata["customer_name"] = extracted_header_data["customer_name"]
-                if extracted_header_data.get("invoice_number"):
-                    metadata["invoice_number"] = extracted_header_data["invoice_number"]
-                if extracted_header_data.get("invoice_date"):
-                    metadata["invoice_date"] = extracted_header_data["invoice_date"]
-
-                success = upsert_document_metadata_embedding(
-                    document_id=str(document_id),
-                    source_name=source_name,
-                    filename=filename,
-                    metadata=metadata
-                )
-
-                if success:
-                    logger.info(f"[Tabular] ✅ Metadata embedding created for document routing")
-                    logger.info(f"[Tabular]   - Stored document_types: {multi_type_result.document_types}")
-                else:
-                    logger.warning(f"[Tabular] ⚠️ Failed to create metadata embedding")
-            except Exception as meta_error:
-                logger.warning(f"[Tabular] ⚠️ Metadata embedding error: {meta_error}", exc_info=True)
-            logger.info("-" * 80)
+            # NOTE: Metadata embedding to separate 'metadatas' collection removed.
+            # Document routing now uses the summary chunks in 'documents' collection directly.
 
             self._broadcast(broadcast_callback, document_id, {
                 "status": "finalizing",
