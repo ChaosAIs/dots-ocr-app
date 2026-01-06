@@ -1040,6 +1040,16 @@ def is_document_indexed(source_name: str) -> bool:
 # =============================================================================
 # Document Metadata Search (via documents collection summary chunks)
 # =============================================================================
+#
+# DATA SOURCES OF TRUTH:
+# - Qdrant chunk metadata is a READ-ONLY CACHE populated during indexing
+# - Authoritative sources are in PostgreSQL:
+#   - schema_type: documents_data.schema_type
+#   - vendor_name/customer_name: documents_data.header_data
+#   - document_types: documents.document_metadata['document_types']
+# - Qdrant metadata is used for semantic search/discovery, not as source of truth
+#
+# =============================================================================
 
 # Configuration for document routing search
 METADATA_SEARCH_TOP_K = int(os.getenv("METADATA_SEARCH_TOP_K", "15"))

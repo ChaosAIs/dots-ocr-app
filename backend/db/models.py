@@ -403,7 +403,7 @@ class Document(Base):
     summary_chunk_ids = Column(ARRAY(String), nullable=True)
 
     # Structured Data Extraction status (for extracting tabular data from spreadsheets, invoices, etc.)
-    # NOTE: schema_type is stored in document_metadata JSONB, not as a separate column
+    # NOTE: schema_type is stored in documents_data.schema_type, NOT in document_metadata
     extraction_eligible = Column(Boolean, nullable=True)
     extraction_status = Column(String(20), default='pending')  # pending, processing, completed, failed, skipped
     extraction_started_at = Column(DateTime(timezone=True), nullable=True)

@@ -12,6 +12,12 @@ This service handles the "tabular" processing path for:
 - Invoices, receipts with line items
 - Bank statements, expense reports
 - Any document with structured rows/columns
+
+DATA SOURCES OF TRUTH:
+- schema_type: documents_data.schema_type (authoritative)
+- vendor_name/customer_name: documents_data.header_data (authoritative)
+- document_types: documents.document_metadata['document_types'] (array, for classification)
+- Qdrant chunk metadata: Read-only cache, populated from documents_data during indexing
 """
 
 import os
