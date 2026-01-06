@@ -559,6 +559,58 @@ class DocumentRouter:
                     f"for entities {normalized_query_entities}"
                 )
 
+                # =================================================================
+                # Step 2: Search line items for entity matches (for product queries)
+                # =================================================================
+                # If we haven't found all documents yet, also search in line item descriptions
+                # This is important for queries like "keyboard" where the entity is a product
+                # that appears in line items, not in document metadata
+                remaining_doc_ids = [
+                    doc_id for doc_id in doc_ids
+                    if doc_id not in matched_ids
+                ]
+
+                if remaining_doc_ids and normalized_query_entities:
+                    logger.info(f"[Router] Searching line items for entities in {len(remaining_doc_ids)} remaining documents")
+
+                    # Build ILIKE conditions for each entity
+                    line_item_sql = """
+                        SELECT DISTINCT
+                            d.id::text as document_id,
+                            COALESCE(dd.header_data->>'vendor_name', dd.header_data->>'store_name', d.filename) as source_display
+                        FROM documents d
+                        JOIN documents_data dd ON dd.document_id = d.id
+                        JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+                        WHERE d.id = ANY(CAST(:remaining_doc_ids AS uuid[]))
+                        AND (
+                            """ + " OR ".join([
+                                "(li.data->>'description') ILIKE :entity_pattern_" + str(i)
+                                for i in range(len(normalized_query_entities))
+                            ]) + """
+                        )
+                    """
+
+                    # Build parameters for the query
+                    remaining_doc_ids_array = '{' + ','.join(remaining_doc_ids) + '}'
+                    params = {"remaining_doc_ids": remaining_doc_ids_array}
+                    for i, entity in enumerate(normalized_query_entities):
+                        params[f"entity_pattern_{i}"] = f"%{entity}%"
+
+                    line_item_result = db.execute(text(line_item_sql), params)
+
+                    for row in line_item_result.fetchall():
+                        line_item_doc_id = row[0]
+                        line_item_source = row[1] or "Unknown"
+                        if line_item_doc_id not in matched_ids:
+                            matched_ids.append(line_item_doc_id)
+                            matched_names.append(line_item_source)
+                            logger.info(f"[Router] ✓ Matched doc '{line_item_source}' via line item description containing entity")
+
+                    if len(matched_ids) > len(doc_ids) - len(remaining_doc_ids):
+                        logger.info(
+                            f"[Router] Line item search found {len(matched_ids) - (len(doc_ids) - len(remaining_doc_ids))} additional document(s)"
+                        )
+
         except Exception as e:
             logger.error(f"[Router] Hard entity filter error: {e}", exc_info=True)
             # Fall back to simpler in-memory filtering if main logic fails
@@ -760,6 +812,12 @@ class DocumentRouter:
                                 OR LOWER(COALESCE(dd.header_data->>'category', '')) ILIKE :{param_name}
                                 -- Match in summary_data
                                 OR LOWER(COALESCE(dd.summary_data::text, '')) ILIKE :{param_name}
+                                -- Match in line item descriptions (for product-based queries)
+                                OR EXISTS (
+                                    SELECT 1 FROM documents_data_line_items li
+                                    WHERE li.documents_data_id = dd.id
+                                    AND LOWER(COALESCE(li.data->>'description', '')) ILIKE :{param_name}
+                                )
                             )
                         """)
                     # Any topic match is OK (OR logic)

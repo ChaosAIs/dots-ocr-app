@@ -834,7 +834,10 @@ SELECT ... FROM items ...
 4. Use ROUND() for monetary values to 2 decimal places
 5. Always include COUNT(*) as item_count in aggregations
 6. Order results logically
-7. CRITICAL - When selecting line item amounts, ALWAYS include is_currency:
+7. CRITICAL - Text search must be CASE-INSENSITIVE using ILIKE (not LIKE):
+   - CORRECT: WHERE (item->>'description') ILIKE '%keyboard%'  -- Finds "Keyboard", "keyboard", "KEYBOARD"
+   - WRONG: WHERE (item->>'description') LIKE '%keyboard%'  -- Case-sensitive, misses "Keyboard"
+8. CRITICAL - When selecting line item amounts, ALWAYS include is_currency:
    - Add: item->>'is_currency' AS is_currency
    - This flag indicates if the amount is monetary (true) or a count/usage (false)
    - Example: SELECT item->>'description' AS description, (item->>'amount')::numeric AS amount, item->>'is_currency' AS is_currency FROM ...
@@ -992,9 +995,10 @@ Analyze the query and identify:
    - "category not Electronics" -> {{"operator": "!=", "value": "Electronics"}}
    - "category not in Electronics, Books" -> {{"operator": "not_in", "value": ["Electronics", "Books"]}}
 
-   **String matching:**
-   - "name contains Apple", "name like Apple" -> {{"operator": "like", "value": "%Apple%"}}
-   - "name starts with A" -> {{"operator": "like", "value": "A%"}}
+   **String matching (CASE-INSENSITIVE - always use ILIKE in PostgreSQL):**
+   - "name contains Apple", "name like Apple" -> {{"operator": "ilike", "value": "%Apple%"}}
+   - "name starts with A" -> {{"operator": "ilike", "value": "A%"}}
+   - "item keyboard", "has keyboard" -> {{"operator": "ilike", "value": "%keyboard%"}}
 
    **Filter format:** filters = {{"FieldName": {{"operator": "op", "value": value}}}}
    - Match filter field to actual schema field name (e.g., "stock" matches "StockQuantity", "category" matches "Category")
@@ -1219,6 +1223,9 @@ Check the 'source' and 'access_pattern' in the field schema!
      WHERE header_data->>'transaction_date' ~ '^[0-9]{{4}}-'  -- Only process if starts with year
      ```
 5. Wrong field name: Check the schema for exact field names (e.g., 'Total Sales' not 'amount', 'Product' not 'description').
+6. **Case-sensitive text search returning no results**: If using LIKE for text matching, change to ILIKE for case-insensitive matching:
+   - WRONG: WHERE (item->>'description') LIKE '%keyboard%'  -- Misses "Keyboard"
+   - CORRECT: WHERE (item->>'description') ILIKE '%keyboard%'  -- Finds "Keyboard", "keyboard", etc.
 
 ## Requirements:
 1. Analyze the error message carefully
@@ -1299,7 +1306,9 @@ WHERE (header_data->>'transaction_date')::date BETWEEN ...
 
 ### 3. Filter Application:
 - Apply filters in OUTER WHERE clause (after CTE), not inside CTE
-- Operators: <, >, =, <=, >=, !=, between, in, not_in, like, compound
+- Operators: <, >, =, <=, >=, !=, between, in, not_in, ilike, compound
+- **CRITICAL FOR TEXT SEARCH**: Always use ILIKE for case-insensitive text matching (NOT LIKE)
+  - Example: WHERE (item->>'description') ILIKE '%keyboard%'  -- Matches "Keyboard", "keyboard", "KEYBOARD"
 
 **CRITICAL - Compound vs BETWEEN:**
 - "lower than X but higher than Y" = TWO conditions: field > Y AND field < X (EXCLUSIVE bounds)
