@@ -286,21 +286,16 @@ class ExtractionEligibilityChecker:
         Args:
             document_id: Document UUID
             eligible: Whether document is eligible
-            schema_type: Schema type if eligible (stored in document_metadata)
+            schema_type: Schema type if eligible (used for logging, actual schema_type
+                        is stored in documents_data.schema_type during extraction)
             status: Extraction status
         """
         document = self.db.query(Document).filter(Document.id == document_id).first()
         if document:
             document.extraction_eligible = eligible
             document.extraction_status = status if eligible else "skipped"
-            # Store schema_type in document_metadata JSONB instead of separate column
-            if schema_type and eligible:
-                if document.document_metadata is None:
-                    document.document_metadata = {}
-                document.document_metadata = {
-                    **document.document_metadata,
-                    "schema_type": schema_type
-                }
+            # NOTE: schema_type is NOT stored in document_metadata
+            # The authoritative source is documents_data.schema_type (set during extraction)
             self.db.commit()
             logger.info(
                 f"Document {document_id}: eligible={eligible}, schema={schema_type}, status={status}"

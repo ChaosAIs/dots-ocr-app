@@ -355,7 +355,9 @@ class Document(Base):
     indexed_chunks = Column(Integer, default=0)
     # Page-level index tracking: {"indexed": [1,2,3], "pending": [4,5], "failed": []}
     indexed_pages_info = Column(JSONB, nullable=True, default=lambda: {"indexed": [], "pending": [], "failed": []})
-    # Document metadata from hierarchical summarization: type, subject, topics, entities, summary
+    # Document metadata from hierarchical summarization: document_types, subject, topics, entities, summary
+    # NOTE: schema_type is NOT stored here. The authoritative source for schema_type is:
+    #       documents_data.schema_type (set during extraction)
     document_metadata = Column(JSONB, nullable=True, default=None)
     # Granular OCR status tracking for selective re-processing (page-level, embedded images)
     ocr_details = Column(JSONB, nullable=True, default=None)
@@ -697,6 +699,8 @@ class DocumentData(Base):
     document_id = Column(PGUUID(as_uuid=True), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False, unique=True)
 
     # Schema Reference
+    # NOTE: This is the AUTHORITATIVE source for schema_type.
+    # Do NOT store schema_type in documents.document_metadata JSONB.
     schema_type = Column(String(64), nullable=False)
     schema_version = Column(String(16), default='1.0')
 
