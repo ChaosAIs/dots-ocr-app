@@ -220,6 +220,17 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                 workspace_ids = request.get("workspace_ids", [])  # Optional workspace filter
                 document_ids = request.get("document_ids", [])  # Optional document filter
                 iterative_reasoning_enabled = request.get("iterative_reasoning_enabled", None)  # Optional toggle from UI checkbox
+                agent_mode_enabled = request.get("agent_mode_enabled", False)  # Optional toggle for new agentic workflow
+
+                # Debug logging for agent mode
+                logger.info("=" * 80)
+                logger.info(f"[ChatAPI] ========== REQUEST RECEIVED ==========")
+                logger.info(f"[ChatAPI] Message: {message[:100]}...")
+                logger.info(f"[ChatAPI] Agent Mode Enabled: {agent_mode_enabled} (type: {type(agent_mode_enabled).__name__})")
+                logger.info(f"[ChatAPI] Iterative Reasoning Enabled: {iterative_reasoning_enabled}")
+                logger.info(f"[ChatAPI] Document IDs: {len(document_ids)} documents")
+                logger.info(f"[ChatAPI] Workspace IDs: {workspace_ids}")
+                logger.info("=" * 80)
 
                 if not message:
                     await websocket.send_json({
@@ -568,7 +579,25 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                     cache_key = query_analysis.cache_key if query_analysis else ""
                     cache_analysis_method = query_analysis.analysis_method if query_analysis else "none"
 
-                    if QUERY_CACHE_ENABLED and accessible_doc_ids_list:
+                    # Fallback: Direct keyword check for cache bypass using centralized patterns
+                    # (in case LLM analysis misses it)
+                    if not cache_bypass:
+                        import re
+                        from analytics_service.unified_query_analyzer import CACHE_CONTROL_PATTERNS
+                        message_lower = enhanced_message.lower()
+                        keyword_bypass = any(re.search(pattern, message_lower, re.IGNORECASE) for pattern in CACHE_CONTROL_PATTERNS)
+                        if keyword_bypass:
+                            logger.info("[QueryCache] Keyword bypass detected in query (LLM missed it)")
+                            cache_bypass = True
+
+                    # Skip cache when agent mode is enabled OR cache bypass keywords detected
+                    use_cache = QUERY_CACHE_ENABLED and accessible_doc_ids_list and not agent_mode_enabled and not cache_bypass
+                    if agent_mode_enabled:
+                        logger.info("[QueryCache] Cache SKIPPED - Agent Mode is enabled")
+                    elif cache_bypass:
+                        logger.info("[QueryCache] Cache SKIPPED - User requested fresh/latest data")
+
+                    if use_cache:
                         cache_start = time.time()
                         try:
                             logger.info("=" * 80)
@@ -756,6 +785,224 @@ async def websocket_chat(websocket: WebSocket, session_id: str):
                         # Send end message and continue to next message
                         await websocket.send_json({"type": "end"})
                         continue
+
+                    # ====== AGENTIC WORKFLOW MODE ======
+                    # When agent_mode_enabled is True, use the new multi-agent agentic workflow
+                    # instead of the standard intent-based routing
+                    logger.info("=" * 80)
+                    logger.info("[AgenticMode] ========== CHECKING AGENTIC WORKFLOW CONDITIONS ==========")
+                    logger.info(f"[AgenticMode] agent_mode_enabled = {agent_mode_enabled} (type: {type(agent_mode_enabled).__name__})")
+                    logger.info(f"[AgenticMode] accessible_doc_ids_list = {len(accessible_doc_ids_list) if accessible_doc_ids_list else 0} documents")
+                    logger.info(f"[AgenticMode] Condition result: agent_mode_enabled AND accessible_doc_ids_list = {bool(agent_mode_enabled and accessible_doc_ids_list)}")
+                    logger.info("=" * 80)
+
+                    if agent_mode_enabled and accessible_doc_ids_list:
+                        logger.info("=" * 80)
+                        logger.info("[AgenticMode] ========== AGENTIC WORKFLOW ACTIVATED ==========")
+                        logger.info(f"[AgenticMode] Query: {enhanced_message[:100]}...")
+                        logger.info(f"[AgenticMode] Workspace IDs: {curr_workspace_ids[:3]}{'...' if len(curr_workspace_ids) > 3 else ''}")
+                        logger.info(f"[AgenticMode] Accessible documents: {len(accessible_doc_ids_list)}")
+                        logger.info("=" * 80)
+
+                        try:
+                            # Import the agents module - try multiple import paths for flexibility
+                            execute_analytics_query_async = None
+                            import_error = None
+
+                            # Try absolute import first (when running with proper PYTHONPATH)
+                            try:
+                                from backend.agents import execute_analytics_query_async
+                                logger.info("[AgenticMode] Successfully imported from backend.agents")
+                            except ImportError as e1:
+                                import_error = e1
+                                # Try relative import (when running from backend directory)
+                                try:
+                                    from agents import execute_analytics_query_async
+                                    logger.info("[AgenticMode] Successfully imported from agents (relative)")
+                                except ImportError as e2:
+                                    import_error = e2
+                                    # Try adding parent directory to path
+                                    try:
+                                        import sys
+                                        import os
+                                        backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                                        if backend_dir not in sys.path:
+                                            sys.path.insert(0, backend_dir)
+                                            logger.info(f"[AgenticMode] Added {backend_dir} to sys.path")
+                                        from agents import execute_analytics_query_async
+                                        logger.info("[AgenticMode] Successfully imported after path adjustment")
+                                    except ImportError as e3:
+                                        import_error = e3
+
+                            if execute_analytics_query_async is None:
+                                raise ImportError(f"Could not import execute_analytics_query_async: {import_error}")
+
+                            # Get workspace ID (use first workspace or "default")
+                            agentic_workspace_id = str(curr_workspace_ids[0]) if curr_workspace_ids else "default"
+
+                            # Get LLM from existing service (vLLM or Ollama based on config)
+                            from .llm_service import get_llm_service
+                            llm_service = get_llm_service()
+                            agentic_llm = llm_service.get_chat_model(temperature=0.1)
+                            logger.info(f"[AgenticMode] Using LLM: {type(agentic_llm).__name__}")
+
+                            await progress_callback("Planning query execution...")
+
+                            # Send initial status message to show auto-flowing status UI
+                            await websocket.send_json({
+                                "type": "status",
+                                "agent": "initializing",
+                                "phase": "initializing",
+                                "message": "Initializing agent workflow",
+                                "sub_messages": [
+                                    f"Preparing to analyze {len(accessible_doc_ids_list) if accessible_doc_ids_list else 0} documents",
+                                    "Setting up execution environment"
+                                ],
+                                "metrics": {"document_count": len(accessible_doc_ids_list) if accessible_doc_ids_list else 0},
+                                "iteration": 0
+                            })
+
+                            # Execute agentic workflow with streaming
+                            # iterative_reasoning_enabled controls Graph RAG agent
+                            graph_search_enabled = iterative_reasoning_enabled if iterative_reasoning_enabled is not None else True
+                            logger.info(f"[AgenticMode] Graph Search Enabled: {graph_search_enabled}")
+
+                            # Convert document IDs to strings for the agentic workflow
+                            accessible_doc_ids_str_list = [str(doc_id) for doc_id in accessible_doc_ids_list] if accessible_doc_ids_list else []
+                            logger.info(f"[AgenticMode] Passing {len(accessible_doc_ids_str_list)} document IDs to workflow")
+
+                            async for event in execute_analytics_query_async(
+                                user_query=enhanced_message,
+                                workspace_id=agentic_workspace_id,
+                                llm=agentic_llm,
+                                chat_history=history,
+                                max_iterations=3,
+                                stream_progress=True,
+                                enable_graph_search=graph_search_enabled,
+                                accessible_doc_ids=accessible_doc_ids_str_list
+                            ):
+                                event_type = event.get("type")
+
+                                if event_type == "progress":
+                                    agent_name = event.get("agent", "")
+                                    iteration = event.get("iteration", 0)
+                                    status_details = event.get("status_details", {})
+
+                                    # Map agent names to user-friendly progress messages (fallback)
+                                    agent_progress_messages = {
+                                        "planner_agent": "Analyzing your question and creating execution plan...",
+                                        "retrieval_team": f"Retrieving data from documents (iteration {iteration + 1})...",
+                                        "reviewer_agent": "Reviewing data quality...",
+                                        "summary_agent": "Generating final response..."
+                                    }
+                                    progress_msg = agent_progress_messages.get(agent_name, f"Processing with {agent_name}...")
+                                    await progress_callback(progress_msg)
+
+                                    # Send detailed status as auto-flowing chat-like messages
+                                    if status_details:
+                                        await websocket.send_json({
+                                            "type": "status",
+                                            "agent": agent_name,
+                                            "phase": status_details.get("phase", ""),
+                                            "message": status_details.get("message", ""),
+                                            "sub_messages": status_details.get("sub_messages", []),
+                                            "metrics": status_details.get("metrics", {}),
+                                            "iteration": iteration
+                                        })
+
+                                elif event_type == "result":
+                                    # Stream the final response
+                                    response_text = event.get("response", "")
+                                    if response_text:
+                                        await progress_callback("Writing your report...")
+                                        # Stream response in chunks
+                                        chunk_size = 20
+                                        for i in range(0, len(response_text), chunk_size):
+                                            chunk = response_text[i:i + chunk_size]
+                                            chunk_count += 1
+                                            full_response += chunk
+                                            await websocket.send_json({
+                                                "type": "token",
+                                                "content": chunk,
+                                            })
+                                            await asyncio.sleep(0.01)
+
+                                        # Add data sources section if available and not already in response
+                                        # (Summary Agent may have already included data sources)
+                                        data_sources = event.get("data_sources", [])
+                                        if data_sources and "Data Sources:" not in full_response:
+                                            sources_text = "\n\n---\n**Data Sources:**\n"
+                                            for source in data_sources:
+                                                if isinstance(source, dict):
+                                                    filename = source.get('filename', source.get('document_id', 'Unknown'))
+                                                else:
+                                                    filename = str(source)
+                                                sources_text += f"- {filename}\n"
+                                            full_response += sources_text
+                                            await websocket.send_json({
+                                                "type": "token",
+                                                "content": sources_text,
+                                            })
+
+                                    logger.info(f"[AgenticMode] Streamed agentic response ({len(full_response)} chars)")
+
+                                elif event_type == "error":
+                                    error_msg = event.get("error", "Unknown error in agentic workflow")
+                                    logger.error(f"[AgenticMode] Error: {error_msg}")
+                                    # Send friendly error response
+                                    error_response = f"I encountered an issue while processing your request with the agentic workflow. Please try again.\n\nError details: {error_msg}"
+                                    for chunk in [error_response[i:i+50] for i in range(0, len(error_response), 50)]:
+                                        full_response += chunk
+                                        await websocket.send_json({
+                                            "type": "token",
+                                            "content": chunk,
+                                        })
+
+                            # Save assistant response to database
+                            if full_response:
+                                try:
+                                    with get_db_session() as db:
+                                        conv_manager = ConversationManager(db)
+                                        conv_manager.add_message(
+                                            session_id=UUID(session_id),
+                                            role="assistant",
+                                            content=full_response,
+                                            metadata={"source": "agentic_workflow"}
+                                        )
+                                except Exception as e:
+                                    logger.error(f"Error saving agentic response: {e}")
+
+                            # Update session metadata
+                            try:
+                                with get_db_session() as db:
+                                    conv_manager = ConversationManager(db)
+                                    session = conv_manager.get_session(UUID(session_id))
+                                    if session:
+                                        current_metadata = session.session_metadata or {}
+                                        current_metadata["_prev_workspace_ids"] = curr_workspace_ids
+                                        current_metadata["_prev_document_ids"] = curr_document_ids
+                                        conv_manager.update_session_metadata(UUID(session_id), current_metadata)
+                            except Exception as e:
+                                logger.error(f"Error updating session metadata: {e}")
+
+                            logger.info("=" * 80)
+                            logger.info(f"[AgenticMode] ========== AGENTIC WORKFLOW COMPLETE ==========")
+                            logger.info("=" * 80)
+
+                            # Send end message and continue to next message
+                            timing_metrics.log_summary()
+                            clear_current_metrics()
+                            await websocket.send_json({"type": "end"})
+                            continue
+
+                        except ImportError as ie:
+                            logger.error(f"[AgenticMode] Import error - agents module not available: {ie}")
+                            # Fall back to standard routing
+                            logger.info("[AgenticMode] Falling back to standard routing due to import error")
+                        except Exception as e:
+                            logger.error(f"[AgenticMode] Error in agentic workflow: {e}", exc_info=True)
+                            # Fall back to standard routing on error
+                            logger.info("[AgenticMode] Falling back to standard routing due to error")
 
                     # ====== INTENT-BASED ROUTING ======
                     use_analytics_path = False

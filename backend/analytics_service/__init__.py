@@ -7,11 +7,19 @@ Provides conversational analytics capabilities including:
 - Query planning and execution
 - Structured data extraction integration
 - Semantic query caching with Qdrant
+- LLM-driven SQL generation (V2 optimized)
+- Dynamic prompt building
+- LLM-driven result formatting
 """
 
 from .redis_session_manager import RedisSessionManager
 from .analytics_session_manager import AnalyticsSessionManager
 from .intent_classifier import IntentClassifier, QueryIntent
+
+# LLM SQL Generation V2 (Optimized)
+from .prompt_builder import PromptBuilder, QueryContext, QueryType, AggregationType
+from .llm_sql_generator_v2 import LLMSQLGeneratorV2, SQLGenerationResult, QueryAnalysis
+from .llm_result_formatter import LLMResultFormatter, ColumnFormat, FormattingConfig
 
 # Query Cache exports
 from .query_cache_config import QueryCacheConfig, get_query_cache_config
@@ -51,6 +59,18 @@ __all__ = [
     # Intent classification
     'IntentClassifier',
     'QueryIntent',
+
+    # LLM SQL Generation V2 (Optimized)
+    'PromptBuilder',
+    'QueryContext',
+    'QueryType',
+    'AggregationType',
+    'LLMSQLGeneratorV2',
+    'SQLGenerationResult',
+    'QueryAnalysis',
+    'LLMResultFormatter',
+    'ColumnFormat',
+    'FormattingConfig',
 
     # Query cache
     'QueryCacheConfig',

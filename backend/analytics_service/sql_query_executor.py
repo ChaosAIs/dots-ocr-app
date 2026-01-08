@@ -861,6 +861,8 @@ class SQLQueryExecutor:
         Add is_currency flags using heuristic detection.
 
         When we can't look up the original line item data, we use heuristics:
+        - Column names containing 'quantity', 'stock', 'count', 'avg_quantity' -> NOT currency
+        - Column names containing 'amount', 'total', 'price', 'cost', 'sales' -> IS currency
         - If amount equals quantity and there's no unit_price, it's likely non-monetary
         - If description contains usage-related keywords, it's likely non-monetary
 
@@ -871,30 +873,50 @@ class SQLQueryExecutor:
             Data with is_currency field added based on heuristics
         """
         NON_MONETARY_KEYWORDS = ['message', 'credit', 'unit', 'usage', 'hour', 'minute', 'call', 'request', 'point']
+        NON_MONETARY_COLUMN_PATTERNS = ['quantity', 'stock', 'count', 'qty', 'num_', 'number_of', '_count', 'units']
+        MONETARY_COLUMN_PATTERNS = ['amount', 'total', 'price', 'cost', 'sales', 'revenue', 'value', 'avg_amount', 'sum_amount']
 
         enriched = []
         for row in data:
             row_copy = dict(row)
 
-            # Default to currency (True)
-            is_currency = True
+            # First, check column names to determine is_currency per-column
+            # Default to True only for monetary columns, False for count/quantity columns
+            column_based_is_currency = None
 
-            amount = row.get('amount')
-            quantity = row.get('quantity')
-            unit_price = row.get('unit_price')
-            description = str(row.get('description', '')).lower()
+            for col_name in row.keys():
+                col_lower = col_name.lower()
 
-            # Heuristic 1: amount equals quantity without unit_price
-            if amount is not None and quantity is not None and unit_price is None:
-                try:
-                    if float(amount) == float(quantity) and float(quantity) > 1:
-                        is_currency = False
-                except (ValueError, TypeError):
-                    pass
+                # Check if column name indicates non-monetary (quantity, count, stock)
+                if any(pattern in col_lower for pattern in NON_MONETARY_COLUMN_PATTERNS):
+                    column_based_is_currency = False
+                    break
 
-            # Heuristic 2: description contains non-monetary keywords
-            if any(kw in description for kw in NON_MONETARY_KEYWORDS) and unit_price is None:
-                is_currency = False
+                # Check if column name indicates monetary (amount, total, price)
+                if any(pattern in col_lower for pattern in MONETARY_COLUMN_PATTERNS):
+                    column_based_is_currency = True
+
+            # Use column-based detection if available, otherwise fall back to value heuristics
+            is_currency = column_based_is_currency if column_based_is_currency is not None else True
+
+            # Value-based heuristics only if column-based was inconclusive
+            if column_based_is_currency is None:
+                amount = row.get('amount')
+                quantity = row.get('quantity')
+                unit_price = row.get('unit_price')
+                description = str(row.get('description', '')).lower()
+
+                # Heuristic 1: amount equals quantity without unit_price
+                if amount is not None and quantity is not None and unit_price is None:
+                    try:
+                        if float(amount) == float(quantity) and float(quantity) > 1:
+                            is_currency = False
+                    except (ValueError, TypeError):
+                        pass
+
+                # Heuristic 2: description contains non-monetary keywords
+                if any(kw in description for kw in NON_MONETARY_KEYWORDS) and unit_price is None:
+                    is_currency = False
 
             row_copy['is_currency'] = is_currency
             enriched.append(row_copy)
@@ -2147,48 +2169,125 @@ class SQLQueryExecutor:
         header_data: Dict[str, Any]
     ) -> Dict[str, Dict[str, Any]]:
         """
-        Create field mappings for spreadsheet data directly from column headers.
+        Create field mappings for spreadsheet data from ACTUAL database field names.
 
-        Instead of using hardcoded patterns, this method:
-        1. Uses column_headers from header_data if available
-        2. Infers data types from sample values
-        3. Lets the LLM understand column semantics from the names directly
+        IMPORTANT: The actual database fields (sample_item keys) may differ from
+        original column headers due to normalization during extraction:
+        - StockQuantity -> quantity
+        - ProductName -> description
+        - Price -> amount
+
+        This method uses the ACTUAL database field names (from sample_item) as keys,
+        and includes original_column for LLM context about user's terminology.
 
         Args:
-            sample_item: First row of spreadsheet data (with actual values)
-            header_data: Header metadata containing column_headers list
+            sample_item: First row of spreadsheet data (with ACTUAL database field names)
+            header_data: Header metadata containing original column_headers list
 
         Returns:
-            Field mappings with actual column names as keys
+            Field mappings with ACTUAL database field names as keys
         """
         field_mappings = {}
 
-        # Get column names from header_data or sample_item keys
-        column_headers = header_data.get('column_headers', [])
-        if not column_headers:
-            column_headers = [k for k in sample_item.keys() if k != 'row_number']
+        # Get original column headers for LLM context (user may refer to these)
+        original_headers = header_data.get('column_headers', [])
 
-        for col_name in column_headers:
+        # CRITICAL: Use ACTUAL database field names from sample_item, not original headers
+        # The sample_item has the normalized field names that exist in the database
+        actual_db_fields = [k for k in sample_item.keys() if k != 'row_number']
+
+        # Build a mapping from original headers to actual fields for context
+        # This helps LLM understand "StockQuantity" -> "quantity"
+        original_to_actual = {}
+        if original_headers:
+            # Try to match original headers to actual fields by common patterns
+            for orig in original_headers:
+                orig_lower = orig.lower().replace('_', '').replace(' ', '')
+                for actual in actual_db_fields:
+                    actual_lower = actual.lower()
+                    # Check if original contains actual or vice versa
+                    if actual_lower in orig_lower or orig_lower in actual_lower:
+                        original_to_actual[orig] = actual
+                        break
+                    # Common mappings
+                    if orig_lower in ['stockquantity', 'qty', 'stock'] and actual == 'quantity':
+                        original_to_actual[orig] = actual
+                        break
+                    if orig_lower in ['productname', 'itemname', 'name'] and actual == 'description':
+                        original_to_actual[orig] = actual
+                        break
+                    if orig_lower in ['price', 'cost', 'unitprice'] and actual == 'amount':
+                        original_to_actual[orig] = actual
+                        break
+
+        logger.info(f"[Field Mappings] Original headers: {original_headers}")
+        logger.info(f"[Field Mappings] Actual DB fields: {actual_db_fields}")
+        logger.info(f"[Field Mappings] Original->Actual mapping: {original_to_actual}")
+
+        # Create field mappings using ACTUAL database field names
+        for db_field in actual_db_fields:
             # Skip internal fields
-            if col_name in ['row_number', '_id']:
+            if db_field in ['row_number', '_id']:
                 continue
 
             # Get sample value to infer data type
-            sample_value = sample_item.get(col_name)
-
-            # Infer data type from sample value
+            sample_value = sample_item.get(db_field)
             data_type = self._infer_data_type(sample_value)
 
-            # Create field mapping - let LLM understand semantics from column name
-            field_mappings[col_name] = {
+            # Find original column name(s) that map to this field
+            original_names = [orig for orig, actual in original_to_actual.items() if actual == db_field]
+            if not original_names:
+                # No mapping found, try to find original by checking if it matches
+                for orig in original_headers:
+                    if orig.lower() == db_field.lower():
+                        original_names = [orig]
+                        break
+
+            # Create field mapping with ACTUAL database field name as key
+            field_mappings[db_field] = {
                 'data_type': data_type,
-                'source': 'line_item',  # Spreadsheet data is in line_items
-                'original_column': col_name,
-                # For numeric fields, suggest they can be aggregated
-                'aggregation': 'sum' if data_type == 'number' else 'group_by'
+                'source': 'line_item',
+                'db_field': db_field,  # CRITICAL: The actual field name in SQL
+                'original_column': original_names[0] if original_names else db_field,
+                'aliases': original_names,  # All original names that map to this field
+                'aggregation': 'sum' if data_type == 'number' else 'group_by',
+                # Add semantic hints based on field name
+                'semantic_type': self._infer_semantic_type(db_field, data_type)
             }
 
+        # Also add aliases for original column names pointing to actual fields
+        # This helps when LLM sees "StockQuantity" in user query
+        for orig, actual in original_to_actual.items():
+            if orig not in field_mappings and actual in field_mappings:
+                field_mappings[orig] = {
+                    **field_mappings[actual],
+                    'is_alias': True,
+                    'db_field': actual,  # Points to the actual database field
+                    'note': f"Alias for '{actual}' - use '{actual}' in SQL queries"
+                }
+
         return field_mappings
+
+    def _infer_semantic_type(self, field_name: str, data_type: str) -> str:
+        """Infer semantic type from field name."""
+        field_lower = field_name.lower()
+
+        if data_type == 'number':
+            if any(kw in field_lower for kw in ['amount', 'total', 'price', 'cost', 'value', 'sales']):
+                return 'amount'
+            if any(kw in field_lower for kw in ['quantity', 'qty', 'count', 'stock', 'units']):
+                return 'quantity'
+            return 'number'
+        elif data_type == 'datetime':
+            return 'date'
+        else:
+            if any(kw in field_lower for kw in ['name', 'description', 'product', 'item']):
+                return 'product'
+            if any(kw in field_lower for kw in ['category', 'type', 'group']):
+                return 'category'
+            if any(kw in field_lower for kw in ['id', 'sku', 'code', 'number']):
+                return 'identifier'
+            return 'text'
 
     def _infer_data_type(self, value: Any) -> str:
         """

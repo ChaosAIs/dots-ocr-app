@@ -2056,6 +2056,80 @@ Document section:
 
         return result
 
+    def _extract_header_footer_for_ner(
+        self,
+        content: str,
+        result: Dict[str, Any]
+    ) -> str:
+        """
+        Extract header and footer sections from content for NER processing.
+
+        For tabular documents (spreadsheets, CSV), table body cells contain
+        product names, quantities, etc. that SpaCy wrongly identifies as
+        person/organization entities. This method extracts only the text
+        above and below the table for entity extraction.
+
+        For non-tabular documents, returns the full content.
+
+        Args:
+            content: Full document text content
+            result: Extraction result with header_data containing schema hints
+
+        Returns:
+            Text content suitable for NER (header + footer for tabular, full for others)
+        """
+        import re
+
+        # Check if this is a tabular document based on column_headers
+        header_data = result.get("header_data", {})
+        column_headers = header_data.get("column_headers", [])
+        line_items = result.get("line_items", [])
+
+        # If no column headers or very few line items, treat as non-tabular
+        if not column_headers or len(line_items) < 3:
+            return content
+
+        # This is a tabular document - extract header and footer only
+        lines = content.split('\n')
+
+        # Find table boundaries
+        table_start = None
+        table_end = None
+
+        for i, line in enumerate(lines):
+            # Detect table row (markdown table with pipes)
+            is_table_row = '|' in line and len(line.split('|')) > 2
+            is_separator = bool(re.match(r'^\s*\|[\s\-:|]+\|\s*$', line))
+
+            if is_table_row and table_start is None:
+                table_start = i
+            elif is_table_row or is_separator:
+                table_end = i
+
+        # If no table found, return full content
+        if table_start is None:
+            return content
+
+        # Extract header (content above table) and footer (content below table)
+        header_section = '\n'.join(lines[:table_start]) if table_start > 0 else ""
+        footer_section = '\n'.join(lines[table_end + 1:]) if table_end and table_end < len(lines) - 1 else ""
+
+        # Also include the table header row (column names) for context
+        table_header = lines[table_start] if table_start < len(lines) else ""
+
+        combined = f"{header_section}\n\n{table_header}\n\n{footer_section}".strip()
+
+        # Log optimization
+        original_len = len(content)
+        optimized_len = len(combined)
+        if optimized_len < original_len:
+            logger.info(
+                f"[Extraction] NER optimization: reduced text from {original_len} to {optimized_len} chars "
+                f"(skipped table body with {len(line_items)} rows)"
+            )
+
+        return combined if combined else content
+
     def _enhance_with_entity_extraction(
         self,
         result: Dict[str, Any],
@@ -2069,6 +2143,11 @@ Document section:
         - customer_normalized: Normalized customer name for exact matching
         - all_entities_normalized: List of all normalized entity names
 
+        OPTIMIZATION: For tabular documents (spreadsheets, CSV), only process
+        header and footer sections to avoid extracting table cell values as entities.
+        Table body cells contain product names, quantities, etc. that should NOT
+        be extracted as person/organization entities.
+
         Args:
             result: Extraction result with header_data, line_items, summary_data
             content: Document text content for NER processing
@@ -2079,9 +2158,14 @@ Document section:
         try:
             header_data = result.get("header_data", {})
 
+            # OPTIMIZATION: For tabular documents, extract header/footer only
+            # Table body cells often contain product names that SpaCy wrongly
+            # identifies as person/organization entities
+            text_for_ner = self._extract_header_footer_for_ner(content, result)
+
             # Extract entities using all available methods
             entity_result = extract_all_entities(
-                text=content,
+                text=text_for_ner,
                 header_data=header_data,  # Use structured data as highest priority
                 use_spacy=True,
                 use_regex=True,

@@ -207,6 +207,7 @@ class VLLMLLMService(BaseLLMService):
         temperature: float = 0.2,
         num_ctx: int = 8192,
         num_predict: Optional[int] = None,
+        request_timeout: Optional[int] = None,
     ) -> BaseChatModel:
         """Get vLLM chat model for main inference."""
         kwargs = {
@@ -215,6 +216,8 @@ class VLLMLLMService(BaseLLMService):
             "model": self.model,
             "temperature": temperature,
             "extra_body": self._get_extra_body(),
+            "request_timeout": request_timeout or 120,  # Default 2 minutes, prevent hanging
+            "max_retries": 2,
         }
         if num_predict is not None:
             kwargs["max_tokens"] = num_predict

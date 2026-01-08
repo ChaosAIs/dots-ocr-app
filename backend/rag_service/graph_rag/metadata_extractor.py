@@ -100,15 +100,20 @@ class HierarchicalMetadataExtractor:
             if progress_callback:
                 progress_callback("Normalizing dates...")
 
-            all_text = "\n\n".join([c.get("page_content", "") for c in valid_chunks])
-            normalized_dates = find_and_normalize_dates(all_text)
+            # OPTIMIZATION: Use sampling for large documents to reduce processing
+            # Sample first 10% + middle 10% + last 10% of chunks for entity extraction
+            sampled_chunks = self._sample_chunks_for_extraction(valid_chunks)
+            sampled_text = "\n\n".join([c.get("page_content", "") for c in sampled_chunks])
+
+            # For date extraction, use sampled text (dates usually appear in header/footer)
+            normalized_dates = find_and_normalize_dates(sampled_text)
 
             # Entity extraction: Use NER + regex to extract and normalize entities
             if progress_callback:
                 progress_callback("Extracting entities...")
 
             entity_result = extract_all_entities(
-                text=all_text,
+                text=sampled_text,
                 header_data=None,  # Will be enhanced later if structured extraction runs
                 use_spacy=True,
                 use_regex=True,
@@ -189,6 +194,7 @@ class HierarchicalMetadataExtractor:
                 "processing_stats": {
                     "total_chunks": len(chunks),
                     "processed_chunks": len(valid_chunks),
+                    "sampled_chunks_for_ner": len(sampled_chunks),  # NEW: Track sampling
                     "dates_found": len(normalized_dates),
                     "entities_found": len(entity_result.organizations) + len(entity_result.persons),
                     "llm_calls": len(level1_summaries) + 2,  # batches + meta + structured
@@ -342,6 +348,79 @@ class HierarchicalMetadataExtractor:
         except Exception as e:
             logger.error(f"[Metadata] Failed to extract structured metadata: {e}")
             return self._create_fallback_metadata(source_name, meta_summary)
+
+    def _sample_chunks_for_extraction(
+        self,
+        chunks: List[Dict[str, Any]],
+        sample_ratio: float = 0.1,
+        min_chunks: int = 3,
+        max_chunks: int = 30,
+    ) -> List[Dict[str, Any]]:
+        """
+        Sample chunks for entity/date extraction to reduce processing time.
+
+        Strategy: Take first 10% + sampled middle 10% + last 10% of chunks.
+        This captures:
+        - Header information (first chunks)
+        - Representative content (middle samples)
+        - Footer/summary information (last chunks)
+
+        For small documents (< 10 chunks), returns all chunks.
+
+        Args:
+            chunks: All valid chunks from the document
+            sample_ratio: Ratio of chunks to sample from each section (default 10%)
+            min_chunks: Minimum chunks to return (for very small docs)
+            max_chunks: Maximum chunks to return (cap for very large docs)
+
+        Returns:
+            Sampled list of chunks for entity extraction
+        """
+        total = len(chunks)
+
+        # For small documents, use all chunks
+        if total <= min_chunks * 3:
+            logger.debug(f"[Metadata] Using all {total} chunks (small document)")
+            return chunks
+
+        # Calculate section sizes
+        section_size = max(1, int(total * sample_ratio))
+
+        # First section (header area)
+        first_section = chunks[:section_size]
+
+        # Last section (footer area)
+        last_section = chunks[-section_size:]
+
+        # Middle section (sample evenly from the middle)
+        middle_start = section_size
+        middle_end = total - section_size
+        middle_count = min(section_size, middle_end - middle_start)
+
+        if middle_count > 0 and middle_end > middle_start:
+            # Sample evenly from middle
+            step = (middle_end - middle_start) // middle_count
+            step = max(1, step)
+            middle_indices = list(range(middle_start, middle_end, step))[:middle_count]
+            middle_section = [chunks[i] for i in middle_indices]
+        else:
+            middle_section = []
+
+        # Combine and cap at max_chunks
+        sampled = first_section + middle_section + last_section
+        if len(sampled) > max_chunks:
+            # Prioritize first and last, reduce middle
+            first_cap = max_chunks // 3
+            last_cap = max_chunks // 3
+            middle_cap = max_chunks - first_cap - last_cap
+            sampled = first_section[:first_cap] + middle_section[:middle_cap] + last_section[-last_cap:]
+
+        logger.info(
+            f"[Metadata] Chunk sampling: {total} → {len(sampled)} chunks "
+            f"(first={len(first_section)}, middle={len(middle_section)}, last={len(last_section)})"
+        )
+
+        return sampled
 
     def _create_empty_metadata(self, source_name: str) -> Dict[str, Any]:
         """Create empty metadata for documents with no valid chunks."""

@@ -506,6 +506,89 @@ def extract_entities_from_header_data(header_data: Dict[str, Any]) -> EntityExtr
 # COMBINED EXTRACTION
 # ============================================================================
 
+def _deduplicate_entities_optimized(
+    entities: List[ExtractedEntity],
+    entity_type: str = "organization"
+) -> Tuple[List[ExtractedEntity], List[str]]:
+    """
+    Deduplicate entities using exact-match-first strategy.
+
+    This is an O(n + groups²) optimization over naive O(n²) fuzzy matching:
+    1. Group entities by exact normalized name (O(n))
+    2. Only fuzzy match between different groups (O(groups²))
+
+    For documents with many repeated entities, this significantly reduces comparisons.
+
+    Args:
+        entities: List of extracted entities (may have duplicates)
+        entity_type: Type for logging ("organization" or "person")
+
+    Returns:
+        Tuple of (deduplicated entities, normalized names list)
+    """
+    if not entities:
+        return [], []
+
+    # Step 1: Group by exact normalized name (O(n))
+    groups: Dict[str, List[ExtractedEntity]] = {}
+    for entity in entities:
+        key = entity.normalized_name.lower()
+        if key not in groups:
+            groups[key] = []
+        groups[key].append(entity)
+
+    # Step 2: For each group, keep the highest confidence entity
+    representatives: List[ExtractedEntity] = []
+    for key, group in groups.items():
+        # Sort by confidence and take the best one
+        group.sort(key=lambda e: e.confidence, reverse=True)
+        representatives.append(group[0])
+
+    # Step 3: Fuzzy match between groups only if we have fuzzy matcher
+    # This is O(groups²) which is much smaller than O(n²)
+    fuzzy_ratio = _get_fuzzy_matcher()
+    if fuzzy_ratio and len(representatives) > 1:
+        # Track which entities to merge
+        merged_indices: Set[int] = set()
+        final_entities: List[ExtractedEntity] = []
+
+        for i, entity_i in enumerate(representatives):
+            if i in merged_indices:
+                continue
+
+            # Check for fuzzy matches with remaining entities
+            for j in range(i + 1, len(representatives)):
+                if j in merged_indices:
+                    continue
+
+                entity_j = representatives[j]
+                score = fuzzy_ratio(entity_i.normalized_name, entity_j.normalized_name)
+
+                if score >= FUZZY_MATCH_THRESHOLD:
+                    # Merge j into i (keep higher confidence)
+                    merged_indices.add(j)
+                    if entity_j.confidence > entity_i.confidence:
+                        entity_i = entity_j
+
+            final_entities.append(entity_i)
+
+        representatives = final_entities
+
+    # Build normalized names list
+    normalized_names = [e.normalized_name for e in representatives]
+
+    # Log optimization stats
+    original_count = len(entities)
+    final_count = len(representatives)
+    if original_count > final_count:
+        logger.debug(
+            f"[EntityExtractor] Dedup {entity_type}: {original_count} → {final_count} "
+            f"({len(groups)} unique groups)"
+        )
+
+    return representatives, normalized_names
+
+
 def extract_all_entities(
     text: str = None,
     header_data: Dict[str, Any] = None,
@@ -520,6 +603,8 @@ def extract_all_entities(
     2. SpaCy NER - 0.85 confidence
     3. Regex patterns - 0.70 confidence
 
+    OPTIMIZATION: Uses exact-match-first deduplication to reduce O(n²) to O(groups²)
+
     Args:
         text: Document text content
         header_data: Structured header data from extraction
@@ -529,52 +614,64 @@ def extract_all_entities(
     Returns:
         Merged EntityExtractionResult with deduplicated entities
     """
-    result = EntityExtractionResult()
-    seen_orgs: Set[str] = set()
-    seen_persons: Set[str] = set()
+    # Collect all entities from all sources first
+    all_orgs: List[ExtractedEntity] = []
+    all_persons: List[ExtractedEntity] = []
+    all_products: List[ExtractedEntity] = []
+    all_locations: List[ExtractedEntity] = []
+    primary_vendor = None
+    primary_customer = None
 
-    def merge_entities(source_result: EntityExtractionResult):
-        """Merge entities from source into result, avoiding duplicates."""
-        for entity in source_result.organizations:
-            if entity.normalized_name not in seen_orgs:
-                seen_orgs.add(entity.normalized_name)
-                result.organizations.append(entity)
-                result.organizations_normalized.append(entity.normalized_name)
+    def collect_entities(source_result: EntityExtractionResult):
+        """Collect entities from source for batch deduplication."""
+        nonlocal primary_vendor, primary_customer
 
-        for entity in source_result.persons:
-            if entity.normalized_name not in seen_persons:
-                seen_persons.add(entity.normalized_name)
-                result.persons.append(entity)
-                result.persons_normalized.append(entity.normalized_name)
-
-        result.products.extend(source_result.products)
-        result.locations.extend(source_result.locations)
+        all_orgs.extend(source_result.organizations)
+        all_persons.extend(source_result.persons)
+        all_products.extend(source_result.products)
+        all_locations.extend(source_result.locations)
 
         # Set primary vendor/customer from first source that has them
-        if result.primary_vendor is None and source_result.primary_vendor:
-            result.primary_vendor = source_result.primary_vendor
-        if result.primary_customer is None and source_result.primary_customer:
-            result.primary_customer = source_result.primary_customer
+        if primary_vendor is None and source_result.primary_vendor:
+            primary_vendor = source_result.primary_vendor
+        if primary_customer is None and source_result.primary_customer:
+            primary_customer = source_result.primary_customer
 
     # Priority 1: Header data (highest confidence)
     if header_data:
         header_result = extract_entities_from_header_data(header_data)
-        merge_entities(header_result)
+        collect_entities(header_result)
         logger.debug(f"[EntityExtractor] Header data: {len(header_result.organizations)} orgs")
 
     # Priority 2: SpaCy NER
     if use_spacy and text:
         spacy_result = extract_entities_with_spacy(text)
-        merge_entities(spacy_result)
+        collect_entities(spacy_result)
 
     # Priority 3: Regex patterns
     if use_regex and text:
         regex_result = extract_entities_with_regex(text)
-        merge_entities(regex_result)
+        collect_entities(regex_result)
+
+    # OPTIMIZATION: Batch deduplicate using exact-match-first strategy
+    # This is O(n + groups²) instead of O(n²)
+    result = EntityExtractionResult()
+    result.organizations, result.organizations_normalized = _deduplicate_entities_optimized(
+        all_orgs, "organization"
+    )
+    result.persons, result.persons_normalized = _deduplicate_entities_optimized(
+        all_persons, "person"
+    )
+    result.products = all_products  # Products typically don't need dedup
+    result.locations = all_locations  # Locations typically don't need dedup
 
     # Sort by confidence (highest first)
     result.organizations.sort(key=lambda e: e.confidence, reverse=True)
     result.persons.sort(key=lambda e: e.confidence, reverse=True)
+
+    # Set primary vendor/customer
+    result.primary_vendor = primary_vendor
+    result.primary_customer = primary_customer
 
     # Infer primary vendor/customer if not set
     if result.primary_vendor is None and result.organizations:

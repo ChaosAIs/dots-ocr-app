@@ -384,10 +384,13 @@ RESPOND WITH JSON ONLY (no markdown):
     def _parse_llm_result(self, result: Dict[str, Any], original_message: str) -> QueryAnalysisResult:
         """Parse LLM result dict into QueryAnalysisResult."""
 
-        resolved_message = result.get("resolved_message", original_message)
+        resolved_message_raw = result.get("resolved_message", original_message)
 
-        # Always apply strip_cache_control_words as safety fallback
-        clean_cache_key = strip_cache_control_words(resolved_message)
+        # Always apply strip_cache_control_words to resolved_message as safety fallback
+        # This ensures cache hint phrases like "latest data", "fresh data", "no cache"
+        # are removed from the query before it's passed to SQL generation or other agents
+        resolved_message = strip_cache_control_words(resolved_message_raw)
+        clean_cache_key = resolved_message  # Cache key is same as cleaned resolved message
 
         # Parse intent
         intent_str = result.get("intent", "document_search").lower()
@@ -446,15 +449,16 @@ RESPOND WITH JSON ONLY (no markdown):
         # Classify intent
         intent = self._classify_intent_heuristic(message_lower)
 
-        # Clean cache key
-        clean_cache_key = strip_cache_control_words(message)
+        # Clean resolved message and cache key (remove cache control words)
+        resolved_message = strip_cache_control_words(message)
+        clean_cache_key = resolved_message  # Cache key is same as cleaned resolved message
 
         # Extract time range
         time_range = self._extract_time_range(message_lower)
 
         return QueryAnalysisResult(
             original_message=message,
-            resolved_message=message,
+            resolved_message=resolved_message,
             cache_key=clean_cache_key,
             is_cacheable=not self._is_greeting_heuristic(message_lower),
             bypass_cache=bypass_cache,
@@ -464,7 +468,7 @@ RESPOND WITH JSON ONLY (no markdown):
             intent=intent,
             intent_confidence=0.7,
             requires_extracted_data=intent in [QueryIntent.DATA_ANALYTICS, QueryIntent.HYBRID],
-            enhanced_query=message,
+            enhanced_query=resolved_message,
             entities=[],
             topics=topics,
             document_type_hints=doc_types,

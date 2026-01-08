@@ -20,6 +20,8 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 
+from .llm_result_formatter import LLMResultFormatter
+
 logger = logging.getLogger(__name__)
 
 
@@ -957,6 +959,11 @@ Write the summary header in markdown format:"""
 ## Available Data Fields (JSON Schema):
 {field_schema}
 
+**IMPORTANT about field names:**
+- Each field has "field_name" (user's terminology, e.g., "StockQuantity") and "db_field" (actual database name, e.g., "quantity")
+- User may refer to fields by original names, but always use "db_field" in your response when referring to actual fields
+- Match user terms to the appropriate db_field in your analysis
+
 ## Task:
 Analyze the query and identify:
 1. What groupings/dimensions does the user want? (e.g., by customer, by year, by category)
@@ -1133,24 +1140,30 @@ Respond with JSON only:"""
 ## Available Data Fields:
 {field_schema}
 
+**CRITICAL: Use db_field values in actual_field!**
+- The schema shows "field_name" (user's original column name) and "db_field" (actual database field)
+- In your response, ALWAYS use the "db_field" value for "actual_field"
+- Example: If user says "stock" and schema has {{"field_name": "StockQuantity", "db_field": "quantity"}}, use "quantity" as actual_field
+
 ## Task:
-Map each requested grouping/aggregation to the EXACT field name from the schema.
+Map each requested grouping/aggregation to the EXACT db_field from the schema.
 
 For example:
-- "customer" might map to "Customer Name" field
+- "customer" might map to "Customer Name" field -> use the db_field value
 - "year" is a time grouping extracted from a date field
-- "amount" might map to "Total Sales" or "Total Amount"
+- "stock" maps to "quantity" (the db_field, not the original "StockQuantity")
+- "amount" might map to "amount" db_field
 
 ## Response Format (JSON only):
 {{
     "grouping_fields": [
-        {{"requested": "customer", "actual_field": "Customer Name", "is_time_grouping": false}},
-        {{"requested": "year", "actual_field": "Purchase Date", "is_time_grouping": true, "granularity": "yearly"}}
+        {{"requested": "customer", "actual_field": "vendor_name", "is_time_grouping": false}},
+        {{"requested": "year", "actual_field": "transaction_date", "is_time_grouping": true, "granularity": "yearly"}}
     ],
-    "aggregation_field": {{"requested": "amount", "actual_field": "Total Sales"}},
+    "aggregation_field": {{"requested": "stock", "actual_field": "quantity"}},
     "aggregation_type": "{aggregation_type}",
-    "entity_field": {{"requested": "{entity_field}", "actual_field": "Customer Name"}},  // Map entity field for min/max
-    "date_field": "Purchase Date",  // The date field to use for time groupings
+    "entity_field": {{"requested": "{entity_field}", "actual_field": "description"}},  // Map entity field for min/max
+    "date_field": "transaction_date",  // The date field to use for time groupings (use db_field!)
     "success": true,
     "unmapped_fields": []  // Any fields that couldn't be mapped
 }}
@@ -1180,20 +1193,36 @@ You MUST use the EXACT field names from the Data Schema above!
 - DO NOT use generic names like 'amount', 'description', 'date', 'quantity'
 - USE the actual field names exactly as shown in the schema
 
-## Data Structure:
-The documents_data table has THREE separate JSONB columns:
-- header_data (JSONB object): Document-level fields (vendor_name, invoice_date, etc.)
-- summary_data (JSONB object): Aggregate totals (subtotal, tax_amount, total_amount, etc.)
-- line_items: Individual line items stored in documents_data_line_items table
+## Data Structure (CRITICAL - USE EXACT COLUMN NAMES):
+
+### Table: documents_data (alias: dd)
+- id (UUID): Primary key
+- document_id (UUID): FK to documents table
+- header_data (JSONB): Document-level fields (vendor_name, invoice_date, etc.)
+- summary_data (JSONB): Aggregate totals (subtotal, tax_amount, total_amount, etc.)
+
+### Table: documents_data_line_items (alias: li)
+- id (UUID): Primary key
+- documents_data_id (UUID): FK to dd.id
+- line_number (INTEGER): Position in document
+- data (JSONB): **THE LINE ITEM DATA** - NOT "line_items"!
+
+**CRITICAL FIX FOR "column line_items does not exist"**:
+- WRONG: `li.line_items` - THIS COLUMN DOES NOT EXIST!
+- CORRECT: `li.data` - This is the actual JSONB column for line items
+- Each row in documents_data_line_items is ONE line item (already normalized)
+- Do NOT use jsonb_array_elements() - the data is already split into rows
+- Alias as `li.data as item` in the CTE, then use `item->>'field_name'`
 
 Check the 'source' and 'access_pattern' in the field schema!
-- source='header': Access via header_data->>'field_name'
-- source='summary': Access via summary_data->>'field_name'
-- source='line_item': Access via item->>'field_name' after JOIN with documents_data_line_items
+- source='header': Access via `header_data->>'field_name'`
+- source='summary': Access via `summary_data->>'field_name'`
+- source='line_item': Access via `item->>'field_name'` after aliasing `li.data as item`
 
 ## Common Error Fixes:
-1. "column X does not exist" in CTE: The 'item' column is only available AFTER jsonb_array_elements() runs. You CANNOT use item->>'...' in WHERE clause inside the CTE (WITH ... AS block). Move such filters to the outer SELECT.
-2. "column must appear in GROUP BY": Add the column to GROUP BY clause.
+1. **"column line_items does not exist"** → Use `li.data` not `li.line_items`! The column is named `data`.
+2. **"column item does not exist" in CTE** → The 'item' alias is only available AFTER the CTE defines it. Move item->>'...' filters to the outer SELECT's WHERE clause.
+3. "column must appear in GROUP BY": Add the column to GROUP BY clause.
 3. **"invalid input syntax for type numeric"**:
    - CRITICAL: Check the data_type in the schema! The field being cast might be a STRING, not a number.
    - If error shows a value like "P000035", "SKU-001", etc., the field is a STRING - DO NOT cast to ::numeric
@@ -1270,10 +1299,14 @@ Respond with JSON only:"""
 
 ## CRITICAL RULES:
 
-### 1. Schema Adherence:
+### 1. Schema Adherence (MOST IMPORTANT):
 - Use ONLY fields listed in "Available Data Fields" above
+- **CRITICAL: Always use the "db_field" value (NOT "field_name") in SQL queries!**
+  - The schema shows both: field_name (user's terminology) and db_field (actual database field)
+  - User may say "StockQuantity" but the db_field is "quantity" - use "quantity" in SQL!
+  - Example: If schema shows {{"field_name": "StockQuantity", "db_field": "quantity"}}, use: item->>'quantity'
 - Data is normalized to canonical field names (description, quantity, amount, etc.)
-- Use the exact field names from the schema provided
+- Use the exact "access_pattern" shown in the schema for each field
 - For report_type="detail": Include ALL fields from the schema in SELECT
 - For min/max queries (finding record with min or max value): Include ALL fields from the schema in SELECT
 - Never invent or assume fields not in the schema
@@ -2068,8 +2101,26 @@ Respond with JSON only:"""
         logger.info("[SQL Generator] Generating SQL with verified parameters...")
 
         # Prepare grouping fields description
+        # Normalize grouping_fields to ensure each element is a dict
+        raw_grouping_fields = field_mapping_result.get('grouping_fields', [])
+        grouping_fields = []
+        for gf in raw_grouping_fields:
+            if isinstance(gf, dict):
+                grouping_fields.append(gf)
+            elif isinstance(gf, str):
+                # Convert string to dict format
+                grouping_fields.append({'actual_field': gf, 'requested': gf, 'is_time_grouping': False})
+            elif isinstance(gf, list):
+                # Handle nested list - flatten and convert each element
+                for item in gf:
+                    if isinstance(item, dict):
+                        grouping_fields.append(item)
+                    elif isinstance(item, str):
+                        grouping_fields.append({'actual_field': item, 'requested': item, 'is_time_grouping': False})
+            # Skip other types
+
         grouping_fields_desc = []
-        for gf in field_mapping_result.get('grouping_fields', []):
+        for gf in grouping_fields:
             if gf.get('is_time_grouping'):
                 grouping_fields_desc.append(f"{gf.get('granularity', 'yearly')} (from {gf.get('actual_field', 'date')})")
             else:
@@ -2077,7 +2128,7 @@ Respond with JSON only:"""
 
         # Determine time grouping info
         time_grouping_info = "None"
-        for gf in field_mapping_result.get('grouping_fields', []):
+        for gf in grouping_fields:
             if gf.get('is_time_grouping'):
                 time_grouping_info = f"{gf.get('granularity', 'yearly')} from field '{gf.get('actual_field')}'"
                 break
@@ -2095,8 +2146,27 @@ Respond with JSON only:"""
         # Determine the source of the date field (header vs line_item)
         date_field = field_mapping_result.get('date_field', 'transaction_date')
         date_field_source = 'header'  # Default to header since dates are typically document-level
-        if date_field in field_mappings:
-            date_field_source = field_mappings[date_field].get('source', 'header')
+
+        # Check if grouped or legacy format and find date field source
+        is_grouped_format = any(
+            field_mappings.get(k) for k in ['header_mappings', 'line_item_mappings', 'summary_mappings']
+        )
+        if is_grouped_format:
+            # Search for date_field in grouped format
+            for mapping_key, source in [('header_mappings', 'header'), ('line_item_mappings', 'line_item'), ('summary_mappings', 'summary')]:
+                mapping_list = field_mappings.get(mapping_key, [])
+                if isinstance(mapping_list, list):
+                    for item in mapping_list:
+                        if isinstance(item, dict):
+                            canonical = item.get('canonical', item.get('field_name', ''))
+                            if canonical == date_field:
+                                date_field_source = source
+                                break
+        elif date_field in field_mappings:
+            # Legacy flat format
+            mapping = field_mappings[date_field]
+            if isinstance(mapping, dict):
+                date_field_source = mapping.get('source', 'header')
 
         # Safely extract aggregation field (handle None values)
         agg_field_mapping = field_mapping_result.get('aggregation_field') or {}
@@ -2315,14 +2385,55 @@ Respond with JSON only:"""
         """Format grouped field mappings (new format) as JSON for LLM prompts.
 
         Converts grouped format to a flat schema list with proper source annotations.
+        Handles various input formats defensively:
+        - Dict with 'canonical' key (expected)
+        - List items [field_name, field_info]
+        - String items (just field name)
         """
         schema_list = []
 
+        def _normalize_mapping(item: Any, source: str) -> Optional[Dict]:
+            """Normalize a mapping item to the expected format."""
+            if isinstance(item, dict):
+                # Standard format with 'canonical' key
+                canonical = item.get('canonical', item.get('field_name', item.get('name', '')))
+                if canonical:
+                    return {
+                        'canonical': canonical,
+                        'data_type': item.get('data_type', 'string'),
+                        'patterns': item.get('patterns', [])
+                    }
+            elif isinstance(item, list) and len(item) >= 1:
+                # List format: [field_name] or [field_name, field_info_dict]
+                canonical = item[0] if isinstance(item[0], str) else ''
+                field_info = item[1] if len(item) > 1 and isinstance(item[1], dict) else {}
+                if canonical:
+                    return {
+                        'canonical': canonical,
+                        'data_type': field_info.get('data_type', 'string') if isinstance(field_info, dict) else 'string',
+                        'patterns': field_info.get('patterns', []) if isinstance(field_info, dict) else []
+                    }
+            elif isinstance(item, str) and item:
+                # Simple string format
+                return {
+                    'canonical': item,
+                    'data_type': 'string',
+                    'patterns': []
+                }
+            logger.warning(f"[SQL Generator] Could not normalize mapping item: {type(item)} - {item}")
+            return None
+
         # Process header mappings
-        for mapping in grouped_mappings.get('header_mappings', []):
-            canonical = mapping.get('canonical', '')
-            if not canonical:
+        header_list = grouped_mappings.get('header_mappings', [])
+        if not isinstance(header_list, list):
+            logger.warning(f"[SQL Generator] header_mappings is not a list: {type(header_list)}")
+            header_list = []
+
+        for item in header_list:
+            mapping = _normalize_mapping(item, 'header')
+            if not mapping:
                 continue
+            canonical = mapping['canonical']
             schema_list.append({
                 "field_name": canonical,
                 "data_type": mapping.get('data_type', 'string'),
@@ -2335,10 +2446,16 @@ Respond with JSON only:"""
             })
 
         # Process line item mappings
-        for mapping in grouped_mappings.get('line_item_mappings', []):
-            canonical = mapping.get('canonical', '')
-            if not canonical:
+        line_item_list = grouped_mappings.get('line_item_mappings', [])
+        if not isinstance(line_item_list, list):
+            logger.warning(f"[SQL Generator] line_item_mappings is not a list: {type(line_item_list)}")
+            line_item_list = []
+
+        for item in line_item_list:
+            mapping = _normalize_mapping(item, 'line_item')
+            if not mapping:
                 continue
+            canonical = mapping['canonical']
             data_type = mapping.get('data_type', 'string')
             schema_list.append({
                 "field_name": canonical,
@@ -2352,10 +2469,16 @@ Respond with JSON only:"""
             })
 
         # Process summary mappings
-        for mapping in grouped_mappings.get('summary_mappings', []):
-            canonical = mapping.get('canonical', '')
-            if not canonical:
+        summary_list = grouped_mappings.get('summary_mappings', [])
+        if not isinstance(summary_list, list):
+            logger.warning(f"[SQL Generator] summary_mappings is not a list: {type(summary_list)}")
+            summary_list = []
+
+        for item in summary_list:
+            mapping = _normalize_mapping(item, 'summary')
+            if not mapping:
                 continue
+            canonical = mapping['canonical']
             schema_list.append({
                 "field_name": canonical,
                 "data_type": mapping.get('data_type', 'number'),
@@ -2368,31 +2491,62 @@ Respond with JSON only:"""
             })
 
         logger.info(f"[SQL Generator] Formatted {len(schema_list)} fields from grouped mappings "
-                   f"(header={len(grouped_mappings.get('header_mappings', []))}, "
-                   f"line_item={len(grouped_mappings.get('line_item_mappings', []))}, "
-                   f"summary={len(grouped_mappings.get('summary_mappings', []))})")
+                   f"(header={len(header_list)}, "
+                   f"line_item={len(line_item_list)}, "
+                   f"summary={len(summary_list)})")
 
         return json.dumps(schema_list, indent=2)
 
     def _format_legacy_field_schema_json(self, field_mappings: Dict[str, Dict[str, Any]]) -> str:
-        """Format legacy flat field mappings as JSON for LLM prompts."""
+        """Format legacy flat field mappings as JSON for LLM prompts.
+
+        IMPORTANT: For spreadsheet data, original column names are normalized during
+        extraction (e.g., StockQuantity -> quantity). This method handles:
+        - db_field: The ACTUAL field name in the database (always use this in SQL!)
+        - field_name: The name in the mapping (could be original or db field)
+        - original_column: The original column name from the spreadsheet
+        - is_alias: If true, this is an alias entry pointing to an actual db_field
+        """
         schema_list = []
+        seen_db_fields = set()  # Track db_fields to avoid duplicates
+
         for field_name, mapping in field_mappings.items():
             # Skip grouped format keys if they somehow get here
             if field_name in ['header_mappings', 'line_item_mappings', 'summary_mappings']:
                 continue
 
+            # Get the actual database field name (may differ from field_name for aliases)
+            db_field = mapping.get('db_field', field_name)
+
+            # Skip duplicate entries for the same db_field (aliases point to same field)
+            if mapping.get('is_alias') and db_field in seen_db_fields:
+                continue
+
+            seen_db_fields.add(db_field)
+
             source = mapping.get('source', 'line_item')  # Default to line_item for backwards compatibility
-            schema_list.append({
+
+            # Build the schema entry with both names for LLM understanding
+            schema_entry = {
                 "field_name": field_name,
+                "db_field": db_field,  # CRITICAL: LLM must use this in SQL queries!
                 "data_type": mapping.get('data_type', 'string'),
                 "semantic_type": mapping.get('semantic_type', 'unknown'),
                 "source": source,
-                "access_pattern": self._get_access_pattern(field_name, source),
+                "access_pattern": self._get_access_pattern(db_field, source),  # Use db_field for access
                 "aggregation": mapping.get('aggregation', 'none'),
                 "description": mapping.get('description', ''),
                 "aliases": mapping.get('aliases', [])
-            })
+            }
+
+            # Include original column name if different (helps LLM understand user intent)
+            original_column = mapping.get('original_column')
+            if original_column and original_column != db_field:
+                schema_entry["original_column"] = original_column
+                schema_entry["note"] = f"User may refer to this as '{original_column}', but use '{db_field}' in SQL"
+
+            schema_list.append(schema_entry)
+
         return json.dumps(schema_list, indent=2)
 
     def _get_access_pattern(self, field_name: str, source: str) -> str:
@@ -2403,6 +2557,49 @@ Respond with JSON only:"""
             return f"summary_data->>'{field_name}'"
         else:
             return f"item->>'{field_name}'"
+
+    def _iterate_field_mappings(self, field_mappings: Dict[str, Any]):
+        """
+        Iterate over field mappings in a format-agnostic way.
+
+        Supports two formats:
+        1. NEW GROUPED FORMAT: {'header_mappings': [...], 'line_item_mappings': [...], ...}
+        2. LEGACY FLAT FORMAT: {'field_name': {'data_type': '...', ...}}
+
+        Yields:
+            Tuple of (field_name, mapping_dict) where mapping_dict always has 'source' key
+        """
+        # Check if grouped format
+        is_grouped_format = any(
+            field_mappings.get(k) for k in ['header_mappings', 'line_item_mappings', 'summary_mappings']
+        )
+
+        if is_grouped_format:
+            source_map = {
+                'header_mappings': 'header',
+                'line_item_mappings': 'line_item',
+                'summary_mappings': 'summary'
+            }
+            for mapping_key, source in source_map.items():
+                mapping_list = field_mappings.get(mapping_key, [])
+                if not isinstance(mapping_list, list):
+                    continue
+                for item in mapping_list:
+                    if isinstance(item, dict):
+                        field_name = item.get('canonical', item.get('field_name', ''))
+                        if field_name:
+                            # Ensure 'source' is in the mapping
+                            mapping_with_source = {**item, 'source': source}
+                            yield (field_name, mapping_with_source)
+                    elif isinstance(item, str):
+                        yield (item, {'source': source, 'data_type': 'string'})
+        else:
+            # Legacy flat format
+            for field_name, mapping in field_mappings.items():
+                if field_name in ['header_mappings', 'line_item_mappings', 'summary_mappings']:
+                    continue  # Skip if somehow grouped keys appear
+                if isinstance(mapping, dict):
+                    yield (field_name, mapping)
 
     def _infer_semantic_type_from_canonical(self, canonical: str, source: str) -> str:
         """Infer semantic type from canonical field name and source."""
@@ -2476,18 +2673,58 @@ Respond with JSON only:"""
             return None
 
     def _format_field_schema(self, field_mappings: Dict[str, Dict[str, Any]]) -> str:
-        """Format field mappings as a readable schema description."""
-        lines = []
-        for field_name, mapping in field_mappings.items():
-            semantic_type = mapping.get('semantic_type', 'unknown')
-            data_type = mapping.get('data_type', 'string')
-            aggregation = mapping.get('aggregation', 'none')
-            description = mapping.get('description', '')
+        """Format field mappings as a readable schema description.
 
-            lines.append(
-                f"- {field_name}: {data_type} ({semantic_type})"
-                f" [aggregation: {aggregation}] - {description}"
-            )
+        Supports two formats:
+        1. NEW GROUPED FORMAT: {'header_mappings': [...], 'line_item_mappings': [...], ...}
+        2. LEGACY FLAT FORMAT: {'field_name': {'data_type': '...', ...}}
+        """
+        lines = []
+
+        # Check if this is the new grouped format
+        is_grouped_format = any(
+            field_mappings.get(k) for k in ['header_mappings', 'line_item_mappings', 'summary_mappings']
+        )
+
+        if is_grouped_format:
+            # Handle grouped format
+            source_map = {
+                'header_mappings': 'header',
+                'line_item_mappings': 'line_item',
+                'summary_mappings': 'summary'
+            }
+            for mapping_key, source in source_map.items():
+                mapping_list = field_mappings.get(mapping_key, [])
+                if not isinstance(mapping_list, list):
+                    continue
+                for item in mapping_list:
+                    if isinstance(item, dict):
+                        field_name = item.get('canonical', item.get('field_name', 'unknown'))
+                        data_type = item.get('data_type', 'string')
+                        semantic_type = item.get('semantic_type', 'unknown')
+                        aggregation = item.get('aggregation', 'none')
+                        description = item.get('description', '')
+                        lines.append(
+                            f"- {field_name}: {data_type} ({semantic_type}) [source: {source}]"
+                            f" [aggregation: {aggregation}] - {description}"
+                        )
+                    elif isinstance(item, str):
+                        lines.append(f"- {item}: string (unknown) [source: {source}]")
+        else:
+            # Handle legacy flat format
+            for field_name, mapping in field_mappings.items():
+                if not isinstance(mapping, dict):
+                    # Skip non-dict mappings
+                    continue
+                semantic_type = mapping.get('semantic_type', 'unknown')
+                data_type = mapping.get('data_type', 'string')
+                aggregation = mapping.get('aggregation', 'none')
+                description = mapping.get('description', '')
+
+                lines.append(
+                    f"- {field_name}: {data_type} ({semantic_type})"
+                    f" [aggregation: {aggregation}] - {description}"
+                )
 
         return "\n".join(lines)
 
@@ -2546,6 +2783,12 @@ Respond with JSON only:"""
 
         if 'jsonb_array_elements' not in sql.lower():
             logger.info("[SQL Converter] No jsonb_array_elements found, skipping conversion")
+            # FIX: Check for undefined 'item' alias and replace with 'li.data'
+            # This handles cases where LLM generates SQL using item->>'field' without defining item
+            sql = self._fix_undefined_item_alias(sql)
+            # FIX: Check for 'FROM expanded_items' without CTE definition
+            # This handles cases where LLM references the CTE name from examples but doesn't define it
+            sql = self._fix_missing_expanded_items_cte(sql)
             return sql
 
         # Step 1: Replace jsonb_array_elements(dd.line_items) or jsonb_array_elements(line_items) with li.data as item
@@ -2682,6 +2925,101 @@ Respond with JSON only:"""
         logger.debug(f"[SQL Converter] Converted:\n{converted[:200]}...")
 
         return converted
+
+    def _fix_undefined_item_alias(self, sql: str) -> str:
+        """
+        Fix SQL that uses item->>'field' without defining the 'item' alias.
+
+        This is a common LLM error where it generates:
+            SELECT SUM((item->>'quantity')::numeric) FROM documents_data dd
+            JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+
+        But 'item' is never defined. The correct SQL should use 'li.data' directly:
+            SELECT SUM((li.data->>'quantity')::numeric) FROM documents_data dd
+            JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+
+        Args:
+            sql: SQL query that may have undefined 'item' references
+
+        Returns:
+            Fixed SQL query with 'item' replaced by 'li.data'
+        """
+        # Check if 'item' is used but not defined
+        has_item_ref = re.search(r'\bitem\s*->>', sql, re.IGNORECASE)
+        has_item_def = re.search(r'\bas\s+item\b', sql, re.IGNORECASE)
+
+        if has_item_ref and not has_item_def:
+            # 'item' is referenced but never defined - replace with li.data
+            logger.info("[SQL Converter] Fixing undefined 'item' alias - replacing with 'li.data'")
+
+            # Replace all item->>' with li.data->>'
+            fixed = re.sub(r'\bitem\s*->>\'', "li.data->>'", sql)
+            fixed = re.sub(r'\bitem\s*->\'', "li.data->'", fixed)
+            fixed = re.sub(r'\(item->>', "(li.data->>'", fixed)
+            fixed = re.sub(r'\(item->', "(li.data->", fixed)
+
+            logger.debug(f"[SQL Converter] Fixed undefined item alias:\n  Before: {sql[:200]}...\n  After: {fixed[:200]}...")
+            return fixed
+
+        return sql
+
+    def _fix_missing_expanded_items_cte(self, sql: str) -> str:
+        """
+        Fix SQL that references 'expanded_items' without defining the CTE.
+
+        This is a common LLM error where it copies the CTE name from prompt examples
+        but doesn't include the CTE definition:
+
+        Invalid:
+            SELECT SUM((li.data->>'quantity')::numeric) FROM expanded_items;
+
+        Fixed:
+            WITH expanded_items AS (
+                SELECT dd.document_id, dd.header_data, dd.summary_data, li.data as item
+                FROM documents_data dd
+                JOIN documents_data_line_items li ON li.documents_data_id = dd.id
+            )
+            SELECT SUM((item->>'quantity')::numeric) FROM expanded_items;
+
+        OR simpler direct query:
+            SELECT SUM((li.data->>'quantity')::numeric)
+            FROM documents_data dd
+            JOIN documents_data_line_items li ON li.documents_data_id = dd.id;
+
+        Args:
+            sql: SQL query that may reference expanded_items without CTE
+
+        Returns:
+            Fixed SQL query with proper table references
+        """
+        # Check if 'expanded_items' is referenced but CTE is not defined
+        has_expanded_items = re.search(r'\bFROM\s+expanded_items\b', sql, re.IGNORECASE)
+        has_cte_def = re.search(r'\bWITH\s+expanded_items\s+AS\b', sql, re.IGNORECASE)
+
+        if has_expanded_items and not has_cte_def:
+            logger.info("[SQL Converter] Fixing missing expanded_items CTE - converting to direct table query")
+
+            # Instead of adding the CTE, convert to direct table query
+            # This is simpler and less error-prone
+
+            # Replace 'FROM expanded_items' with the proper JOIN
+            fixed = re.sub(
+                r'\bFROM\s+expanded_items\b',
+                'FROM documents_data dd\n    JOIN documents_data_line_items li ON li.documents_data_id = dd.id',
+                sql,
+                flags=re.IGNORECASE
+            )
+
+            # Also fix any 'item->>' references to 'li.data->>' since we're not using the CTE
+            fixed = re.sub(r'\bitem\s*->>\'', "li.data->>'", fixed)
+            fixed = re.sub(r'\bitem\s*->\'', "li.data->'", fixed)
+            fixed = re.sub(r'\(item->>', "(li.data->>'", fixed)
+            fixed = re.sub(r'\(item->', "(li.data->", fixed)
+
+            logger.debug(f"[SQL Converter] Fixed missing CTE:\n  Before: {sql[:200]}...\n  After: {fixed[:200]}...")
+            return fixed
+
+        return sql
 
     def _fix_union_syntax(self, sql: str) -> str:
         """
@@ -3049,7 +3387,7 @@ Respond with JSON only:"""
         amount_field_source = 'line_item'  # Default to line_item for amounts
         category_fields = []
 
-        for field_name, mapping in field_mappings.items():
+        for field_name, mapping in self._iterate_field_mappings(field_mappings):
             sem_type = mapping.get('semantic_type', '')
             source = mapping.get('source', 'line_item')
             if sem_type == 'date' and not date_field:
@@ -3302,7 +3640,7 @@ FROM expanded_items
         line_item_fields = []
         summary_fields = []
 
-        for field_name, mapping in field_mappings.items():
+        for field_name, mapping in self._iterate_field_mappings(field_mappings):
             source = mapping.get('source', 'line_item')
             if source == 'header':
                 header_fields.append(field_name)
@@ -3378,7 +3716,7 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
 
     def _find_date_field(self, field_mappings: Dict[str, Dict[str, Any]]) -> Optional[str]:
         """Find the date field in field mappings."""
-        for field_name, mapping in field_mappings.items():
+        for field_name, mapping in self._iterate_field_mappings(field_mappings):
             if mapping.get('semantic_type') == 'date':
                 return field_name
         return None
@@ -3477,11 +3815,12 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
                     sql_explanation=sql_explanation
                 )
             else:
-                # SMALL RESULT SET: LLM processes full data
+                # SMALL RESULT SET: LLM processes full data using LLMResultFormatter
                 formatted_report = self._generate_small_result_report(
                     user_query=user_query,
                     query_results=query_results,
-                    evaluation=evaluation
+                    evaluation=evaluation,
+                    field_mappings=field_mappings
                 )
 
             return {
@@ -3584,44 +3923,49 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
         self,
         user_query: str,
         query_results: List[Dict[str, Any]],
-        evaluation: ContentSizeEvaluation
+        evaluation: ContentSizeEvaluation,
+        field_mappings: Optional[Dict[str, Dict[str, Any]]] = None
     ) -> str:
         """
-        Generate report for small result sets using full LLM processing.
+        Generate report for small result sets using LLMResultFormatter.
 
-        This is the original behavior - LLM processes the entire result set
-        and generates a formatted report.
+        Uses LLMResultFormatter for schema-aware, query-type-aware formatting
+        instead of hardcoded receipt/invoice templates.
 
         Args:
             user_query: Original user query
             query_results: Query results
             evaluation: Content size evaluation (contains pre-built markdown table)
+            field_mappings: Optional field schema for context
 
         Returns:
             Formatted report string
         """
+        # Use LLMResultFormatter for intelligent, schema-aware formatting
+        result_formatter = LLMResultFormatter(
+            llm_client=self.llm_client,
+            schema_service=self.schema_service
+        )
+
+        # Get the formatted markdown table from LLMResultFormatter
+        formatted_table = result_formatter.format_results(
+            query_results=query_results,
+            user_query=user_query,
+            field_mappings=field_mappings
+        )
+
+        # Now use LLM to generate a natural language summary based on the query and data
+        # This prompt is generic and does NOT assume receipt/invoice structure
+        actual_columns = list(query_results[0].keys()) if query_results else []
+        columns_list = ", ".join(actual_columns)
+
         # Detect if user wants detailed listing vs summary
         detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
                            'each', 'breakdown', 'itemized', 'every', 'specific']
         query_lower = user_query.lower()
         wants_details = any(keyword in query_lower for keyword in detail_keywords)
+        report_type = "detailed" if wants_details else "summary"
 
-        # Determine instruction based on user intent
-        if wants_details:
-            detail_instruction = "4. IMPORTANT: The user asked for details/list - you MUST include ALL individual items from the data table in your response. Show each item with its details. Do NOT just show a summary total."
-            report_type = "detailed"
-        else:
-            detail_instruction = "4. Be concise but complete - summarize the data appropriately"
-            report_type = "summary"
-
-        # Use the pre-built markdown table from evaluation
-        results_markdown = evaluation.markdown_table
-
-        # Get actual column names from the results to enforce schema adherence
-        actual_columns = list(query_results[0].keys()) if query_results else []
-        columns_list = ", ".join(actual_columns)
-
-        # Simple prompt with markdown-formatted data
         prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
@@ -3632,81 +3976,30 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
 
 ## SQL Query Results ({len(query_results)} rows):
 
-{results_markdown}
+{formatted_table}
 
-## CRITICAL - STRICT DATA ADHERENCE (MOST IMPORTANT RULE):
-**You MUST ONLY report on columns listed in "AVAILABLE COLUMNS" above!**
-- The AVAILABLE COLUMNS list shows ALL fields that exist - there are NO OTHER fields
-- Do NOT add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date", "Notes", "Last Purchase Date", "Last Sale Date"
-- If a field is not in AVAILABLE COLUMNS, it DOES NOT EXIST - NEVER mention it
-- Only use values you can actually see in the SQL Query Results table
-- For each product/item, ONLY show the columns that exist in the data
-
-## Instructions:
-1. Directly answer the user's question based on the data above
-2. If they asked for minimum/maximum values, clearly identify who has the min and max amounts for each year/grouping
-3. Format monetary amounts with $ and proper number formatting (e.g., $1,234.56)
-   - IMPORTANT: Only add $ to MONETARY fields (amounts, totals, prices, costs, averages of money)
-   - Do NOT add $ to COUNT fields like "total_receipts", "item_count", "num_records" - these are INTEGER counts, not money!
-   - Example: "7 receipts" or "Total Receipts: 7" (NOT "$7.00")
-   - Example: "Average per Receipt: $142.12" (this IS money, so use $)
-   - Example: "Grand Total: $994.84" (this IS money, so use $)
-{detail_instruction}
+## CRITICAL RULES:
+1. **ONLY use columns that exist in the data above** - never invent fields
+2. **Detect the data type from the query and columns**:
+   - If columns contain aggregates like "total_", "sum_", "avg_", "count_", "min_", "max_" → This is AGGREGATE data, present as statistics
+   - If columns contain identifiers like "id", "name", "description" with multiple rows → This is DETAIL data, present as a list/table
+   - Match your output format to the data type - don't force invoice/receipt structure on inventory or other data types
+3. **Format numbers appropriately - THIS IS CRITICAL**:
+   - MONETARY values (price, cost, revenue, sales, fee, charge): Use $ prefix (e.g., $1,234.56)
+   - NON-MONETARY values: Plain numbers WITHOUT $ sign:
+     * Inventory counts/quantities (inventory, stock, units, products, items, qty): e.g., 267,159 units
+     * Product counts: e.g., 1,000 products
+     * Average inventory: e.g., 267.16 (NOT $267.16 - inventory is NOT money!)
+     * Any count, quantity, or unit-based metric
+   - Rule of thumb: If it's counting THINGS (products, items, inventory units), NO dollar sign
+   - Rule of thumb: If it's counting MONEY (dollars, revenue, cost), USE dollar sign
+4. **Present data naturally based on what it represents**:
+   - Inventory data → Show as inventory summary/list (units, NOT dollars)
+   - Sales data → Show as sales report
+   - Aggregate statistics → Show as key metrics/statistics
+   - Don't force hierarchical receipt/invoice layout on non-receipt data
 5. Use markdown formatting for readability
-
-## CRITICAL - Recognize AGGREGATE vs DETAIL Results:
-FIRST, check what type of data you received:
-
-**AGGREGATE/SUMMARY Results** (1 row with statistics like average, total, count):
-- If the data has columns like "average_per_receipt", "total_receipts", "grand_total", "min_receipt", "max_receipt"
-- This is SUMMARY DATA - just present the statistics directly
-- Do NOT invent "Receipt #1" or similar - there are no individual receipts in this data!
-- Example output for average query:
-  ## Average Meal Cost for 2025
-  - **Average per Receipt:** $142.12
-  - **Total Receipts:** 7
-  - **Grand Total:** $994.84
-  - **Minimum Receipt:** $66.99
-  - **Maximum Receipt:** $228.00
-
-**DETAIL Results** (multiple rows with actual receipt data):
-- If the data has columns like "receipt_number", "store_name", "item_description"
-- This is DETAIL DATA - use hierarchical layout with actual receipt numbers
-
-## CRITICAL - Hierarchical/Tree Layout for DETAIL Data Only:
-When showing detailed items (NOT aggregate summaries), use a TREE/HIERARCHICAL structure:
-- If multiple items share the same receipt number, date, or restaurant, group them together
-- Show the parent group (e.g., receipt number, restaurant, date) ONCE as a header
-- List the child items (individual line items) indented under their parent
-
-IMPORTANT: Use the ACTUAL receipt_number/invoice_number from the data as the primary identifier!
-- If you see a column like "receipt_number" or "invoice_number", use THAT value in the header
-- NEVER invent receipt numbers like "Receipt #1" - only use values that exist in the data!
-
-## CRITICAL - NO DUPLICATES and NO INVENTED DATA:
-- NEVER show the same receipt/invoice/document more than once
-- NEVER invent receipt numbers, item numbers, or any identifiers that don't exist in the data
-- Each unique receipt_number should appear EXACTLY ONCE in your output
-- If the data is aggregate/summary, just present the numbers - don't create fake detail rows
-
-## CRITICAL - HANDLE NULL VALUES AND NON-MONETARY AMOUNTS:
-- If unit_price is NULL or "-" or missing, show "-" or omit the column - NEVER invent a price like "$1.00"
-- PRESERVE the value formatting from the input table:
-  - If the input shows a value WITH $ (e.g., "$50.00"), it is MONETARY - keep the $ sign
-  - If the input shows a value WITHOUT $ (e.g., "600"), it is NON-MONETARY (count/usage) - do NOT add $ sign
-  - Example: Input "600" → output "600" (NOT "$600.00") - this is a count of items/messages
-  - Example: Input "$50.00" → output "$50.00" - this is monetary
-- If an item description contains "User Message", "Messages", "Credits", "Tokens", "Usage" - the "amount" field is a COUNT, not money
-- Non-monetary amounts (message counts, usage units) should be plain numbers without $ prefix
-
-## CRITICAL - ONLY USE COLUMNS FROM THE QUERY RESULTS:
-- ONLY display fields/columns that actually exist in the SQL Query Results table above
-- NEVER assume or add fields like "Description", "Tax", "Discount", "Supplier ID", "Unit of Measure", "Reorder Level", "Inventory Status", "Created Date", "Modified Date" etc.
-- If a column is not in the query results, DO NOT include it in your response
-- Use "-" for NULL/empty values, but NEVER invent field names that don't exist in the data
-- Look at the actual column headers in the results table - those are the ONLY fields you can report on
-
-6. For detail reports, include subtotals for each group and a grand total at the end
+6. Be concise but complete - directly answer the user's question
 
 Write the {report_type} report in markdown format:"""
 
@@ -3890,103 +4183,82 @@ Write the {report_type} report in markdown format:"""
         field_mappings: Dict[str, Dict[str, Any]] = None
     ):
         """
-        Stream response for small result sets.
+        Stream response for small result sets using schema-aware formatting.
 
-        Strategy: LLM formats the ENTIRE result set with nice layout including:
-        - Summary/analysis of the data
-        - Well-formatted markdown table with ALL rows
-        - Key insights or highlights
+        Uses LLMResultFormatter for intelligent formatting based on data type,
+        not hardcoded receipt/invoice templates.
 
         Args:
             user_query: Original user query
             query_results: Query results
             evaluation: Content size evaluation (contains pre-built markdown table)
-            field_mappings: Field mappings from document metadata (used to detect document type)
+            field_mappings: Field mappings from document metadata
 
         Yields:
             Chunks of the formatted report
         """
+        # Use LLMResultFormatter for intelligent, schema-aware formatting
+        result_formatter = LLMResultFormatter(
+            llm_client=self.llm_client,
+            schema_service=self.schema_service
+        )
+
+        # Get the formatted markdown table from LLMResultFormatter
+        formatted_table = result_formatter.format_results(
+            query_results=query_results,
+            user_query=user_query,
+            field_mappings=field_mappings
+        )
+
         # Get actual column names from the results
         actual_columns = list(query_results[0].keys()) if query_results else []
         columns_list = ", ".join(actual_columns)
 
-        # Build the complete markdown table for LLM to include in response
-        full_markdown_table = self._convert_results_to_markdown(query_results, actual_columns)
+        # Detect if user wants detailed listing vs summary
+        detail_keywords = ['details', 'detail', 'list', 'show all', 'all items', 'individual',
+                           'each', 'breakdown', 'itemized', 'every', 'specific']
+        query_lower = user_query.lower()
+        wants_details = any(keyword in query_lower for keyword in detail_keywords)
+        report_type = "detailed" if wants_details else "summary"
 
-        # Use ContentSizeEvaluator to detect grouping columns based on field_mappings
-        evaluator = ContentSizeEvaluator()
-        group_by_columns = evaluator._detect_grouping_columns(query_results, field_mappings)
-
-        # Identify header vs line item columns based on detected grouping
-        header_columns = group_by_columns
-        item_columns = [c for c in actual_columns if c not in header_columns]
-
-        # Count unique documents for grouping info using detected grouping columns
-        unique_docs = set()
-        for row in query_results:
-            doc_key = tuple(row.get(col, '') for col in group_by_columns)
-            unique_docs.add(doc_key)
-        num_unique_docs = len(unique_docs)
-
-        # Determine document type based on grouping columns for prompt context
-        is_invoice = 'invoice_number' in group_by_columns or 'vendor_name' in group_by_columns
-        doc_type = "invoices" if is_invoice else "receipts"
-        entity_field = "vendor_name" if is_invoice else "store_name"
-        id_field = "invoice_number" if is_invoice else "receipt_number"
-        date_field = "invoice_date" if is_invoice else "transaction_date"
-
-        prompt = f"""You are a data analyst. Format and present the complete query results in a clear, professional report with GROUPED layout.
+        prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
 ## User's Question:
 "{user_query}"
 
-## Complete Data ({len(query_results)} line items across {num_unique_docs} documents):
-{full_markdown_table}
+## AVAILABLE COLUMNS IN THIS DATA (ONLY THESE EXIST):
+{columns_list}
 
-## Column Categories:
-- **Header/Document columns** (group by these): {', '.join(header_columns)}
-- **Line Item columns** (show nested under each group): {', '.join(item_columns) if item_columns else 'description, quantity, unit_price, amount'}
+## SQL Query Results ({len(query_results)} rows):
 
-## Instructions:
-Create a GROUPED report - DO NOT show a flat table with repeated header info!
+{formatted_table}
 
-1. **Title**: A descriptive markdown title (## Title)
-2. **Summary**: Brief paragraph with:
-   - Total documents/{doc_type}: {num_unique_docs}
-   - Total line items: {len(query_results)}
-   - Key statistics (total amount, date range, etc.)
-3. **GROUPED Data Display**: Group records by document ({' + '.join(group_by_columns)}), then show line items:
+## CRITICAL RULES:
+1. **ONLY use columns that exist in the data above** - never invent fields
+2. **Detect the data type from the query and columns**:
+   - If columns contain aggregates like "total_", "sum_", "avg_", "count_", "min_", "max_" → This is AGGREGATE data, present as statistics
+   - If columns contain identifiers like "id", "name", "description" with multiple rows → This is DETAIL data, present as a list/table
+   - Match your output format to the data type - don't force invoice/receipt structure on inventory or other data types
+3. **Format numbers appropriately - THIS IS CRITICAL**:
+   - MONETARY values (price, cost, revenue, sales, fee, charge): Use $ prefix (e.g., $1,234.56)
+   - NON-MONETARY values: Plain numbers WITHOUT $ sign:
+     * Inventory counts/quantities (inventory, stock, units, products, items, qty): e.g., 267,159 units
+     * Product counts: e.g., 1,000 products
+     * Average inventory: e.g., 267.16 (NOT $267.16 - inventory is NOT money!)
+     * Any count, quantity, or unit-based metric
+   - Rule of thumb: If it's counting THINGS (products, items, inventory units), NO dollar sign
+   - Rule of thumb: If it's counting MONEY (dollars, revenue, cost), USE dollar sign
+4. **Present data naturally based on what it represents**:
+   - Inventory data → Show as inventory summary/list (units, NOT dollars)
+   - Sales data → Show as sales report
+   - Aggregate statistics → Show as key metrics/statistics
+   - Don't force hierarchical receipt/invoice layout on non-receipt data
+5. Use markdown formatting for readability
+6. Be concise but complete - directly answer the user's question
 
-## CRITICAL - USE THIS GROUPED FORMAT:
+Write the {report_type} report in markdown format:"""
 
-### 📄 [{entity_field}] - #{id_field} ([{date_field}])
-
-| Description | Qty | Unit Price | Amount |
-|-------------|-----|------------|--------|
-| Item 1      | 2   | $5.00      | $10.00 |
-| Item 2      | 1   | $8.30      | $8.30  |
-
-**Subtotal: $18.30**
-
----
-
-### 📄 [Next {entity_field}] - #{id_field} ([{date_field}])
-... (next group of items)
-
-## Formatting Rules:
-- Group by: {' + '.join(group_by_columns)} (DO NOT repeat these in every row!)
-- Show each document as a separate section with ### header
-- Use a compact table for line items ONLY (line item columns from above)
-- PRESERVE the value formatting from the input table - values with $ are monetary, values without $ are non-monetary (counts/usage)
-- Example: If the input shows "600" (no $), output "600" (NOT "$600.00") - this is a count, not money
-- Example: If the input shows "$50.00", output "$50.00" - this is monetary
-- Add subtotal for each document group (only for monetary amounts)
-- Add --- separator between document groups
-- Include ALL {len(query_results)} line items across all groups - do not skip any!
-
-Generate the GROUPED formatted report (include ALL items):"""
-
-        # Stream the LLM-generated full report (including formatted table)
+        # Stream the LLM-generated report
         try:
             async for chunk in self.llm_client.astream(prompt):
                 if chunk:

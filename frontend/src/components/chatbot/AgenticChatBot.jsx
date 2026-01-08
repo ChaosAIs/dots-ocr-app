@@ -70,6 +70,9 @@ export const AgenticChatBot = () => {
   // Progress step tracking for better UX
   const [progressStep, setProgressStep] = useState(null);
 
+  // Agent status messages for auto-flowing display
+  const [statusMessages, setStatusMessages] = useState([]);
+
   // Workspace browser state
   const [selectedWorkspaceIds, setSelectedWorkspaceIdsInternal] = useState([]);
   const [selectedDocumentIds, setSelectedDocumentIdsInternal] = useState([]);
@@ -94,6 +97,11 @@ export const AgenticChatBot = () => {
   // When unchecked: use simple vector search flow
   const [iterativeReasoningEnabled, setIterativeReasoningEnabled] = useState(true); // Default to true, will be updated from config
 
+  // Agent mode toggle (checkbox: "Enable Agent Mode")
+  // When checked: use the new agentic workflow with planner, retrieval team, reviewer, and summary agents
+  // When unchecked (default): use the current standard processing flow
+  const [agentModeEnabled, setAgentModeEnabled] = useState(false); // Default to false
+
   const wsRef = useRef(null);
   const workspaceBrowserRef = useRef(null);
   const messagesEndRef = useRef(null);
@@ -115,6 +123,13 @@ export const AgenticChatBot = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages, streamingContent, scrollToBottom]);
+
+  // Auto-scroll when status messages update
+  useEffect(() => {
+    if (statusMessages.length > 0) {
+      scrollToBottom();
+    }
+  }, [statusMessages, scrollToBottom]);
 
   // Initialize - no session created until first message
   useEffect(() => {
@@ -376,13 +391,29 @@ export const AgenticChatBot = () => {
           // Update progress step for UI display (without percentage for cleaner UX)
           setProgressStep(progressMsg);
           // Don't set streaming content for progress - we'll show a separate progress indicator
+        } else if (data.type === "status") {
+          // Handle detailed status messages for auto-flowing display
+          console.log("[WebSocket Status] Received status:", data);
+          const statusEntry = {
+            id: Date.now(),
+            agent: data.agent,
+            phase: data.phase,
+            message: data.message,
+            subMessages: data.sub_messages || [],
+            metrics: data.metrics || {},
+            iteration: data.iteration || 0,
+            timestamp: new Date().toISOString()
+          };
+          // Add new status message, keeping only last 10 to prevent memory issues
+          setStatusMessages((prev) => [...prev.slice(-9), statusEntry]);
         } else if (data.type === "token") {
           // Log when token streaming starts (only first token to avoid spam)
           if (!streamingContentRef.current) {
-            console.log("[WebSocket] Token streaming started, clearing progress step");
+            console.log("[WebSocket] Token streaming started, clearing progress step and status messages");
           }
-          // Clear progress step when actual content starts streaming
+          // Clear progress step and status messages when actual content starts streaming
           setProgressStep(null);
+          setStatusMessages([]);
           streamingContentRef.current += data.content;
           setStreamingContent(streamingContentRef.current);
         } else if (data.type === "end") {
@@ -407,6 +438,7 @@ export const AgenticChatBot = () => {
           streamingContentRef.current = "";
           setStreamingContent("");
           setProgressStep(null);
+          setStatusMessages([]);
           setIsLoading(false);
 
           // Increment message count
@@ -457,6 +489,7 @@ export const AgenticChatBot = () => {
           streamingContentRef.current = "";
           setStreamingContent("");
           setProgressStep(null);
+          setStatusMessages([]);
           setIsLoading(false);
 
           // Increment message count
@@ -483,6 +516,7 @@ export const AgenticChatBot = () => {
           streamingContentRef.current = "";
           setStreamingContent("");
           setProgressStep(null);
+          setStatusMessages([]);
           setIsLoading(false);
         }
       }
@@ -666,14 +700,16 @@ export const AgenticChatBot = () => {
     // Send to WebSocket (history is now managed by backend)
     // Only send document_ids - backend filters by selected documents directly
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(
-        JSON.stringify({
-          message: userMessage.content,
-          user_id: user?.id,
-          document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
-          iterative_reasoning_enabled: iterativeReasoningEnabled,
-        })
-      );
+      const payload = {
+        message: userMessage.content,
+        user_id: user?.id,
+        document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
+        iterative_reasoning_enabled: iterativeReasoningEnabled,
+        agent_mode_enabled: agentModeEnabled,
+      };
+      console.log("[AgenticChatBot] Sending WebSocket message:", payload);
+      console.log("[AgenticChatBot] Agent Mode Enabled:", agentModeEnabled);
+      wsRef.current.send(JSON.stringify(payload));
     } else {
       toast.current?.show({
         severity: "warn",
@@ -684,7 +720,7 @@ export const AgenticChatBot = () => {
       setIsLoading(false);
       connectWebSocket();
     }
-  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds, iterativeReasoningEnabled]);
+  }, [inputValue, isLoading, sessionId, connectWebSocket, selectedDocumentIds, iterativeReasoningEnabled, agentModeEnabled]);
 
   const handleRetry = useCallback(async (msg, msgIndex) => {
     if (isLoading || !sessionId) return;
@@ -769,10 +805,11 @@ export const AgenticChatBot = () => {
           is_retry: true,
           document_ids: selectedDocumentIds.length > 0 ? selectedDocumentIds : [],
           iterative_reasoning_enabled: iterativeReasoningEnabled,
+          agent_mode_enabled: agentModeEnabled,
         })
       );
 
-      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, iterative_reasoning_enabled=${iterativeReasoningEnabled}: ${messageContent}`);
+      console.log(`[Retry] Sending message with is_retry=true, user_id=${user?.id}, document_ids=${selectedDocumentIds.length}, iterative_reasoning_enabled=${iterativeReasoningEnabled}, agent_mode_enabled=${agentModeEnabled}: ${messageContent}`);
     } catch (error) {
       console.error("Error retrying message:", error);
       toast.current?.show({
@@ -783,7 +820,7 @@ export const AgenticChatBot = () => {
       });
       setIsLoading(false);
     }
-  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket, iterativeReasoningEnabled, user?.id]);
+  }, [isLoading, sessionId, selectedDocumentIds, connectWebSocket, iterativeReasoningEnabled, agentModeEnabled, user?.id]);
 
   // Start editing a message
   const handleStartEdit = useCallback((msgIndex, content) => {
@@ -1556,14 +1593,53 @@ export const AgenticChatBot = () => {
               <i className="pi pi-android" />
             </div>
             <Card className="message-content progress-card">
-              <div className="progress-indicator">
-                <div className="progress-dots">
-                  <span className="dot"></span>
-                  <span className="dot"></span>
-                  <span className="dot"></span>
+              {/* Auto-flowing status messages */}
+              {statusMessages.length > 0 ? (
+                <div className="status-flow">
+                  {statusMessages.map((status, index) => (
+                    <div
+                      key={status.id}
+                      className={`status-entry ${status.phase} ${index === statusMessages.length - 1 ? 'latest' : 'completed'}`}
+                    >
+                      <div className="status-header">
+                        <span className="status-phase-icon">
+                          {status.phase === 'initializing' && <i className="pi pi-play" />}
+                          {status.phase === 'planning' && <i className="pi pi-sitemap" />}
+                          {status.phase === 'retrieval' && <i className="pi pi-database" />}
+                          {status.phase === 'review' && <i className="pi pi-check-circle" />}
+                          {status.phase === 'summarizing' && <i className="pi pi-file-edit" />}
+                          {!['initializing', 'planning', 'retrieval', 'review', 'summarizing'].includes(status.phase) && <i className="pi pi-cog" />}
+                        </span>
+                        <span className="status-message">{status.message}</span>
+                        {index === statusMessages.length - 1 && (
+                          <span className="status-spinner">
+                            <i className="pi pi-spin pi-spinner" />
+                          </span>
+                        )}
+                      </div>
+                      {status.subMessages && status.subMessages.length > 0 && (
+                        <div className="status-sub-messages">
+                          {status.subMessages.map((subMsg, subIndex) => (
+                            <div key={subIndex} className="sub-message">
+                              <i className="pi pi-angle-right" />
+                              <span>{subMsg}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
                 </div>
-                <span className="progress-text">{progressStep || t("Chat.ProcessingRequest")}</span>
-              </div>
+              ) : (
+                <div className="progress-indicator">
+                  <div className="progress-dots">
+                    <span className="dot"></span>
+                    <span className="dot"></span>
+                    <span className="dot"></span>
+                  </div>
+                  <span className="progress-text">{progressStep || t("Chat.ProcessingRequest")}</span>
+                </div>
+              )}
             </Card>
           </div>
         )}
@@ -1584,20 +1660,37 @@ export const AgenticChatBot = () => {
             </div>
           )}
 
-          {/* Input Area with Iterative Reasoning Toggle */}
+          {/* Input Area with Iterative Reasoning Toggle and Agent Mode Toggle */}
           <div className="chatbot-input-wrapper">
-            {/* Iterative Reasoning Toggle */}
-            <div className="graph-rag-toggle">
-              <Checkbox
-                inputId="iterativeReasoningEnabled"
-                checked={iterativeReasoningEnabled}
-                onChange={(e) => setIterativeReasoningEnabled(e.checked)}
-                disabled={isLoading}
-              />
-              <label htmlFor="iterativeReasoningEnabled" className="graph-rag-label">
-                <i className="pi pi-sitemap" />
-                {t("Chat.EnableGraphKnowledgeReasoning", "Enable Graph Knowledge Reasoning")}
-              </label>
+            {/* Toggle Options Row */}
+            <div className="chat-toggles-row">
+              {/* Iterative Reasoning Toggle */}
+              <div className="graph-rag-toggle">
+                <Checkbox
+                  inputId="iterativeReasoningEnabled"
+                  checked={iterativeReasoningEnabled}
+                  onChange={(e) => setIterativeReasoningEnabled(e.checked)}
+                  disabled={isLoading}
+                />
+                <label htmlFor="iterativeReasoningEnabled" className="graph-rag-label">
+                  <i className="pi pi-sitemap" />
+                  {t("Chat.EnableGraphKnowledgeReasoning", "Enable Graph Knowledge Reasoning")}
+                </label>
+              </div>
+
+              {/* Agent Mode Toggle */}
+              <div className="agent-mode-toggle">
+                <Checkbox
+                  inputId="agentModeEnabled"
+                  checked={agentModeEnabled}
+                  onChange={(e) => setAgentModeEnabled(e.checked)}
+                  disabled={isLoading}
+                />
+                <label htmlFor="agentModeEnabled" className="agent-mode-label">
+                  <i className="pi pi-cog" />
+                  {t("Chat.EnableAgentMode", "Enable Agent Mode")}
+                </label>
+              </div>
             </div>
             <div className="chatbot-input">
               <InputTextarea

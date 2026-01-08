@@ -495,13 +495,23 @@
   background-color: var(--surface-section);
 }
 
-.graph-rag-toggle {
+// Container for multiple toggle options
+.chat-toggles-row {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.5rem 1.5rem;
+  flex-wrap: wrap;
+}
+
+.graph-rag-toggle,
+.agent-mode-toggle {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  padding: 0.5rem 1.5rem;
 
-  .graph-rag-label {
+  .graph-rag-label,
+  .agent-mode-label {
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -524,6 +534,15 @@
     .p-checkbox-box {
       width: 16px;
       height: 16px;
+    }
+  }
+}
+
+// Agent mode toggle specific styling
+.agent-mode-toggle {
+  .agent-mode-label {
+    i {
+      color: var(--orange-500, #f59e0b);
     }
   }
 }
@@ -639,6 +658,176 @@
     opacity: 0.7;
   }
   50% {
+    opacity: 1;
+  }
+}
+
+// Auto-flowing status messages styles
+.status-flow {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  max-height: 300px;
+  overflow-y: auto;
+
+  // Smooth scroll for auto-scrolling behavior
+  scroll-behavior: smooth;
+
+  &::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: var(--surface-border);
+    border-radius: 2px;
+  }
+}
+
+.status-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  background-color: var(--surface-ground);
+  border-left: 3px solid var(--primary-color);
+  animation: status-slide-in 0.3s ease-out;
+  transition: opacity 0.3s ease, background-color 0.3s ease;
+
+  &.completed {
+    opacity: 0.7;
+    border-left-color: var(--green-500);
+
+    .status-phase-icon i {
+      color: var(--green-500);
+    }
+  }
+
+  &.latest {
+    opacity: 1;
+    background-color: color-mix(in srgb, var(--primary-color) 8%, var(--surface-ground));
+  }
+
+  // Phase-specific colors
+  &.initializing {
+    border-left-color: var(--cyan-500);
+
+    &.latest .status-phase-icon i {
+      color: var(--cyan-500);
+    }
+  }
+
+  &.planning {
+    border-left-color: var(--blue-500);
+
+    &.latest .status-phase-icon i {
+      color: var(--blue-500);
+    }
+  }
+
+  &.retrieval {
+    border-left-color: var(--purple-500);
+
+    &.latest .status-phase-icon i {
+      color: var(--purple-500);
+    }
+  }
+
+  &.review {
+    border-left-color: var(--orange-500);
+
+    &.latest .status-phase-icon i {
+      color: var(--orange-500);
+    }
+  }
+
+  &.summarizing {
+    border-left-color: var(--teal-500);
+
+    &.latest .status-phase-icon i {
+      color: var(--teal-500);
+    }
+  }
+}
+
+.status-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.status-phase-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+
+  i {
+    font-size: 1rem;
+    color: var(--primary-color);
+  }
+}
+
+.status-message {
+  flex: 1;
+  color: var(--text-color);
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.status-spinner {
+  flex-shrink: 0;
+
+  i {
+    font-size: 0.875rem;
+    color: var(--primary-color);
+  }
+}
+
+.status-sub-messages {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding-left: 1.75rem;
+
+  .sub-message {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+    color: var(--text-color-secondary);
+    font-size: 0.8rem;
+    animation: sub-message-fade-in 0.3s ease-out;
+
+    i {
+      font-size: 0.7rem;
+      opacity: 0.6;
+    }
+  }
+}
+
+@keyframes status-slide-in {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sub-message-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
     opacity: 1;
   }
 }

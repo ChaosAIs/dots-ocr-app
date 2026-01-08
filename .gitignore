@@ -40,3 +40,8 @@ backend/extraction_service/__pycache__/
 backend/analytics_service/__pycache__/
 backend/scripts/__pycache__/
 backend/common/__pycache__/
+backend/agents/__pycache__/
+backend/agents/agents/__pycache__/
+backend/agents/prompts/__pycache__/
+backend/agents/state/__pycache__/
+backend/agents/tools/__pycache__/
