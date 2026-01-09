@@ -88,11 +88,12 @@ def _extract_sql_results_from_outputs(
         id_to_filename_map: Optional map to convert document IDs to filenames
 
     Returns:
-        Tuple of (query_results: List[Dict], field_mappings: Dict, data_sources: List[str])
+        Tuple of (query_results: List[Dict], field_mappings: Dict, data_sources: List[str], schema_types: Set[str])
     """
     query_results = []
     data_sources = []
     field_mappings = {}
+    schema_types = set()
 
     if id_to_filename_map is None:
         id_to_filename_map = {}
@@ -108,10 +109,14 @@ def _extract_sql_results_from_outputs(
         status = output.get("status", "")
         data = output.get("data")
         docs_used = output.get("documents_used", [])
+        schema_type = output.get("schema_type", "")
+
+        # Track schema types
+        if schema_type:
+            schema_types.add(schema_type.lower())
 
         # Track data sources - convert IDs to filenames
         for doc_id in docs_used:
-            # Try to get filename from map, fallback to ID if not found
             filename = id_to_filename_map.get(doc_id, doc_id)
             data_sources.append(filename)
 
@@ -120,32 +125,32 @@ def _extract_sql_results_from_outputs(
             if isinstance(data, list):
                 query_results.extend(data)
             elif isinstance(data, dict):
-                # Could be a single aggregation result
                 query_results.append(data)
 
     # Remove duplicates from data sources
     data_sources = list(set(data_sources))
 
-    logger.info(f"[SummaryAgent] Extracted {len(query_results)} rows from agent outputs, {len(data_sources)} sources")
+    logger.info(f"[SummaryAgent] Extracted {len(query_results)} rows from agent outputs, {len(data_sources)} sources, schema_types={schema_types}")
 
-    return query_results, field_mappings, data_sources
+    return query_results, field_mappings, data_sources, schema_types
 
 
 def _format_response_with_llm_generator(
     user_query: str,
     query_results: List[Dict[str, Any]],
     field_mappings: Dict[str, Any],
-    data_sources: List[str]
+    data_sources: List[str],
+    schema_types: set = None
 ) -> tuple:
     """
     Format response using shared LLMSQLGenerator (same as non-agent flow).
 
-    This ensures agent flow produces the same quality response as non-agent flow.
+    For tabular/spreadsheet data, forces large result strategy to avoid
+    sending full table records to LLM.
 
     Returns:
         Tuple of (final_response: str, structured_data: Dict)
     """
-    # Get LLM client and SQL generator
     llm_client = _get_llm_client()
     sql_generator = _get_llm_sql_generator(llm_client)
 
@@ -158,13 +163,26 @@ def _format_response_with_llm_generator(
         return "No data found for your query.", {}
 
     try:
-        logger.info(f"[SummaryAgent] Using LLMSQLGenerator.generate_summary_report() for {len(query_results)} rows")
+        # Determine primary schema type
+        schema_type = "unknown"
+        if schema_types:
+            # Prioritize tabular types
+            tabular_types = {"spreadsheet", "csv", "excel", "tabular", "table"}
+            for st in schema_types:
+                if st in tabular_types:
+                    schema_type = st
+                    break
+            if schema_type == "unknown":
+                schema_type = next(iter(schema_types))
 
-        # Use the shared generate_summary_report method (same as non-agent flow)
+        logger.info(f"[SummaryAgent] Using LLMSQLGenerator for {len(query_results)} rows, schema_type={schema_type}")
+
+        # Use the shared generate_summary_report method with schema_type
         report_result = sql_generator.generate_summary_report(
             user_query=user_query,
             query_results=query_results,
-            field_mappings=field_mappings
+            field_mappings=field_mappings,
+            schema_type=schema_type
         )
 
         formatted_report = report_result.get("formatted_report", "")
@@ -269,18 +287,17 @@ def create_summary_agent(
         # Step 1: Extract SQL results from agent outputs
         logger.info("[SummaryAgent] Step 1: Extracting results from agent outputs...")
         agent_outputs = state.get("agent_outputs", [])
-        query_results, field_mappings, data_sources = _extract_sql_results_from_outputs(
+        query_results, field_mappings, data_sources, schema_types = _extract_sql_results_from_outputs(
             agent_outputs, id_to_filename_map
         )
 
         # Also get data sources from state if available (convert IDs to filenames)
         state_sources = state.get("data_sources", [])
         if state_sources:
-            # Convert any IDs in state_sources to filenames
             converted_sources = [id_to_filename_map.get(s, s) for s in state_sources]
             data_sources = list(set(data_sources + converted_sources))
 
-        logger.info(f"[SummaryAgent] Extracted {len(query_results)} rows, {len(data_sources)} sources")
+        logger.info(f"[SummaryAgent] Extracted {len(query_results)} rows, {len(data_sources)} sources, schema_types={schema_types}")
 
         # Step 2: Format using shared LLMSQLGenerator (same as non-agent flow)
         logger.info("[SummaryAgent] Step 2: Formatting with LLMSQLGenerator...")
@@ -288,7 +305,8 @@ def create_summary_agent(
             user_query=user_query,
             query_results=query_results,
             field_mappings=field_mappings,
-            data_sources=data_sources
+            data_sources=data_sources,
+            schema_types=schema_types
         )
 
         logger.info(f"[SummaryAgent] Final response length: {len(final_response)} chars")

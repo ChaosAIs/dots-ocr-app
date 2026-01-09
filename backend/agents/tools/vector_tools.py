@@ -150,7 +150,16 @@ def report_vector_result(
         JSON string with the result report
     """
     try:
-        parsed_docs = json.loads(documents) if documents else []
+        # Handle various invalid values LLM might pass for documents
+        if not documents or documents.strip() in ("", "None", "null", "[]"):
+            parsed_docs = []
+        else:
+            try:
+                parsed_docs = json.loads(documents)
+                if parsed_docs is None:
+                    parsed_docs = []
+            except json.JSONDecodeError:
+                parsed_docs = []
 
         # Extract document IDs used
         doc_ids_used = list(set(

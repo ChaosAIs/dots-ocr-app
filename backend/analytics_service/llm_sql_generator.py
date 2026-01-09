@@ -149,9 +149,13 @@ class ContentSizeEvaluator:
             column_headers=ordered_columns  # Use ordered columns
         )
 
+    # Internal columns that should not be displayed to end users
+    INTERNAL_COLUMNS = {'is_currency', 'is_complimentary', 'document_id', 'line_number'}
+
     def _order_columns(self, columns: List[str]) -> List[str]:
         """
         Order columns by logical priority for better readability.
+        Also filters out internal columns that shouldn't be displayed to users.
 
         Priority:
         1. Header/Document fields (store, receipt, dates, payment)
@@ -162,6 +166,9 @@ class ContentSizeEvaluator:
 
         NOTE: Data is normalized to canonical field names (snake_case).
         """
+        # Filter out internal columns that shouldn't be shown to users
+        filtered_columns = [c for c in columns if c.lower() not in self.INTERNAL_COLUMNS]
+
         # Define priority groups using canonical names (lower number = higher priority)
         header_fields = {'store_name', 'store_address', 'receipt_number', 'invoice_number',
                          'customer_name', 'vendor_name', 'payment_method', 'currency'}
@@ -186,7 +193,7 @@ class ContentSizeEvaluator:
                 return 5
             return 3  # Default to middle priority
 
-        return sorted(columns, key=get_priority)
+        return sorted(filtered_columns, key=get_priority)
 
     def _build_markdown_table(
         self,
@@ -844,6 +851,17 @@ SELECT ... FROM items ...
    - This flag indicates if the amount is monetary (true) or a count/usage (false)
    - Example: SELECT item->>'description' AS description, (item->>'amount')::numeric AS amount, item->>'is_currency' AS is_currency FROM ...
 
+9. CRITICAL - is_currency for aggregated results:
+   - For AVG/SUM/COUNT on MONETARY fields (amount, total, price, cost, sales, revenue): is_currency should be 'true'
+   - For AVG/SUM/COUNT on NON-MONETARY fields (quantity, inventory, stock, count, units): is_currency should be 'false'
+   - Example for inventory: SELECT item->>'category' AS category, AVG((item->>'quantity')::numeric) AS average_inventory, 'false' AS is_currency FROM ... GROUP BY item->>'category'
+   - Example for sales: SELECT item->>'category' AS category, SUM((item->>'amount')::numeric) AS total_sales, 'true' AS is_currency FROM ... GROUP BY item->>'category'
+
+10. CRITICAL - GROUP BY with JSONB fields:
+   - Line item fields are stored in JSONB and MUST be accessed with item->>'field_name' in both SELECT and GROUP BY
+   - WRONG: SELECT category, AVG(...) FROM ... GROUP BY category  (category is NOT a column!)
+   - CORRECT: SELECT item->>'category' AS category, AVG(...) FROM ... GROUP BY item->>'category'
+
 ## Response Format:
 Return ONLY a JSON object with this exact structure:
 {{
@@ -1423,8 +1441,16 @@ ORDER BY transaction_date, description
 **CRITICAL RULE**: description field MUST come BEFORE amount/price fields!
 
 ### 6. Aggregation Patterns (ALWAYS cast to numeric for SUM/AVG):
-- **sum**: GROUP BY grouping fields, SUM((item->>'field')::numeric)
-- **avg**: Use two-step aggregation for per-document averages, AVG((item->>'field')::numeric)
+
+**CRITICAL: Grouping fields MUST appear in SELECT AND use correct JSONB access!**
+When using GROUP BY, the grouping fields MUST be included in SELECT so users can see what they're grouping by.
+Line item fields MUST be accessed via `item->>'field_name'` syntax (NOT as bare column names).
+
+- WRONG: `SELECT category, AVG((item->>'quantity')::numeric) FROM ... GROUP BY category` (category is NOT a column - it's in JSONB!)
+- CORRECT: `SELECT item->>'category' AS category, AVG((item->>'quantity')::numeric) FROM ... GROUP BY item->>'category'`
+
+- **sum**: SELECT item->>'grouping_field' AS grouping_field, SUM((item->>'field')::numeric) ... GROUP BY item->>'grouping_field'
+- **avg**: SELECT item->>'grouping_field' AS grouping_field, AVG((item->>'field')::numeric) ... GROUP BY item->>'grouping_field'
 - **count**: Two types based on count_level parameter - THIS IS CRITICAL:
   - **count_level="document"**: Count DISTINCT documents (receipts/invoices), NOT line items
     IMPORTANT: Include document_id and summary_data in the CTE!
@@ -1466,7 +1492,20 @@ ORDER BY transaction_date, description
   **IMPORTANT: Include ALL schema fields in SELECT, not just the aggregation field. The user wants to see the complete record.**
   **DO NOT use ORDER BY ... LIMIT 1 for min/max - it fails with NULL values.**
 
-### 7. Important Notes:
+### 7. is_currency Flag for Aggregated Results (CRITICAL):
+When aggregating values, ALWAYS include an is_currency column to indicate if the result is monetary:
+- **MONETARY fields** (amount, total, price, cost, sales, revenue) → `'true' AS is_currency`
+- **NON-MONETARY fields** (quantity, inventory, stock, count, units) → `'false' AS is_currency`
+
+Examples:
+```sql
+-- For inventory data (NOT money):
+SELECT item->>'category' AS category, AVG((item->>'quantity')::numeric) AS average_inventory, 'false' AS is_currency FROM ...
+-- For sales data (IS money):
+SELECT item->>'category' AS category, SUM((item->>'amount')::numeric) AS total_sales, 'true' AS is_currency FROM ...
+```
+
+### 8. Important Notes:
 - Do NOT add WHERE inside base CTE - document filtering is added automatically
 - Always include header_data in CTE SELECT for access in outer queries
 - For time groupings use: EXTRACT(YEAR/QUARTER FROM ...) or TO_CHAR(..., 'YYYY-MM')
@@ -3725,17 +3764,20 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
         self,
         user_query: str,
         query_results: List[Dict[str, Any]],
-        field_mappings: Dict[str, Dict[str, Any]]
+        field_mappings: Dict[str, Dict[str, Any]],
+        schema_type: str = "unknown"
     ) -> Dict[str, Any]:
         """
         Generate a formatted summary report from query results.
 
-        Uses LLM for intelligent analysis when available, with heuristic fallback.
+        For tabular/spreadsheet data, forces large result strategy to avoid
+        sending full table records to LLM. Uses LLM only for header/footer.
 
         Args:
             user_query: Original user query
             query_results: Results from SQL execution
             field_mappings: Field schema information
+            schema_type: Document schema type (spreadsheet, csv, etc.)
 
         Returns:
             Formatted report with hierarchical data and summaries
@@ -3743,8 +3785,8 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
         if not self.llm_client:
             return self._generate_summary_heuristic(query_results, field_mappings, user_query)
 
-        # Use LLM-driven smart summary generation
-        return self._generate_summary_with_llm(user_query, query_results, field_mappings)
+        # Use LLM-driven smart summary generation with schema_type
+        return self._generate_summary_with_llm(user_query, query_results, field_mappings, schema_type=schema_type)
 
     def _generate_summary_with_llm(
         self,
@@ -3785,9 +3827,30 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
             evaluator = ContentSizeEvaluator()
             evaluation = evaluator.evaluate(query_results)
 
+            # Force large result strategy for tabular/spreadsheet data
+            # This prevents sending full table records to LLM
+            tabular_types = {"spreadsheet", "csv", "excel", "tabular", "table"}
+            is_tabular = schema_type.lower() in tabular_types if schema_type else False
+
+            if is_tabular and not evaluation.exceeds_limit:
+                logger.info(
+                    f"[LLM Summary] Forcing large result strategy for tabular data "
+                    f"(schema_type={schema_type}, {evaluation.row_count} rows)"
+                )
+                # Override to force large result path - don't send table records to LLM
+                evaluation = ContentSizeEvaluation(
+                    exceeds_limit=True,
+                    row_count=evaluation.row_count,
+                    column_count=evaluation.column_count,
+                    estimated_tokens=evaluation.estimated_tokens,
+                    markdown_table=evaluation.markdown_table,
+                    column_headers=evaluation.column_headers
+                )
+
             logger.info(
                 f"[LLM Summary] Content size evaluation: {evaluation.row_count} rows, "
-                f"~{evaluation.estimated_tokens:,} tokens, exceeds_limit={evaluation.exceeds_limit}"
+                f"~{evaluation.estimated_tokens:,} tokens, exceeds_limit={evaluation.exceeds_limit}, "
+                f"schema_type={schema_type}"
             )
 
             # Calculate grand total for metadata
@@ -3956,7 +4019,9 @@ ORDER BY header_data->>'date' DESC, (item->>'row_number')::int ASC
 
         # Now use LLM to generate a natural language summary based on the query and data
         # This prompt is generic and does NOT assume receipt/invoice structure
-        actual_columns = list(query_results[0].keys()) if query_results else []
+        # Exclude internal columns from the list shown to LLM
+        internal_cols = {'is_currency', 'is_complimentary', 'document_id', 'line_number'}
+        actual_columns = [c for c in query_results[0].keys() if c.lower() not in internal_cols] if query_results else []
         columns_list = ", ".join(actual_columns)
 
         # Detect if user wants detailed listing vs summary
@@ -4210,8 +4275,9 @@ Write the {report_type} report in markdown format:"""
             field_mappings=field_mappings
         )
 
-        # Get actual column names from the results
-        actual_columns = list(query_results[0].keys()) if query_results else []
+        # Get actual column names from the results (excluding internal columns)
+        internal_cols = {'is_currency', 'is_complimentary', 'document_id', 'line_number'}
+        actual_columns = [c for c in query_results[0].keys() if c.lower() not in internal_cols] if query_results else []
         columns_list = ", ".join(actual_columns)
 
         # Detect if user wants detailed listing vs summary
@@ -4220,6 +4286,21 @@ Write the {report_type} report in markdown format:"""
         query_lower = user_query.lower()
         wants_details = any(keyword in query_lower for keyword in detail_keywords)
         report_type = "detailed" if wants_details else "summary"
+
+        # Calculate correct statistics distinguishing header vs line-item fields
+        correct_stats = self._calculate_correct_statistics(query_results, field_mappings)
+        stats_section = ""
+        if correct_stats:
+            stats_section = "\n## PRE-CALCULATED CORRECT STATISTICS (USE THESE VALUES):\n"
+            stats_section += "These are the CORRECT totals - use these instead of summing the raw data:\n"
+            for stat_name, stat_value in correct_stats.items():
+                if isinstance(stat_value, (int, float)):
+                    if 'quantity' in stat_name.lower() or 'count' in stat_name.lower():
+                        stats_section += f"- {stat_name}: {stat_value:,.0f}\n"
+                    else:
+                        stats_section += f"- {stat_name}: ${stat_value:,.2f}\n"
+                else:
+                    stats_section += f"- {stat_name}: {stat_value}\n"
 
         prompt = f"""Based on the user's question and the SQL query results, write a clear {report_type} report.
 
@@ -4232,7 +4313,7 @@ Write the {report_type} report in markdown format:"""
 ## SQL Query Results ({len(query_results)} rows):
 
 {formatted_table}
-
+{stats_section}
 ## CRITICAL RULES:
 1. **ONLY use columns that exist in the data above** - never invent fields
 2. **Detect the data type from the query and columns**:
@@ -4255,6 +4336,7 @@ Write the {report_type} report in markdown format:"""
    - Don't force hierarchical receipt/invoice layout on non-receipt data
 5. Use markdown formatting for readability
 6. Be concise but complete - directly answer the user's question
+7. **For Summary Statistics**: If PRE-CALCULATED CORRECT STATISTICS are provided above, use THOSE values instead of summing the raw table data. The raw data may have repeated values that would give incorrect totals.
 
 Write the {report_type} report in markdown format:"""
 
@@ -4271,6 +4353,112 @@ Write the {report_type} report in markdown format:"""
             yield "### Complete Data Results\n\n"
             yield evaluation.markdown_table
             yield f"\n\n*Showing all {len(query_results)} records*\n"
+
+    def _calculate_correct_statistics(
+        self,
+        query_results: List[Dict[str, Any]],
+        field_mappings: Dict[str, Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """
+        Calculate correct statistics for denormalized data with header/line-item structure.
+
+        When data has header-level fields (like total_amount, subtotal) repeated for each
+        line item, we need to:
+        - Sum header-level fields only once per unique document/receipt
+        - Sum line-item fields across all rows
+
+        Args:
+            query_results: Query results (potentially denormalized)
+            field_mappings: Field schema information
+
+        Returns:
+            Dictionary of correctly calculated statistics
+        """
+        if not query_results:
+            return {}
+
+        stats = {}
+        columns = list(query_results[0].keys())
+
+        # Header-level fields that should be summed per unique receipt, not per row
+        header_level_fields = {'subtotal', 'tax_amount', 'total_amount', 'total', 'grand_total'}
+        # Fields used to identify unique receipts/documents
+        grouping_fields = {'receipt_number', 'transaction_date', 'store_name', 'document_id'}
+
+        # Line-item level fields that should be summed across all rows
+        line_item_fields = {'amount', 'quantity', 'unit_price'}
+
+        # Determine which columns are header-level vs line-item level
+        header_cols = []
+        line_item_cols = []
+        for col in columns:
+            col_lower = col.lower()
+            if col_lower in header_level_fields:
+                header_cols.append(col)
+            elif col_lower in line_item_fields:
+                line_item_cols.append(col)
+
+        # Check if data appears to be denormalized (header values repeated)
+        # by looking for a grouping field
+        grouping_col = None
+        for col in columns:
+            if col.lower() in grouping_fields:
+                grouping_col = col
+                break
+
+        # If we have a grouping column, calculate header totals per unique group
+        if grouping_col and header_cols:
+            # Group by the grouping column and take first value for header fields
+            seen_groups = {}
+            for row in query_results:
+                group_key = row.get(grouping_col)
+                if group_key and group_key not in seen_groups:
+                    seen_groups[group_key] = row
+
+            # Sum header-level fields from unique groups only
+            for col in header_cols:
+                col_lower = col.lower()
+                total = 0
+                for group_key, row in seen_groups.items():
+                    val = row.get(col)
+                    if val is not None:
+                        try:
+                            if isinstance(val, str):
+                                val = float(val.replace(',', '').replace('$', ''))
+                            total += float(val)
+                        except (ValueError, TypeError):
+                            pass
+                if total > 0:
+                    display_name = col.replace('_', ' ').title()
+                    stats[f"Total {display_name}"] = round(total, 2)
+
+            # Add unique document count
+            stats["Number of Receipts/Documents"] = len(seen_groups)
+
+        # Sum line-item fields across all rows
+        for col in line_item_cols:
+            col_lower = col.lower()
+            total = 0
+            for row in query_results:
+                val = row.get(col)
+                if val is not None:
+                    try:
+                        if isinstance(val, str):
+                            val = float(val.replace(',', '').replace('$', ''))
+                        total += float(val)
+                    except (ValueError, TypeError):
+                        pass
+            if total > 0:
+                display_name = col.replace('_', ' ').title()
+                if col_lower == 'quantity':
+                    stats[f"Total {display_name}"] = int(total)
+                else:
+                    stats[f"Total Line Item {display_name}"] = round(total, 2)
+
+        # Add total number of line items
+        stats["Total Line Items"] = len(query_results)
+
+        return stats
 
     def _convert_results_to_markdown(
         self,
@@ -4290,14 +4478,21 @@ Write the {report_type} report in markdown format:"""
         if not query_results or not columns:
             return "No data available."
 
+        # Filter out internal columns that shouldn't be shown to users
+        internal_cols = {'is_currency', 'is_complimentary', 'document_id', 'line_number'}
+        display_columns = [c for c in columns if c.lower() not in internal_cols]
+
+        if not display_columns:
+            return "No data available."
+
         lines = []
 
         # Header row
-        header = "| " + " | ".join(columns) + " |"
+        header = "| " + " | ".join(display_columns) + " |"
         lines.append(header)
 
         # Separator row
-        separator = "| " + " | ".join(["---"] * len(columns)) + " |"
+        separator = "| " + " | ".join(["---"] * len(display_columns)) + " |"
         lines.append(separator)
 
         # Data rows
@@ -4307,11 +4502,23 @@ Write the {report_type} report in markdown format:"""
             is_currency = row.get('is_currency')
             if isinstance(is_currency, str):
                 is_currency = is_currency.lower() == 'true'
-            # Default to True (show as currency) if not specified
+            # If is_currency not specified, infer from column names
+            # Non-monetary columns should NOT show $ sign
             if is_currency is None:
-                is_currency = True
+                # Check all columns in the row for non-monetary indicators
+                non_monetary_keywords = {'inventory', 'stock', 'quantity', 'qty', 'count', 'units', 'items', 'num_'}
+                monetary_keywords = {'amount', 'total', 'price', 'cost', 'sales', 'revenue', 'fee', 'charge'}
+                has_non_monetary = any(any(kw in c.lower() for kw in non_monetary_keywords) for c in display_columns)
+                has_monetary = any(any(kw in c.lower() for kw in monetary_keywords) for c in display_columns)
+                # Default: if we have non-monetary columns and no explicit monetary columns, assume non-monetary
+                # If we have monetary columns, assume monetary
+                # If unclear, default to True (monetary) for backwards compatibility
+                if has_non_monetary and not has_monetary:
+                    is_currency = False
+                else:
+                    is_currency = True
 
-            for col in columns:
+            for col in display_columns:
                 val = row.get(col, "")
                 col_lower = col.lower()
 

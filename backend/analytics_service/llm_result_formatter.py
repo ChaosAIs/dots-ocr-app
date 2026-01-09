@@ -246,6 +246,9 @@ CRITICAL:
             column_order=result.get('recommended_order', columns)
         )
 
+    # Internal columns that should not be displayed to end users
+    INTERNAL_COLUMNS = {'is_currency', 'is_complimentary', 'document_id', 'line_number'}
+
     def _infer_format_heuristic(
         self,
         query_results: List[Dict[str, Any]],
@@ -255,7 +258,10 @@ CRITICAL:
         """Infer column formats using heuristics."""
         col_formats = []
 
-        for col in columns:
+        # Filter out internal columns that shouldn't be shown to users
+        display_columns = [c for c in columns if c.lower() not in self.INTERNAL_COLUMNS]
+
+        for col in display_columns:
             col_lower = col.lower()
 
             # Get sample values
@@ -269,7 +275,8 @@ CRITICAL:
             # (e.g., "average_inventory" should NOT be treated as monetary just because it has "average")
             non_monetary_keywords = ['inventory', 'stock', 'units', 'products', 'items', 'count',
                                      'qty', 'quantity', 'num_', 'total_receipts', 'total_items',
-                                     'record_count', 'product_count', 'item_count']
+                                     'record_count', 'product_count', 'item_count', 'average_inventory',
+                                     'avg_inventory', 'avg_stock', 'avg_quantity', 'sum_quantity', 'total_quantity']
 
             if any(kw in col_lower for kw in ['date', 'time', 'created', 'updated']):
                 data_type = 'date'
@@ -310,8 +317,8 @@ CRITICAL:
                 decimal_places=2 if is_monetary else 0
             ))
 
-        # Order columns
-        column_order = self._order_columns(columns, col_formats)
+        # Order columns (use display_columns, not original columns)
+        column_order = self._order_columns(display_columns, col_formats)
 
         return FormattingConfig(
             columns=col_formats,

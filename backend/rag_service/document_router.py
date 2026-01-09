@@ -10,6 +10,9 @@ Routing Strategy (in order of preference):
 1. Vector Search (Primary): Fast semantic search on document metadata embeddings
 2. LLM Scoring (Fallback): When vector search returns insufficient results
 3. Rule-based Scoring (Final Fallback): When LLM is unavailable
+
+Uses shared document filtering logic from shared.document_filter for
+topic pre-filtering to ensure consistency with agent flow.
 """
 import os
 import logging
@@ -22,6 +25,11 @@ from db.document_repository import DocumentRepository
 from db.database import get_db_session
 from rag_service.chunking.document_types import types_match, expand_type_aliases
 from rag_service.entity_extractor import normalize_entity_name, entity_matches_query
+
+# Import shared document filtering logic
+from shared.document_filter import (
+    topic_based_prefilter as shared_topic_prefilter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -746,19 +754,10 @@ class DocumentRouter:
         accessible_document_ids: Optional[List[str]] = None
     ) -> Tuple[List[str], List[str]]:
         """
-        Pre-filter documents by topic/category matching using ILIKE %keyword%.
+        Pre-filter documents by topic/category matching using ILIKE.
 
-        This handles queries like "meal receipts" where:
-        - "meal" is a topic/category term to match against document metadata
-        - "receipt" is a document type filter
-
-        Uses fuzzy ILIKE matching to catch variations:
-        - 'meal' matches 'meal', 'meals', 'meal expense', 'business meal'
-
-        Searches in multiple fields:
-        - document_metadata->>'topics' (array stored as JSON)
-        - header_data->>'vendor_name', 'store_name', 'description'
-        - summary_data content
+        Uses the shared document filtering logic from shared.document_filter
+        to ensure consistency with agent flow.
 
         Args:
             topics: List of topic/category terms to match (e.g., ["meal", "food"])
@@ -768,108 +767,13 @@ class DocumentRouter:
         Returns:
             Tuple of (matched_document_ids, matched_document_names)
         """
-        if not topics and not document_type_hints:
-            return [], []
-
-        if not accessible_document_ids:
-            return [], []
-
-        logger.info(f"[Router] 🏷️ TOPIC PRE-FILTER: Searching for topics={topics}, doc_types={document_type_hints}")
-
-        matched_ids = []
-        matched_names = []
-
-        try:
-            with get_db_session() as db:
-                # Build dynamic SQL with ILIKE for fuzzy topic matching
-                # We need to check:
-                # 1. document_metadata->'topics' array (JSONB)
-                # 2. documents_data.header_data fields
-                # 3. documents_data.schema_type for document type
-
-                conditions = []
-                params = {}
-
-                # Convert list to PostgreSQL array format for document ID filter
-                doc_ids_array = '{' + ','.join(accessible_document_ids) + '}' if accessible_document_ids else '{}'
-                params["doc_ids"] = doc_ids_array
-
-                # Topic matching conditions (OR between topics, AND with doc type)
-                if topics:
-                    topic_conditions = []
-                    for i, topic in enumerate(topics):
-                        param_name = f"topic_{i}"
-                        params[param_name] = f"%{topic.lower()}%"
-                        # Check multiple fields for topic match
-                        topic_conditions.append(f"""
-                            (
-                                -- Match in document_metadata topics array (cast to text for ILIKE)
-                                LOWER(d.document_metadata::text) ILIKE :{param_name}
-                                -- Match in header_data fields
-                                OR LOWER(COALESCE(dd.header_data->>'vendor_name', '')) ILIKE :{param_name}
-                                OR LOWER(COALESCE(dd.header_data->>'store_name', '')) ILIKE :{param_name}
-                                OR LOWER(COALESCE(dd.header_data->>'description', '')) ILIKE :{param_name}
-                                OR LOWER(COALESCE(dd.header_data->>'category', '')) ILIKE :{param_name}
-                                -- Match in summary_data
-                                OR LOWER(COALESCE(dd.summary_data::text, '')) ILIKE :{param_name}
-                                -- Match in line item descriptions (for product-based queries)
-                                OR EXISTS (
-                                    SELECT 1 FROM documents_data_line_items li
-                                    WHERE li.documents_data_id = dd.id
-                                    AND LOWER(COALESCE(li.data->>'description', '')) ILIKE :{param_name}
-                                )
-                            )
-                        """)
-                    # Any topic match is OK (OR logic)
-                    conditions.append(f"({' OR '.join(topic_conditions)})")
-
-                # Document type filter (if specified) - exact match on schema_type
-                if document_type_hints:
-                    type_conditions = []
-                    for j, doc_type in enumerate(document_type_hints):
-                        param_name = f"doctype_{j}"
-                        params[param_name] = doc_type.lower()
-                        type_conditions.append(f"LOWER(dd.schema_type) = :{param_name}")
-                    # Any type match is OK (OR logic)
-                    conditions.append(f"({' OR '.join(type_conditions)})")
-
-                # Build final SQL
-                where_clause = " AND ".join(conditions) if conditions else "TRUE"
-
-                sql = f"""
-                    SELECT DISTINCT
-                        d.id::text as document_id,
-                        COALESCE(dd.header_data->>'vendor_name', dd.header_data->>'store_name', d.filename) as source_display
-                    FROM documents d
-                    LEFT JOIN documents_data dd ON dd.document_id = d.id
-                    WHERE d.id = ANY(CAST(:doc_ids AS uuid[]))
-                      AND d.deleted_at IS NULL
-                      AND {where_clause}
-                """
-
-                logger.debug(f"[Router] Topic pre-filter SQL params: {list(params.keys())}")
-
-                result = db.execute(text(sql), params)
-
-                for row in result.fetchall():
-                    doc_id = row[0]
-                    source_display = row[1] or "Unknown"
-                    matched_ids.append(doc_id)
-                    matched_names.append(source_display)
-
-                logger.info(
-                    f"[Router] 🏷️ TOPIC PRE-FILTER: Found {len(matched_ids)} document(s) "
-                    f"matching topics={topics}, doc_types={document_type_hints}"
-                )
-                if matched_names:
-                    logger.info(f"[Router] 🏷️ Topic filtered documents: {matched_names}")
-
-        except Exception as e:
-            logger.error(f"[Router] Topic pre-filter error: {e}", exc_info=True)
-            # On error, return empty - let vector search handle it
-            return [], []
-
-        return matched_ids, matched_names
+        # Use the shared topic pre-filter function
+        return shared_topic_prefilter(
+            topics=topics,
+            document_type_hints=document_type_hints,
+            accessible_document_ids=accessible_document_ids,
+            db_session_factory=get_db_session
+        )
 
     def _route_with_vector_search(
         self,

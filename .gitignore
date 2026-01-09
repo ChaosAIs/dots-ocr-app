@@ -45,3 +45,4 @@ backend/agents/agents/__pycache__/
 backend/agents/prompts/__pycache__/
 backend/agents/state/__pycache__/
 backend/agents/tools/__pycache__/
+backend/shared/__pycache__/

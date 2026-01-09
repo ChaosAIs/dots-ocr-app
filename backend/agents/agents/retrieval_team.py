@@ -121,9 +121,10 @@ def _create_custom_retrieval_team(
 
     from langgraph.graph import StateGraph, END
     from typing import TypedDict, Annotated, Sequence, Literal, Optional, List, Dict, Any
-    from langchain_core.messages import BaseMessage
+    from langchain_core.messages import BaseMessage, HumanMessage
     from langgraph.graph.message import add_messages
     import operator
+    import json
 
     from agents.state.models import AgentOutput, ExecutionPlan, SchemaGroup, DocumentSource, ReviewDecision
 
@@ -251,23 +252,110 @@ def _create_custom_retrieval_team(
             return next_agent
         return "complete"
 
+    def _get_current_task(state: RetrievalState) -> Optional[Dict[str, Any]]:
+        """Get the current task from execution plan based on current_task_index."""
+        plan = state.get("execution_plan")
+        if not plan:
+            return None
+
+        sub_tasks = plan.sub_tasks if hasattr(plan, 'sub_tasks') else plan.get('sub_tasks', [])
+        current_idx = state.get("current_task_index", 0)
+
+        if current_idx < len(sub_tasks):
+            task = sub_tasks[current_idx]
+            # Convert to dict if it's a Pydantic model
+            if hasattr(task, 'model_dump'):
+                return task.model_dump()
+            elif hasattr(task, 'dict'):
+                return task.dict()
+            return task
+        return None
+
+    def _get_schema_group_for_task(state: RetrievalState, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Get the schema group associated with a task."""
+        plan = state.get("execution_plan")
+        if not plan:
+            return None
+
+        schema_groups = plan.schema_groups if hasattr(plan, 'schema_groups') else plan.get('schema_groups', [])
+        schema_group_id = task.get("schema_group_id")
+
+        for group in schema_groups:
+            group_dict = group.model_dump() if hasattr(group, 'model_dump') else (group.dict() if hasattr(group, 'dict') else group)
+            if group_dict.get("group_id") == schema_group_id:
+                return group_dict
+
+        # If no matching group, return first group with same schema_type
+        task_schema = task.get("schema_type", "unknown")
+        for group in schema_groups:
+            group_dict = group.model_dump() if hasattr(group, 'model_dump') else (group.dict() if hasattr(group, 'dict') else group)
+            if group_dict.get("schema_type") == task_schema:
+                return group_dict
+
+        return None
+
+    def _build_task_message(state: RetrievalState, agent_name: str) -> str:
+        """Build a focused task message for the agent with all needed context.
+
+        This prevents the agent from seeing irrelevant tool calls from other agents
+        (like Planner's identify_sub_questions) which can cause hallucinations.
+        """
+        task = _get_current_task(state)
+        if not task:
+            # Fallback to user query if no task found
+            return state.get("user_query", "Process the documents")
+
+        schema_group = _get_schema_group_for_task(state, task)
+
+        # Build a structured task message with all context the agent needs
+        parts = [
+            f"Task ID: {task.get('task_id', 'unknown')}",
+            f"Task: {task.get('description', 'Process documents')}",
+            f"Document IDs: {json.dumps(task.get('document_ids', []))}",
+            f"Schema Type: {task.get('schema_type', 'unknown')}",
+        ]
+
+        if task.get('aggregation_type'):
+            parts.append(f"Aggregation: {task.get('aggregation_type')}")
+
+        if task.get('target_fields'):
+            parts.append(f"Target Fields: {json.dumps(task.get('target_fields', []))}")
+
+        if schema_group:
+            parts.append(f"Schema Group: {json.dumps(schema_group)}")
+
+        return "\n".join(parts)
+
     def wrap_agent_with_output_extraction(agent, agent_name: str):
         """Wrap an agent to extract tool results and convert to AgentOutput.
 
         The ReAct agent's tools like report_sql_result return JSON strings in messages.
         We need to extract these and convert them to AgentOutput objects so the
         supervisor can track task completion.
+
+        IMPORTANT: We construct a fresh message context for each agent to prevent
+        hallucinations from seeing other agents' tool calls in the message history.
         """
         import json
-        from langchain_core.messages import ToolMessage
+        from langchain_core.messages import ToolMessage, HumanMessage
 
         def wrapped_agent(state: RetrievalState):
+            # Build a fresh state with only the task-specific message
+            # This prevents the agent from seeing Planner's tool calls and hallucinating
+            task_message = _build_task_message(state, agent_name)
+
+            # Create a clean state copy with fresh messages
+            agent_state = dict(state)
+            agent_state["messages"] = [HumanMessage(content=task_message)]
+
+            logger.info(f"[{agent_name}] Starting with fresh context: {task_message[:100]}...")
+
             # Run the original agent with recursion limit to prevent infinite loops
             # The ReAct agent should complete in ~6-10 steps max:
             # 1-2 for SQL generation, 1-2 for execution, 1 for reporting, 1-2 for response
             config = {"recursion_limit": 15}
             try:
-                result = agent.invoke(state, config=config)
+                result = agent.invoke(agent_state, config=config)
             except Exception as e:
                 error_msg = str(e)
                 if "recursion" in error_msg.lower():
@@ -293,8 +381,9 @@ def _create_custom_retrieval_team(
                             content = msg.content
                             if isinstance(content, str):
                                 data = json.loads(content)
-                                if data.get("success") and data.get("task_id"):
-                                    # Create AgentOutput from the tool result
+                                # Extract output for BOTH success and failure cases
+                                # This ensures task is marked as attempted even if it failed
+                                if data.get("task_id"):
                                     # Use status from tool if available, otherwise map success boolean
                                     status_value = data.get("status")
                                     if status_value not in ("success", "partial", "failed"):
@@ -334,7 +423,7 @@ def _create_custom_retrieval_team(
                                         issues=issues_list
                                     )
                                     agent_outputs_to_add.append(agent_output)
-                                    logger.info(f"[{agent_name}] Extracted AgentOutput for task {data.get('task_id')}")
+                                    logger.info(f"[{agent_name}] Extracted AgentOutput for task {data.get('task_id')} (status={status_value})")
                         except (json.JSONDecodeError, Exception) as e:
                             logger.warning(f"[{agent_name}] Failed to extract AgentOutput from tool message: {e}")
 

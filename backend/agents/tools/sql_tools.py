@@ -323,9 +323,45 @@ def generate_schema_aware_sql(
         Generated SQL query string
     """
     try:
-        doc_ids = json.loads(document_ids)
-        group = json.loads(schema_group) if schema_group else {}
-        fields = json.loads(target_fields) if target_fields else []
+        # Robust parsing of document_ids - handle both JSON array and comma-separated
+        if document_ids and document_ids.strip():
+            doc_ids_stripped = document_ids.strip()
+            if doc_ids_stripped.startswith('['):
+                try:
+                    doc_ids = json.loads(doc_ids_stripped)
+                except json.JSONDecodeError:
+                    doc_ids = [d.strip().strip('"').strip("'") for d in doc_ids_stripped.split(',') if d.strip()]
+            else:
+                doc_ids = [d.strip().strip('"').strip("'") for d in doc_ids_stripped.split(',') if d.strip()]
+        else:
+            doc_ids = []
+
+        # Robust parsing of schema_group
+        group = {}
+        if schema_group and schema_group.strip():
+            try:
+                group = json.loads(schema_group)
+            except json.JSONDecodeError:
+                logger.warning(f"[sql_tools] Failed to parse schema_group as JSON: {schema_group[:100]}")
+                group = {}
+
+        # Robust parsing of target_fields - LLM may pass different formats:
+        # 1. JSON array string: '["field1", "field2"]'
+        # 2. Comma-separated string: 'field1,field2,field3'
+        # 3. Empty/null values
+        fields = []
+        if target_fields and target_fields.strip():
+            target_fields_stripped = target_fields.strip()
+            if target_fields_stripped.startswith('['):
+                # Try to parse as JSON array
+                try:
+                    fields = json.loads(target_fields_stripped)
+                except json.JSONDecodeError:
+                    # If JSON parsing fails, treat as comma-separated
+                    fields = [f.strip().strip('"').strip("'") for f in target_fields_stripped.split(',') if f.strip()]
+            else:
+                # Comma-separated string
+                fields = [f.strip().strip('"').strip("'") for f in target_fields_stripped.split(',') if f.strip()]
 
         common_fields = group.get("common_fields", fields)
         schema_type = group.get("schema_type", "unknown")
@@ -690,9 +726,12 @@ def report_sql_result(
 ) -> str:
     """Report SQL agent results back to the retrieval supervisor.
 
+    IMPORTANT: You MUST call execute_sql_with_retry BEFORE calling this tool!
+    The 'data' parameter should contain the JSON results from execute_sql_with_retry.
+
     Args:
         task_id: ID of the task being reported
-        data: JSON string of result data
+        data: JSON string of result data (from execute_sql_with_retry output)
         documents_used: JSON array of document IDs used
         schema_type: Schema type of processed documents
         sql_executed: The SQL query that was executed
@@ -704,9 +743,43 @@ def report_sql_result(
         JSON string with the result report
     """
     try:
+        # Validate that data is not empty - the agent must call execute_sql_with_retry first
+        if not data or data.strip() == "" or data.strip() == "null":
+            logger.error(f"[report_sql_result] Empty data received - execute_sql_with_retry was likely not called")
+            return json.dumps({
+                "success": False,
+                "task_id": task_id,
+                "agent_name": "sql_agent",
+                "status": "failed",
+                "error": "No data provided. You MUST call execute_sql_with_retry first to get results before calling report_sql_result.",
+                "hint": "Call execute_sql_with_retry with your SQL query, then pass its output data to report_sql_result."
+            })
+
         parsed_data = json.loads(data) if data else None
-        parsed_docs = json.loads(documents_used) if documents_used else []
-        parsed_issues = json.loads(issues) if issues else []
+
+        # Handle various invalid values LLM might pass for documents_used
+        if not documents_used or documents_used.strip() in ("", "None", "null", "[]"):
+            parsed_docs = []
+        else:
+            try:
+                parsed_docs = json.loads(documents_used)
+                if parsed_docs is None:
+                    parsed_docs = []
+            except json.JSONDecodeError:
+                parsed_docs = []
+
+        # Handle various invalid values LLM might pass for issues
+        # LLM sometimes passes "None", "null", empty string, or actual JSON array
+        if not issues or issues.strip() in ("", "None", "null", "[]"):
+            parsed_issues = []
+        else:
+            try:
+                parsed_issues = json.loads(issues)
+                if parsed_issues is None:
+                    parsed_issues = []
+            except json.JSONDecodeError:
+                # If it's not valid JSON, treat the string as a single issue
+                parsed_issues = [issues] if issues.strip() else []
 
         # Determine status based on confidence and issues
         if confidence >= 0.7 and not parsed_issues:

@@ -581,13 +581,24 @@ def create_analytics_workflow(
     # Create default LLM if not provided
     if llm is None:
         logger.info("[WorkflowBuilder] No LLM provided, creating default ChatOpenAI...")
+
+        # Get reasoning mode - "instruction" disables Qwen3 thinking mode for faster responses
+        reasoning_mode = AGENTIC_CONFIG.get("reasoning_mode", "instruction")
+        enable_thinking = (reasoning_mode == "thinking")
+        extra_body = {
+            "chat_template_kwargs": {
+                "enable_thinking": enable_thinking
+            }
+        }
+
         llm = ChatOpenAI(
             model=AGENT_LLM_CONFIG["planner"]["model"],
             temperature=AGENT_LLM_CONFIG["planner"]["temperature"],
             request_timeout=AGENTIC_CONFIG.get("planner_timeout", 60),  # Prevent indefinite hanging
-            max_retries=2
+            max_retries=2,
+            extra_body=extra_body
         )
-        logger.info(f"[WorkflowBuilder] Created LLM: model={AGENT_LLM_CONFIG['planner']['model']}, timeout={AGENTIC_CONFIG.get('planner_timeout', 60)}s")
+        logger.info(f"[WorkflowBuilder] Created LLM: model={AGENT_LLM_CONFIG['planner']['model']}, timeout={AGENTIC_CONFIG.get('planner_timeout', 60)}s, enable_thinking={enable_thinking}")
     else:
         logger.info(f"[WorkflowBuilder] Using provided LLM: {type(llm).__name__}")
 
@@ -1158,5 +1169,12 @@ def create_workflow_with_config(
     """
     # For now, use a single LLM
     # In production, could create different LLMs for each agent
-    llm = ChatOpenAI(model=planner_model, temperature=0.1)
+    reasoning_mode = AGENTIC_CONFIG.get("reasoning_mode", "instruction")
+    enable_thinking = (reasoning_mode == "thinking")
+    extra_body = {
+        "chat_template_kwargs": {
+            "enable_thinking": enable_thinking
+        }
+    }
+    llm = ChatOpenAI(model=planner_model, temperature=0.1, extra_body=extra_body)
     return create_analytics_workflow(llm)

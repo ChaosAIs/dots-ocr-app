@@ -526,8 +526,25 @@ def report_generic_result(
         JSON string with the result report
     """
     try:
-        parsed_data = json.loads(data) if data else None
-        parsed_docs = json.loads(documents_used) if documents_used else []
+        # Handle various invalid values LLM might pass for data
+        if not data or data.strip() in ("", "None", "null"):
+            parsed_data = None
+        else:
+            try:
+                parsed_data = json.loads(data)
+            except json.JSONDecodeError:
+                parsed_data = None
+
+        # Handle various invalid values LLM might pass for documents_used
+        if not documents_used or documents_used.strip() in ("", "None", "null", "[]"):
+            parsed_docs = []
+        else:
+            try:
+                parsed_docs = json.loads(documents_used)
+                if parsed_docs is None:
+                    parsed_docs = []
+            except json.JSONDecodeError:
+                parsed_docs = []
 
         # Determine status
         if confidence >= 0.6:

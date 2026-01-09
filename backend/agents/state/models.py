@@ -100,9 +100,18 @@ class SchemaGroup(BaseModel):
         default_factory=list,
         description="Fields shared across all documents in this group"
     )
-    documents: List[DocumentSource] = Field(
+    # Support both full documents and minimal ID/name lists
+    documents: List[Any] = Field(
         default_factory=list,
-        description="Documents belonging to this group"
+        description="Documents belonging to this group (full or minimal)"
+    )
+    document_ids: List[str] = Field(
+        default_factory=list,
+        description="Document IDs in this group"
+    )
+    document_names: List[str] = Field(
+        default_factory=list,
+        description="Document filenames in this group"
     )
     can_combine: bool = Field(
         default=False,
@@ -115,8 +124,12 @@ class SchemaGroup(BaseModel):
 
     def __init__(self, **data):
         super().__init__(**data)
+        # Calculate document_count from available data
         if self.document_count == 0:
-            self.document_count = len(self.documents)
+            if self.document_ids:
+                self.document_count = len(self.document_ids)
+            elif self.documents:
+                self.document_count = len(self.documents)
 
 
 # =============================================================================

@@ -19,6 +19,10 @@ AGENTIC_CONFIG: Dict[str, Any] = {
     "low_confidence_threshold": 0.5,
     "enable_streaming": True,
 
+    # Qwen3 reasoning mode: "thinking" enables <think> blocks, "instruction" disables them
+    # Reuses the same env var as non-agent flow (RAG_VLLM_REASONING_MODE)
+    "reasoning_mode": os.getenv("RAG_VLLM_REASONING_MODE", "instruction"),
+
     # Agent timeouts (seconds) - per LLM call, not total agent time
     # Local models (Qwen3-4B/8B) may need 60-90s per call
     "planner_timeout": 120,      # Planner makes ~4 LLM calls
