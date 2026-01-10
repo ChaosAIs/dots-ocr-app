@@ -1,15 +1,20 @@
 """
 SQL tools for the SQL Agent.
 
-These tools handle:
-- Schema-aware SQL generation (via shared LLMSQLGenerator service)
-- SQL execution with LLM-based error correction
-- Result reporting
+DEPRECATED: These tools are kept for backward compatibility only.
+The SQL Agent now uses execute_sql_subtask from sql_executor_tool.py,
+which wraps SQLQueryExecutor.execute_dynamic_sql_query() for atomic execution.
 
-Quick Win Integration:
-- Reuses LLMSQLGenerator from analytics_service for accurate SQL generation
-- Reuses SchemaService for proper field mappings
-- Reuses correct_sql_error() for LLM-based error correction
+The new approach eliminates LLM orchestration overhead by using deterministic
+execution with LLM only for SQL generation/correction (not tool selection).
+
+For new development, use:
+    from agents.tools.sql_executor_tool import execute_sql_subtask, execute_sql_subtask_core
+
+Legacy tools (deprecated):
+- generate_schema_aware_sql: Use execute_sql_subtask instead
+- execute_sql_with_retry: Use execute_sql_subtask instead
+- report_sql_result: Use execute_sql_subtask instead (it returns AgentOutput directly)
 """
 
 import json

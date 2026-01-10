@@ -1036,6 +1036,30 @@ Analyze the query and identify:
    - If user asks for "average", "mean" -> aggregation_type = "avg"
    - If user asks for "count", "how many" -> aggregation_type = "count"
 
+   **CRITICAL - Aggregation Field Selection (inventory vs price):**
+   Choose the correct field based on what user is asking about:
+
+   **Use QUANTITY/StockQuantity field (NOT amount/price) for:**
+   - "inventory", "stock", "stock level", "inventory count", "units in stock"
+   - "average inventory" = average QUANTITY of items (e.g., avg 50 units)
+   - "total inventory", "total stock" = sum of quantities
+   - "inventory by category" = quantity grouped by category
+
+   **Use AMOUNT/Price field for:**
+   - "price", "cost", "value", "worth", "sales", "revenue"
+   - "inventory value", "stock value" = price × quantity or sum of prices
+   - "average price" = average of price field
+   - "total sales", "total amount" = sum of amounts
+
+   **Key distinction:**
+   - "average inventory" → aggregation_field = quantity (counting items)
+   - "average price" → aggregation_field = amount (monetary value)
+   - "inventory value" → aggregation_field = amount (monetary)
+
+   Look at the Available Data Fields to find the correct field:
+   - Fields like "StockQuantity", "quantity", "qty", "units" → use for inventory counts
+   - Fields like "Price", "amount", "cost", "unit_price" → use for monetary values
+
    **CRITICAL for COUNT queries - Document vs Line Item counting:**
    Use the document types and entities from the Available Data Fields schema to determine what to count:
 

@@ -4,7 +4,8 @@ Tools for the Agentic AI Flow system.
 This module contains all tool definitions used by the agents:
 - Routing tools: Document source routing
 - Planning tools: Query decomposition and plan creation
-- SQL tools: SQL generation and execution
+- SQL Executor tool: Atomic SQL execution (preferred)
+- SQL tools: Legacy SQL tools (deprecated, use sql_executor_tool instead)
 - Vector tools: Semantic search operations
 - Graph tools: Knowledge graph queries
 - Generic tools: Hybrid/fallback operations
@@ -22,6 +23,13 @@ from agents.tools.planning_tools import (
     classify_task_agent,
     create_execution_plan
 )
+# New atomic SQL executor (preferred)
+from agents.tools.sql_executor_tool import (
+    execute_sql_subtask,
+    execute_sql_subtask_core,
+    create_agent_output_from_result
+)
+# Legacy SQL tools (deprecated)
 from agents.tools.sql_tools import (
     generate_schema_aware_sql,
     execute_sql_with_retry,
@@ -61,7 +69,11 @@ __all__ = [
     "identify_sub_questions",
     "classify_task_agent",
     "create_execution_plan",
-    # SQL
+    # SQL Executor (preferred)
+    "execute_sql_subtask",
+    "execute_sql_subtask_core",
+    "create_agent_output_from_result",
+    # SQL (legacy, deprecated)
     "generate_schema_aware_sql",
     "execute_sql_with_retry",
     "report_sql_result",

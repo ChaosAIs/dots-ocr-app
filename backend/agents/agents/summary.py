@@ -98,18 +98,51 @@ def _extract_sql_results_from_outputs(
     if id_to_filename_map is None:
         id_to_filename_map = {}
 
-    for output in agent_outputs:
+    logger.info(f"[SummaryAgent] Extracting from {len(agent_outputs)} agent outputs")
+
+    for i, output in enumerate(agent_outputs):
+        # Debug: Log the raw output type and content
+        logger.info(f"[SummaryAgent] Output #{i+1}: type={type(output).__name__}")
+
         # Handle both dict and Pydantic model
         if hasattr(output, 'model_dump'):
-            output = output.model_dump()
+            output_dict = output.model_dump()
+            logger.info(f"[SummaryAgent] Output #{i+1}: Converted via model_dump()")
         elif hasattr(output, 'dict'):
-            output = output.dict()
+            output_dict = output.dict()
+            logger.info(f"[SummaryAgent] Output #{i+1}: Converted via dict()")
+        elif isinstance(output, dict):
+            output_dict = output
+            logger.info(f"[SummaryAgent] Output #{i+1}: Already a dict")
+        else:
+            logger.warning(f"[SummaryAgent] Output #{i+1}: Unknown output type: {type(output)}, skipping")
+            continue
 
-        agent_name = output.get("agent_name", "")
-        status = output.get("status", "")
-        data = output.get("data")
-        docs_used = output.get("documents_used", [])
-        schema_type = output.get("schema_type", "")
+        # Log the converted dict keys
+        logger.info(f"[SummaryAgent] Output #{i+1}: dict keys={list(output_dict.keys())}")
+
+        agent_name = output_dict.get("agent_name", "")
+        status = output_dict.get("status", "")
+        data = output_dict.get("data")
+        docs_used = output_dict.get("documents_used", [])
+        schema_type = output_dict.get("schema_type", "")
+        row_count = output_dict.get("row_count")
+
+        # Debug logging - detailed data info
+        if data is None:
+            data_info = "None"
+        elif isinstance(data, list):
+            data_info = f"list[{len(data)}]"
+            if data and len(data) > 0:
+                first_item = data[0]
+                if isinstance(first_item, dict):
+                    data_info += f", first_row_keys={list(first_item.keys())[:5]}"
+        elif isinstance(data, dict):
+            data_info = f"dict[{list(data.keys())[:5]}]"
+        else:
+            data_info = f"{type(data).__name__}"
+
+        logger.info(f"[SummaryAgent] Output #{i+1}: agent={agent_name}, status={status}, data={data_info}, row_count={row_count}")
 
         # Track schema types
         if schema_type:
@@ -122,15 +155,20 @@ def _extract_sql_results_from_outputs(
 
         # Extract SQL results (primary data source for analytics)
         if agent_name == "sql_agent" and status == "success" and data:
+            logger.info(f"[SummaryAgent] Output #{i+1}: Extracting data from sql_agent")
             if isinstance(data, list):
                 query_results.extend(data)
+                logger.info(f"[SummaryAgent] Output #{i+1}: Extended query_results with {len(data)} rows")
             elif isinstance(data, dict):
                 query_results.append(data)
+                logger.info(f"[SummaryAgent] Output #{i+1}: Appended 1 dict to query_results")
+        elif agent_name == "sql_agent":
+            logger.warning(f"[SummaryAgent] Output #{i+1}: sql_agent output NOT extracted - status={status}, data_present={data is not None}")
 
     # Remove duplicates from data sources
     data_sources = list(set(data_sources))
 
-    logger.info(f"[SummaryAgent] Extracted {len(query_results)} rows from agent outputs, {len(data_sources)} sources, schema_types={schema_types}")
+    logger.info(f"[SummaryAgent] FINAL: Extracted {len(query_results)} rows from agent outputs, {len(data_sources)} sources, schema_types={schema_types}")
 
     return query_results, field_mappings, data_sources, schema_types
 

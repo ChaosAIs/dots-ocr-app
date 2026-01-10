@@ -2,10 +2,15 @@
 Retrieval Team Supervisor implementation.
 
 The Retrieval Team coordinates all retrieval agents:
-- SQL Agent
+- SQL Agent (atomic execution, no ReAct)
 - Vector Agent
 - Graph Agent
 - Generic Doc Agent
+
+Architecture Note:
+The SQL Agent has been simplified to use atomic execution via execute_sql_subtask_core.
+It no longer uses ReAct pattern with multiple tool calls, eliminating LLM orchestration
+overhead within SQL execution.
 """
 
 import logging
@@ -327,11 +332,11 @@ def _create_custom_retrieval_team(
         return "\n".join(parts)
 
     def wrap_agent_with_output_extraction(agent, agent_name: str):
-        """Wrap an agent to extract tool results and convert to AgentOutput.
+        """Wrap an agent to extract results and convert to AgentOutput.
 
-        The ReAct agent's tools like report_sql_result return JSON strings in messages.
-        We need to extract these and convert them to AgentOutput objects so the
-        supervisor can track task completion.
+        Handles two types of agents:
+        1. SQL Agent (new): Returns agent_output directly in state (atomic execution)
+        2. Other agents (ReAct): Return results via tool messages (report_*_result)
 
         IMPORTANT: We construct a fresh message context for each agent to prevent
         hallucinations from seeing other agents' tool calls in the message history.
@@ -348,12 +353,28 @@ def _create_custom_retrieval_team(
             agent_state = dict(state)
             agent_state["messages"] = [HumanMessage(content=task_message)]
 
+            # For SQL agent, also pass task context directly in state
+            if agent_name == "sql_agent":
+                task = _get_current_task(state)
+                if task:
+                    agent_state["task_id"] = task.get("task_id", "unknown")
+                    agent_state["task_description"] = task.get("description", "")
+                    agent_state["document_ids"] = task.get("document_ids", [])
+                    agent_state["schema_type"] = task.get("schema_type")
+                    agent_state["aggregation_type"] = task.get("aggregation_type")
+                    agent_state["target_fields"] = task.get("target_fields", [])
+                    # Get schema group for this task
+                    schema_group = _get_schema_group_for_task(state, task)
+                    if schema_group:
+                        agent_state["schema_group"] = schema_group
+                agent_state["user_query"] = state.get("user_query", "")
+
             logger.info(f"[{agent_name}] Starting with fresh context: {task_message[:100]}...")
 
-            # Run the original agent with recursion limit to prevent infinite loops
-            # The ReAct agent should complete in ~6-10 steps max:
-            # 1-2 for SQL generation, 1-2 for execution, 1 for reporting, 1-2 for response
-            config = {"recursion_limit": 15}
+            # Run the agent
+            # SQL agent is simpler and doesn't need high recursion limit
+            # ReAct agents may need more steps
+            config = {"recursion_limit": 5 if agent_name == "sql_agent" else 15}
             try:
                 result = agent.invoke(agent_state, config=config)
             except Exception as e:
@@ -368,10 +389,26 @@ def _create_custom_retrieval_team(
                 else:
                     raise
 
-            # Extract AgentOutput from tool messages
             agent_outputs_to_add = []
-            messages = result.get("messages", [])
 
+            # Check for agent_output directly in result (SQL agent pattern)
+            if "agent_output" in result and result["agent_output"] is not None:
+                agent_output = result["agent_output"]
+                if isinstance(agent_output, AgentOutput):
+                    agent_outputs_to_add.append(agent_output)
+                    # Debug: Log data details to trace data flow
+                    data_info = "None"
+                    if agent_output.data is not None:
+                        if isinstance(agent_output.data, list):
+                            data_info = f"list[{len(agent_output.data)}]"
+                        elif isinstance(agent_output.data, dict):
+                            data_info = f"dict[{len(agent_output.data)} keys]"
+                        else:
+                            data_info = f"{type(agent_output.data).__name__}"
+                    logger.info(f"[{agent_name}] Got AgentOutput directly from state (task={agent_output.task_id}, status={agent_output.status}, row_count={agent_output.row_count}, data={data_info})")
+
+            # Also check for tool messages (ReAct agents pattern)
+            messages = result.get("messages", [])
             for msg in messages:
                 if isinstance(msg, ToolMessage):
                     # Check if this is a report_*_result tool call
@@ -423,7 +460,7 @@ def _create_custom_retrieval_team(
                                         issues=issues_list
                                     )
                                     agent_outputs_to_add.append(agent_output)
-                                    logger.info(f"[{agent_name}] Extracted AgentOutput for task {data.get('task_id')} (status={status_value})")
+                                    logger.info(f"[{agent_name}] Extracted AgentOutput from tool message (task={data.get('task_id')}, status={status_value})")
                         except (json.JSONDecodeError, Exception) as e:
                             logger.warning(f"[{agent_name}] Failed to extract AgentOutput from tool message: {e}")
 
